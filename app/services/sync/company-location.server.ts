@@ -26,6 +26,29 @@ import { safeLog, shopHash } from "~/lib/log.server";
 import { shouldIncludePiiFields, type PiiEnv } from "./customer-fields.server";
 
 /**
+ * Build SQL fragment to conditionally restore locationDeletedAt on upsert.
+ *
+ * Clears locationDeletedAt only if the restore timestamp is newer than the existing delete.
+ * This prevents stale events (late-delivered webhooks or old bulk snapshots) from incorrectly
+ * restoring a location that was deleted after them.
+ *
+ * @param sql - postgres.js SQL client for building the fragment
+ * @param restoreTime - Timestamp of the restore event (webhook triggeredAt or bulk createdAt).
+ *                      If null (unknown bulk snapshot time), conservatively keeps the delete.
+ * @returns SQL fragment for use in DO UPDATE SET "locationDeletedAt" = ...
+ */
+export function locationDeletedAtRestore(sql: Sql, restoreTime: Date | null) {
+  if (restoreTime === null) {
+    return sql`"BuyerAccount"."locationDeletedAt"`;
+  }
+  return sql`CASE
+    WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
+    THEN NULL
+    ELSE "BuyerAccount"."locationDeletedAt"
+  END`;
+}
+
+/**
  * Process a CompanyLocation webhook event.
  *
  * CREATE: Creates a new BuyerAccount with kind=COMPANY
@@ -168,11 +191,7 @@ export async function processCompanyLocationWebhook(
         "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
         "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
         "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
-        "locationDeletedAt" = CASE
-          WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
-          THEN NULL
-          ELSE "BuyerAccount"."locationDeletedAt"
-        END,
+        "locationDeletedAt" = ${locationDeletedAtRestore(sql, restoreTime)},
         "updatedAt" = NOW()
       RETURNING id, (xmax = 0)::text as "upsertAction"
     `;
@@ -223,11 +242,7 @@ export async function processCompanyLocationWebhook(
           "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
           "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
           "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
-          "locationDeletedAt" = CASE
-            WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
-            THEN NULL
-            ELSE "BuyerAccount"."locationDeletedAt"
-          END,
+          "locationDeletedAt" = ${locationDeletedAtRestore(sql, restoreTime)},
           "updatedAt" = NOW()
         RETURNING id, (xmax = 0)::text as "upsertAction"
       `;
@@ -289,11 +304,7 @@ export async function processCompanyLocationWebhook(
             "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
             "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
             "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
-            "locationDeletedAt" = CASE
-              WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
-              THEN NULL
-              ELSE "BuyerAccount"."locationDeletedAt"
-            END,
+            "locationDeletedAt" = ${locationDeletedAtRestore(tx, restoreTime)},
             "updatedAt" = NOW()
           RETURNING id, (xmax = 0)::text as "upsertAction", gated_at
         `;
@@ -491,13 +502,7 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactEmail" = EXCLUDED."mainContactEmail",
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
-              "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
-                THEN NULL
-                ELSE "BuyerAccount"."locationDeletedAt"
-              END,
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -536,13 +541,7 @@ export async function bulkUpsertBuyerAccounts(
               "companyId" = EXCLUDED."companyId",
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-              "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
-                THEN NULL
-                ELSE "BuyerAccount"."locationDeletedAt"
-              END,
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -612,13 +611,7 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactEmail" = EXCLUDED."mainContactEmail",
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
-              "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
-                THEN NULL
-                ELSE "BuyerAccount"."locationDeletedAt"
-              END,
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -656,13 +649,7 @@ export async function bulkUpsertBuyerAccounts(
               "companyId" = EXCLUDED."companyId",
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-              "locationDeletedAt" = CASE
-                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
-                     AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
-                THEN NULL
-                ELSE "BuyerAccount"."locationDeletedAt"
-              END,
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -746,13 +733,7 @@ export async function bulkUpsertBuyerAccounts(
                 "mainContactEmail" = EXCLUDED."mainContactEmail",
                 "mainContactName" = EXCLUDED."mainContactName",
                 "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
-                "locationDeletedAt" = CASE
-                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
-                       AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
-                       AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
-                  THEN NULL
-                  ELSE "BuyerAccount"."locationDeletedAt"
-                END,
+                "locationDeletedAt" = ${locationDeletedAtRestore(tx, bulkSnapshotAt)},
                 "updatedAt" = NOW()
             `;
             count += result.count;
@@ -793,13 +774,7 @@ export async function bulkUpsertBuyerAccounts(
                 "companyId" = EXCLUDED."companyId",
                 name = EXCLUDED.name,
                 "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-                "locationDeletedAt" = CASE
-                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL
-                       AND ${bulkSnapshotAt}::timestamptz IS NOT NULL
-                       AND ${bulkSnapshotAt}::timestamptz > "BuyerAccount"."locationDeletedAt"
-                  THEN NULL
-                  ELSE "BuyerAccount"."locationDeletedAt"
-                END,
+                "locationDeletedAt" = ${locationDeletedAtRestore(tx, bulkSnapshotAt)},
                 "updatedAt" = NOW()
             `;
             count += result.count;

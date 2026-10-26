@@ -56,6 +56,12 @@ describeWithDb("CompanyLocation Sync", () => {
   afterAll(async () => {
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-loc-" + TEST_SUFFIX + "%"}`;
+    // M8/M9 cleanup: webhook IDs (format: wh-m8-stale-${TEST_SUFFIX}) and bulk operations
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-m8-%" + TEST_SUFFIX}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-m9-%" + TEST_SUFFIX}`;
+    // Path coverage cleanup: webhook IDs (format: wh-stale-wh-path-${planKey}-${TEST_SUFFIX})
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-%-" + TEST_SUFFIX}`;
+    await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${"%" + TEST_SUFFIX}`;
     await sql.end();
   });
 
@@ -63,6 +69,12 @@ describeWithDb("CompanyLocation Sync", () => {
     // Clean up buyer accounts for this shop
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-loc-" + TEST_SUFFIX + "%"}`;
+    // M8/M9 cleanup: webhook IDs (format: wh-m8-stale-${TEST_SUFFIX}) and bulk operations
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-m8-%" + TEST_SUFFIX}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-m9-%" + TEST_SUFFIX}`;
+    // Path coverage cleanup: webhook IDs (format: wh-stale-wh-path-${planKey}-${TEST_SUFFIX})
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-%-" + TEST_SUFFIX}`;
+    await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${"%" + TEST_SUFFIX}`;
   });
 
   describe("processCompanyLocationWebhook", () => {
@@ -1871,6 +1883,273 @@ describeWithDb("CompanyLocation Sync", () => {
       } finally {
         global.fetch = originalFetch;
       }
+    });
+  });
+
+  describe("T5: locationDeletedAtRestore helper path coverage", () => {
+    const deleteTime = new Date("2026-10-22T12:00:00Z");
+    const staleTime = new Date("2026-10-20T12:00:00Z"); // BEFORE delete
+    const newerTime = new Date("2026-10-25T12:00:00Z"); // AFTER delete
+
+    describe("webhook paths", () => {
+      const webhookCases = [
+        { name: "flag-off", envValue: undefined, planKey: "starter" },
+        { name: "gating-on unlimited", envValue: "1", planKey: "unlimited" },
+        { name: "gating-on limited", envValue: "1", planKey: "growth" },
+      ];
+
+      describe.each(webhookCases)("$name", ({ envValue, planKey }) => {
+        let originalEnv: string | undefined;
+        const pathSuffix = `wh-path-${planKey}-${TEST_SUFFIX}`;
+
+        beforeAll(async () => {
+          originalEnv = process.env.PLAN_GATING_ENFORCED;
+          if (envValue === undefined) {
+            delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+          } else {
+            (process.env as Record<string, string>).PLAN_GATING_ENFORCED = envValue;
+          }
+          // Set the plan_key on test shop
+          await sql`UPDATE "Shop" SET plan_key = ${planKey} WHERE id = ${TEST_SHOP_ID}`;
+        });
+
+        afterAll(async () => {
+          if (originalEnv === undefined) {
+            delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+          } else {
+            (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+          }
+        });
+
+        it("stale webhook does NOT restore deleted location", async () => {
+          vi.resetModules();
+          const locationId = `gid://shopify/CompanyLocation/stale-${pathSuffix}`;
+          const companyId = `gid://shopify/Company/stale-co-${pathSuffix}`;
+
+          // Create deleted account
+          await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+              "createdAt", "updatedAt"
+            ) VALUES (
+              ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Path Test Stale',
+              ${deleteTime}, NOW(), NOW()
+            )
+          `;
+
+          const { processCompanyLocationWebhook: processWh } = await import("../company-location.server");
+
+          const location = {
+            id: locationId,
+            name: "Path Test Stale Updated",
+            company: { id: companyId },
+          };
+
+          const result = await processWh(
+            sql,
+            TEST_SHOP_DOMAIN,
+            "COMPANY_LOCATIONS_UPDATE",
+            location,
+            `wh-stale-${pathSuffix}`,
+            {},
+            true,
+            staleTime
+          );
+          expect(result.success).toBe(true);
+
+          // Verify locationDeletedAt was NOT cleared
+          const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+            SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+          `;
+          expect(account.locationDeletedAt).not.toBeNull();
+          expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+        });
+
+        it("newer webhook DOES restore deleted location", async () => {
+          vi.resetModules();
+          const locationId = `gid://shopify/CompanyLocation/newer-${pathSuffix}`;
+          const companyId = `gid://shopify/Company/newer-co-${pathSuffix}`;
+
+          // Create deleted account
+          await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+              "createdAt", "updatedAt"
+            ) VALUES (
+              ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Path Test Newer',
+              ${deleteTime}, NOW(), NOW()
+            )
+          `;
+
+          const { processCompanyLocationWebhook: processWh } = await import("../company-location.server");
+
+          const location = {
+            id: locationId,
+            name: "Path Test Newer Updated",
+            company: { id: companyId },
+          };
+
+          const result = await processWh(
+            sql,
+            TEST_SHOP_DOMAIN,
+            "COMPANY_LOCATIONS_UPDATE",
+            location,
+            `wh-newer-${pathSuffix}`,
+            {},
+            true,
+            newerTime
+          );
+          expect(result.success).toBe(true);
+
+          // Verify locationDeletedAt WAS cleared
+          const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+            SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+          `;
+          expect(account.locationDeletedAt).toBeNull();
+        });
+      });
+    });
+
+    describe("bulk paths", () => {
+      const bulkCases = [
+        { name: "flag-off contactKnown=true", envValue: undefined, planKey: "starter", contactKnown: true },
+        { name: "flag-off contactKnown=false", envValue: undefined, planKey: "starter", contactKnown: false },
+        { name: "gating-on unlimited contactKnown=true", envValue: "1", planKey: "unlimited", contactKnown: true },
+        { name: "gating-on unlimited contactKnown=false", envValue: "1", planKey: "unlimited", contactKnown: false },
+        { name: "gating-on limited contactKnown=true", envValue: "1", planKey: "growth", contactKnown: true },
+        { name: "gating-on limited contactKnown=false", envValue: "1", planKey: "growth", contactKnown: false },
+      ];
+
+      describe.each(bulkCases)("$name", ({ envValue, planKey, contactKnown }) => {
+        let originalEnv: string | undefined;
+        const pathSuffix = `bulk-${planKey}-${contactKnown ? "known" : "orphan"}-${TEST_SUFFIX}`;
+
+        beforeAll(async () => {
+          originalEnv = process.env.PLAN_GATING_ENFORCED;
+          if (envValue === undefined) {
+            delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+          } else {
+            (process.env as Record<string, string>).PLAN_GATING_ENFORCED = envValue;
+          }
+          // Set the plan_key on test shop
+          await sql`UPDATE "Shop" SET plan_key = ${planKey} WHERE id = ${TEST_SHOP_ID}`;
+        });
+
+        afterAll(async () => {
+          if (originalEnv === undefined) {
+            delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+          } else {
+            (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+          }
+        });
+
+        it("stale bulk does NOT restore deleted location", async () => {
+          vi.resetModules();
+          const locationId = `gid://shopify/CompanyLocation/stale-${pathSuffix}`;
+          const companyId = `gid://shopify/Company/stale-co-${pathSuffix}`;
+
+          // Create deleted account
+          await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+              "createdAt", "updatedAt"
+            ) VALUES (
+              ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Bulk Path Stale',
+              ${deleteTime}, NOW(), NOW()
+            )
+          `;
+
+          const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../company-location.server");
+
+          const location = {
+            id: locationId,
+            name: "Bulk Path Stale Updated",
+            company: { id: companyId },
+          };
+
+          const mapped = mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, location, {}, contactKnown);
+          const count = await bulkUpsertBuyerAccounts(sql, [mapped], staleTime);
+          expect(count).toBe(1);
+
+          // Verify locationDeletedAt was NOT cleared
+          const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+            SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+          `;
+          expect(account.locationDeletedAt).not.toBeNull();
+          expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+        });
+
+        it("newer bulk DOES restore deleted location", async () => {
+          vi.resetModules();
+          const locationId = `gid://shopify/CompanyLocation/newer-${pathSuffix}`;
+          const companyId = `gid://shopify/Company/newer-co-${pathSuffix}`;
+
+          // Create deleted account
+          await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+              "createdAt", "updatedAt"
+            ) VALUES (
+              ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Bulk Path Newer',
+              ${deleteTime}, NOW(), NOW()
+            )
+          `;
+
+          const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../company-location.server");
+
+          const location = {
+            id: locationId,
+            name: "Bulk Path Newer Updated",
+            company: { id: companyId },
+          };
+
+          const mapped = mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, location, {}, contactKnown);
+          const count = await bulkUpsertBuyerAccounts(sql, [mapped], newerTime);
+          expect(count).toBe(1);
+
+          // Verify locationDeletedAt WAS cleared
+          const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+            SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+          `;
+          expect(account.locationDeletedAt).toBeNull();
+        });
+
+        it("null snapshotAt does NOT restore deleted location", async () => {
+          vi.resetModules();
+          const locationId = `gid://shopify/CompanyLocation/null-${pathSuffix}`;
+          const companyId = `gid://shopify/Company/null-co-${pathSuffix}`;
+
+          // Create deleted account
+          await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+              "createdAt", "updatedAt"
+            ) VALUES (
+              ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Bulk Path Null',
+              ${deleteTime}, NOW(), NOW()
+            )
+          `;
+
+          const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../company-location.server");
+
+          const location = {
+            id: locationId,
+            name: "Bulk Path Null Updated",
+            company: { id: companyId },
+          };
+
+          const mapped = mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, location, {}, contactKnown);
+          const count = await bulkUpsertBuyerAccounts(sql, [mapped], null);
+          expect(count).toBe(1);
+
+          // Verify locationDeletedAt was NOT cleared (null snapshotAt = conservative)
+          const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+            SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+          `;
+          expect(account.locationDeletedAt).not.toBeNull();
+          expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+        });
+      });
     });
   });
 

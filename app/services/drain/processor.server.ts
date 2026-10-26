@@ -361,13 +361,15 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
   }
 
   // If node is null, treat as delete
+  // T5: Use now() as delete time since we discovered the deletion just now.
+  // The original triggeredAt is from the CREATE/UPDATE webhook that preceded the delete.
   if (!result.data?.node) {
     const location: ShopifyCompanyLocation = {
       id: message.resourceGid,
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId, env, true, triggeredAt);
+    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId, env, true, new Date());
   }
 
   return processCompanyLocationWebhook(
