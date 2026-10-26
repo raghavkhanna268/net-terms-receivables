@@ -2561,38 +2561,111 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const STRANDED_SHOP_DOMAIN = `stranded-null-${TEST_SUFFIX}.myshopify.com`;
       const bulkOpId = `gid://shopify/BulkOperation/stranded-null-${TEST_SUFFIX}`;
 
-      await sql`
-        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-        VALUES (${STRANDED_SHOP_ID}, ${STRANDED_SHOP_DOMAIN}, 'INR', NOW(), NOW())
-      `;
+      try {
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${STRANDED_SHOP_ID}, ${STRANDED_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
 
-      // Stranded op: finish arrived, lease is NULL (released), not completed
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at,
-          finish_received_at, processing_lease_until, completed_at
-        )
-        VALUES (
-          ${bulkOpId}, ${STRANDED_SHOP_DOMAIN}, 'companies', 'reconcile',
-          NOW() - interval '2 hours',
-          NOW() - interval '30 minutes',
-          NULL,
-          NULL
-        )
-      `;
+        // Stranded op: finish arrived, lease is NULL (released), not completed
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${bulkOpId}, ${STRANDED_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL
+          )
+        `;
 
-      // Threshold: 10 minutes. Op's finish_received_at is 30 min ago.
-      const stranded = await findStrandedBulkOperations(sql, 10);
-      const found = stranded.find((op) => op.bulk_operation_id === bulkOpId);
-      expect(found).toBeDefined();
-      expect(found!.shop).toBe(STRANDED_SHOP_DOMAIN);
+        // Threshold: 10 minutes. Op's finish_received_at is 30 min ago.
+        const stranded = await findStrandedBulkOperations(sql, 10);
+        const found = stranded.find((op) => op.bulk_operation_id === bulkOpId);
+        expect(found).toBeDefined();
+        expect(found!.shop).toBe(STRANDED_SHOP_DOMAIN);
+      } finally {
+        await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${STRANDED_SHOP_ID}`;
+      }
+    });
 
-      // Cleanup
-      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
-      await sql`DELETE FROM "Shop" WHERE id = ${STRANDED_SHOP_ID}`;
+    it("C15a-threshold: op inside threshold NOT returned, op outside threshold IS returned", async () => {
+      const { findStrandedBulkOperations } = await import("../bulk-op-recovery.server");
+
+      const THRESHOLD_SHOP_ID = `shop-threshold-${TEST_SUFFIX}`;
+      const THRESHOLD_SHOP_DOMAIN = `threshold-${TEST_SUFFIX}.myshopify.com`;
+      const insideThresholdOpId = `gid://shopify/BulkOperation/inside-threshold-${TEST_SUFFIX}`;
+      const outsideThresholdOpId = `gid://shopify/BulkOperation/outside-threshold-${TEST_SUFFIX}`;
+
+      try {
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${THRESHOLD_SHOP_ID}, ${THRESHOLD_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Op INSIDE threshold: finish_received_at is 5 min ago, threshold is 10 min
+        // Should NOT be returned (too recent to be considered stranded)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${insideThresholdOpId}, ${THRESHOLD_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '5 minutes',
+            NULL,
+            NULL
+          )
+        `;
+
+        // Op OUTSIDE threshold: finish_received_at is 15 min ago, threshold is 10 min
+        // SHOULD be returned (stranded long enough)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${outsideThresholdOpId}, ${THRESHOLD_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '15 minutes',
+            NULL,
+            NULL
+          )
+        `;
+
+        // Threshold: 10 minutes
+        const stranded = await findStrandedBulkOperations(sql, 10);
+
+        // Op inside threshold (5 min ago) should NOT be found
+        const foundInside = stranded.find((op) => op.bulk_operation_id === insideThresholdOpId);
+        expect(foundInside).toBeUndefined();
+
+        // Op outside threshold (15 min ago) SHOULD be found
+        const foundOutside = stranded.find((op) => op.bulk_operation_id === outsideThresholdOpId);
+        expect(foundOutside).toBeDefined();
+        expect(foundOutside!.shop).toBe(THRESHOLD_SHOP_DOMAIN);
+      } finally {
+        await sql`DELETE FROM s6_bulk_operations WHERE shop = ${THRESHOLD_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${THRESHOLD_SHOP_ID}`;
+      }
     });
 
     it("C15b: concurrent recoveries enqueue only once (race guard)", async () => {
+      // Deterministic interleave using row-level FOR UPDATE gate (no triggers, no timing waits).
+      // 1. Gate connection takes SELECT ... FOR UPDATE on the op row (holds row lock)
+      // 2. Start recovery calls from two separate connections - they will block on FOR UPDATE
+      // 3. Poll pg_stat_activity until both backends are blocked waiting for locks
+      // 4. COMMIT gate connection to release them
+      // 5. Assert exactly one enqueue across both runs
+      //
+      // Mutation proof: Removing FOR UPDATE in enqueueCompletedOperation would allow
+      // both sessions to proceed without serialization, causing duplicate enqueues.
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
@@ -2600,55 +2673,118 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const RACE_SHOP_DOMAIN = `race-recovery-${TEST_SUFFIX}.myshopify.com`;
       const bulkOpId = `gid://shopify/BulkOperation/race-recovery-${TEST_SUFFIX}`;
 
-      await sql`
-        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-        VALUES (${RACE_SHOP_ID}, ${RACE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
-      `;
+      // Three separate connections: two workers + one gate holder
+      const conn1 = postgres(TEST_DATABASE_URL!, sqlOptions);
+      const conn2 = postgres(TEST_DATABASE_URL!, sqlOptions);
+      const gateConn = postgres(TEST_DATABASE_URL!, sqlOptions);
 
-      // Stranded op
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at,
-          finish_received_at, processing_lease_until, completed_at
-        )
-        VALUES (
-          ${bulkOpId}, ${RACE_SHOP_DOMAIN}, 'companies', 'reconcile',
-          NOW() - interval '2 hours',
-          NOW() - interval '30 minutes',
-          NULL,
-          NULL
-        )
-      `;
+      // Get PIDs for conn1 and conn2 to filter pg_stat_activity precisely
+      const [[{ pid: pid1 }], [{ pid: pid2 }]] = await Promise.all([
+        conn1<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`,
+        conn2<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`,
+      ]);
 
-      // Mock Shopify status as COMPLETED
-      vi.mocked(adminGraphQL).mockResolvedValue({
-        success: true,
-        data: { node: { id: bulkOpId, status: "COMPLETED" } },
-        retryable: false,
+      const gate: { release: (() => void) | null } = { release: null };
+      const gateReleased = new Promise<void>((resolve) => {
+        gate.release = resolve;
+      });
+
+      let gateAcquired: (() => void) | null = null;
+      const gateAcquiredPromise = new Promise<void>((resolve) => {
+        gateAcquired = resolve;
       });
 
       try {
-        // Run two concurrent recoveries
-        const [result1, result2] = await Promise.all([
-          recoverStaleBulkOperations(sql, 60, 10),
-          recoverStaleBulkOperations(sql, 60, 10),
-        ]);
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${RACE_SHOP_ID}, ${RACE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
 
-        // Total enqueued should be exactly 1 across both runs
-        const totalEnqueued = result1.enqueuedCount + result2.enqueuedCount;
+        // Stranded op - must be far enough outside threshold (30 min > 10 min threshold)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${bulkOpId}, ${RACE_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL
+          )
+        `;
+
+        // Mock Shopify status as COMPLETED for all ops (recovery might find others)
+        vi.mocked(adminGraphQL).mockResolvedValue({
+          success: true,
+          data: { node: { id: bulkOpId, status: "COMPLETED" } },
+          retryable: false,
+        });
+
+        // 1. Gate connection takes FOR UPDATE lock on the row
+        const gatePromise = gateConn.begin(async (tx) => {
+          await tx`
+            SELECT 1 FROM s6_bulk_operations
+            WHERE bulk_operation_id = ${bulkOpId}
+            FOR UPDATE
+          `;
+          gateAcquired!();
+          await gateReleased;
+        });
+
+        // Wait for gate to acquire lock
+        await gateAcquiredPromise;
+
+        // 2. Start both recovery calls - they will block on FOR UPDATE in enqueueCompletedOperation
+        const promise1 = recoverStaleBulkOperations(conn1, 60, 10);
+        const promise2 = recoverStaleBulkOperations(conn2, 60, 10);
+
+        // 3. Poll pg_stat_activity until both worker backends are blocked waiting for locks
+        let waitingCount = 0;
+        for (let i = 0; i < 100; i++) {
+          const [info] = await sql<{ waiting: string }[]>`
+            SELECT COUNT(*)::text as waiting FROM pg_stat_activity
+            WHERE wait_event_type = 'Lock'
+              AND state = 'active'
+              AND pid IN (${pid1}, ${pid2})
+          `;
+          waitingCount = parseInt(info.waiting, 10);
+          if (waitingCount >= 2) break;
+          await new Promise((r) => globalThis.setTimeout(r, 10));
+        }
+
+        // Verify both are waiting before releasing
+        expect(waitingCount).toBeGreaterThanOrEqual(2);
+
+        // 4. Release the gate
+        gate.release!();
+        await gatePromise;
+
+        // Wait for both to complete
+        const [result1, result2] = await Promise.all([promise1, promise2]);
+
+        // 5. Total enqueued for THIS op should be exactly 1
+        const enqueued1 = result1.attempts.filter((a) => a.bulkOperationId === bulkOpId && a.status === "enqueued").length;
+        const enqueued2 = result2.attempts.filter((a) => a.bulkOperationId === bulkOpId && a.status === "enqueued").length;
+        const totalEnqueued = enqueued1 + enqueued2;
         expect(totalEnqueued).toBe(1);
 
-        // Exactly one message in queue
+        // Exactly one message in queue for THIS op
         const [queueCount] = await sql<{ count: string }[]>`
           SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
           WHERE message->>'bulkOperationId' = ${bulkOpId}
         `;
         expect(parseInt(queueCount.count, 10)).toBe(1);
       } finally {
+        gate.release?.();
         vi.mocked(adminGraphQL).mockReset();
         await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' = ${bulkOpId}`;
         await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
         await sql`DELETE FROM "Shop" WHERE id = ${RACE_SHOP_ID}`;
+        await conn1.end();
+        await conn2.end();
+        await gateConn.end();
       }
     });
 
@@ -2661,61 +2797,62 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const liveLeaseOpId = `gid://shopify/BulkOperation/live-lease-guard-${TEST_SUFFIX}`;
       const pendingMsgOpId = `gid://shopify/BulkOperation/pending-msg-guard-${TEST_SUFFIX}`;
 
-      await sql`
-        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-        VALUES (${LIVE_SHOP_ID}, ${LIVE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
-      `;
-
-      // Op with live lease (should NOT be found by findStrandedBulkOperations)
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at,
-          finish_received_at, processing_lease_until, completed_at
-        )
-        VALUES (
-          ${liveLeaseOpId}, ${LIVE_SHOP_DOMAIN}, 'companies', 'reconcile',
-          NOW() - interval '2 hours',
-          NOW() - interval '30 minutes',
-          NOW() + interval '5 minutes',
-          NULL
-        )
-      `;
-
-      // Op with NULL lease but pending message (should be skipped by recovery)
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at,
-          finish_received_at, processing_lease_until, completed_at
-        )
-        VALUES (
-          ${pendingMsgOpId}, ${LIVE_SHOP_DOMAIN}, 'companies', 'reconcile',
-          NOW() - interval '2 hours',
-          NOW() - interval '30 minutes',
-          NULL,
-          NULL
-        )
-      `;
-
-      // Insert a pending message for pendingMsgOpId
-      await sql`
-        INSERT INTO pgmq.q_s6_bulk (vt, message)
-        VALUES (NOW(), ${sql.json({
-          topic: "BULK_OPERATIONS_FINISH",
-          shop: LIVE_SHOP_DOMAIN,
-          webhookId: `existing:${pendingMsgOpId}`,
-          bulkOperationId: pendingMsgOpId,
-          bulkType: "companies",
-          enqueuedAt: new Date().toISOString(),
-        })})
-      `;
-
-      vi.mocked(adminGraphQL).mockResolvedValue({
-        success: true,
-        data: { node: { id: pendingMsgOpId, status: "COMPLETED" } },
-        retryable: false,
-      });
-
       try {
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${LIVE_SHOP_ID}, ${LIVE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Op with live lease (should NOT be found by findStrandedBulkOperations)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${liveLeaseOpId}, ${LIVE_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NOW() + interval '5 minutes',
+            NULL
+          )
+        `;
+
+        // Op with NULL lease but pending message (should be skipped by recovery)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${pendingMsgOpId}, ${LIVE_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL
+          )
+        `;
+
+        // Insert a pending message for pendingMsgOpId
+        await sql`
+          INSERT INTO pgmq.q_s6_bulk (vt, message)
+          VALUES (NOW(), ${sql.json({
+            topic: "BULK_OPERATIONS_FINISH",
+            shop: LIVE_SHOP_DOMAIN,
+            webhookId: `existing:${pendingMsgOpId}`,
+            bulkOperationId: pendingMsgOpId,
+            bulkType: "companies",
+            enqueuedAt: new Date().toISOString(),
+          })})
+        `;
+
+        // Mock Shopify status as COMPLETED for all ops
+        vi.mocked(adminGraphQL).mockResolvedValue({
+          success: true,
+          data: { node: { id: pendingMsgOpId, status: "COMPLETED" } },
+          retryable: false,
+        });
+
         // Live lease op should NOT be found by findStrandedBulkOperations
         const stranded = await findStrandedBulkOperations(sql, 10);
         const foundLive = stranded.find((op) => op.bulk_operation_id === liveLeaseOpId);
@@ -2727,11 +2864,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
         // But recovery should skip it because message already exists
         const result = await recoverStaleBulkOperations(sql, 60, 10);
+        // Filter to only this test's ops
         const pendingAttempt = result.attempts.find((a) => a.bulkOperationId === pendingMsgOpId);
         expect(pendingAttempt).toBeDefined();
         expect(pendingAttempt!.status).toBe("skipped"); // Skipped because message exists
 
-        // Still exactly one message (the original, no duplicate)
+        // Still exactly one message for THIS op (the original, no duplicate)
         const [queueCount] = await sql<{ count: string }[]>`
           SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
           WHERE message->>'bulkOperationId' = ${pendingMsgOpId}
@@ -2753,53 +2891,54 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const completedOpId = `gid://shopify/BulkOperation/completed-guard-${TEST_SUFFIX}`;
       const closedOpId = `gid://shopify/BulkOperation/closed-guard-${TEST_SUFFIX}`;
 
-      await sql`
-        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-        VALUES (${DONE_SHOP_ID}, ${DONE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
-      `;
+      try {
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${DONE_SHOP_ID}, ${DONE_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
 
-      // Completed op (should NOT be found)
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at,
-          finish_received_at, processing_lease_until, completed_at
-        )
-        VALUES (
-          ${completedOpId}, ${DONE_SHOP_DOMAIN}, 'companies', 'reconcile',
-          NOW() - interval '2 hours',
-          NOW() - interval '30 minutes',
-          NULL,
-          NOW() - interval '20 minutes'
-        )
-      `;
+        // Completed op (should NOT be found)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${completedOpId}, ${DONE_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NOW() - interval '20 minutes'
+          )
+        `;
 
-      // Closed op (should NOT be found)
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at,
-          finish_received_at, processing_lease_until, completed_at, closed_at, closed_reason
-        )
-        VALUES (
-          ${closedOpId}, ${DONE_SHOP_DOMAIN}, 'companies', 'reconcile',
-          NOW() - interval '2 hours',
-          NOW() - interval '30 minutes',
-          NULL,
-          NULL,
-          NOW() - interval '10 minutes',
-          'reinstall_reset'
-        )
-      `;
+        // Closed op (should NOT be found)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at, closed_at, closed_reason
+          )
+          VALUES (
+            ${closedOpId}, ${DONE_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL,
+            NOW() - interval '10 minutes',
+            'reinstall_reset'
+          )
+        `;
 
-      const stranded = await findStrandedBulkOperations(sql, 10);
-      const foundCompleted = stranded.find((op) => op.bulk_operation_id === completedOpId);
-      const foundClosed = stranded.find((op) => op.bulk_operation_id === closedOpId);
+        const stranded = await findStrandedBulkOperations(sql, 10);
+        const foundCompleted = stranded.find((op) => op.bulk_operation_id === completedOpId);
+        const foundClosed = stranded.find((op) => op.bulk_operation_id === closedOpId);
 
-      expect(foundCompleted).toBeUndefined();
-      expect(foundClosed).toBeUndefined();
-
-      // Cleanup
-      await sql`DELETE FROM s6_bulk_operations WHERE shop = ${DONE_SHOP_DOMAIN}`;
-      await sql`DELETE FROM "Shop" WHERE id = ${DONE_SHOP_ID}`;
+        expect(foundCompleted).toBeUndefined();
+        expect(foundClosed).toBeUndefined();
+      } finally {
+        await sql`DELETE FROM s6_bulk_operations WHERE shop = ${DONE_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${DONE_SHOP_ID}`;
+      }
     });
   });
 
