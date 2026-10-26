@@ -517,6 +517,32 @@ export async function hasNewerStageDueToday(
 }
 
 /**
+ * Check if a sibling rule (same offsetDays, different ruleId) already sent
+ * for this invoice. Used by catch-up path to prevent duplicate sends when
+ * duplicate ReminderRule rows exist for the same (shopId, offsetDays, channel).
+ */
+export async function hasSiblingRuleSent(
+  sql: Sql,
+  shopId: string,
+  invoiceId: string,
+  ruleId: string,
+  offsetDays: number
+): Promise<boolean> {
+  const [row] = await sql<{ hasSibling: boolean }[]>`
+    SELECT EXISTS(
+      SELECT 1 FROM "ReminderLog" rl
+      INNER JOIN "ReminderRule" r ON r.id = rl."ruleId"
+      WHERE rl."shopId" = ${shopId}
+        AND rl."invoiceId" = ${invoiceId}
+        AND rl."ruleId" != ${ruleId}
+        AND rl.status = 'sent'::"ReminderLogStatus"
+        AND r."offsetDays" = ${offsetDays}
+    ) AS "hasSibling"
+  `;
+  return row?.hasSibling ?? false;
+}
+
+/**
  * Remove a claimed reminder slot (on send failure, to allow retry).
  */
 export async function releaseReminderSlot(
@@ -1356,6 +1382,22 @@ export async function sendCatchupReminder(
       success: true,
       action: "skipped",
       skipReason: "Reminder rule disabled",
+    };
+  }
+
+  // Gate 10b: Check if a sibling rule (same offsetDays) already sent for this invoice.
+  // Prevents duplicate sends when duplicate ReminderRule rows exist.
+  const siblingAlreadySent = await hasSiblingRuleSent(sql, shopId, invoiceId, ruleId, offsetDays);
+  if (siblingAlreadySent) {
+    await sql`
+      UPDATE "ReminderLog"
+      SET status = 'skipped_daily_limit'::"ReminderLogStatus"
+      WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+    `;
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Sibling rule already sent for this invoice",
     };
   }
 
