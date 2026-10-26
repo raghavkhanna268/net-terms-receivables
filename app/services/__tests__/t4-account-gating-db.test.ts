@@ -1637,4 +1637,135 @@ describeWithDb("T4 account-count gating (DB)", () => {
       expect(parseInt(finalCounts.gated)).toBe(1);
     });
   });
+
+  describe("(l) positive control: flag-on limit=0 uses sql.begin and gates accounts", () => {
+    const SHOP_ID = `shop-positive-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN = `test-positive-${TEST_SUFFIX}.myshopify.com`;
+    let originalEnv: string | undefined;
+    let beginSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeAll(async () => {
+      originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', NOW(), NOW())
+      `;
+
+      await sql`
+        INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+        VALUES (${'tag-rule-positive-' + TEST_SUFFIX}, ${SHOP_ID}, 'wholesale', 30, NOW(), NOW())
+      `;
+    });
+
+    afterAll(async () => {
+      if (originalEnv === undefined) {
+        delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+      } else {
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+      }
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%positive%' + TEST_SUFFIX + '%'}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}`;
+      await sql`DELETE FROM "AccountSource" WHERE "shopId" = ${SHOP_ID}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
+    });
+
+    beforeEach(async () => {
+      vi.resetModules();
+      beginSpy = vi.spyOn(sql, "begin");
+    });
+
+    afterEach(() => {
+      beginSpy.mockRestore();
+    });
+
+    it("processCompanyLocationWebhook flag-on limit=0: sql.begin called, account gated", async () => {
+      const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
+      const webhookId = `webhook-positive-company-${TEST_SUFFIX}`;
+      const location = {
+        id: `gid://shopify/CompanyLocation/positive-company-${TEST_SUFFIX}`,
+        company: { id: `gid://shopify/Company/positive-company-${TEST_SUFFIX}` },
+        name: "Positive Control Company",
+        billingAddress: null,
+        buyerExperienceConfiguration: null,
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        webhookId,
+        {}
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("gated");
+      expect(beginSpy).toHaveBeenCalled();
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).not.toBeNull();
+    });
+
+    it("bulkUpsertBuyerAccounts flag-on limit=0: sql.begin called, all accounts gated", async () => {
+      beginSpy.mockClear();
+      const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../sync/company-location.server");
+
+      const newLocations = [];
+      for (let i = 1; i <= 3; i++) {
+        newLocations.push({
+          id: `gid://shopify/CompanyLocation/positive-bulk-${i}-${TEST_SUFFIX}`,
+          company: { id: `gid://shopify/Company/positive-bulk-${i}-${TEST_SUFFIX}` },
+          name: `Positive Bulk ${i}`,
+          billingAddress: null,
+          buyerExperienceConfiguration: null,
+        });
+      }
+
+      const mappedAccounts = newLocations.map((loc) => mapCompanyLocationToBuyerAccount(SHOP_ID, loc, {}));
+
+      const upsertCount = await bulkUpsertBuyerAccounts(sql, mappedAccounts);
+      expect(upsertCount).toBe(3);
+      expect(beginSpy).toHaveBeenCalled();
+
+      const results = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "shopId" = ${SHOP_ID}
+          AND "companyLocationId" LIKE ${'%positive-bulk-%'}
+      `;
+
+      expect(results.length).toBe(3);
+      expect(results.every(r => r.gated_at !== null)).toBe(true);
+    });
+
+    it("processBulkCustomer flag-on limit=0: sql.begin called, account gated", async () => {
+      beginSpy.mockClear();
+      const { processBulkCustomer } = await import("../sync/customer.server");
+
+      const customer = {
+        id: `gid://shopify/Customer/positive-bulk-${TEST_SUFFIX}`,
+        tags: ["wholesale"],
+        email: null,
+        displayName: null,
+      };
+
+      const result = await processBulkCustomer(sql, SHOP_DOMAIN, customer, "disabled");
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("gated");
+      expect(beginSpy).toHaveBeenCalled();
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "customerId" = ${customer.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).not.toBeNull();
+    });
+  });
 });
