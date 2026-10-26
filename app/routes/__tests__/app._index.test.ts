@@ -25,9 +25,15 @@ interface LoaderResult {
   usage: {
     companies: { current: number; limit: number };
     importsThisMonth: { current: number; limit: number };
-  };
+  } | null;
   appHandle: string;
   gatingEnforced: boolean;
+  newAccountsPausedBanner: {
+    show: boolean;
+    heading: string;
+    bodyText: string;
+    upgradeUrl: string | null;
+  };
   agingTotals: {
     totalByCurrency: Record<string, string>;
     buckets: Record<string, { byCurrency: Record<string, string> }>;
@@ -119,9 +125,12 @@ import {
   getBuyerLedger,
   getBuyerInvoices,
 } from "~/lib/aging-queries.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 
 const mockGetShopAgingTotals = vi.mocked(getShopAgingTotals);
 const mockGetBuyerLedger = vi.mocked(getBuyerLedger);
+const mockGetUsageStats = vi.mocked(getUsageStats);
+const mockIsGatingEnforced = vi.mocked(isGatingEnforced);
 const mockGetBuyerInvoices = vi.mocked(getBuyerInvoices);
 
 describe("app._index loader", () => {
@@ -772,6 +781,166 @@ describe("S21 over-limit banner using buildOverLimitBannerState helper", () => {
     const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildOverLimitBannerState(2, true);
     expect(state.enforcementNote).toBeNull();
+  });
+});
+
+/**
+ * T4 Tests: newAccountsPausedBanner loader behavior with flag on/off and usage error.
+ */
+describe("T4 newAccountsPausedBanner loader tests", () => {
+  const TEST_SHOP = "test-t4-banner.myshopify.com";
+  const TEST_SHOP_ID = "shop-t4-banner";
+
+  function createLoaderArgs() {
+    const url = new URL("https://example.com/app?skipOnboarding=true");
+    return {
+      request: new Request(url.toString()),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              sessionToken: "mock-token",
+              redirect: vi.fn(),
+              admin: {
+                graphql: vi.fn().mockResolvedValue({
+                  json: vi.fn().mockResolvedValue({
+                    data: { shop: { id: "gid://shopify/Shop/123", currencyCode: "INR" } },
+                  }),
+                }),
+              },
+            }),
+          },
+        },
+        cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("onboarding_dismissed_at")) {
+        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: {},
+      buckets: {
+        current: { byCurrency: {} },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+
+    mockGetBuyerLedger.mockResolvedValue({ rows: [], totalCount: 0 });
+  });
+
+  it("flag off: getUsageStats is called and usage is returned, banner is hidden", async () => {
+    mockIsGatingEnforced.mockReturnValue(false);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 20, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    const { loader } = await import("../app._index");
+    const result = extractLoaderData(await loader(createLoaderArgs()));
+
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toEqual({
+      companies: { current: 20, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+  });
+
+  it("flag on, usage available, at limit: banner shown with correct heading", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 25, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    const { loader } = await import("../app._index");
+    const result = extractLoaderData(await loader(createLoaderArgs()));
+
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+    expect(result.gatingEnforced).toBe(true);
+    expect(result.newAccountsPausedBanner.show).toBe(true);
+    expect(result.newAccountsPausedBanner.heading).toContain("25 of 25");
+  });
+
+  it("flag on, usage null (getUsageStats error): banner show:false, no Limit Reached", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockRejectedValue(new Error("Database error"));
+
+    const { loader } = await import("../app._index");
+    const result = extractLoaderData(await loader(createLoaderArgs()));
+
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toBeNull();
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(result.newAccountsPausedBanner.heading).toBe("");
+  });
+});
+
+/**
+ * T4 Render Tests: Index component wiring with null usage.
+ * Verifies the component chain renders correctly when usage is null.
+ *
+ * Tests the actual rendering behavior via PlanBanner (the component that
+ * receives usageUnavailable prop) plus code inspection to verify wiring.
+ */
+describe("T4 Index component wiring with usage null", () => {
+  it("PlanBanner with usageUnavailable:true renders no Limit Reached, no 0 / 0, no Usage:", async () => {
+    const { PlanBanner } = await import("~/components/UpgradePrompt");
+
+    const html = renderToString(
+      createElement(PlanBanner, {
+        planKey: "starter" as const,
+        planName: "Starter",
+        isTest: false,
+        companiesUsed: 0,
+        companiesLimit: -1,
+        gatingEnforced: true,
+        upgradeUrl: "https://upgrade.test",
+        usageUnavailable: true,
+      })
+    );
+
+    expect(html).not.toContain("Limit Reached");
+    expect(html).not.toContain("0 / 0");
+    expect(html).not.toContain("Upgrade to Add More");
+    expect(html).not.toContain("Usage:");
+    expect(html).toContain("Starter");
+  });
+
+  it("Index component source: usage === null sets usageUnavailable and passes to PlanBanner", async () => {
+    const { readFileSync } = await import("fs");
+    const indexSource = readFileSync("app/routes/app._index.tsx", "utf-8");
+
+    expect(indexSource).toContain("const usageUnavailable = usage === null");
+    expect(indexSource).toContain("usageUnavailable={usageUnavailable}");
   });
 });
 
