@@ -15,6 +15,10 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 vi.mock("~/services/gating.server", () => ({
   isAccountActive: vi.fn().mockReturnValue(true),
   isGatingEnforced: vi.fn().mockReturnValue(false),
+  getUsageStats: vi.fn().mockResolvedValue({
+    companies: { current: 0, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
+  }),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
@@ -141,6 +145,7 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");
@@ -197,6 +202,7 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");
@@ -253,6 +259,7 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");
@@ -309,6 +316,7 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
       }));
 
       const { loader } = await import("../app.accounts.$id");

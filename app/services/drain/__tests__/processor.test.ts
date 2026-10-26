@@ -29,9 +29,10 @@ vi.mock("../admin-client.server", () => ({
     retryable: false,
   }),
   COMPANY_QUERY: "query CompanyById",
-  COMPANY_LOCATION_QUERY: "query CompanyLocationById",
   ORDER_QUERY: "query OrderById",
   getCustomerQueryForDrain: vi.fn().mockReturnValue("query CustomerById"),
+  getCompanyLocationQuery: vi.fn().mockReturnValue("query CompanyLocationById"),
+  getCompanyLocationQueryWithoutContact: vi.fn().mockReturnValue("query CompanyLocationById"),
   DRAFT_ORDER_QUERY: "query DraftOrderById",
   BULK_OPERATION_STATUS_QUERY: "query BulkOperationStatus",
 }));
@@ -87,9 +88,18 @@ vi.mock("~/services/sync/draft-order.server", () => ({
   }),
 }));
 
+// S8 customer fetch mock (partial - only mock incrementCustomerPiiAccessDeniedFallback)
+vi.mock("../customer-fetch.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../customer-fetch.server")>();
+  return {
+    ...actual,
+    incrementCustomerPiiAccessDeniedFallback: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 vi.mock("~/services/sync/bulk-operations.server", () => ({
   registerBulkOperation: vi.fn().mockResolvedValue(undefined),
-  BULK_COMPANIES_QUERY: "mutation BulkCompaniesExport",
+  getBulkCompaniesQuery: vi.fn().mockReturnValue("mutation BulkCompaniesExport"),
   BULK_ORDERS_QUERY: "mutation BulkOrdersExport",
   parseBulkOperationResult: vi.fn().mockReturnValue({
     success: true,
@@ -114,6 +124,7 @@ vi.mock("../reconcile-handlers.server", () => ({
     entityId: "gid://shopify/BulkOperation/123",
   }),
   incrementOrderRefetchNull: vi.fn().mockResolvedValue(undefined),
+  enqueueReconcileStage: vi.fn().mockResolvedValue(true),
   enqueueReconcileOrders: vi.fn().mockResolvedValue(true),
   getManualKeyForBulkOp: vi.fn().mockResolvedValue(undefined),
 }));
@@ -186,6 +197,7 @@ describe("Drain Processor", () => {
 
       // S10b: RECONCILE_* handlers are registered
       expect(getSyncHandler("RECONCILE_COMPANIES")).toBeDefined();
+      expect(getSyncHandler("RECONCILE_CUSTOMERS")).toBeDefined();
       expect(getSyncHandler("RECONCILE_ORDERS")).toBeDefined();
     });
   });
@@ -749,6 +761,11 @@ describe("S10b RECONCILE handlers", () => {
     expect(getSyncHandler("RECONCILE_COMPANIES")).toBeDefined();
   });
 
+  it("RECONCILE_CUSTOMERS handler is registered", async () => {
+    const { getSyncHandler } = await import("../processor.server");
+    expect(getSyncHandler("RECONCILE_CUSTOMERS")).toBeDefined();
+  });
+
   it("RECONCILE_ORDERS handler is registered", async () => {
     const { getSyncHandler } = await import("../processor.server");
     expect(getSyncHandler("RECONCILE_ORDERS")).toBeDefined();
@@ -766,28 +783,28 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     expect(getBulkHandler("BULK_OPERATIONS_FINISH")).toBeDefined();
   });
 
-  it("chains to orders when chainToOrders flag is set (based on origin/stage, not webhookId)", async () => {
+  it("chains to next stage when nextStage is set (based on origin/stage, not webhookId)", async () => {
     const { processBulkOperation } = await import(
       "~/services/sync/bulk-jsonl-processor.server"
     );
-    const { enqueueReconcileOrders } = await import(
+    const { enqueueReconcileStage } = await import(
       "../reconcile-handlers.server"
     );
 
     const mockProcessBulkOperation = processBulkOperation as ReturnType<
       typeof vi.fn
     >;
-    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+    const mockEnqueueReconcileStage = enqueueReconcileStage as ReturnType<
       typeof vi.fn
     >;
 
-    // Simulate a completed companies reconcile - chainToOrders=true
+    // Simulate a completed companies reconcile - nextStage='customers'
     mockProcessBulkOperation.mockResolvedValue({
       success: true,
       action: "updated",
       entityId: "gid://shopify/BulkOperation/123",
       status: "complete",
-      chainToOrders: true, // Set based on origin/stage, not webhookId
+      nextStage: "customers", // Set based on origin/stage
     });
 
     const { getBulkHandler } = await import("../processor.server");
@@ -797,7 +814,7 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
       json: vi.fn((v: unknown) => v),
     });
 
-    // Use a non-reconcile webhookId to prove we're using chainToOrders, not webhookId
+    // Use a non-reconcile webhookId to prove we're using nextStage, not webhookId
     const message = {
       topic: "BULK_OPERATIONS_FINISH",
       shop: "test.myshopify.com",
@@ -811,27 +828,30 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
 
     expect(result.success).toBe(true);
     expect(result.status).toBe("complete");
-    // Should chain because chainToOrders=true, not because of webhookId
-    // Third arg is manualKey (undefined for cron path since mock returns undefined)
-    expect(mockEnqueueReconcileOrders).toHaveBeenCalledWith(
+    // Should chain because nextStage='customers', not because of webhookId
+    // Fourth arg is manualKey (undefined for cron path since mock returns undefined)
+    // Fifth arg is prevBulkOperationId (#293)
+    expect(mockEnqueueReconcileStage).toHaveBeenCalledWith(
       mockSql,
       "test.myshopify.com",
-      undefined
+      "customers",
+      undefined,
+      "gid://shopify/BulkOperation/123"
     );
   });
 
-  it("does NOT chain to orders when chainToOrders is false (even if bulkType is companies)", async () => {
+  it("does NOT chain when nextStage is undefined (even if bulkType is companies)", async () => {
     const { processBulkOperation } = await import(
       "~/services/sync/bulk-jsonl-processor.server"
     );
-    const { enqueueReconcileOrders } = await import(
+    const { enqueueReconcileStage } = await import(
       "../reconcile-handlers.server"
     );
 
     const mockProcessBulkOperation = processBulkOperation as ReturnType<
       typeof vi.fn
     >;
-    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+    const mockEnqueueReconcileStage = enqueueReconcileStage as ReturnType<
       typeof vi.fn
     >;
 
@@ -841,7 +861,7 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
       action: "updated",
       entityId: "gid://shopify/BulkOperation/123",
       status: "complete",
-      chainToOrders: false, // Not a reconcile operation
+      nextStage: undefined, // Not a reconcile operation - no next stage
     });
 
     const { getBulkHandler } = await import("../processor.server");
@@ -863,8 +883,8 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     const result = await handler!(mockSql as never, message);
 
     expect(result.success).toBe(true);
-    // Should NOT chain because chainToOrders=false
-    expect(mockEnqueueReconcileOrders).not.toHaveBeenCalled();
+    // Should NOT chain because nextStage is undefined
+    expect(mockEnqueueReconcileStage).not.toHaveBeenCalled();
   });
 });
 
@@ -975,14 +995,14 @@ describe("S10b MUST-FIX #1: Error classification", () => {
     const { processBulkOperation } = await import(
       "~/services/sync/bulk-jsonl-processor.server"
     );
-    const { enqueueReconcileOrders } = await import(
+    const { enqueueReconcileStage } = await import(
       "../reconcile-handlers.server"
     );
 
     const mockProcessBulkOperation = processBulkOperation as ReturnType<
       typeof vi.fn
     >;
-    const mockEnqueueReconcileOrders = enqueueReconcileOrders as ReturnType<
+    const mockEnqueueReconcileStage = enqueueReconcileStage as ReturnType<
       typeof vi.fn
     >;
 
@@ -1001,7 +1021,7 @@ describe("S10b MUST-FIX #1: Error classification", () => {
       action: "updated",
       entityId: "gid://shopify/BulkOperation/123",
       status: "complete",
-      chainToOrders: true,
+      nextStage: "customers",
     });
 
     const { getBulkHandler } = await import("../processor.server");
@@ -1028,7 +1048,7 @@ describe("S10b MUST-FIX #1: Error classification", () => {
     // Second call - success
     const result2 = await handler!(mockSql as never, message);
     expect(result2.success).toBe(true);
-    expect(mockEnqueueReconcileOrders).toHaveBeenCalled();
+    expect(mockEnqueueReconcileStage).toHaveBeenCalled();
   });
 
   it("5 retryable failures result in permanent error for DLQ", async () => {
@@ -1226,7 +1246,7 @@ describe("Handler registration completeness", () => {
     );
 
     // Internal reconcile topics (generated by cron, not webhook)
-    const reconcileTopics = ["RECONCILE_COMPANIES", "RECONCILE_ORDERS"];
+    const reconcileTopics = ["RECONCILE_COMPANIES", "RECONCILE_CUSTOMERS", "RECONCILE_ORDERS"];
 
     // Check sync handlers
     const missingHandlers: string[] = [];
@@ -1744,5 +1764,1042 @@ describe("S18 REMINDER_CATCHUP handler", () => {
     expect(result.success).toBe(false);
     expect(result.retryable).toBe(false);
     expect(result.error).toContain("Invalid REMINDER_CATCHUP message format");
+  });
+});
+
+describe("DLQ shop_not_found sanitization (#239 part a)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("company-location shop_not_found returns errorCode for sanitization", async () => {
+    const { processCompanyLocationWebhook } = await import(
+      "~/services/sync/company-location.server"
+    );
+    const mockProcess = processCompanyLocationWebhook as ReturnType<typeof vi.fn>;
+
+    // Simulate shop not found by returning the error structure
+    mockProcess.mockResolvedValueOnce({
+      success: false,
+      action: "skipped",
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("COMPANY_LOCATIONS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "COMPANY_LOCATIONS_CREATE",
+      shop: "test-missing-shop.myshopify.com",
+      webhookId: "wh-loc-notfound",
+      resourceGid: "gid://shopify/CompanyLocation/999",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("shop_not_found");
+    expect(result.errorCode).toBe("shop_not_found");
+  });
+
+  it("order shop_not_found returns errorCode for sanitization", async () => {
+    const { processOrderWebhook } = await import(
+      "~/services/sync/order.server"
+    );
+    const mockProcess = processOrderWebhook as ReturnType<typeof vi.fn>;
+
+    // Use mockResolvedValueOnce to override just this call
+    mockProcess.mockResolvedValueOnce({
+      success: false,
+      action: "skipped",
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
+    });
+
+    // Also need to mock the GraphQL to return an order (so we don't hit the null refetch path)
+    const mockAdminGraphQL = (await import("../admin-client.server"))
+      .adminGraphQL as ReturnType<typeof vi.fn>;
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: {
+        node: {
+          id: "gid://shopify/Order/888",
+          name: "#1001",
+          createdAt: new Date().toISOString(),
+          paymentTerms: null,
+        },
+      },
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CREATE");
+
+    const { isWebhookProcessed } = await import(
+      "~/services/sync/company.server"
+    );
+    const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+    mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "ORDERS_CREATE",
+      shop: "test-missing-shop.myshopify.com",
+      webhookId: "wh-order-notfound",
+      resourceGid: "gid://shopify/Order/888",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("shop_not_found");
+    expect(result.errorCode).toBe("shop_not_found");
+  });
+
+  it("non-shop error (graphql_error) returns different errorCode", async () => {
+    const mockAdminGraphQL = (await import("../admin-client.server"))
+      .adminGraphQL as ReturnType<typeof vi.fn>;
+
+    // Simulate GraphQL error
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "GraphQL query error: schema validation failed",
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("ORDERS_CREATE");
+
+    const { isWebhookProcessed } = await import(
+      "~/services/sync/company.server"
+    );
+    const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+    mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ id: "shop-123" }]),
+      {
+        json: vi.fn((v: unknown) => v),
+        begin: vi.fn().mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
+          return fn(mockSql);
+        }),
+      }
+    );
+
+    const message = {
+      topic: "ORDERS_CREATE",
+      shop: "test-shop.myshopify.com",
+      webhookId: "wh-order-graphql-error",
+      resourceGid: "gid://shopify/Order/777",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    // Error should NOT be shop_not_found
+    expect(result.error).not.toBe("shop_not_found");
+  });
+
+  it("draft order shop_not_found still has shop domain in error (not relabelled)", async () => {
+    const { processDraftOrderWebhook } = await import(
+      "~/services/sync/draft-order.server"
+    );
+    const mockProcess = processDraftOrderWebhook as ReturnType<typeof vi.fn>;
+
+    // Mock the adminGraphQL to return data (so we hit the processor)
+    const mockAdminGraphQL = (await import("../admin-client.server"))
+      .adminGraphQL as ReturnType<typeof vi.fn>;
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: {
+        node: {
+          id: "gid://shopify/DraftOrder/555",
+          name: "#D1001",
+          createdAt: new Date().toISOString(),
+        },
+      },
+      retryable: false,
+    });
+
+    // Draft orders are NOT relabelled, so they keep the original error string with shop domain
+    mockProcess.mockResolvedValueOnce({
+      success: false,
+      action: "skipped",
+      error: "Shop not found: test-draft-shop.myshopify.com",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("DRAFT_ORDERS_CREATE");
+
+    const { isWebhookProcessed } = await import(
+      "~/services/sync/company.server"
+    );
+    const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+    mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "DRAFT_ORDERS_CREATE",
+      shop: "test-draft-shop.myshopify.com",
+      webhookId: "wh-draft-notfound",
+      resourceGid: "gid://shopify/DraftOrder/555",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    // Draft order keeps full error string (not sanitized in this PR)
+    expect(result.error).toContain("Shop not found");
+    expect(result.error).toContain("test-draft-shop");
+  });
+
+  it("customer shop_not_found still has shop domain in error (not relabelled)", async () => {
+    const { processCustomerWebhook } = await import(
+      "~/services/sync/customer.server"
+    );
+    const mockProcess = processCustomerWebhook as ReturnType<typeof vi.fn>;
+
+    // Mock the adminGraphQL to return customer data (so fetchCustomerWithFallback succeeds)
+    const mockAdminGraphQL = (await import("../admin-client.server"))
+      .adminGraphQL as ReturnType<typeof vi.fn>;
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: {
+        node: {
+          id: "gid://shopify/Customer/444",
+          tags: [],
+        },
+      },
+      retryable: false,
+    });
+
+    // Customers are NOT relabelled, so they keep the original error string
+    mockProcess.mockResolvedValueOnce({
+      success: false,
+      action: "skipped",
+      error: "Shop not found: test-customer-shop.myshopify.com",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_CREATE");
+
+    const { isWebhookProcessed } = await import(
+      "~/services/sync/company.server"
+    );
+    const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+    mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_CREATE",
+      shop: "test-customer-shop.myshopify.com",
+      webhookId: "wh-cust-notfound",
+      resourceGid: "gid://shopify/Customer/444",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    // Customer keeps full error string (not sanitized in this PR)
+    expect(result.error).toContain("Shop not found");
+    expect(result.error).toContain("test-customer-shop");
+  });
+});
+
+describe("No-session Shop-row check (#239 follow-up)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe("COMPANIES_* handlers", () => {
+    it("COMPANIES_CREATE with no_session returns shop_not_found when Shop row is missing", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: "test-missing-shop.myshopify.com",
+        webhookId: "wh-company-nosession-missing",
+        resourceGid: "gid://shopify/Company/123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("shop_not_found");
+      expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
+    });
+
+    it("COMPANIES_UPDATE with no_session returns shop_not_found when uninstalledAt is set", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_UPDATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([{ uninstalledAt: new Date() }]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANIES_UPDATE",
+        shop: "test-uninstalled-shop.myshopify.com",
+        webhookId: "wh-company-nosession-uninstalled",
+        resourceGid: "gid://shopify/Company/456",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("shop_not_found");
+      expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
+    });
+
+    it("COMPANIES_CREATE with no_session returns original error when Shop is installed", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([{ uninstalledAt: null }]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: "test-installed-shop.myshopify.com",
+        webhookId: "wh-company-nosession-installed",
+        resourceGid: "gid://shopify/Company/789",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("No session found");
+      expect(result.retryable).toBe(false);
+    });
+
+    it("Shop query receives the correct shop domain", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const sqlCalls: unknown[] = [];
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation((...args: unknown[]) => {
+          sqlCalls.push(args);
+          return Promise.resolve([]);
+        }),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const shopDomain = "test-domain-check.myshopify.com";
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: shopDomain,
+        webhookId: "wh-domain-check",
+        resourceGid: "gid://shopify/Company/domain-check",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      await handler!(mockSql as never, message);
+
+      // Verify the Shop query was called with the correct domain
+      expect(mockSql).toHaveBeenCalled();
+      const shopQuery = sqlCalls.find((call) =>
+        JSON.stringify(call).includes("uninstalledAt")
+      );
+      expect(shopQuery).toBeDefined();
+      expect(JSON.stringify(shopQuery)).toContain(shopDomain);
+    });
+
+    it("non-no_session error does NOT trigger Shop check (behaviour unchanged)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "GraphQL query error: schema validation failed",
+        errorCode: "graphql_error",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const sqlCalls: unknown[] = [];
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation((...args: unknown[]) => {
+          sqlCalls.push(args);
+          return Promise.resolve([]);
+        }),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: "test-graphql-error.myshopify.com",
+        webhookId: "wh-graphql-error",
+        resourceGid: "gid://shopify/Company/graphql-err",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      // Should return the original error unchanged
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("GraphQL query error: schema validation failed");
+      expect(result.retryable).toBe(false);
+
+      // Shop query should NOT have been called (only isWebhookProcessed query)
+      const shopQuery = sqlCalls.find((call) =>
+        JSON.stringify(call).includes("uninstalledAt")
+      );
+      expect(shopQuery).toBeUndefined();
+    });
+
+    it("Shop query that throws returns original no_session error (fail-open)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      // Shop query throws an error
+      const mockSql = Object.assign(
+        vi.fn().mockRejectedValue(new Error("Database connection failed")),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: "test-db-error.myshopify.com",
+        webhookId: "wh-db-error",
+        resourceGid: "gid://shopify/Company/db-err",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      // When Shop query throws, the error propagates and the handler fails
+      // This is "fail-open": the message stays in queue for retry rather than
+      // being incorrectly labelled as shop_not_found
+      await expect(handler!(mockSql as never, message)).rejects.toThrow(
+        "Database connection failed"
+      );
+    });
+  });
+
+  describe("COMPANY_LOCATIONS_* handlers", () => {
+    it("COMPANY_LOCATIONS_CREATE with no_session returns shop_not_found when Shop row is missing", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANY_LOCATIONS_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANY_LOCATIONS_CREATE",
+        shop: "test-missing-loc-shop.myshopify.com",
+        webhookId: "wh-loc-nosession-missing",
+        resourceGid: "gid://shopify/CompanyLocation/loc-123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("shop_not_found");
+      expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
+    });
+
+    it("COMPANY_LOCATIONS_UPDATE with no_session returns shop_not_found when uninstalledAt is set", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANY_LOCATIONS_UPDATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([{ uninstalledAt: new Date() }]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANY_LOCATIONS_UPDATE",
+        shop: "test-uninstalled-loc-shop.myshopify.com",
+        webhookId: "wh-loc-nosession-uninstalled",
+        resourceGid: "gid://shopify/CompanyLocation/loc-456",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("shop_not_found");
+      expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
+    });
+
+    it("COMPANY_LOCATIONS_CREATE with no_session returns original error when Shop is installed", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANY_LOCATIONS_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([{ uninstalledAt: null }]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANY_LOCATIONS_CREATE",
+        shop: "test-installed-loc-shop.myshopify.com",
+        webhookId: "wh-loc-nosession-installed",
+        resourceGid: "gid://shopify/CompanyLocation/loc-789",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("No session found");
+      expect(result.retryable).toBe(false);
+    });
+
+    it("COMPANY_LOCATIONS_DELETE does NOT run Shop query (S2: assert no Shop check)", async () => {
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANY_LOCATIONS_DELETE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const { processCompanyLocationWebhook } = await import(
+        "~/services/sync/company-location.server"
+      );
+      const mockProcess = processCompanyLocationWebhook as ReturnType<typeof vi.fn>;
+      mockProcess.mockResolvedValueOnce({
+        success: true,
+        action: "skipped",
+        skipReason: "Company location deleted; BuyerAccount preserved for financial history",
+      });
+
+      const sqlCalls: unknown[] = [];
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation((...args: unknown[]) => {
+          sqlCalls.push(args);
+          return Promise.resolve([]);
+        }),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANY_LOCATIONS_DELETE",
+        shop: "test-delete-shop.myshopify.com",
+        webhookId: "wh-loc-delete",
+        resourceGid: "gid://shopify/CompanyLocation/loc-delete",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+
+      // S2: Verify NO Shop query ran (no SELECT "uninstalledAt" FROM "Shop")
+      const shopQuery = sqlCalls.find((call) =>
+        JSON.stringify(call).includes("uninstalledAt")
+      );
+      expect(shopQuery).toBeUndefined();
+    });
+  });
+
+  describe("ORDERS_* handlers (#239 extension)", () => {
+    let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleLogSpy.mockRestore();
+    });
+
+    it("ORDERS_CREATE with no_session is ACKed when Shop row is missing (no DLQ)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "ORDERS_CREATE",
+        shop: "test-uninstalled-orders.myshopify.com",
+        webhookId: "wh-order-nosession-missing",
+        resourceGid: "gid://shopify/Order/123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      // ACKed (success: true) - no DLQ entry
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("shop_not_found");
+      // retryable should be undefined on success result
+      expect(result.retryable).toBeUndefined();
+
+      // Verify safeLog was called with fixed codes and shopHash only (no domain)
+      expect(consoleLogSpy).toHaveBeenCalled();
+      const logCalls = consoleLogSpy.mock.calls.map((c: unknown[]) => c[0]);
+      const ackLog = logCalls.find((c: unknown) =>
+        typeof c === "string" && c.includes('"event":"order_webhook_uninstalled_shop_acked"')
+      );
+      expect(ackLog).toBeDefined();
+      expect(ackLog).toContain('"shopHash"');
+      expect(ackLog).toContain('"topic":"ORDERS_CREATE"');
+      // Must NOT contain shop domain (PII)
+      expect(ackLog).not.toContain("test-uninstalled-orders.myshopify.com");
+    });
+
+    it("ORDERS_UPDATED with no_session is ACKed when uninstalledAt is set (no DLQ)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_UPDATED");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([{ uninstalledAt: new Date() }]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "ORDERS_UPDATED",
+        shop: "test-uninstalled-orders-updated.myshopify.com",
+        webhookId: "wh-order-nosession-uninstalled",
+        resourceGid: "gid://shopify/Order/456",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("shop_not_found");
+      expect(result.retryable).toBeUndefined();
+    });
+
+    it("ORDERS_PAID with no_session is ACKed when Shop row is missing (no DLQ)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_PAID");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "ORDERS_PAID",
+        shop: "test-uninstalled-orders-paid.myshopify.com",
+        webhookId: "wh-order-nosession-paid",
+        resourceGid: "gid://shopify/Order/789",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("shop_not_found");
+      expect(result.retryable).toBeUndefined();
+    });
+
+    it("ORDERS_CANCELLED with no_session is ACKed when uninstalledAt is set (no DLQ)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_CANCELLED");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([{ uninstalledAt: new Date() }]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "ORDERS_CANCELLED",
+        shop: "test-uninstalled-orders-cancelled.myshopify.com",
+        webhookId: "wh-order-nosession-cancelled",
+        resourceGid: "gid://shopify/Order/101",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("shop_not_found");
+      expect(result.retryable).toBeUndefined();
+    });
+
+    it("ORDERS_CREATE with no_session returns original error when Shop is installed (unchanged)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([{ uninstalledAt: null }]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "ORDERS_CREATE",
+        shop: "test-installed-orders.myshopify.com",
+        webhookId: "wh-order-nosession-installed",
+        resourceGid: "gid://shopify/Order/installed-123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      // Should return the original no_session error (unchanged behavior for installed shops)
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("No session found");
+      expect(result.retryable).toBe(false);
+    });
+
+    it("Shop query DB error throws and leaves message for retry (not incorrectly ACKed)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      // Shop query throws an error
+      const mockSql = Object.assign(
+        vi.fn().mockRejectedValue(new Error("Database connection failed")),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "ORDERS_CREATE",
+        shop: "test-db-error-orders.myshopify.com",
+        webhookId: "wh-order-db-error",
+        resourceGid: "gid://shopify/Order/db-err-123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      // When Shop query throws, the error propagates and the handler throws.
+      // The drain treats uncaught exceptions as retryable, so the message
+      // stays in queue for retry rather than being incorrectly ACKed.
+      await expect(handler!(mockSql as never, message)).rejects.toThrow(
+        "Database connection failed"
+      );
+    });
+
+    it("non-no_session error does NOT trigger Shop check (behaviour unchanged)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "GraphQL query error: schema validation failed",
+        errorCode: "graphql_error",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const sqlCalls: unknown[] = [];
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation((...args: unknown[]) => {
+          sqlCalls.push(args);
+          return Promise.resolve([]);
+        }),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "ORDERS_CREATE",
+        shop: "test-graphql-error-orders.myshopify.com",
+        webhookId: "wh-order-graphql-error",
+        resourceGid: "gid://shopify/Order/graphql-err-123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      // Should return the original error unchanged
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("GraphQL query error: schema validation failed");
+      expect(result.retryable).toBe(false);
+
+      // Shop query should NOT have been called (only isWebhookProcessed query)
+      const shopQuery = sqlCalls.find((call) =>
+        JSON.stringify(call).includes("uninstalledAt")
+      );
+      expect(shopQuery).toBeUndefined();
+    });
+
+    it("safeLog output uses fixed codes plus shopHash only (no PII)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("ORDERS_UPDATED");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const mockSql = Object.assign(
+        vi.fn().mockResolvedValue([]),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const shopDomain = "test-pii-check.myshopify.com";
+      const message = {
+        topic: "ORDERS_UPDATED",
+        shop: shopDomain,
+        webhookId: "wh-order-pii-check",
+        resourceGid: "gid://shopify/Order/pii-check-123",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      await handler!(mockSql as never, message);
+
+      // Verify safeLog output
+      expect(consoleLogSpy).toHaveBeenCalled();
+      const logCalls = consoleLogSpy.mock.calls.map((c: unknown[]) => c[0]);
+      const ackLog = logCalls.find((c: unknown) =>
+        typeof c === "string" && c.includes('"event":"order_webhook_uninstalled_shop_acked"')
+      );
+      expect(ackLog).toBeDefined();
+
+      // Must contain fixed codes
+      expect(ackLog).toContain('"event":"order_webhook_uninstalled_shop_acked"');
+      expect(ackLog).toContain('"topic":"ORDERS_UPDATED"');
+      // Must contain shopHash
+      expect(ackLog).toContain('"shopHash"');
+      // Must NOT contain shop domain or any PII
+      expect(ackLog).not.toContain(shopDomain);
+      expect(ackLog).not.toContain("test-pii-check");
+      expect(ackLog).not.toContain("myshopify.com");
+    });
   });
 });

@@ -89,7 +89,7 @@ describe("onboarding-steps", () => {
         id: "gid://shopify/Validation/123",
         handle: "credit-check-validation",
         enabled: true,
-        title: "Net Terms Credit Check",
+        title: "Termwise Credit Check",
       };
       const step = computeValidationStep(validation);
       expect(step.status).toBe("complete");
@@ -100,7 +100,7 @@ describe("onboarding-steps", () => {
         id: "gid://shopify/Validation/123",
         handle: "credit-check-validation",
         enabled: false,
-        title: "Net Terms Credit Check",
+        title: "Termwise Credit Check",
       };
       const step = computeValidationStep(validation);
       expect(step.status).toBe("attention");
@@ -131,7 +131,7 @@ describe("onboarding-steps", () => {
         id: "gid://shopify/PaymentCustomization/123",
         handle: "hide-terms-payment",
         enabled: true,
-        title: "Net Terms Payment Hide",
+        title: "Termwise Payment Hide",
       };
       const step = computePaymentCustomizationStep(customization);
       expect(step.status).toBe("complete");
@@ -142,7 +142,7 @@ describe("onboarding-steps", () => {
         id: "gid://shopify/PaymentCustomization/123",
         handle: "hide-terms-payment",
         enabled: false,
-        title: "Net Terms Payment Hide",
+        title: "Termwise Payment Hide",
       };
       const step = computePaymentCustomizationStep(customization);
       expect(step.status).toBe("attention");
@@ -197,13 +197,13 @@ describe("onboarding-steps", () => {
           id: "gid://shopify/Validation/123",
           handle: "credit-check-validation",
           enabled: true,
-          title: "Net Terms Credit Check",
+          title: "Termwise Credit Check",
         },
         paymentCustomization: {
           id: "gid://shopify/PaymentCustomization/123",
           handle: "hide-terms-payment",
           enabled: true,
-          title: "Net Terms Payment Hide",
+          title: "Termwise Payment Hide",
         },
         resendApiKeyConfigured: false, // coming_soon doesn't block completion
       };
@@ -282,13 +282,13 @@ describe("onboarding-steps", () => {
           id: "gid://shopify/Validation/123",
           handle: "credit-check-validation",
           enabled: true,
-          title: "Net Terms Credit Check",
+          title: "Termwise Credit Check",
         },
         paymentCustomization: {
           id: "gid://shopify/PaymentCustomization/123",
           handle: "hide-terms-payment",
           enabled: true,
-          title: "Net Terms Payment Hide",
+          title: "Termwise Payment Hide",
         },
         resendApiKeyConfigured: true,
         dismissedAt: null,

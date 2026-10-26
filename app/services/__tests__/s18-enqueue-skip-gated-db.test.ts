@@ -236,7 +236,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
   });
 
   describe("TS send path gating (PLAN_GATING_ENFORCED)", () => {
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-buyer@test-reminders.example,active-buyer@test-reminders.example" };
 
     it("flag false sends to gated account on send path", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
@@ -295,7 +295,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
   });
 
   describe("TS catch-up path gating (PLAN_GATING_ENFORCED)", () => {
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-buyer@test-reminders.example,active-buyer@test-reminders.example" };
 
     it("flag false sends to gated account on catch-up path", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
@@ -372,7 +372,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
   });
 
   describe("catch-up Phase A claim under lock (BLOCKER 2 fix)", () => {
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-buyer@test-reminders.example,active-buyer@test-reminders.example" };
 
     it("stage 1 delayed + stage 2 due today: exactly 1 Resend call", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";

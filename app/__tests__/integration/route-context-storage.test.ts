@@ -237,9 +237,11 @@ describe("Route context storage verification", () => {
   });
 
   describe("webhooks.compliance route", () => {
-    it("uses sessionStorage.deleteAllForShop for shop/redact (idempotent)", async () => {
+    it("does NOT call sessionStorage.deleteAllForShop for shop/redact (sessions deleted inside deleteShop per #291)", async () => {
+      // Session deletion was moved inside deleteShop's transaction to ensure
+      // sessions are only deleted when the shop is actually being erased
+      // (not skipped by reinstall guard). See issue #291.
       const sessionStorage = createMockSessionStorage();
-      sessionStorage.deleteAllForShop.mockResolvedValue(2);
 
       mockVerifyWebhook.mockResolvedValue({
         shop: "test-compliance.myshopify.com",
@@ -255,14 +257,12 @@ describe("Route context storage verification", () => {
       const { action } = await import("../../routes/webhooks.compliance");
       await action(args);
 
-      expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(
-        "test-compliance.myshopify.com"
-      );
+      // deleteAllForShop is NOT called - sessions are deleted inside deleteShop
+      expect(sessionStorage.deleteAllForShop).not.toHaveBeenCalled();
     });
 
     it("returns 200 even when no sessions exist (idempotent)", async () => {
       const sessionStorage = createMockSessionStorage();
-      sessionStorage.deleteAllForShop.mockResolvedValue(0);
 
       mockVerifyWebhook.mockResolvedValue({
         shop: "test-empty-shop.myshopify.com",

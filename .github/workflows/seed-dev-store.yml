@@ -33,6 +33,10 @@ on:
         description: 'Report potential duplicate companies only (read-only, no mutations; overrides dry_run/reset)'
         type: boolean
         default: false
+      reseed_held_currency:
+        description: 'Only update the existing held seed fixtures credit_status to the shop currency (INR) in place, then exit (honours dry_run; ignores reset)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,6 +56,7 @@ jobs:
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
       INPUT_RESET: ${{ inputs.reset }}
       INPUT_REPORT_DUPLICATES: ${{ inputs.report_duplicates }}
+      INPUT_RESEED_HELD_CURRENCY: ${{ inputs.reseed_held_currency }}
 
     steps:
       - name: Checkout
@@ -248,6 +253,16 @@ jobs:
           if [ "$INPUT_REPORT_DUPLICATES" = "true" ]; then
             # Read-only: seed.ts exits after the duplicate report, before reset/seed
             npx tsx scripts/seed.ts --report-duplicates
+            exit 0
+          fi
+          if [ "$INPUT_RESEED_HELD_CURRENCY" = "true" ]; then
+            # In-place credit_status update on held seed fixtures only; DB reads are READ ONLY.
+            # Prints counts/enums only. Never combined with --reset.
+            if [ "$INPUT_DRY_RUN" = "true" ]; then
+              npx tsx scripts/seed.ts --reseed-held-currency --dry-run
+            else
+              npx tsx scripts/seed.ts --reseed-held-currency
+            fi
             exit 0
           fi
           if [ "$INPUT_DRY_RUN" = "true" ]; then

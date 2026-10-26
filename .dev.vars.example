@@ -17,6 +17,22 @@ SENTRY_TRACES_SAMPLE_RATE=0
 RESEND_API_KEY=
 # Sender address - must be a verified domain in Resend (e.g. noreply@yourdomain.com)
 RESEND_FROM=
+# Pre-launch recipient allowlist - comma-separated emails allowed to receive
+# payment reminders, catch-up reminders, and data-request notification emails.
+# When set, sends only to listed addresses; when empty or unset, blocks ALL emails (fail closed).
+# To disable the allowlist guard for launch, set RESEND_RECIPIENT_ALLOWLIST_ENFORCED=false.
+RESEND_TEST_RECIPIENTS=ops@test-example.com
+
+# Off switch for the recipient allowlist guard. Defaults to enforced (true).
+# Set to the exact string "false" to disable the guard and allow all recipients.
+# Any other value (including unset, empty, "False", "0", "no", whitespace, "true")
+# keeps the guard ENFORCED (fail closed).
+# IMPORTANT: Flipping this to "false" in production is a launch step requiring
+# the owner's sign-off. Do not disable without explicit approval.
+# NOTE: There is no diagnostics output for this flag (Actions cannot read Worker
+# secret values). Verification at the launch flip is a live send to a non-allowlisted
+# test inbox, performed by DevOps after setting the flag, only with owner approval.
+# RESEND_RECIPIENT_ALLOWLIST_ENFORCED=false
 
 # Database connection for local development
 # Option 1: Local Postgres (recommended for offline dev)

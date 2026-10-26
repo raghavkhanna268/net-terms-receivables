@@ -74,9 +74,10 @@ describe("log.server", () => {
         expect(consoleLogSpy.mock.calls[0][0]).toContain('"shopHash":"abc123def456"');
       });
 
-      it("allows webhookId", () => {
+      it("redacts webhookId (banned per #332)", () => {
         safeLog("info", "test", { webhookId: "wh-123" });
-        expect(consoleLogSpy.mock.calls[0][0]).toContain('"webhookId":"wh-123"');
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"webhookId":"<redacted>"');
+        expect(consoleLogSpy.mock.calls[0][0]).not.toContain("wh-123");
       });
 
       it("allows orderGid", () => {

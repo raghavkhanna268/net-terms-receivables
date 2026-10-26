@@ -44,51 +44,52 @@ const mockFetch = vi.fn();
 const originalFetch = globalThis.fetch;
 
 describe("compliance.server", () => {
-  const originalEnv = process.env;
-
   beforeEach(() => {
     vi.clearAllMocks();
     mockSql.mockResolvedValue(mockSqlResult);
     mockTx.mockResolvedValue(mockSqlResult);
     globalThis.fetch = mockFetch;
-    process.env = { ...originalEnv };
+    vi.unstubAllEnvs();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    process.env = originalEnv;
+    vi.unstubAllEnvs();
   });
 
   describe("deleteShop", () => {
     it("deletes shop and all non-FK-linked tables in a transaction", async () => {
       // All queries run inside sql.begin() using mockTx
-      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
-      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
-      // 1. DELETE s10b_order_refetch_null
+      // 0. SELECT FOR UPDATE with uninstalledAt (reinstall guard #291)
+      const uninstalledDate = new Date();
+      mockTx.mockResolvedValueOnce([{ id: "shop-123", uninstalledAt: uninstalledDate }]);
+      // 1. DELETE Session (moved inside transaction per #291)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 2. DELETE s10b_order_refetch_null
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
-      // 2. DELETE s6_bulk_operations
+      // 3. DELETE s6_bulk_operations
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 3. DELETE order_outstanding_missing
+      // 4. DELETE order_outstanding_missing
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 4. DELETE s10b_customer_pii_fallback
+      // 5. DELETE s10b_customer_pii_fallback
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 5. DELETE pgmq.q_s6_sync
+      // 6. DELETE pgmq.q_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 6 }));
-      // 6. DELETE pgmq.q_s6_bulk
+      // 7. DELETE pgmq.q_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 7 }));
-      // 7. DELETE pgmq.a_s6_sync
+      // 8. DELETE pgmq.a_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 8 }));
-      // 8. DELETE pgmq.a_s6_bulk
+      // 9. DELETE pgmq.a_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 9 }));
-      // 9. DELETE s6_dead_letter
+      // 10. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-      // 10. DELETE s6_processed_webhooks (reconcile prefix)
+      // 11. DELETE s6_processed_webhooks (reconcile prefix)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 11. DELETE s6_processed_webhooks (receipts join)
+      // 12. DELETE s6_processed_webhooks (receipts join)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 12. DELETE webhook_receipts
+      // 13. DELETE webhook_receipts
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 10 }));
-      // 13. DELETE Shop
+      // 14. DELETE Shop
       mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
@@ -96,6 +97,8 @@ describe("compliance.server", () => {
       expect(result).toEqual({
         deleted: true,
         shopId: "shop-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 2,
         refetchNullPurged: 5,
         bulkOperationsPurged: 2,
         orderGapPurged: 3,
@@ -113,40 +116,44 @@ describe("compliance.server", () => {
 
     it("returns deleted=false when shop not found", async () => {
       // All queries run inside sql.begin() using mockTx
-      // 0. SELECT FOR UPDATE (serializes with drain's FOR SHARE guards, #239)
+      // 0. SELECT FOR UPDATE (shop not found)
       mockTx.mockResolvedValueOnce([]);
-      // 1. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
+      // 1. DELETE Session (still runs even if shop not in "Shop" table)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s6_bulk_operations
+      // 2. DELETE s10b_order_refetch_null (may have rows even if shop doesn't exist)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE order_outstanding_missing
+      // 3. DELETE s6_bulk_operations
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. DELETE s10b_customer_pii_fallback
+      // 4. DELETE order_outstanding_missing
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 5. DELETE pgmq.q_s6_sync
+      // 5. DELETE s10b_customer_pii_fallback
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 6. DELETE pgmq.q_s6_bulk
+      // 6. DELETE pgmq.q_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 7. DELETE pgmq.a_s6_sync
+      // 7. DELETE pgmq.q_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 8. DELETE pgmq.a_s6_bulk
+      // 8. DELETE pgmq.a_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 9. DELETE s6_dead_letter
+      // 9. DELETE pgmq.a_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 10. DELETE s6_processed_webhooks (reconcile prefix)
+      // 10. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 11. DELETE s6_processed_webhooks (receipts join)
+      // 11. DELETE s6_processed_webhooks (reconcile prefix)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 12. DELETE webhook_receipts
+      // 12. DELETE s6_processed_webhooks (receipts join)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 13. DELETE Shop (no rows)
+      // 13. DELETE webhook_receipts
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 14. DELETE Shop (no rows)
       mockTx.mockResolvedValueOnce([]);
 
-      const result = await deleteShop(mockSql, "nonexistent.myshopify.com");
+      const result = await deleteShop(mockSql, "test-nonexistent.myshopify.com");
 
       expect(result).toEqual({
         deleted: false,
         shopId: null,
+        skippedReinstalled: false,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -159,6 +166,34 @@ describe("compliance.server", () => {
         processedWebhooksPurged: 0,
         webhookReceiptsPurged: 0,
       });
+    });
+
+    it("skips deletion when shop has reinstalled (uninstalledAt is NULL)", async () => {
+      // Shop exists but uninstalledAt is NULL (shop reinstalled after uninstall)
+      // 0. SELECT FOR UPDATE returns shop with uninstalledAt: null
+      mockTx.mockResolvedValueOnce([{ id: "shop-reinstalled-123", uninstalledAt: null }]);
+
+      const result = await deleteShop(mockSql, "test-reinstalled.myshopify.com");
+
+      // Sessions are NOT deleted on skip path - they survive the reinstall guard
+      expect(result).toEqual({
+        deleted: false,
+        shopId: "shop-reinstalled-123",
+        skippedReinstalled: true,
+        sessionsDeleted: 0,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -176,17 +211,19 @@ describe("compliance.server", () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 3. DELETE s22_data_requests
+      // 4. DELETE s22_data_requests
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 4. SELECT buyerAccount
+      // 5. SELECT buyerAccount
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 6. DELETE PayerAlias
+      // 7. DELETE PayerAlias
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 7. UPDATE BuyerAccount
+      // 8. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -201,23 +238,26 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(2);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(3);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("redacts payments and deletes PayerAlias via Match→Invoice→BuyerAccount", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. SELECT buyerAccount
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 6. DELETE PayerAlias
+      // 7. DELETE PayerAlias
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 7. UPDATE BuyerAccount
+      // 8. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -229,17 +269,20 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(3);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(2);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("handles customer with no data gracefully", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. SELECT buyerAccount (not found)
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -254,17 +297,20 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(0);
       expect(result.buyerAccountAnonymized).toBe(false);
       expect(result.paymentsRedacted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("deletes data requests for the customer", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests - 3 requests exist
+      // 3. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s22_data_requests - 3 requests exist
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 4. SELECT buyerAccount (not found)
+      // 5. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -275,11 +321,13 @@ describe("compliance.server", () => {
 
       expect(result.dataRequestsDeleted).toBe(3);
       expect(result.payerAliasesDeleted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("runs all operations in a single transaction", async () => {
       // Setup: customer has data to redact
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // b2b main contact update
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // data_requests
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]); // buyerAccount
@@ -291,6 +339,32 @@ describe("compliance.server", () => {
 
       // Verify sql.begin was called (ensures transaction wrapper)
       expect(mockSql.begin).toHaveBeenCalledTimes(1);
+    });
+
+    it("redacts B2B main contacts when mainContactCustomerId matches", async () => {
+      // Transaction operations use mockTx
+      // 1. DELETE s8_tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. UPDATE BuyerAccount B2B main contact fields - 2 company locations have this contact
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 3. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount (not found - this is a contact, not a tagged customer)
+      mockTx.mockResolvedValueOnce([]);
+
+      const result = await redactCustomer(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/contact-789"
+      );
+
+      expect(result.taggedCustomersDeleted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(2);
+      expect(result.draftOrdersDeleted).toBe(0);
+      expect(result.dataRequestsDeleted).toBe(0);
+      expect(result.buyerAccountAnonymized).toBe(false);
     });
   });
 
@@ -312,7 +386,7 @@ describe("compliance.server", () => {
         status: "open",
         created_at: new Date("2026-01-15"),
       }]);
-      // 3. SELECT BuyerAccount
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test Customer",
@@ -321,7 +395,9 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
-      // 4. SELECT Invoice
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -331,7 +407,7 @@ describe("compliance.server", () => {
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
       }]);
-      // 5. SELECT Match (payment matches)
+      // 6. SELECT Match (payment matches)
       mockSql.mockResolvedValueOnce([{
         id: "match-1",
         invoiceId: "inv-1",
@@ -479,7 +555,7 @@ describe("compliance.server", () => {
       }]);
       // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([]);
-      // 3. SELECT BuyerAccount
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Account Name",
@@ -488,7 +564,9 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
-      // 4. SELECT Invoice
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -498,7 +576,7 @@ describe("compliance.server", () => {
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
       }]);
-      // 5. SELECT Match - include payerText/narration in mock to prove they're dropped
+      // 6. SELECT Match - include payerText/narration in mock to prove they're dropped
       mockSql.mockResolvedValueOnce([{
         id: "match-1",
         invoiceId: "inv-1",
@@ -543,6 +621,7 @@ describe("compliance.server", () => {
       // This is a belt-and-suspenders check on top of the mapping test.
 
       // Setup: provide minimal mocks to get to the Match query
+      // 1. SELECT s8_tagged_customers
       mockSql.mockResolvedValueOnce([{
         tags: [],
         tag_active: true,
@@ -550,7 +629,9 @@ describe("compliance.server", () => {
         display_name: null,
         created_at: new Date(),
       }]);
+      // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test",
@@ -559,7 +640,11 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
       mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
+      mockSql.mockResolvedValueOnce([]);
+      // 6. SELECT Match
       mockSql.mockResolvedValueOnce([]);
 
       await generateCustomerDataExport(
@@ -569,9 +654,9 @@ describe("compliance.server", () => {
         "req-sql-check"
       );
 
-      // The 5th call is the Match query
-      expect(mockSql).toHaveBeenCalledTimes(5);
-      const matchQueryCall = mockSql.mock.calls[4];
+      // The 6th call is the Match query
+      expect(mockSql).toHaveBeenCalledTimes(6);
+      const matchQueryCall = mockSql.mock.calls[5];
       
       // The template literal is passed as an array of strings
       // Convert to string to check what columns are selected
@@ -589,6 +674,86 @@ describe("compliance.server", () => {
       expect(queryText).toContain("m.amount");
       expect(queryText).toContain("m.state");
     });
+
+    it("includes B2B main contact accounts where mainContactCustomerId matches", async () => {
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId) - no direct match
+      mockSql.mockResolvedValueOnce([]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([
+        {
+          id: "ba-b2b-1",
+          name: "Acme Corp HQ",
+          kind: "COMPANY",
+          mainContactEmail: "contact@acme.com",
+          mainContactName: "Contact Person",
+          mainContactCustomerId: "gid://shopify/Customer/789",
+        },
+        {
+          id: "ba-b2b-2",
+          name: "Acme Corp West",
+          kind: "COMPANY",
+          mainContactEmail: "contact@acme.com",
+          mainContactName: "Contact Person",
+          mainContactCustomerId: "gid://shopify/Customer/789",
+        },
+      ]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/789",
+        "req-b2b-main-contact"
+      );
+
+      expect(result.customerGid).toBe("gid://shopify/Customer/789");
+      expect(result.data.b2bMainContactAccounts).toHaveLength(2);
+      expect(result.data.b2bMainContactAccounts[0]).toEqual({
+        id: "ba-b2b-1",
+        name: "Acme Corp HQ",
+        kind: "COMPANY",
+        mainContactEmail: "contact@acme.com",
+        mainContactName: "Contact Person",
+        mainContactCustomerId: "gid://shopify/Customer/789",
+      });
+      expect(result.data.b2bMainContactAccounts[1]).toEqual({
+        id: "ba-b2b-2",
+        name: "Acme Corp West",
+        kind: "COMPANY",
+        mainContactEmail: "contact@acme.com",
+        mainContactName: "Contact Person",
+        mainContactCustomerId: "gid://shopify/Customer/789",
+      });
+    });
+
+    it("returns empty b2bMainContactAccounts when no match", async () => {
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([{
+        tags: [],
+        tag_active: false,
+        email: null,
+        display_name: null,
+        created_at: new Date(),
+      }]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId)
+      mockSql.mockResolvedValueOnce([]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts) - no match
+      mockSql.mockResolvedValueOnce([]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/no-b2b-match",
+        "req-no-b2b"
+      );
+
+      expect(result.data.b2bMainContactAccounts).toHaveLength(0);
+    });
   });
 
   describe("persistDataRequest", () => {
@@ -600,7 +765,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-789",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, b2bMainContactAccounts: [], invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
@@ -622,7 +787,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-duplicate",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, b2bMainContactAccounts: [], invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
@@ -720,8 +885,18 @@ describe("compliance.server", () => {
   });
 
   describe("sendDataRequestNotification", () => {
+    const originalAppHandle = process.env.APP_HANDLE;
+
+    beforeEach(() => {
+      process.env.APP_HANDLE = "net-terms-receivables-1";
+    });
+
+    afterEach(() => {
+      process.env.APP_HANDLE = originalAppHandle;
+    });
+
     it("skips email when RESEND_API_KEY is not set and logs correctly", async () => {
-      delete process.env.RESEND_API_KEY;
+      vi.stubEnv("RESEND_API_KEY", "");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       const result = await sendDataRequestNotification(
@@ -748,8 +923,8 @@ describe("compliance.server", () => {
     });
 
     it("skips email when RESEND_FROM is not set", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      delete process.env.RESEND_FROM;
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       const result = await sendDataRequestNotification(
@@ -765,8 +940,9 @@ describe("compliance.server", () => {
     });
 
     it("sends email with NO customer PII in request body", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
 
       // Mock Resend API call
       mockFetch.mockResolvedValueOnce({
@@ -776,7 +952,7 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "owner@shop.com",
+        "owner@test-shop.com",
         "req-123"
       );
 
@@ -804,8 +980,9 @@ describe("compliance.server", () => {
     });
 
     it("returns error when Resend API fails but does not throw", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       // Mock Resend API failure
@@ -817,7 +994,7 @@ describe("compliance.server", () => {
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "owner@shop.com",
+        "owner@test-shop.com",
         "req-123"
       );
 
@@ -830,23 +1007,59 @@ describe("compliance.server", () => {
     });
 
     it("handles fetch network errors gracefully", async () => {
-      process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@test-shop.com");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      // Mock network error
+      // Mock network error (generic error message maps to "error" via toErrorCode)
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
       const result = await sendDataRequestNotification(
         "test-shop.myshopify.com",
-        "owner@shop.com",
+        "owner@test-shop.com",
         "req-123"
       );
 
       expect(result.sent).toBe(false);
-      // Error code is returned, not raw message (per security rule)
+      // toErrorCode maps generic errors to "error", preserving main's behavior
       expect(result.error).toBe("error");
       consoleSpy.mockRestore();
+    });
+
+    it("sends email without link when APP_HANDLE is missing", async () => {
+      (process.env as Record<string, string | undefined>).APP_HANDLE = undefined;
+      process.env.RESEND_API_KEY = "re_test_key";
+      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@shop.com");
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-456" }),
+      });
+
+      const result = await sendDataRequestNotification(
+        "test-shop.myshopify.com",
+        "owner@shop.com",
+        "req-789"
+      );
+
+      expect(result.sent).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      const resendCall = mockFetch.mock.calls[0];
+      const requestBody = JSON.parse(resendCall[1].body);
+
+      expect(requestBody.html).not.toContain("admin.shopify.com");
+      expect(requestBody.html).toContain("Open the Net Terms Receivables app in your Shopify admin and go to Data Requests");
+      expect(requestBody.text).not.toContain("admin.shopify.com");
+      expect(requestBody.text).toContain("Open the Net Terms Receivables app in your Shopify admin and go to Data Requests");
+
+      const warnLogs = consoleWarnSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(warnLogs).toContain('"event":"plan_url_app_handle_missing"');
+
+      consoleWarnSpy.mockRestore();
     });
   });
 

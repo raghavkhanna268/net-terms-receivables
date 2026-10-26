@@ -22,6 +22,23 @@ vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
 }));
 
+vi.mock("~/services/drain/reconcile-handlers.server", () => ({
+  enqueueReconcileStage: vi.fn().mockResolvedValue(true),
+}));
+
+vi.mock("~/services/gating.server", () => ({
+  getUsageStats: vi.fn().mockResolvedValue({
+    companies: { current: 5, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
+  }),
+  isGatingEnforced: vi.fn().mockReturnValue(false),
+}));
+
+vi.mock("~/lib/plan-url", () => ({
+  getAppHandle: vi.fn().mockReturnValue("net-terms-receivables-1"),
+  buildPlanSelectionUrl: vi.fn().mockReturnValue("https://example.com/upgrade"),
+}));
+
 /**
  * ActionData type for test assertions.
  */
@@ -256,6 +273,102 @@ describe("Tag Rules Route", () => {
       expect(result.finishingSetup).toBe(false);
       expect(result.error).toBeNull();
       expect(result.shopId).toBe("shop-123");
+    });
+
+    it("does not call getUsageStats when gating flag is off", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { isGatingEnforced, getUsageStats } = await import("~/services/gating.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      (getUsageStats as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // COMPANY check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Tag rules fetch
+      mockSql.mockResolvedValueOnce([]);
+
+      const { loader } = await import("../app.tag-rules");
+      const rawResult = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractLoaderData(rawResult);
+      
+      // getUsageStats should NOT have been called when flag is off
+      expect(getUsageStats).not.toHaveBeenCalled();
+      // Banner should not show
+      expect((result as { newAccountsPausedBanner?: { show: boolean } }).newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("loader resolves with no banner when gating flag is on but getUsageStats rejects", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { isGatingEnforced, getUsageStats } = await import("~/services/gating.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Database error"));
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // COMPANY check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Tag rules fetch
+      mockSql.mockResolvedValueOnce([]);
+
+      const { loader } = await import("../app.tag-rules");
+      const rawResult = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractLoaderData(rawResult);
+      
+      // Loader should resolve despite getUsageStats error (fail-soft)
+      expect(result.error).toBeNull();
+      // Banner should not show when getUsageStats fails
+      expect((result as { newAccountsPausedBanner?: { show: boolean } }).newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("shows banner when gating flag is on and usage is at limit", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { isGatingEnforced, getUsageStats } = await import("~/services/gating.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      // At limit: current=25, limit=25
+      (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
+        companies: { current: 25, limit: 25 },
+        importsThisMonth: { current: 0, limit: -1 },
+      });
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // COMPANY check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Tag rules fetch
+      mockSql.mockResolvedValueOnce([]);
+
+      const { loader } = await import("../app.tag-rules");
+      const rawResult = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractLoaderData(rawResult);
+      
+      // Banner should show when at limit
+      expect((result as { newAccountsPausedBanner?: { show: boolean; heading?: string } }).newAccountsPausedBanner?.show).toBe(true);
+      expect((result as { newAccountsPausedBanner?: { heading?: string } }).newAccountsPausedBanner?.heading).toBeDefined();
     });
   });
 
@@ -678,14 +791,16 @@ describe("Tag Rules Route", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-      // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check for case-insensitive duplicate - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
+      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
+      mockSql.mockResolvedValueOnce([{ count: "2" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -728,14 +843,16 @@ describe("Tag Rules Route", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-      // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
+      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
+      mockSql.mockResolvedValueOnce([{ count: "2" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -758,6 +875,154 @@ describe("Tag Rules Route", () => {
 
       const result = extractActionData(rawResult);
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe("action - first-tag-rule enqueue", () => {
+    it("enqueues customers reconcile when first tag rule is created (count=1)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "test-s8-first.myshopify.com" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returning id
+      mockSql.mockResolvedValueOnce([{ id: "first-rule-id" }]);
+      // S8: Count tag rules - FIRST rule (count=1)
+      mockSql.mockResolvedValueOnce([{ count: "1" }]);
+      // Idempotency check - no existing message
+      mockSql.mockResolvedValueOnce([]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(true);
+      expect(result.createdRuleId).toBe("first-rule-id");
+
+      // Verify enqueueReconcileStage was called with "customers"
+      expect(enqueueReconcileStage).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-s8-first.myshopify.com",
+        "customers",
+        expect.stringContaining("manual:")
+      );
+    });
+
+    it("does NOT enqueue customers reconcile when second tag rule is created (count=2)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "test-s8-second.myshopify.com" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returning id
+      mockSql.mockResolvedValueOnce([{ id: "second-rule-id" }]);
+      // S8: Count tag rules - SECOND rule (count=2)
+      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "wholesale");
+      formData.append("defaultTermsDays", "45");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(true);
+      expect(result.createdRuleId).toBe("second-rule-id");
+
+      // Verify enqueueReconcileStage was NOT called
+      expect(enqueueReconcileStage).not.toHaveBeenCalled();
+    });
+
+    it("first-tag-rule enqueue is idempotent (skips if message already queued)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup (action uses SELECT id, domain FROM "Shop")
+      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "test-s8-idem.myshopify.com" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returning id
+      mockSql.mockResolvedValueOnce([{ id: "idem-rule-id" }]);
+      // S8: Count tag rules - FIRST rule (count=1)
+      mockSql.mockResolvedValueOnce([{ count: "1" }]);
+      // Idempotency check - message ALREADY exists in queue
+      mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg-123" }]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      expect(result.success).toBe(true);
+      expect(result.createdRuleId).toBe("idem-rule-id");
+
+      // Verify enqueueReconcileStage was NOT called (idempotent skip)
+      expect(enqueueReconcileStage).not.toHaveBeenCalled();
     });
   });
 
@@ -1378,6 +1643,12 @@ describe("S24: Finishing setup empty state (real render)", () => {
           shopId: "shop-123",
           error: null,
           finishingSetup: false,
+          newAccountsPausedBanner: {
+            show: false,
+            heading: "",
+            bodyText: "",
+            upgradeUrl: null,
+          },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
@@ -1414,6 +1685,12 @@ describe("S24: Finishing setup empty state (real render)", () => {
           shopId: "shop-123",
           error: null,
           finishingSetup: false,
+          newAccountsPausedBanner: {
+            show: false,
+            heading: "",
+            bodyText: "",
+            upgradeUrl: null,
+          },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle" }),
@@ -1432,5 +1709,47 @@ describe("S24: Finishing setup empty state (real render)", () => {
     expect(html).toContain("Net");
     expect(html).toContain("30");
     expect(html).toContain("days");
+  });
+
+  it("renders newAccountsPausedBanner when show is true", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          storeMode: "tag_based",
+          tagRules: [],
+          shopId: "shop-123",
+          error: null,
+          finishingSetup: false,
+          newAccountsPausedBanner: {
+            show: true,
+            heading: "New accounts paused",
+            bodyText: "You've reached your plan's account limit.",
+            upgradeUrl: "https://admin.shopify.com/store/test/charges/net-terms/pricing_plans",
+          },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle" }),
+        useRevalidator: () => ({ revalidate: vi.fn(), state: "idle" }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: TagRulesPage } = await import("../app.tag-rules");
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    // Verify banner renders with correct content
+    expect(html).toContain("s-banner");
+    expect(html).toContain("New accounts paused");
+    expect(html).toContain("account limit");
+    expect(html).toContain("Upgrade your plan");
+    expect(html).toContain("https://admin.shopify.com/store/test/charges/net-terms/pricing_plans");
   });
 });

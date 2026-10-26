@@ -1,9 +1,9 @@
 /**
- * Reconcile handlers for S10b.
+ * Reconcile handlers for S10b + S8.
  *
- * Handles RECONCILE_COMPANIES and RECONCILE_ORDERS messages by starting
- * bulk exports via the Admin API. Also provides the order refetch null
- * metric recording function.
+ * Handles RECONCILE_COMPANIES, RECONCILE_CUSTOMERS, and RECONCILE_ORDERS
+ * messages by starting bulk exports via the Admin API. Also provides the
+ * order refetch null metric recording function.
  *
  * Flow:
  * 1. pg_cron calls /jobs/drain?reconcile=true at 02:00 UTC daily
@@ -11,24 +11,34 @@
  * 3. Drain processor calls handleReconcileCompanies handler
  * 4. Handler starts companies bulk operation
  * 5. BULK_OPERATIONS_FINISH webhook completes companies
- * 6. After companies complete, handleBulkOperationsFinish enqueues RECONCILE_ORDERS
- * 7. Orders reconcile runs similarly
+ * 6. After companies complete, handleBulkOperationsFinish enqueues RECONCILE_CUSTOMERS
+ * 7. Customers reconcile runs (skipped if no tag rules)
+ * 8. After customers complete, handleBulkOperationsFinish enqueues RECONCILE_ORDERS
+ * 9. Orders reconcile runs similarly
  *
- * Sequential design: Companies must complete before orders to ensure
- * BuyerAccounts exist for order-to-account mapping.
+ * Sequential design: companies → customers → orders
+ * - Companies must complete before customers (B2B contacts check)
+ * - Customers must complete before orders (tagged customer buyer account existence)
+ *
+ * Customers stage skip: If a shop has no tag rules, the customers stage is
+ * skipped entirely (no bulk op started) and the chain continues to orders.
  */
 
 import type { Sql } from "~/lib/db-light.server";
 import type { SyncResult } from "~/services/sync/types";
+import type { ReconcileStage } from "~/services/sync/bulk-operations.server";
 import { markWebhookProcessed } from "~/services/sync/company.server";
 import { safeLog, shopHash } from "~/lib/log.server";
 import { adminGraphQL } from "./admin-client.server";
 import {
-  BULK_COMPANIES_QUERY,
+  getBulkCompaniesQuery,
   BULK_ORDERS_QUERY,
   parseBulkOperationResult,
   registerBulkOperation,
 } from "~/services/sync/bulk-operations.server";
+import { getBulkCustomersQuery, validateCustomerQuery } from "~/services/sync/customer-fields.server";
+import { getTagRules } from "~/services/sync/customer.server";
+import { getRequestEnv } from "~/lib/request-context.server";
 
 /**
  * Extract manualKey from a webhookId if it follows the manual pattern.
@@ -42,10 +52,13 @@ export function extractManualKey(webhookId: string): string | undefined {
 
 /**
  * Get the manualKey for a bulk operation by looking up its source webhookId.
- * Used when chaining from companies to orders after BULK_OPERATIONS_FINISH.
+ * Used when chaining between stages after BULK_OPERATIONS_FINISH.
  *
  * Scoped to the shop to prevent cross-shop matches if two shops happen to
  * have the same bulk operation GID (unlikely but defensive).
+ *
+ * Looks up any reconcile stage topic (RECONCILE_COMPANIES, RECONCILE_CUSTOMERS,
+ * RECONCILE_ORDERS) since the manual key is consistent across all stages.
  *
  * @param sql - postgres.js SQL client
  * @param bulkOperationId - The bulk operation GID
@@ -62,7 +75,7 @@ export async function getManualKeyForBulkOp(
     SELECT webhook_id
     FROM s6_processed_webhooks
     WHERE resource_gid = ${bulkOperationId}
-      AND topic = 'RECONCILE_COMPANIES'
+      AND topic IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS')
       AND left(webhook_id, length(${prefix})) = ${prefix}
     LIMIT 1
   `;
@@ -71,28 +84,97 @@ export async function getManualKeyForBulkOp(
 }
 
 /**
+ * Start result with optional skip flag for customers stage.
+ */
+export interface StartReconcileResult extends SyncResult {
+  skipped?: boolean;
+}
+
+/**
+ * Build the GraphQL mutation for a reconcile stage.
+ *
+ * For customers stage, loads tag rules and builds a filtered query.
+ * Returns null if the stage should be skipped (e.g., no tag rules for customers).
+ *
+ * @param sql - postgres.js SQL client
+ * @param shop - Shop domain
+ * @param kind - Reconcile stage
+ * @returns Mutation string or null to skip
+ */
+async function buildReconcileMutation(
+  sql: Sql,
+  shop: string,
+  kind: ReconcileStage
+): Promise<string | null> {
+  const env = getRequestEnv() ?? {};
+
+  if (kind === "companies") {
+    const query = getBulkCompaniesQuery(env);
+    validateCustomerQuery(query, env);
+    return query;
+  }
+
+  if (kind === "orders") {
+    return BULK_ORDERS_QUERY;
+  }
+
+  if (kind === "customers") {
+    const [shopRow] = await sql<{ id: string }[]>`
+      SELECT id FROM "Shop" WHERE domain = ${shop}
+    `;
+    if (!shopRow) {
+      return null;
+    }
+
+    const tagRules = await getTagRules(sql, shopRow.id);
+    if (tagRules.length === 0) {
+      return null;
+    }
+
+    return getBulkCustomersQuery(tagRules, env);
+  }
+
+  return null;
+}
+
+/**
  * Start a reconcile bulk operation for a shop.
  *
  * Executes a bulkOperationRunQuery mutation and registers the operation
  * for tracking. The BULK_OPERATIONS_FINISH webhook will handle completion.
  *
+ * For customers stage: loads tag rules and builds filtered query. If no tag
+ * rules exist, the stage is skipped and the result includes skipped=true.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
- * @param kind - Type of reconcile ("companies" or "orders")
+ * @param kind - Type of reconcile (companies, customers, or orders)
  * @param webhookId - Webhook ID for idempotency
- * @returns Sync result
+ * @returns Sync result with optional skipped flag
  */
 export async function startReconcileBulkOperation(
   sql: Sql,
   shop: string,
-  kind: "companies" | "orders",
+  kind: ReconcileStage,
   webhookId: string
-): Promise<SyncResult> {
-  // Select the appropriate mutation
-  const mutation =
-    kind === "companies" ? BULK_COMPANIES_QUERY : BULK_ORDERS_QUERY;
+): Promise<StartReconcileResult> {
+  const mutation = await buildReconcileMutation(sql, shop, kind);
 
-  // Start the bulk operation
+  if (!mutation) {
+    safeLog("info", "reconcile_stage_skipped", {
+      shopHash: await shopHash(shop),
+      stage: kind,
+      reason: kind === "customers" ? "no_tag_rules" : "unknown",
+    });
+
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: kind === "customers" ? "No tag rules configured" : "Stage skipped",
+      skipped: true,
+    };
+  }
+
   const result = await adminGraphQL<{
     bulkOperationRunQuery?: {
       bulkOperation?: {
@@ -111,7 +193,6 @@ export async function startReconcileBulkOperation(
     };
   }
 
-  // Parse the mutation result
   const parsed = parseBulkOperationResult(result.data ?? null);
 
   if (!parsed.success || !parsed.bulkOperationId) {
@@ -122,17 +203,15 @@ export async function startReconcileBulkOperation(
     };
   }
 
-  // Register the bulk operation for tracking with origin and stage
   await registerBulkOperation(
     sql,
     parsed.bulkOperationId,
     shop,
     kind,
-    "reconcile", // origin
-    kind // reconcile_stage
+    "reconcile",
+    kind
   );
 
-  // Mark webhook as processed
   await markWebhookProcessed(
     sql,
     webhookId,
@@ -154,35 +233,45 @@ export async function startReconcileBulkOperation(
 }
 
 /**
- * Enqueue RECONCILE_ORDERS message for a shop.
- * Called after companies reconcile completes to start orders reconcile.
+ * Enqueue a reconcile stage message for a shop.
+ * Called after a stage completes to start the next stage.
  *
- * For manual runs, pass the manualKey from the companies message so
- * orders uses the same key base (allowing retry even if day key is used).
+ * For manual runs, pass the manualKey from the previous stage so
+ * the next stage uses the same key base (allowing retry even if day key is used).
  *
  * Guard: Does not enqueue if Shop no longer exists or is uninstalled (#239).
  * FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row.
  *
+ * #293: Also checks that the previous stage's bulk operation is not closed.
+ * If prevBulkOperationId is provided and that row is closed, the stage is not
+ * enqueued (the reset already closed the pipeline). This serializes with the
+ * reinstall reset's UPDATE lock on the bulk operation row.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
- * @param manualKey - Optional manual key base from companies stage
- * @returns Whether the message was enqueued (false if shop doesn't exist or uninstalled)
+ * @param stage - Stage to enqueue (customers or orders)
+ * @param manualKey - Optional manual key base from previous stage
+ * @param prevBulkOperationId - Optional bulk operation ID of the previous stage
+ * @returns Whether the message was enqueued (false if shop doesn't exist, uninstalled, or prev op closed)
  */
-export async function enqueueReconcileOrders(
+export async function enqueueReconcileStage(
   sql: Sql,
   shop: string,
-  manualKey?: string
+  stage: "customers" | "orders",
+  manualKey?: string,
+  prevBulkOperationId?: string
 ): Promise<boolean> {
   let webhookId: string;
   if (manualKey) {
-    webhookId = `reconcile:${shop}:${manualKey}:orders`;
+    webhookId = `reconcile:${shop}:${manualKey}:${stage}`;
   } else {
     const today = new Date().toISOString().split("T")[0];
-    webhookId = `reconcile:${shop}:${today}:orders`;
+    webhookId = `reconcile:${shop}:${today}:${stage}`;
   }
 
+  const topic = `RECONCILE_${stage.toUpperCase()}` as const;
   const message: { topic: string; shop: string; webhookId: string; enqueuedAt: string; manualKey?: string } = {
-    topic: "RECONCILE_ORDERS",
+    topic,
     shop,
     webhookId,
     enqueuedAt: new Date().toISOString(),
@@ -192,8 +281,9 @@ export async function enqueueReconcileOrders(
     message.manualKey = manualKey;
   }
 
-  // Guard: check and send in one transaction with FOR SHARE (#239).
-  // FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row.
+  // Guard: check and send in one transaction with FOR SHARE (#239, #293).
+  // FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row
+  // and with reinstall reset's UPDATE lock on the bulk operation row.
   const enqueued = await sql.begin(async (tx) => {
     const [shopRow] = await tx<[{ id: string }?]>`
       SELECT id FROM "Shop"
@@ -204,16 +294,44 @@ export async function enqueueReconcileOrders(
     if (!shopRow) {
       return false;
     }
+
+    // #293: Check that the previous stage's bulk operation is not closed
+    if (prevBulkOperationId) {
+      const [prevOp] = await tx<[{ bulk_operation_id: string }?]>`
+        SELECT bulk_operation_id FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${prevBulkOperationId}
+          AND closed_at IS NULL
+        FOR SHARE
+      `;
+      if (!prevOp) {
+        return false;
+      }
+    }
+
     await tx`SELECT pgmq.send('s6_sync', ${tx.json(message)})`;
     return true;
   });
 
   if (enqueued) {
-    safeLog("info", "reconcile_orders_enqueued", {
+    safeLog("info", "reconcile_stage_enqueued", {
       shopHash: await shopHash(shop),
+      stage,
     });
   }
   return enqueued;
+}
+
+/**
+ * Enqueue RECONCILE_ORDERS message for a shop.
+ * @deprecated Use enqueueReconcileStage(sql, shop, "orders", manualKey) instead.
+ * Kept for backward compatibility with existing tests.
+ */
+export async function enqueueReconcileOrders(
+  sql: Sql,
+  shop: string,
+  manualKey?: string
+): Promise<boolean> {
+  return enqueueReconcileStage(sql, shop, "orders", manualKey);
 }
 
 /**

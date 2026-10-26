@@ -49,6 +49,16 @@ function createMockSql() {
       return mockResults.get("customer") ?? [];
     }
 
+    // getBuyerAccountId lookup (standalone query for buyer account ID)
+    if (query.includes("buyerAccountId") && query.includes("FROM \"Invoice\"") && !query.includes("INNER JOIN")) {
+      return mockResults.get("buyer_account_id") ?? [{ buyerAccountId: "buyer-123" }];
+    }
+
+    // isBuyerOptedOut check
+    if (query.includes("reminderOptOutAt") && query.includes("FROM \"BuyerAccount\"")) {
+      return mockResults.get("buyer_opted_out") ?? [{ optedOut: false }];
+    }
+
     // ReminderLog exists check
     if (query.includes("EXISTS") && query.includes("ReminderLog")) {
       return mockResults.get("reminder_exists") ?? [{ exists: false }];
@@ -110,6 +120,11 @@ function createMockSql() {
     // Shop reminder settings
     if (query.includes("FROM s18_shop_reminder_settings")) {
       return mockResults.get("settings") ?? [];
+    }
+
+    // #292: Shop currency check (INR-only in v1)
+    if (query.includes("currency") && query.includes("Shop") && query.includes("SELECT")) {
+      return mockResults.get("shop_currency") ?? [{ currency: "INR" }];
     }
 
     return [];
@@ -319,7 +334,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -364,7 +379,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -423,7 +438,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -445,7 +460,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -487,7 +502,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -534,7 +549,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -561,7 +576,7 @@ describe("Payment Reminders (S18)", () => {
       shopUninstalledAt: Date | null;
     };
 
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" };
 
     beforeEach(() => {
       mockInvoiceData = {
@@ -763,7 +778,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -790,7 +805,7 @@ describe("Payment Reminders (S18)", () => {
       shopUninstalledAt: Date | null;
     };
 
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" };
 
     beforeEach(() => {
       mockInvoiceData = {
@@ -875,7 +890,7 @@ describe("Payment Reminders (S18)", () => {
         "rule-123",
         0,
         "Asia/Kolkata",
-        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com" }
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
       expect(result.success).toBe(true);
@@ -1567,5 +1582,212 @@ describe("ensureDefaultReminderRules", () => {
     expect(result.seeded).toBe(false);
     expect(result.count).toBe(0);
     expect(ruleInsertCalled).toBe(false);
+  });
+});
+
+describe("sendPaymentReminder - buyerAccountId null handling", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // Set time within send window (12:00 IST = 06:30 UTC)
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("skips send and logs warning when getBuyerAccountId returns null", async () => {
+    // Mock DateTime.now to be within send window
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-123",
+      shopId: "shop-123",
+      shopDomain: "test-shop.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#1001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-123",
+      customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+    // Set buyer_account_id to empty to simulate null return
+    mockSql.setMockResult("buyer_account_id", []);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("Buyer account ID not found");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    // Should log warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reminders_no_buyer_account")
+    );
+  });
+});
+
+describe("sendPaymentReminder - SHOPIFY_APP_URL gate", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // Set time within send window (12:00 IST = 06:30 UTC)
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("skips send and logs warning when SHOPIFY_APP_URL is missing", async () => {
+    // Mock DateTime.now to be within send window
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-123",
+      shopId: "shop-123",
+      shopDomain: "test-shop.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#1001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-123",
+      customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "", // Empty = not configured
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("SHOPIFY_APP_URL not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    // Should log warning
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reminders_no_app_url")
+    );
+  });
+
+  it("skips send when SHOPIFY_APP_URL is whitespace only", async () => {
+    // Mock DateTime.now to be within send window
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-123",
+      shopId: "shop-123",
+      shopDomain: "test-shop.myshopify.com",
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#1001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: new Date(),
+      status: "open",
+      buyerAccountId: "buyer-123",
+      customerId: "gid://shopify/Customer/456",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "   ", // Whitespace only
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("SHOPIFY_APP_URL not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

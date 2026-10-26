@@ -27,7 +27,11 @@ import type {
 import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
+import { buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
+import { enqueueReconcileStage } from "~/services/drain/reconcile-handlers.server";
 
 /**
  * Check if a character is forbidden in Shopify tags.
@@ -66,6 +70,7 @@ interface LoaderData {
   shopId: string | null;
   error: string | null;
   finishingSetup: boolean;
+  newAccountsPausedBanner: NewAccountsPausedBannerState;
 }
 
 interface ActionData {
@@ -188,6 +193,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopId: null,
       error: null,
       finishingSetup: true,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
     } satisfies LoaderData;
   }
 
@@ -197,12 +208,43 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       getTagRules(sql, shop.id),
     ]);
 
+    const gatingEnforced = isGatingEnforced();
+    const upgradeUrl = (() => {
+      const handle = getAppHandle();
+      if (handle === null) return null;
+      return buildPlanSelectionUrl(shopDomain, handle);
+    })();
+
+    // Only call getUsageStats when gating is enforced (fail-soft on error)
+    let newAccountsPausedBanner: NewAccountsPausedBannerState = {
+      show: false,
+      heading: "",
+      bodyText: "",
+      upgradeUrl: null,
+    };
+
+    if (gatingEnforced) {
+      try {
+        const usage = await getUsageStats(sql, shop.id);
+        newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+          usage.companies.current,
+          usage.companies.limit,
+          gatingEnforced,
+          upgradeUrl
+        );
+      } catch (err) {
+        safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+        // Fail soft: no banner on error
+      }
+    }
+
     return {
       storeMode,
       tagRules,
       shopId: shop.id,
       error: null,
       finishingSetup: false,
+      newAccountsPausedBanner,
     } satisfies LoaderData;
   } catch (err) {
     safeLog("error", "tag_rules_load_error", {
@@ -216,6 +258,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopId: shop.id,
       error: "Failed to load tag rules",
       finishingSetup: false,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
     } satisfies LoaderData;
   }
 };
@@ -226,8 +274,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; domain: string }[]>`
+    SELECT id, domain FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
@@ -362,6 +410,27 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       termsDays: parsedTermsDays,
     });
 
+    const [ruleCountResult] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shop.id}
+    `;
+    const ruleCount = parseInt(ruleCountResult?.count ?? "0", 10);
+
+    if (ruleCount === 1) {
+      const [alreadyQueued] = await sql<{ msg_id: string }[]>`
+        SELECT msg_id::text FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${shop.domain}
+          AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+        LIMIT 1
+      `;
+      if (!alreadyQueued) {
+        const manualKey = `manual:${Date.now()}`;
+        await enqueueReconcileStage(sql, shop.domain, "customers", manualKey);
+        safeLog("info", "first_tag_rule_customers_enqueued", {
+          shopHash: await shopHash(shop.domain),
+        });
+      }
+    }
+
     return {
       success: true,
       createdRuleId: result[0].id,
@@ -415,9 +484,9 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
   return (
     <s-table>
       <s-table-header-row>
-        <s-table-header>Customer Tag</s-table-header>
-        <s-table-header>Default Terms</s-table-header>
-        <s-table-header>Created</s-table-header>
+        <s-table-header listSlot="primary">Customer Tag</s-table-header>
+        <s-table-header listSlot="labeled">Default Terms</s-table-header>
+        <s-table-header listSlot="labeled">Created</s-table-header>
       </s-table-header-row>
       <s-table-body>
         {rules.map((rule) => (
@@ -439,7 +508,7 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
 }
 
 export default function TagRulesPage() {
-  const { storeMode, tagRules, error, finishingSetup } = useLoaderData<typeof loader>();
+  const { storeMode, tagRules, error, finishingSetup, newAccountsPausedBanner } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -517,6 +586,23 @@ export default function TagRulesPage() {
       <s-link href="/" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
+
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
 
       {error && (
         <s-section>

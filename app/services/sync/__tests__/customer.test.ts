@@ -3,6 +3,7 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
   processCustomerWebhook,
+  processBulkCustomer,
   mapCustomerToTaggedCustomer,
   bulkUpsertTaggedCustomers,
   findMatchingTagRule,
@@ -1133,6 +1134,124 @@ describeWithDb("Customer Sync", () => {
       const counts = await redactShopData(sql, `nonexistent-shop-${TEST_SUFFIX}`);
       expect(counts.taggedCustomers).toBe(0);
       expect(counts.draftOrders).toBe(0);
+    });
+  });
+
+  describe("processBulkCustomer (bulk JSONL path)", () => {
+    it("creates TAGGED_CUSTOMER buyer account for customer with matching tag (no orders)", async () => {
+      const customerId = `gid://shopify/Customer/bulk-${TEST_SUFFIX}-tagged`;
+
+      const customer: ShopifyCustomer = {
+        id: customerId,
+        tags: ["net-terms"],
+        email: "bulk-test@example.com",
+        displayName: "Bulk Test Customer",
+      };
+
+      const result = await processBulkCustomer(
+        sql,
+        TEST_SHOP_DOMAIN,
+        customer,
+        "fetched"
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+      expect(result.entityId).toBeDefined();
+
+      // Verify BuyerAccount was created with TAGGED_CUSTOMER kind
+      const [account] = await sql<{ kind: string; customerId: string; holdState: string; defaultTermsDays: number; defaultTermsSource: string }[]>`
+        SELECT kind, "customerId", "holdState", "defaultTermsDays", "defaultTermsSource"
+        FROM "BuyerAccount" WHERE id = ${result.entityId!}
+      `;
+      expect(account.kind).toBe("TAGGED_CUSTOMER");
+      expect(account.customerId).toBe(customerId);
+      expect(account.holdState).toBe("OK");
+      expect(account.defaultTermsDays).toBe(30); // From tag rule
+      expect(account.defaultTermsSource).toBe("tag");
+
+      // Verify s8_tagged_customers record was created
+      const [tagRecord] = await sql<{ tag_active: boolean; email: string | null; display_name: string | null }[]>`
+        SELECT tag_active, email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(tagRecord.tag_active).toBe(true);
+      expect(tagRecord.email).toBe("bulk-test@example.com");
+      expect(tagRecord.display_name).toBe("Bulk Test Customer");
+    });
+
+    it("skips customer that does not match any tag rule", async () => {
+      const customer: ShopifyCustomer = {
+        id: `gid://shopify/Customer/bulk-${TEST_SUFFIX}-notag`,
+        tags: ["other-tag", "wholesale"],
+      };
+
+      const result = await processBulkCustomer(
+        sql,
+        TEST_SHOP_DOMAIN,
+        customer,
+        "fetched"
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toContain("does not match any tag rule");
+    });
+
+    it("skips customer when shop has no tag rules", async () => {
+      const noRulesShopId = `shop-bulk-norules-${TEST_SUFFIX}`;
+      const noRulesShopDomain = `test-s8-norules-${TEST_SUFFIX}.myshopify.com`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+        VALUES (${noRulesShopId}, ${noRulesShopDomain}, NOW(), NOW())
+      `;
+
+      try {
+        const customer: ShopifyCustomer = {
+          id: `gid://shopify/Customer/bulk-${TEST_SUFFIX}-norules`,
+          tags: ["net-terms"],
+        };
+
+        const result = await processBulkCustomer(
+          sql,
+          noRulesShopDomain,
+          customer,
+          "fetched"
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("No tag rules configured");
+      } finally {
+        await sql`DELETE FROM "Shop" WHERE id = ${noRulesShopId}`;
+      }
+    });
+
+    it("respects piiMode 'disabled' (does not store PII)", async () => {
+      const customerId = `gid://shopify/Customer/bulk-${TEST_SUFFIX}-disabled-pii`;
+
+      const customer: ShopifyCustomer = {
+        id: customerId,
+        tags: ["net-terms"],
+        email: "should-not-store@example.com",
+        displayName: "Should Not Store",
+      };
+
+      const result = await processBulkCustomer(
+        sql,
+        TEST_SHOP_DOMAIN,
+        customer,
+        "disabled"
+      );
+
+      expect(result.success).toBe(true);
+
+      // Verify PII was NOT stored
+      const [tagRecord] = await sql<{ email: string | null; display_name: string | null }[]>`
+        SELECT email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(tagRecord.email).toBeNull();
+      expect(tagRecord.display_name).toBeNull();
     });
   });
 });
