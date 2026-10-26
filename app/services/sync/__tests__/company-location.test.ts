@@ -397,7 +397,7 @@ describeWithDb("CompanyLocation Sync", () => {
 
     it("gates new accounts when over limit with PLAN_GATING_ENFORCED=1", async () => {
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       
       try {
         // T1: 'free' resolves to 'none' plan which has limit 0

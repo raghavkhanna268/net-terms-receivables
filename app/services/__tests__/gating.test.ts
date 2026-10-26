@@ -89,32 +89,34 @@ describe("Gating Service", () => {
   });
 
   describe("isGatingEnforced", () => {
-    it("returns false when PLAN_GATING_ENFORCED is not set", async () => {
-      (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = undefined;
-      const { isGatingEnforced } = await import("../gating.server");
-      expect(isGatingEnforced()).toBe(false);
-    });
+    /**
+     * Table-driven test for PLAN_GATING_ENFORCED env var derivation.
+     * Only the exact string 'true' should enable gating.
+     */
+    const envTestCases: Array<{ envValue: string | undefined; expected: boolean; label: string }> = [
+      { envValue: undefined, expected: false, label: "unset" },
+      { envValue: "", expected: false, label: "empty string ''" },
+      { envValue: "false", expected: false, label: "'false'" },
+      { envValue: "TRUE", expected: false, label: "'TRUE' (uppercase)" },
+      { envValue: "1", expected: false, label: "'1'" },
+      { envValue: " true", expected: false, label: "' true' (leading space)" },
+      { envValue: "true ", expected: false, label: "'true ' (trailing space)" },
+      { envValue: "True", expected: false, label: "'True' (title case)" },
+      { envValue: "true", expected: true, label: "'true' (exact match)" },
+    ];
 
-    it("returns false when PLAN_GATING_ENFORCED is 'false'", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
-      vi.resetModules();
-      const { isGatingEnforced } = await import("../gating.server");
-      expect(isGatingEnforced()).toBe(false);
-    });
-
-    it("returns true when PLAN_GATING_ENFORCED is '1'", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
-      vi.resetModules();
-      const { isGatingEnforced } = await import("../gating.server");
-      expect(isGatingEnforced()).toBe(true);
-    });
-
-    it("returns true when PLAN_GATING_ENFORCED is 'true'", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
-      vi.resetModules();
-      const { isGatingEnforced } = await import("../gating.server");
-      expect(isGatingEnforced()).toBe(true);
-    });
+    for (const { envValue, expected, label } of envTestCases) {
+      it(`returns ${expected} when PLAN_GATING_ENFORCED is ${label}`, async () => {
+        if (envValue === undefined) {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        } else {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = envValue;
+        }
+        vi.resetModules();
+        const { isGatingEnforced } = await import("../gating.server");
+        expect(isGatingEnforced()).toBe(expected);
+      });
+    }
   });
 
   describe("checkCompanyLimit with gating OFF", () => {
@@ -133,7 +135,7 @@ describe("Gating Service", () => {
 
   describe("checkCompanyLimit with gating ON", () => {
     beforeEach(() => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     });
 
     it("allows creation when under limit", async () => {
@@ -252,7 +254,7 @@ describe("Gating Service", () => {
 
   describe("reactivateGatedAccounts", () => {
     it("reactivates gated accounts on upgrade (oldest first)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
@@ -282,7 +284,7 @@ describe("Gating Service", () => {
     });
 
     it("reactivates all gated accounts on upgrade to unlimited", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
@@ -308,7 +310,7 @@ describe("Gating Service", () => {
     });
 
     it("reactivates nothing when already at limit", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
@@ -364,7 +366,7 @@ describe("Gating Service", () => {
 
   describe("enforceCompanyLimit", () => {
     it("succeeds when under limit", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { enforceCompanyLimit } = await import("../gating.server");
       
@@ -383,7 +385,7 @@ describe("Gating Service", () => {
     });
 
     it("throws UpgradeRequiredError when limit exceeded", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { enforceCompanyLimit, UpgradeRequiredError } = await import("../gating.server");
       
@@ -420,7 +422,7 @@ describe("Gating Service", () => {
 
   describe("decideNewAccountGate", () => {
     it("does not query plans table (limit passed as parameter)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { decideNewAccountGate } = await import("../gating.server");
       
@@ -490,7 +492,7 @@ describe("Gating Service", () => {
     });
 
     it("returns gate: false without querying when limit is -1 (unlimited)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { decideNewAccountGate } = await import("../gating.server");
       
@@ -519,7 +521,7 @@ describe("Gating Service", () => {
 
   describe("Over-limit then upgrade scenario", () => {
     it("gated accounts appear after upgrade", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { checkCompanyLimit, reactivateGatedAccounts } = await import("../gating.server");
       
@@ -577,7 +579,7 @@ describe("Gating Service", () => {
     });
 
     it("returns gated_at IS NULL fragment when gating is ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { activeAccountFragment } = await import("../gating.server");
       
@@ -597,7 +599,7 @@ describe("Gating Service", () => {
     });
 
     it("returns true only for non-gated accounts when gating is ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { isAccountActive } = await import("../gating.server");
       
@@ -633,7 +635,7 @@ describe("Gating Service", () => {
     });
 
     it("counts only non-gated companies when gating is ON", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { getUsageStats } = await import("../gating.server");
       
@@ -719,7 +721,7 @@ describeWithDb("activeAccountFragment DB integration", () => {
   });
 
   it("excludes gated accounts when gating is ON", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
     const { activeAccountFragment } = await import("../gating.server");
 
@@ -735,7 +737,7 @@ describeWithDb("activeAccountFragment DB integration", () => {
   });
 
   it("isAccountActive returns correct values with DB data", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
     const { isAccountActive } = await import("../gating.server");
 
@@ -753,7 +755,7 @@ describeWithDb("activeAccountFragment DB integration", () => {
   });
 
   it("isAccountActive correctly identifies gated accounts with gating ON", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
     const { isAccountActive } = await import("../gating.server");
 
@@ -836,7 +838,7 @@ describeWithDb("countActiveAccounts inactive-tag exclusion DB integration", () =
   });
 
   it("inactive-tag TAGGED_CUSTOMER account doesn't count toward limit", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
     const { countActiveAccounts } = await import("../gating.server");
 
@@ -859,7 +861,7 @@ describeWithDb("countActiveAccounts inactive-tag exclusion DB integration", () =
   });
 
   it("active-tag TAGGED_CUSTOMER account counts toward limit", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
     const { countActiveAccounts } = await import("../gating.server");
 
@@ -883,7 +885,7 @@ describeWithDb("countActiveAccounts inactive-tag exclusion DB integration", () =
   });
 
   it("COMPANY accounts always count (no tag_active check)", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
     const { countActiveAccounts } = await import("../gating.server");
 
@@ -901,7 +903,7 @@ describeWithDb("countActiveAccounts inactive-tag exclusion DB integration", () =
   });
 
   it("re-activating tag doesn't change gated_at", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
 
     // The inactive-tag account already exists with gated_at = NULL
@@ -956,7 +958,7 @@ describeWithDb("decideNewAccountGate flag-off inertness DB integration", () => {
   });
 
   it("flag-on with limit=0: new accounts ARE gated", async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     vi.resetModules();
     const { decideNewAccountGate } = await import("../gating.server");
 
