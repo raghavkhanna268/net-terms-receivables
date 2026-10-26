@@ -778,7 +778,7 @@ export default function Index() {
   // If flip was blocked, show the flip blocked banner; otherwise show the not supported banner
   if (!currencySupported) {
     return (
-      <s-page heading="Net Terms Receivables">
+      <s-page heading="Termwise: Net Terms & Credit">
         <s-section>
           {currencyFlipBlocked ? (
             <s-banner tone="critical" heading="Currency Conversion Not Available">
@@ -812,7 +812,7 @@ export default function Index() {
   const closeInvoiceListUrl = `?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page}`;
 
   return (
-    <s-page heading="Net Terms Receivables">
+    <s-page heading="Termwise: Net Terms & Credit">
       {/* T4: New accounts paused banner */}
       {newAccountsPausedBanner.show && (
         <s-section>
