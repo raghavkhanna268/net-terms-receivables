@@ -161,11 +161,13 @@ describe("prod-readonly-query.yml", () => {
   const run = step.run ?? "";
 
   it("adds no free-text inputs", () => {
-    // shop_idx is #465's choice input (1 | 2 | reviewer) for initial-sync-timing
+    // shop_idx is #465's choice input (1 | 2 | reviewer) for initial-sync-timing;
+    // closed_window_hours is its number input (clamped 1..168 before psql)
     expect(Object.keys(wf.on.workflow_dispatch.inputs).sort()).toEqual(
-      ["location_id", "msg_ids", "query", "shop_idx", "since"],
+      ["closed_window_hours", "location_id", "msg_ids", "query", "shop_idx", "since"],
     );
     expect((wf.on.workflow_dispatch.inputs.shop_idx as { type?: string }).type).toBe("choice");
+    expect((wf.on.workflow_dispatch.inputs.closed_window_hours as { type?: string }).type).toBe("number");
   });
 
   it("validates and masks E2E_SHOP exactly once", () => {
