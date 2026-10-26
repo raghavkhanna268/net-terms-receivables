@@ -20,7 +20,7 @@
  * - amount_exact: +20 (payment equals invoice outstanding)
  * - amount_partial: +10 (payment < invoice outstanding)
  * - amount_overpayment: +10 (payment > invoice outstanding)
- * - payer_alias: +10 (exact/substring match on buyer.aliases) - NOT in fresh store
+ * - payer_alias: +30 (exact/substring match on buyer.aliases, confirmed only) - NOT in fresh store
  * - payer_name: +8 (fuzzy match on buyer.name, floor(10 * 0.8))
  * - email_match: +6 (email prefix match, floor(10 * 0.6))
  * - multi_invoice: +5 (bonus for subset-sum match to multiple invoices)
@@ -253,7 +253,7 @@ describe("HDFC reviewer CSV v3: Scorer unit test (hypothetical candidates)", () 
      * | 2   | ₹5,000   | TEST BUYER CO                | invoice-reviewer-demo-2 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
      * | 3   | ₹2,500   | TEST BUYER CO                | invoice-reviewer-demo-2 | 48    | low    | invoice_ref(+30), amount_partial(+10), payer_name(+8) |
      *
-     * High (80) requires a confirmed payer alias; without one the best is Medium (58).
+     * High (80) requires a confirmed payer alias (+30); without one the best is Medium (58).
      */
     it("validates all scores match pinned expectations (v3)", () => {
       const row1 = credits.find((c) => c.refNo === "SYNT0001")!;
