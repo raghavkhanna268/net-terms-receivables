@@ -48,12 +48,13 @@ import {
   action,
   mapCreditsForImport,
   summarizeParseErrors,
-  getErrorBadgeTone,
-  getErrorDisplayMessage,
   formatErrorRowLabel,
-  ERROR_CODE_MESSAGES,
 } from "../app.imports";
 import type { ParseErrorRow } from "../app.imports";
+import {
+  getImportErrorLabel,
+  IMPORT_ERROR_LABELS,
+} from "~/lib/copy-helpers";
 
 /**
  * Create a mock request with JSON body.
@@ -231,29 +232,17 @@ describe("summarizeParseErrors", () => {
   });
 });
 
-describe("getErrorBadgeTone", () => {
-  it("returns 'warning' for NORMALIZE_FAILED", () => {
-    expect(getErrorBadgeTone("NORMALIZE_FAILED")).toBe("warning");
+describe("getImportErrorLabel (from copy-helpers)", () => {
+  it("returns human-readable label for known error codes", () => {
+    expect(getImportErrorLabel("ROW_PARSE_FAILED")).toBe("Couldn't read row");
+    expect(getImportErrorLabel("NORMALIZE_FAILED")).toBe("Couldn't process transaction");
+    expect(getImportErrorLabel("NO_HEADER_ROW")).toBe("Missing header row");
+    expect(getImportErrorLabel("COLUMN_MAP_FAILED")).toBe("Unrecognised column layout");
+    expect(getImportErrorLabel("UNKNOWN_BANK_FORMAT")).toBe("Unrecognised bank format");
   });
 
-  it("returns 'critical' for ROW_PARSE_FAILED", () => {
-    expect(getErrorBadgeTone("ROW_PARSE_FAILED")).toBe("critical");
-  });
-
-  it("returns 'critical' for NO_HEADER_ROW", () => {
-    expect(getErrorBadgeTone("NO_HEADER_ROW")).toBe("critical");
-  });
-
-  it("returns 'critical' for COLUMN_MAP_FAILED", () => {
-    expect(getErrorBadgeTone("COLUMN_MAP_FAILED")).toBe("critical");
-  });
-
-  it("returns 'critical' for UNKNOWN_BANK_FORMAT", () => {
-    expect(getErrorBadgeTone("UNKNOWN_BANK_FORMAT")).toBe("critical");
-  });
-
-  it("returns 'critical' for unknown codes", () => {
-    expect(getErrorBadgeTone("SOME_NEW_ERROR")).toBe("critical");
+  it("falls back to 'Error' for unknown codes", () => {
+    expect(getImportErrorLabel("SOME_NEW_ERROR")).toBe("Error");
   });
 });
 
@@ -269,45 +258,6 @@ describe("formatErrorRowLabel", () => {
   });
 });
 
-describe("getErrorDisplayMessage", () => {
-  it("returns fixed message for ROW_PARSE_FAILED", () => {
-    expect(getErrorDisplayMessage("ROW_PARSE_FAILED")).toBe("Could not parse this row");
-  });
-
-  it("returns fixed message for NORMALIZE_FAILED", () => {
-    expect(getErrorDisplayMessage("NORMALIZE_FAILED")).toBe("Could not normalize transaction data");
-  });
-
-  it("returns fixed message for NO_HEADER_ROW", () => {
-    expect(getErrorDisplayMessage("NO_HEADER_ROW")).toBe("Could not find header row in file");
-  });
-
-  it("returns fixed message for COLUMN_MAP_FAILED", () => {
-    expect(getErrorDisplayMessage("COLUMN_MAP_FAILED")).toBe("Could not map columns to expected format");
-  });
-
-  it("returns fixed message for UNKNOWN_BANK_FORMAT", () => {
-    expect(getErrorDisplayMessage("UNKNOWN_BANK_FORMAT")).toBe("Unrecognized bank statement format");
-  });
-
-  it("returns 'Unknown error' for unmapped codes", () => {
-    expect(getErrorDisplayMessage("SOME_NEW_ERROR")).toBe("Unknown error");
-  });
-
-  it("never returns raw parser error messages", () => {
-    const rawMessages = [
-      "Failed to parse row: invalid date format",
-      "Could not extract amount from '1,234.56'",
-      "SYNTHETIC CORP narration",
-    ];
-    for (const code of Object.keys(ERROR_CODE_MESSAGES)) {
-      const msg = getErrorDisplayMessage(code);
-      for (const raw of rawMessages) {
-        expect(msg).not.toContain(raw);
-      }
-    }
-  });
-});
 
 describe("mapCreditsForImport", () => {
   it("maps credits with all optional fields", () => {
@@ -371,8 +321,8 @@ describe("mapCreditsForImport", () => {
 });
 
 describe("Error message safety - no raw messages to merchants", () => {
-  it("all ERROR_CODE_MESSAGES are fixed strings without dynamic content", () => {
-    const fixedMessages = Object.values(ERROR_CODE_MESSAGES);
+  it("all IMPORT_ERROR_LABELS are fixed strings without dynamic content", () => {
+    const fixedMessages = Object.values(IMPORT_ERROR_LABELS);
     for (const msg of fixedMessages) {
       expect(typeof msg).toBe("string");
       expect(msg.length).toBeGreaterThan(0);
@@ -383,7 +333,7 @@ describe("Error message safety - no raw messages to merchants", () => {
     }
   });
 
-  it("getErrorDisplayMessage always returns a safe fixed string", () => {
+  it("getImportErrorLabel always returns a safe fixed string", () => {
     const testCodes = [
       "ROW_PARSE_FAILED",
       "NORMALIZE_FAILED",
@@ -395,7 +345,7 @@ describe("Error message safety - no raw messages to merchants", () => {
       "undefined",
     ];
     for (const code of testCodes) {
-      const msg = getErrorDisplayMessage(code);
+      const msg = getImportErrorLabel(code);
       expect(typeof msg).toBe("string");
       expect(msg.length).toBeGreaterThan(0);
       expect(msg).not.toContain("SYNTHETIC");
