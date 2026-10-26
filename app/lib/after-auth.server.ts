@@ -103,7 +103,7 @@ export async function runAfterAuth(
   try {
     sql = getRequestSql();
   } catch (error) {
-    safeLog("warn", "clear_uninstalled_at_failed", { err: toErrorCode(error) });
+    safeLog("warn", "clear_uninstalled_at_failed", { reason: "no_request_context", err: toErrorCode(error) });
   }
 
   if (sql) {
@@ -189,6 +189,9 @@ async function runCriticalRegistration(
   };
 
   // Chain 3: plan refresh with force (bypasses stale cache)
+  // Note: refreshPlanCache internally catches errors and returns gracefully.
+  // A failed plan refresh is logged but doesn't cause the Promise to reject.
+  // This is by design - the plan will be refreshed on the next request.
   const planChain = async (): Promise<void> => {
     await refreshPlanCache(sql, shop);
   };
@@ -225,21 +228,25 @@ async function runCriticalRegistration(
  * Includes: syncShopInfo (timezone/currency/DB upsert).
  * Plan refresh is now in the critical path, not here.
  *
- * Only marks shop complete if critical registration succeeded.
+ * Only marks shop complete if BOTH critical registration AND syncShopInfo succeeded.
+ * A failed syncShopInfo on reinstall means timezone/currency/upsert didn't complete,
+ * so the next load should retry.
  */
 async function runBackgroundSetup(
   shop: string,
   admin: AdminGraphqlClient,
   criticalSuccess: boolean,
 ): Promise<void> {
+  let syncSuccess = true;
   try {
     await syncShopInfo(shop, admin);
   } catch (error) {
+    syncSuccess = false;
     safeLog("warn", "sync_shop_info_failed", { err: toErrorCode(error) });
   }
 
-  // Only mark complete if all critical steps succeeded
-  if (criticalSuccess) {
+  // Only mark complete if all steps succeeded (critical + syncShopInfo)
+  if (criticalSuccess && syncSuccess) {
     setupCompletedShops.add(shop);
   }
 }
@@ -354,7 +361,7 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
     }
     return { wasReinstalled: false };
   } catch (error) {
-    safeLog("error", "clear_uninstalled_at_failed", { shopHash: await shopHash(shop), err: toErrorCode(error) });
+    safeLog("error", "clear_uninstalled_at_failed", { reason: "db_error", shopHash: await shopHash(shop), err: toErrorCode(error) });
     return { wasReinstalled: false };
   }
 }
