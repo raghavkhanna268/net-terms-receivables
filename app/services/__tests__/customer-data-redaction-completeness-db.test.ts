@@ -55,6 +55,7 @@ const REDACTION_ONLY_OR_NOT_CUSTOMER_DATA: Record<string, string> = {
   PayerAlias: "Implementation detail - learned payer keys from matching; not customer data for export; deleted on redaction",
   ReminderLog: "Operational data - reminder send history linked via Invoice; not customer PII; preserved on redaction",
   s22_data_requests: "Meta table - tracks data request itself, not customer data to export; deleted on redaction to remove stored export",
+  rejected_matches: "Merchant match-rejection history (ids and timestamp only, rejectedBy is a merchant staff user id); no buyer PII; not exported; preserved on redaction",
 };
 
 /**
