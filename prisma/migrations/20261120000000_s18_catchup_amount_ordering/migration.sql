@@ -185,8 +185,7 @@ BEGIN
             s.domain AS shop_domain,
             s.timezone AS shop_timezone,
             -- Compute reminder date for ordering (oldest first)
-            (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays" AS reminder_date,
-            i.outstanding
+            (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays" AS reminder_date
         FROM public."ReminderLog" rl
         INNER JOIN public."ReminderRule" r ON r.id = rl."ruleId" AND r.enabled = true
         INNER JOIN public.s18_shop_reminder_settings srs 
@@ -220,7 +219,7 @@ BEGIN
                 AND (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r_today."offsetDays"
                     = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
           )
-        -- Order by oldest reminder date first, then larger amount, then invoiceId for determinism
+        -- Order by oldest reminder date first within each batch
         ORDER BY reminder_date ASC, i.outstanding DESC NULLS LAST, rl."invoiceId" ASC
     LOOP
         PERFORM pgmq.send(

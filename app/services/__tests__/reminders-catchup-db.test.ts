@@ -1907,3 +1907,57 @@ describe("isReminderDueToday (pure JS, boundary instants)", () => {
     });
   });
 });
+
+/**
+ * Migration diff test: asserts the s18_enqueue_reminders function body in
+ * 20261120000000 differs from 20261112000000 ONLY in the ORDER BY line.
+ * Does not require database access.
+ */
+describe("migration diff: 20261120000000 vs 20261112000000 (#230)", () => {
+  it("function bodies differ ONLY in the ORDER BY line", async () => {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+
+    const baseMigrationPath = path.resolve(
+      __dirname,
+      "../../../prisma/migrations/20261112000000_s18_reminder_catchup/migration.sql"
+    );
+    const newMigrationPath = path.resolve(
+      __dirname,
+      "../../../prisma/migrations/20261120000000_s18_catchup_amount_ordering/migration.sql"
+    );
+
+    const baseSql = await fs.readFile(baseMigrationPath, "utf-8");
+    const newSql = await fs.readFile(newMigrationPath, "utf-8");
+
+    const extractFunctionBody = (sql: string): string => {
+      const match = sql.match(
+        /CREATE OR REPLACE FUNCTION public\.s18_enqueue_reminders\(\)[\s\S]*?\$func\$;/
+      );
+      if (!match) throw new Error("Function body not found in migration");
+      return match[0];
+    };
+
+    const baseBody = extractFunctionBody(baseSql);
+    const newBody = extractFunctionBody(newSql);
+
+    const normalizeWhitespace = (s: string): string[] =>
+      s.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+
+    const baseLines = normalizeWhitespace(baseBody);
+    const newLines = normalizeWhitespace(newBody);
+
+    expect(baseLines.length).toBe(newLines.length);
+
+    const differences: { lineNum: number; base: string; new: string }[] = [];
+    for (let i = 0; i < baseLines.length; i++) {
+      if (baseLines[i] !== newLines[i]) {
+        differences.push({ lineNum: i + 1, base: baseLines[i], new: newLines[i] });
+      }
+    }
+
+    expect(differences.length).toBe(1);
+    expect(differences[0].base).toContain("ORDER BY reminder_date ASC, rl.\"invoiceId\" ASC");
+    expect(differences[0].new).toContain("ORDER BY reminder_date ASC, i.outstanding DESC NULLS LAST, rl.\"invoiceId\" ASC");
+  });
+});
