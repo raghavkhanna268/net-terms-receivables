@@ -82,11 +82,11 @@ const PENDING_FOLLOWUP_ALLOWLIST: Array<{
     line: 998,
     reason: "pending follow-up: remove after Developer PR merges",
   },
-  // pending follow-up: remove after Developer #357 merges (privacy.tsx owned by Developer)
+  // pending follow-up: privacy.tsx title; rename in second PR
   {
     file: "app/routes/privacy.tsx",
     line: 266,
-    reason: "pending follow-up: remove after Developer #357 merges",
+    reason: "pending follow-up: rename in second PR (after #357 merged)",
   },
   // pending follow-up: remove after Developer PR merges (test for compliance.server.ts)
   {
@@ -100,11 +100,11 @@ const PENDING_FOLLOWUP_ALLOWLIST: Array<{
     line: 1053,
     reason: "pending follow-up: remove after Developer PR merges",
   },
-  // pending follow-up: remove after Developer #357 merges (test for privacy.tsx)
+  // pending follow-up: privacy.test.ts title expectation; rename in second PR
   {
     file: "app/routes/__tests__/privacy.test.ts",
-    line: 103,
-    reason: "pending follow-up: remove after Developer #357 merges",
+    line: 105,
+    reason: "pending follow-up: rename in second PR (after #357 merged)",
   },
 ];
 
