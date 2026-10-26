@@ -6,7 +6,7 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 
 | Document | Owner | Status |
 |----------|-------|--------|
-| Submit the Protected customer data access request (Level 2: Name, Email) in Partner Dashboard > API access requests. Currently Draft, not submitted (as of 26 Oct 17:15 IST). Blocks App Store submission. | Raghav | Pending |
+| Protected customer data request (Partner Dashboard > API access requests) | Raghav | Pending: Draft, not yet submitted as of 26 Oct 17:15 IST; Raghav to submit (Level 2: Name, Email); blocks App Store submission |
 | [Sentry Setup](./sentry-setup.md) | Raghav | Pending |
 | [Workers Paid Upgrade](./workers-paid-upgrade.md) | Raghav | Pending |
 | [Request `read_all_orders` Scope](./read-all-orders-request.md) | Raghav | Pending |

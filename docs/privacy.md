@@ -44,7 +44,7 @@ Termwise: Net Terms & Credit ("the App", "we", "us") is a Shopify app built for 
 
 ### 2.3 Customer Data from Shopify (Protected Customer Data)
 
-Termwise: Net Terms & Credit uses Shopify protected customer data, including the **Name** and **Email** fields (Shopify's "Level 2"). We use it for store management and app functionality, and only for customers who match one of the merchant's net-terms tag rules. We do not request or store phone numbers or addresses. Shopify reviews our access as part of our app submission; until that review completes for a store, Shopify withholds these fields and the related features (reminders to tag-based buyers, email-based matching hints) do not run.
+The app accesses buyer name and email, which Shopify classifies as protected customer data, and handles them as described in this policy. We use this data for store management and app functionality, and only for customers who match one of the merchant's net-terms tag rules. We do not request or store phone numbers or addresses.
 
 | Data | Purpose | Retention |
 |------|---------|-----------|
@@ -336,4 +336,4 @@ Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/acc
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
-**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) provides access to Shopify protected customer data. We have requested access to protected customer data and to the **Name** and **Email** protected fields (Shopify's Level 2) for store management and app functionality. Shopify reviews this request with our app submission; until that review completes, Shopify returns only redacted values for these fields (development stores receive unredacted values during development). We do not request the Phone or Address fields.
+**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) provides access to Shopify protected customer data. The app accesses buyer name and email, which Shopify classifies as protected customer data (Level 2), and handles them as described in this policy. We do not request the Phone or Address fields.
