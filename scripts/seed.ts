@@ -3098,6 +3098,7 @@ export async function ensureTaggedCustomer(
 
   if (!tagCheck.ok) {
     console.log(`    ⚠️  Failed to tag customer: ${tagCheck.failureReason}`);
+    return null;
   }
 
   return customerId;
