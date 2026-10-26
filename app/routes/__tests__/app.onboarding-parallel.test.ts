@@ -5,10 +5,11 @@ import type { LoaderFunctionArgs } from "react-router";
  * Tests for parallelized onboarding loader (latency optimization).
  *
  * Verifies:
- * 1. Parallel execution timing: total time is close to the longest single call, not the sum
+ * 1. Parallel execution: all calls start before any resolve (deferred-promise tests)
  * 2. Metafield definitions: both owner types are reported even if one fails
- * 3. Query count: fewer DB queries than the sequential implementation
+ * 3. Query count: exactly 4 DB queries (no separate currency SELECT)
  * 4. Server-Timing header: correct phase codes in the response
+ * 5. safeLog: emits app_home_timing with allowlisted stage codes only
  */
 
 const createMockSqlFn = () =>
@@ -89,9 +90,25 @@ function getResponseHeaders(result: unknown): Headers | null {
   return null;
 }
 
-describe("Parallel execution timing", () => {
+interface DeferredPromise<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+  started: boolean;
+}
+
+function createDeferredPromise<T>(): DeferredPromise<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject, started: false };
+}
+
+describe("Parallel execution (deferred-promise tests)", () => {
   let mockGraphql: ReturnType<typeof vi.fn>;
-  let queryCallTimestamps: number[];
 
   function createLoaderArgs(): LoaderFunctionArgs {
     const url = new URL("https://test-example.com/app/onboarding");
@@ -118,7 +135,6 @@ describe("Parallel execution timing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
-    queryCallTimestamps = [];
     mockGraphql = vi.fn();
   });
 
@@ -126,80 +142,135 @@ describe("Parallel execution timing", () => {
     vi.restoreAllMocks();
   });
 
-  it("total loader time is less than sum of all mocked delays (parallel execution verified)", async () => {
-    const DELAY_MS = 50;
+  it("checkAndRecoverCurrency, fetchShopOnboardingData counts, and both metafield owner types start before any resolves", async () => {
+    const shopQueryDeferred = createDeferredPromise<unknown[]>();
+    const buyerCountDeferred = createDeferredPromise<unknown[]>();
+    const tagRuleCountDeferred = createDeferredPromise<unknown[]>();
+    const syncStateDeferred = createDeferredPromise<unknown[]>();
+    const currencyRecoveryDeferred = createDeferredPromise<{ json: () => Promise<unknown> }>();
+    const metafieldCompanyDeferred = createDeferredPromise<{ json: () => Promise<unknown> }>();
+    const metafieldCustomerDeferred = createDeferredPromise<{ json: () => Promise<unknown> }>();
+    const validationDeferred = createDeferredPromise<{ json: () => Promise<unknown> }>();
+    const paymentCustomizationDeferred = createDeferredPromise<{ json: () => Promise<unknown> }>();
 
-    mockSql.mockImplementation(async (strings: TemplateStringsArray) => {
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
-      const callTime = Date.now();
-      queryCallTimestamps.push(callTime);
-
       if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-        return [{
-          id: TEST_SHOP_ID,
-          defaultTermsDays: 30,
-          onboardingDismissedAt: null,
-          currency: "INR",
-        }];
+        shopQueryDeferred.started = true;
+        return shopQueryDeferred.promise;
       }
       if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-        return [{ count: "0" }];
+        buyerCountDeferred.started = true;
+        return buyerCountDeferred.promise;
       }
       if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-        return [{ count: "0" }];
+        tagRuleCountDeferred.started = true;
+        return tagRuleCountDeferred.promise;
       }
-      if (query.includes("s6_bulk_operations")) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-        return [];
+      if (query.includes("s6_bulk_operations") || query.includes("s6_dead_letter")) {
+        syncStateDeferred.started = true;
+        return syncStateDeferred.promise;
       }
-      if (query.includes("s6_dead_letter")) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-        return [{ count: "0" }];
-      }
-      return [];
+      return Promise.resolve([]);
     });
 
-    mockGraphql.mockImplementation(async (query: string) => {
-      await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-
+    mockGraphql.mockImplementation(async (query: string, opts?: { variables?: { ownerType?: string } }) => {
       if (query.includes("ShopCurrencyAndId")) {
-        return {
-          json: async () => ({
-            data: {
-              shop: {
-                id: TEST_SHOP_GID,
-                currencyCode: "INR",
-                metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
-              },
-            },
-          }),
-        };
-      }
-      if (query.includes("validations")) {
-        return { json: async () => ({ data: { validations: { edges: [] } } }) };
-      }
-      if (query.includes("paymentCustomizations")) {
-        return { json: async () => ({ data: { paymentCustomizations: { edges: [] } } }) };
+        currencyRecoveryDeferred.started = true;
+        return currencyRecoveryDeferred.promise;
       }
       if (query.includes("metafieldDefinitions")) {
-        return { json: async () => ({ data: { metafieldDefinitions: { edges: [] } } }) };
+        const ownerType = opts?.variables?.ownerType;
+        if (ownerType === "COMPANY_LOCATION") {
+          metafieldCompanyDeferred.started = true;
+          return metafieldCompanyDeferred.promise;
+        }
+        if (ownerType === "CUSTOMER") {
+          metafieldCustomerDeferred.started = true;
+          return metafieldCustomerDeferred.promise;
+        }
+      }
+      if (query.includes("validations")) {
+        validationDeferred.started = true;
+        return validationDeferred.promise;
+      }
+      if (query.includes("paymentCustomizations")) {
+        paymentCustomizationDeferred.started = true;
+        return paymentCustomizationDeferred.promise;
       }
       return { json: async () => ({ data: {} }) };
     });
 
     const { loader } = await import("../app.onboarding");
+    const loaderPromise = loader(createLoaderArgs());
 
-    const startTime = Date.now();
-    await loader(createLoaderArgs());
-    const totalTime = Date.now() - startTime;
+    // Step 1: Shop query must complete first (it provides shopId for counts)
+    await new Promise(r => setTimeout(r, 5));
+    expect(shopQueryDeferred.started).toBe(true);
+    shopQueryDeferred.resolve([{
+      id: TEST_SHOP_ID,
+      defaultTermsDays: 30,
+      onboardingDismissedAt: null,
+      currency: "INR",
+    }]);
 
-    // With 7+ delayed operations at 50ms each, sequential would be 350ms+.
-    // Parallel should complete in under 200ms (allowing for overhead).
-    // The key is that total time < sum of individual delays.
-    expect(totalTime).toBeLessThan(350);
+    // Step 2: After shop query, buyerCount and tagRuleCount run in parallel
+    await new Promise(r => setTimeout(r, 5));
+    expect(buyerCountDeferred.started).toBe(true);
+    expect(tagRuleCountDeferred.started).toBe(true);
+
+    // Resolve counts to allow fetchShopOnboardingData to complete
+    buyerCountDeferred.resolve([{ count: "0" }]);
+    tagRuleCountDeferred.resolve([{ count: "0" }]);
+
+    // Step 3: After fetchShopOnboardingData completes, the main Promise.all starts
+    // All Admin calls and sync state should start in parallel
+    await new Promise(r => setTimeout(r, 10));
+    expect(currencyRecoveryDeferred.started).toBe(true);
+    expect(metafieldCompanyDeferred.started).toBe(true);
+    expect(metafieldCustomerDeferred.started).toBe(true);
+    expect(validationDeferred.started).toBe(true);
+    expect(paymentCustomizationDeferred.started).toBe(true);
+    expect(syncStateDeferred.started).toBe(true);
+
+    // Resolve all remaining promises
+    syncStateDeferred.resolve([]);
+
+    currencyRecoveryDeferred.resolve({
+      json: async () => ({
+        data: {
+          shop: {
+            id: TEST_SHOP_GID,
+            currencyCode: "INR",
+            metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+          },
+        },
+      }),
+    });
+
+    validationDeferred.resolve({
+      json: async () => ({ data: { validations: { edges: [] } } }),
+    });
+
+    paymentCustomizationDeferred.resolve({
+      json: async () => ({ data: { paymentCustomizations: { edges: [] } } }),
+    });
+
+    metafieldCompanyDeferred.resolve({
+      json: async () => ({
+        data: { metafieldDefinitions: { edges: [] } },
+      }),
+    });
+
+    metafieldCustomerDeferred.resolve({
+      json: async () => ({
+        data: { metafieldDefinitions: { edges: [] } },
+      }),
+    });
+
+    const result = await loaderPromise;
+    const data = extractLoaderData<{ error: string | null }>(result);
+    expect(data.error).toBeNull();
   });
 });
 
@@ -313,25 +384,21 @@ describe("Metafield definitions parallel reporting", () => {
     expect(result.registrationStatus.metafieldDefinitions.status).toBe("error");
   });
 
-  it("both owner types are queried in parallel", async () => {
-    const callOrder: string[] = [];
-    const callTimes: number[] = [];
+  it("both owner types are queried via Promise.allSettled", async () => {
+    const companyDeferred = createDeferredPromise<{ json: () => Promise<unknown> }>();
+    const customerDeferred = createDeferredPromise<{ json: () => Promise<unknown> }>();
 
     mockGraphql.mockImplementation(async (query: string, opts?: { variables?: { ownerType?: string } }) => {
       if (query.includes("metafieldDefinitions")) {
         const ownerType = opts?.variables?.ownerType ?? "unknown";
-        callOrder.push(ownerType);
-        callTimes.push(Date.now());
-        await new Promise(resolve => setTimeout(resolve, 30));
-        return {
-          json: async () => ({
-            data: {
-              metafieldDefinitions: {
-                edges: [{ node: { id: "mf-1", namespace: "$app", key: "credit_status", ownerType } }],
-              },
-            },
-          }),
-        };
+        if (ownerType === "COMPANY_LOCATION") {
+          companyDeferred.started = true;
+          return companyDeferred.promise;
+        }
+        if (ownerType === "CUSTOMER") {
+          customerDeferred.started = true;
+          return customerDeferred.promise;
+        }
       }
       if (query.includes("ShopCurrencyAndId")) {
         return {
@@ -356,19 +423,44 @@ describe("Metafield definitions parallel reporting", () => {
     });
 
     const { loader } = await import("../app.onboarding");
-    await loader(createLoaderArgs());
+    const loaderPromise = loader(createLoaderArgs());
 
-    expect(callOrder).toContain("COMPANY_LOCATION");
-    expect(callOrder).toContain("CUSTOMER");
-    if (callTimes.length >= 2) {
-      const timeDiff = Math.abs(callTimes[0] - callTimes[1]);
-      expect(timeDiff).toBeLessThan(20);
-    }
+    // Give time for all calls to start
+    await new Promise(r => setTimeout(r, 20));
+
+    // Both metafield queries should have started before we resolve either
+    expect(companyDeferred.started).toBe(true);
+    expect(customerDeferred.started).toBe(true);
+
+    // Now resolve both
+    companyDeferred.resolve({
+      json: async () => ({
+        data: {
+          metafieldDefinitions: {
+            edges: [{ node: { id: "mf-1", namespace: "$app", key: "credit_status", ownerType: "COMPANY_LOCATION" } }],
+          },
+        },
+      }),
+    });
+
+    customerDeferred.resolve({
+      json: async () => ({
+        data: {
+          metafieldDefinitions: {
+            edges: [{ node: { id: "mf-2", namespace: "$app", key: "credit_status", ownerType: "CUSTOMER" } }],
+          },
+        },
+      }),
+    });
+
+    const result = await loaderPromise;
+    const data = extractLoaderData<{ registrationStatus: { metafieldDefinitions: { status: string } } }>(result);
+    expect(data.registrationStatus.metafieldDefinitions.status).toBe("ok");
   });
 });
 
 describe("Query count reduction", () => {
-  let sqlCallCount: number;
+  let sqlQueries: string[];
 
   function createLoaderArgs(): LoaderFunctionArgs {
     const url = new URL("https://test-example.com/app/onboarding");
@@ -425,10 +517,10 @@ describe("Query count reduction", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
-    sqlCallCount = 0;
+    sqlQueries = [];
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
-      sqlCallCount++;
       const query = strings.join("?");
+      sqlQueries.push(query);
       if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
         return Promise.resolve([{
           id: TEST_SHOP_ID,
@@ -457,14 +549,23 @@ describe("Query count reduction", () => {
     vi.restoreAllMocks();
   });
 
-  it("makes fewer than 5 DB queries (was 5, now 4: shop+currency folded)", async () => {
+  it("makes exactly 4 DB queries and no separate currency SELECT", async () => {
     const { loader } = await import("../app.onboarding");
     await loader(createLoaderArgs());
 
-    // Before: shop (1), currency (1), buyerCount (1), tagRuleCount (1), sync state (1) = 5 calls minimum
-    // After: shop+currency (1), buyerCount (1), tagRuleCount (1), sync state (1) = 4 calls minimum
-    // Actual count depends on sync state queries
-    expect(sqlCallCount).toBeLessThanOrEqual(5);
+    // Exactly 4 queries: shop+currency (1), buyerCount (1), tagRuleCount (1), sync state ops (1)
+    expect(sqlQueries.length).toBe(4);
+
+    // No separate currency SELECT - verify no query is just SELECT currency
+    const separateCurrencyQuery = sqlQueries.find(
+      q => q.includes("SELECT currency") && !q.includes("defaultTermsDays")
+    );
+    expect(separateCurrencyQuery).toBeUndefined();
+
+    // Verify the shop query includes currency
+    const shopQuery = sqlQueries.find(q => q.includes("defaultTermsDays"));
+    expect(shopQuery).toBeDefined();
+    expect(shopQuery).toContain("currency");
   });
 
   it("returns identical output structure after optimization", async () => {
@@ -603,22 +704,8 @@ describe("Server-Timing header", () => {
     expect(serverTiming).toContain("loader_total");
   });
 
-  it("safeLog calls use only allowlisted stage values", async () => {
-    const mockSafeLog = vi.fn();
-    vi.doMock("~/lib/log.server", async (importOriginal) => {
-      const actual = await importOriginal<typeof import("~/lib/log.server")>();
-      return {
-        ...actual,
-        safeLog: mockSafeLog,
-      };
-    });
-
-    vi.resetModules();
-
-    const { loader } = await import("../app.onboarding");
-    await loader(createLoaderArgs());
-
-    const allowedStages = new Set([
+  it("safeLog emits app_home_timing events with allowlisted stage codes (real safeLog, console capture)", async () => {
+    const ALLOWED_STAGES = new Set([
       "shop_lookup",
       "shop_lookup_cold",
       "onboarding_checks",
@@ -627,15 +714,45 @@ describe("Server-Timing header", () => {
       "loader_total_cold",
     ]);
 
-    const timingCalls = mockSafeLog.mock.calls.filter(
-      (call) => call[1] === "app_home_timing"
-    );
+    const capturedLogs: string[] = [];
+    const originalConsoleLog = console.log;
+    console.log = (...args: unknown[]) => {
+      const msg = args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+      capturedLogs.push(msg);
+    };
 
-    for (const call of timingCalls) {
-      const payload = call[2] as { stage?: string };
-      if (payload?.stage) {
-        expect(allowedStages.has(payload.stage)).toBe(true);
+    try {
+      const { loader } = await import("../app.onboarding");
+      await loader(createLoaderArgs());
+
+      // Find app_home_timing events in captured logs
+      const timingEvents = capturedLogs
+        .filter(log => log.includes('"event":"app_home_timing"'))
+        .map(log => {
+          try {
+            return JSON.parse(log) as { event: string; stage?: string; durationMs?: number; route?: string };
+          } catch {
+            return null;
+          }
+        })
+        .filter((e): e is { event: string; stage: string; durationMs: number; route: string } =>
+          e !== null && e.event === "app_home_timing" && typeof e.stage === "string"
+        );
+
+      // Assert at least one app_home_timing record was emitted
+      expect(timingEvents.length).toBeGreaterThan(0);
+
+      // Assert every stage value is in ALLOWED_STAGES
+      for (const event of timingEvents) {
+        expect(ALLOWED_STAGES.has(event.stage)).toBe(true);
+        // Assert event carries only stage and ms (durationMs)
+        expect(typeof event.stage).toBe("string");
+        expect(typeof event.durationMs).toBe("number");
+        // Route is also included by the helper
+        expect(event.route).toBe("app_home");
       }
+    } finally {
+      console.log = originalConsoleLog;
     }
   });
 });
