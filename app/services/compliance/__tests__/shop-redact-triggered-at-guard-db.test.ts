@@ -4,10 +4,10 @@
  * Hardens the GDPR shop/redact handler against redacting a shop that was
  * reinstalled between the original uninstall and the shop/redact webhook arrival.
  *
- * Shopify sends X-Shopify-Triggered-At with the timestamp of when the webhook
- * was originally triggered (the uninstall time). If Shop.uninstalledAt is newer
- * than triggeredAt - 47h, the shop was reinstalled after the uninstall that
- * triggered this webhook, so we skip deletion.
+ * Shopify sends X-Shopify-Triggered-At with the timestamp of when the redact
+ * webhook was triggered (approximately 48 hours after uninstall). If
+ * Shop.uninstalledAt is newer than triggeredAt - 47h, the shop was reinstalled
+ * after the uninstall that triggered this webhook, so we skip deletion.
  *
  * Test scenarios:
  * 1. NULL uninstalledAt skips (existing behaviour, keep passing)
@@ -244,20 +244,24 @@ describeWithDb("shop/redact triggeredAt guard", () => {
     const SHOP_ID_PLUS1 = `shop-47h-plus1-${TEST_SUFFIX}`;
     const SHOP_DOMAIN_PLUS1 = `test-47h-plus1-${TEST_SUFFIX}.myshopify.com`;
 
-    // REVERT NOTE: This test FAILS if the triggeredAt guard is reverted.
-    it("exactly at 47h boundary: uninstalledAt == triggeredAt - 47h skips (reinstall detected)", async () => {
+    // Exactly at the 47h boundary: uninstalledAt == triggeredAt - 47h deletes.
+    // The guard is `>` not `>=`, so equality means the uninstall matches the
+    // triggering event and deletion proceeds (fail-safe: delete when ambiguous).
+    it("exactly at 47h boundary deletes", async () => {
       const triggeredAt = new Date();
       const uninstalledAt = new Date(triggeredAt.getTime() - 47 * 60 * 60 * 1000);
       await seedShop(SHOP_ID_EXACT, SHOP_DOMAIN_EXACT, uninstalledAt);
 
       const result = await deleteShop(sql, SHOP_DOMAIN_EXACT, triggeredAt);
 
-      expect(result.deleted).toBe(false);
-      expect(result.skippedReinstalled).toBe(true);
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
     });
 
+    // 1 minute newer than the boundary: uninstalledAt > triggeredAt - 47h, so
+    // the shop was reinstalled after the uninstall that triggered redact. Skip.
     // REVERT NOTE: This test FAILS if the triggeredAt guard is reverted.
-    it("1 minute inside 47h window: uninstalledAt == triggeredAt - 47h + 1min skips", async () => {
+    it("1 minute inside 47h window skips (reinstall detected)", async () => {
       const triggeredAt = new Date();
       const uninstalledAt = new Date(triggeredAt.getTime() - 47 * 60 * 60 * 1000 + 60 * 1000);
       await seedShop(SHOP_ID_MINUS1, SHOP_DOMAIN_MINUS1, uninstalledAt);
@@ -268,7 +272,9 @@ describeWithDb("shop/redact triggeredAt guard", () => {
       expect(result.skippedReinstalled).toBe(true);
     });
 
-    it("1 minute outside 47h window: uninstalledAt == triggeredAt - 47h - 1min deletes", async () => {
+    // 1 minute older than the boundary: uninstalledAt < triggeredAt - 47h, so
+    // the uninstall matches the triggering event. Delete proceeds.
+    it("1 minute outside 47h window deletes", async () => {
       const triggeredAt = new Date();
       const uninstalledAt = new Date(triggeredAt.getTime() - 47 * 60 * 60 * 1000 - 60 * 1000);
       await seedShop(SHOP_ID_PLUS1, SHOP_DOMAIN_PLUS1, uninstalledAt);
@@ -322,41 +328,43 @@ describeWithDb("shop/redact triggeredAt guard", () => {
     const SHOP_DOMAIN = `test-lifecycle-${TEST_SUFFIX}.myshopify.com`;
 
     // REVERT NOTE: This test FAILS if the triggeredAt guard is reverted.
+    // Timeline with explicit timestamps:
+    //   U1 = first uninstall
+    //   U2 = U1 + 2h = second uninstall (after reinstall)
+    //   T1 = U1 + 48h = first redact trigger (should skip: U2 > T1 - 47h)
+    //   T2 = U2 + 48h = second redact trigger (should delete: U2 == T2 - 48h < T2 - 47h)
     it("first redact skips (reinstalled), second redact (after re-uninstall) deletes", async () => {
       const now = new Date();
+      const U1 = new Date(now.getTime() - 100 * 60 * 60 * 1000); // 100h ago
+      const U2 = new Date(U1.getTime() + 2 * 60 * 60 * 1000); // U1 + 2h
+
       await sql`
         INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', ${now}, ${now}, NULL)
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', ${now}, ${now}, ${U1})
       `;
       allShopIds.push(SHOP_ID);
       allShopDomains.push(SHOP_DOMAIN);
 
-      await markShopUninstalled(sql, SHOP_DOMAIN);
-      const [firstUninstall] = await sql<[{ uninstalledAt: Date }]>`
-        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_ID}
-      `;
-      const firstUninstalledAt = firstUninstall.uninstalledAt;
-
+      // Simulate reinstall (clears uninstalledAt) then second uninstall at U2
       await sql`
         UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${SHOP_ID}
       `;
-
       await sql`
-        UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${SHOP_ID}
+        UPDATE "Shop" SET "uninstalledAt" = ${U2} WHERE id = ${SHOP_ID}
       `;
-      const [secondUninstall] = await sql<[{ uninstalledAt: Date }]>`
-        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_ID}
-      `;
-      const secondUninstalledAt = secondUninstall.uninstalledAt;
 
-      const firstRedactTriggeredAt = new Date(firstUninstalledAt.getTime() + 48 * 60 * 60 * 1000);
-      const firstRedactResult = await deleteShop(sql, SHOP_DOMAIN, firstRedactTriggeredAt);
+      // First redact arrives at T1 = U1 + 48h. Current uninstalledAt is U2.
+      // U2 = U1 + 2h, so U2 > T1 - 47h (U1 + 2h > U1 + 48h - 47h = U1 + 1h). Skip.
+      const T1 = new Date(U1.getTime() + 48 * 60 * 60 * 1000);
+      const firstRedactResult = await deleteShop(sql, SHOP_DOMAIN, T1);
       expect(firstRedactResult.deleted).toBe(false);
       expect(firstRedactResult.skippedReinstalled).toBe(true);
       expect(await getShopExists(SHOP_ID)).toBe(true);
 
-      const secondRedactTriggeredAt = new Date(secondUninstalledAt.getTime() + 48 * 60 * 60 * 1000);
-      const secondRedactResult = await deleteShop(sql, SHOP_DOMAIN, secondRedactTriggeredAt);
+      // Second redact arrives at T2 = U2 + 48h. Current uninstalledAt is U2.
+      // U2 == T2 - 48h < T2 - 47h, so U2 is NOT > T2 - 47h. Delete.
+      const T2 = new Date(U2.getTime() + 48 * 60 * 60 * 1000);
+      const secondRedactResult = await deleteShop(sql, SHOP_DOMAIN, T2);
       expect(secondRedactResult.deleted).toBe(true);
       expect(secondRedactResult.skippedReinstalled).toBe(false);
       expect(await getShopExists(SHOP_ID)).toBe(false);

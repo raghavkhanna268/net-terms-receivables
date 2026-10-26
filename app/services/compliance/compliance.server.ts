@@ -152,11 +152,11 @@ export async function deleteShop(
     // the uninstall that triggered this shop/redact. Skip deletion to preserve
     // the reinstalled shop's data. See issue #291.
     //
-    // Additionally, if triggeredAt is provided and uninstalledAt is NEWER than
-    // triggeredAt - 47 hours, the shop reinstalled and then uninstalled again
-    // after the original uninstall that triggered this webhook. The current
-    // uninstalledAt does not match the uninstall that fired shop/redact, so
-    // skip deletion to avoid erasing data from the newer install cycle.
+    // Additionally, if triggeredAt is provided and uninstalledAt is strictly
+    // NEWER than triggeredAt - 47 hours (using `>`, not `>=`), the shop was
+    // reinstalled after the uninstall that triggered this webhook. Skip deletion
+    // to avoid erasing data from the newer install cycle. Equal values delete
+    // (fail-safe: ambiguous cases proceed with deletion).
     const skipReinstall =
       lockedShop &&
       (lockedShop.uninstalledAt === null ||
