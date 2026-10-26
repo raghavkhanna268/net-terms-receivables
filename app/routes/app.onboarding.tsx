@@ -46,6 +46,7 @@ import {
 } from "~/lib/initial-sync.server";
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
+import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 
 /**
@@ -410,7 +411,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const paymentCustomization = paymentCustomizationResult.info;
   const paymentCustomizationError = paymentCustomizationResult.error;
 
-  const resendApiKeyConfigured = Boolean(process.env.RESEND_API_KEY);
+  const emailSendingConfigured = isEmailSendingConfigured();
 
   const inputs: OnboardingStepInputs = {
     shopId: dbData.shopId,
@@ -419,7 +420,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     tagRuleCount: dbData.tagRuleCount,
     validation,
     paymentCustomization,
-    resendApiKeyConfigured,
+    emailSendingConfigured,
     dismissedAt: dbData.dismissedAt,
   };
 
