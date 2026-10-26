@@ -237,7 +237,7 @@ describe("#292 currency gate on /app loader", () => {
     expect(mockGetBuyerLedger).toHaveBeenCalled();
   });
 
-  it("no Shop row: returns empty dashboard (P3: main's previous behavior), not currency gate", async () => {
+  it("no Shop row: notSupported=true, fail-closed with XXX sentinel", async () => {
     // Simulate no shop row found
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
@@ -255,18 +255,17 @@ describe("#292 currency gate on /app loader", () => {
     const dataResponse = await loader(createLoaderArgs());
     const result = dataResponse.data as Record<string, unknown>;
 
-    // P3: Missing Shop returns to main's previous empty/onboarding state, not currency gate
-    expect(result.notSupported).toBeUndefined();
-    expect(result.currencySupported).toBe(true);
-    expect(result.shopCurrency).toBe("XXX"); // Still XXX sentinel (no currency info without shop)
+    // Fail-closed: no Shop row triggers currency gate with XXX sentinel
+    expect(result.notSupported).toBe(true);
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("XXX");
+    expect(result.agingTotals).toBeNull();
+    expect(result.buyerLedger).toBeNull();
 
-    // Dashboard data is deferred; resolve it to check contents
-    const dashboardData = await (result.dashboardData as Promise<Record<string, unknown>>);
-    expect(dashboardData.agingTotals).toBeNull();
-    expect(dashboardData.buyerLedger).toBeNull();
-    expect(dashboardData.error).toBeNull();
+    // Verify serialized payload has no money keys with values
+    const serialized = JSON.stringify(result);
+    assertNoMoneyKeysInPayload(serialized);
 
-    // No DB queries for aging data since shop not found
     expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
     expect(mockGetBuyerLedger).not.toHaveBeenCalled();
   });

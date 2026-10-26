@@ -2,7 +2,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, data, Await, useRevalidator } from "react-router";
 import { Suspense } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { getRequestSql, getRequestWaitUntil } from "~/lib/request-context.server";
+import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import { resolvePlanKey, type PlanKey } from "~/lib/entitlements";
@@ -268,7 +268,6 @@ async function loadDashboardData(
     onlyOverLimit: boolean;
   },
   timing: ServerTiming,
-  waitUntil: ((p: Promise<unknown>) => void) | undefined,
 ): Promise<DeferredDashboardData> {
   const { page, sortBy, sortOrder, selectedBuyerId, onlyOverLimit } = params;
   const gatingEnforced = isGatingEnforced();
@@ -354,25 +353,20 @@ async function loadDashboardData(
     error = "Failed to load aging data. Please try again.";
   }
 
-  timing.logAllPhases();
+  timing.logPhases(["plan_resolve", "ledger_rows", "ledger_count"]);
 
   if (!error) {
-    const accessPromise = (async () => {
-      const accessParams: Parameters<typeof recordAccess>[1] = {
-        shopId: shop.id,
-        actor: getActorFromSessionToken(sessionToken, session),
-        action: "dashboard",
-        recordType: "BuyerAccount",
-        count: buyerLedger?.totalCount ?? 0,
-      };
-      if (selectedBuyerId) {
-        accessParams.recordId = selectedBuyerId;
-      }
-      recordAccess(sql, accessParams);
-    })();
-    if (waitUntil) {
-      waitUntil(accessPromise);
+    const accessParams: Parameters<typeof recordAccess>[1] = {
+      shopId: shop.id,
+      actor: getActorFromSessionToken(sessionToken, session),
+      action: "dashboard",
+      recordType: "BuyerAccount",
+      count: buyerLedger?.totalCount ?? 0,
+    };
+    if (selectedBuyerId) {
+      accessParams.recordId = selectedBuyerId;
     }
+    recordAccess(sql, accessParams);
   }
 
   return {
@@ -437,53 +431,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
   timing.endPhase("shop_lookup");
 
-  const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const gatingEnforced = isGatingEnforced();
-  const upgradeUrl = (() => {
-    const handle = getAppHandle();
-    if (handle === null) {
-      safeLog("warn", "plan_url_app_handle_missing", {});
-      return null;
-    }
-    return buildPlanSelectionUrl(shopDomain, handle);
-  })();
-
-  if (!shop) {
-    timing.endPhase("loader_total");
-    timing.logAllPhases();
-    const serverTiming = timing.toHeaderValue();
-    const headers: HeadersInit = {};
-    if (serverTiming) {
-      headers["Server-Timing"] = serverTiming;
-    }
-    return data({
-      shopName: storeHandle,
-      shopDomain,
-      storeHandle,
-      shopCurrency: NO_CURRENCY_SENTINEL,
-      currencySupported: true as const,
-      currencyFlipBlocked: false,
-      gatingEnforced,
-      upgradeUrl,
-      sortBy,
-      sortOrder,
-      onlyOverLimit,
-      selectedBuyerId,
-      dashboardData: Promise.resolve({
-        plan: null,
-        usage: null,
-        agingTotals: null,
-        buyerLedger: null,
-        selectedBuyerInvoices: null,
-        overLimitCount: 0,
-        error: null,
-        newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
-        pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
-      } satisfies DeferredDashboardData),
-    }, { headers });
-  }
-
-  const currencyResult = await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id);
+  const currencyResult = shop
+    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
+    : null;
   const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
@@ -518,7 +468,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     }, { headers });
   }
 
-  if (!skipOnboarding) {
+  if (shop && !skipOnboarding) {
     timing.startPhase("onboarding_checks");
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
     timing.endPhase("onboarding_checks");
@@ -526,6 +476,17 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       throw shopifyRedirect("/app/onboarding");
     }
   }
+
+  const storeHandle = shopDomain.replace(".myshopify.com", "");
+  const gatingEnforced = isGatingEnforced();
+  const upgradeUrl = (() => {
+    const handle = getAppHandle();
+    if (handle === null) {
+      safeLog("warn", "plan_url_app_handle_missing", {});
+      return null;
+    }
+    return buildPlanSelectionUrl(shopDomain, handle);
+  })();
 
   timing.endPhase("loader_total");
   timing.logAllPhases();
@@ -536,8 +497,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     headers["Server-Timing"] = serverTiming;
   }
 
-  const waitUntil = getRequestWaitUntil();
-
   const dashboardData = loadDashboardData(
     sql,
     shop,
@@ -546,7 +505,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     session,
     { page, sortBy, sortOrder, selectedBuyerId, onlyOverLimit },
     timing,
-    waitUntil,
   );
 
   return data({

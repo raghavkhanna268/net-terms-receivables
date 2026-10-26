@@ -426,6 +426,31 @@ describe("app home timing instrumentation", () => {
       expect(deferredStages).toContain("plan_resolve");
       expect(deferredStages).toContain("ledger_rows");
     });
+
+    it("loader_total logged exactly once, each deferred phase logged exactly once after await", async () => {
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs());
+
+      const data = (result as { data: Record<string, unknown> }).data;
+      if (data.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+        await (data.dashboardData as Promise<unknown>);
+      }
+
+      const allLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const countByStage = (stage: string) =>
+        allLogs.filter((log: { stage: string }) =>
+          log.stage === stage || log.stage === `${stage}_cold`
+        ).length;
+
+      expect(countByStage("loader_total")).toBe(1);
+      expect(countByStage("plan_resolve")).toBe(1);
+      expect(countByStage("ledger_rows")).toBe(1);
+      expect(countByStage("ledger_count")).toBe(1);
+    });
   });
 
   describe("timing phases", () => {
