@@ -108,7 +108,7 @@ We use the following sub-processors to provide the App:
 |---------------|---------|----------------|----------|
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit | Global (Worker placed near ap-south-1) |
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored App data | AWS ap-south-1 (Mumbai, India) |
-| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
+| Resend, Inc. [TBD: Resend data region, pending DevOps confirmation] | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | [TBD: Resend data region, pending DevOps confirmation] |
 | Functional Software, Inc. (Sentry) | Error monitoring. Data is stored in Sentry's EU data region (Germany). [TBD: Sentry data scope] | Sanitized error and performance events | EU (Germany) |
 
 **Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa)
@@ -154,7 +154,7 @@ We do not provide audit rights. Upon written request, we will provide reasonable
 ### 10. Cross-Border Transfers
 
 Personal data may be transferred to:
-- **Japan:** Resend (ap-northeast-1 data region) for email delivery
+- **[TBD: Resend data region]:** Resend for email delivery
 - **EU (Germany):** Sentry for error monitoring
 - **Global:** Cloudflare edge nodes (transient processing only)
 
