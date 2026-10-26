@@ -178,22 +178,50 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
     }
   }
   
-  // Split by both separators for further analysis
-  const parts = text.split(/[/-]/);
-  
-  // Fallback: try to find segment containing @ if not found yet
+  // Fallback: regex-based VPA extraction for non-standard formats
+  // Handles cases like "PAYMENT UPI-SYNT-9000000000-1@oksynt-DONE" where the
+  // narration contains UPI but doesn't start with UPI- or UPI/
   if (!result.upiId) {
-    for (const part of parts) {
-      const trimmed = part.trim();
-      if (trimmed.includes("@")) {
-        const vpaMatch = trimmed.match(/^([a-zA-Z0-9._]+@[a-zA-Z0-9]+)$/);
-        if (vpaMatch) {
-          result.upiId = vpaMatch[1].toLowerCase();
-          break;
+    // VPA local parts are lowercase/digits/dots/hyphens, handles are lowercase/digits
+    // We need to find the @ and extract the surrounding VPA, but NOT include
+    // uppercase segments (which are names, not VPA parts)
+    // Strategy: find @ then look backwards for lowercase/digit segments joined by hyphens
+    const atIdx = text.indexOf("@");
+    if (atIdx > 0) {
+      // Find handle after @
+      const afterAt = text.slice(atIdx + 1);
+      const handleMatch = afterAt.match(/^([a-z0-9]+)/i);
+      if (handleMatch) {
+        const handle = handleMatch[1].toLowerCase();
+        // Find local part before @ - work backwards through hyphen-separated segments
+        // Stop at uppercase, space, slash, or start of string
+        const beforeAt = text.slice(0, atIdx);
+        // Split into segments and work backwards
+        const segments = beforeAt.split("-");
+        const localParts: string[] = [];
+        for (let i = segments.length - 1; i >= 0; i--) {
+          const seg = segments[i];
+          // Stop if segment has uppercase, space, slash, or is empty
+          if (!seg || /[A-Z\s/]/.test(seg)) {
+            break;
+          }
+          // Include if it's lowercase alphanumeric with dots
+          if (/^[a-z0-9.]+$/.test(seg)) {
+            localParts.unshift(seg);
+          } else {
+            break;
+          }
+        }
+        if (localParts.length > 0) {
+          const localPart = localParts.join("-");
+          result.upiId = `${localPart}@${handle}`;
         }
       }
     }
   }
+  
+  // Split by both separators for further analysis
+  const parts = text.split(/[/-]/);
   
   // ICICI: VPA may be without '@' - check segment index 2 only
   // Format: UPI/CR/vpa-id/SENDER NAME/BANK NAME (index 2 = VPA ID, index 4 = bank)

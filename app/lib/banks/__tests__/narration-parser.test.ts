@@ -332,6 +332,25 @@ describe("narration-parser", () => {
     });
 
     describe("VPA hyphen segment handling (#334)", () => {
+      // Issue #334 exact example: synt-vendor@oksynt was truncated to vendor@oksynt
+      it("extracts synt-vendor@oksynt without truncation (#334 issue example)", () => {
+        const result = parseNarration(
+          "UPI-SYNTVENDOR-synt-vendor@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-vendor@oksynt");
+      });
+
+      // Negative: segment separator hyphen must NOT be swallowed into VPA
+      // e.g. UPI-SYNTVENDOR-synt@oksynt-... must extract synt@oksynt, not syntvendor-synt@oksynt
+      it("does NOT swallow segment separator hyphen into non-hyphenated VPA", () => {
+        const result = parseNarration(
+          "UPI-SYNTVENDOR-synt@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt@oksynt");
+      });
+
       // Alphabetic hyphen in ICICI `/` format
       it("extracts alphabetic hyphenated VPA in ICICI slash format", () => {
         const result = parseNarration(
@@ -453,6 +472,44 @@ describe("narration-parser", () => {
         expect(result.upiId).toBe("syntpayer@oksynt");
       });
     });
+
+    describe("VPA fallback path (QA nit 1 from #347)", () => {
+      // Fallback path: UPI detected but narration doesn't start with UPI- or UPI/
+      // e.g. "PAYMENT UPI-SYNT-vpa@handle-DONE"
+
+      it("extracts numeric-dash VPA on fallback path", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-9000000000-1@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      it("extracts alphabetic-hyphen VPA on fallback path", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-synt-vendor@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-vendor@oksynt");
+      });
+
+      it("does NOT swallow uppercase segment separator on fallback path", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNTVENDOR-synt@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // Must be synt@oksynt, NOT syntvendor-synt@oksynt
+        expect(result.upiId).toBe("synt@oksynt");
+      });
+
+      it("extracts multi-segment VPA on fallback path", () => {
+        const result = parseNarration(
+          "CREDIT UPI-PAYEE-synt-pay-01@oksynt-REF"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-pay-01@oksynt");
+      });
+    });
   });
 
   describe("extractUtrForDedupe", () => {
@@ -504,6 +561,25 @@ describe("narration-parser", () => {
 
       it("returns null when ref is all zeros and narration has no RRN", () => {
         expect(extractUtrForDedupe("some narration without RRN", "UPI", "0000000000000000")).toBeNull();
+      });
+
+      // #334: hyphenated VPA must NOT affect dedupe key (RRN-based, not VPA-based)
+      it("extracts RRN correctly from hyphenated VPA narration (HDFC format)", () => {
+        expect(
+          extractUtrForDedupe("UPI-SYNTVENDOR-synt-vendor@oksynt-SYNT0000001-600000000001-UPI", "UPI", undefined)
+        ).toBe("600000000001");
+      });
+
+      it("extracts RRN correctly from non-hyphenated VPA with segment separator", () => {
+        expect(
+          extractUtrForDedupe("UPI-SYNTVENDOR-synt@oksynt-SYNT0000001-600000000002-UPI", "UPI", undefined)
+        ).toBe("600000000002");
+      });
+
+      it("extracts RRN correctly from ICICI hyphenated VPA format", () => {
+        expect(
+          extractUtrForDedupe("UPI/600000000003/synt-pay@oksynt/SYNT VENDOR/SYNT BANK", "UPI", undefined)
+        ).toBe("600000000003");
       });
     });
 
