@@ -458,11 +458,12 @@ describeWithDb("CompanyLocation Sync", () => {
         const goodLocId1 = `gid://shopify/CompanyLocation/good1-${Date.now()}`;
         const goodLocId2 = `gid://shopify/CompanyLocation/good2-${Date.now()}`;
         
-        // Create another shop for the conflict test
+        // Create another shop for the conflict test (use test- prefix for fake domain)
         const otherShopId = `shop-other-${Date.now()}`;
+        const otherShopDomain = `test-other-${Date.now()}.myshopify.com`;
         await sql`
           INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
-          VALUES (${otherShopId}, ${"other-" + Date.now() + ".myshopify.com"}, NOW(), NOW())
+          VALUES (${otherShopId}, ${otherShopDomain}, NOW(), NOW())
         `;
         
         // Insert an account in the other shop with same companyLocationId
