@@ -261,9 +261,10 @@ describeWithDb("drain: in-flight message for a redacted shop (#239)", () => {
 
     expect(redactTriggered.done).toBe(true);
 
-    // The 2 sync messages (ORDERS_UPDATED and COMPANY_LOCATIONS_DELETE) were read
-    // under VT before redact, so moveToDeadLetter returns false for them.
-    expect(totalAlreadyGone, "deadLetterAlreadyGoneCount for shop A's leaked messages").toBe(2);
+    // ORDERS_UPDATED is now ACKed for uninstalled shops (#239 extension), so only
+    // COMPANY_LOCATIONS_DELETE goes to DLQ. Since it was read under VT before redact,
+    // moveToDeadLetter returns false for it (deadLetterAlreadyGoneCount=1).
+    expect(totalAlreadyGone, "deadLetterAlreadyGoneCount for shop A's leaked messages").toBe(1);
 
     const countsAfter_A = await getShopCounts(sqlRef, A.domain, A.id);
     expect(countsAfter_A.Shop, "Shop A should be deleted").toBe(0);
