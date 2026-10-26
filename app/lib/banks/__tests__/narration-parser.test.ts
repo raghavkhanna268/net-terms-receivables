@@ -632,10 +632,10 @@ describe("narration-parser", () => {
             }
           }
 
-          expect(actualBoundaryIdx).toBe(
-            expectedBoundaryIdx,
+          expect(
+            actualBoundaryIdx,
             `Boundary mismatch for "${desc}": input="${input}"`
-          );
+          ).toBe(expectedBoundaryIdx);
         }
       });
     });
