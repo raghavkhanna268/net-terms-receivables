@@ -34,7 +34,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   await processPlanWelcome(sql, sessionShop, urlShopParam, planHandle, chargeId);
 
-  throw shopifyRedirect("/app");
+  throw shopifyRedirect("/app?plan_handle=&charge_id=");
 };
 
 export const headers: HeadersFunction = (headersArgs) => {
