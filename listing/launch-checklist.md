@@ -69,7 +69,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `write_customers`, `write_orders` scopes (write grants read)
-  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
+  - **Status:** Level 2 (Name, Email) request is in Draft, not yet submitted (Raghav to submit), as of 26 Oct 17:15 IST (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
   - **Owner:** Raghav (Partner Dashboard) — cite [docs/privacy.md Section 2.3](../docs/privacy.md#23-tagged-customer-data) and [Appendix A](../docs/privacy.md#appendix-a-shopify-oauth-scopes)
   - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
     - [ ] File PCD access request form in Partner Dashboard
@@ -197,6 +197,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] Lighthouse audit passing
 - [ ] Sentry wired and receiving errors
 - [ ] CI/CD pipeline green
+- [ ] **Raghav-only, blocks submission:** Submit the Protected customer data access request in Partner Dashboard > API access requests.
 
 ---
 

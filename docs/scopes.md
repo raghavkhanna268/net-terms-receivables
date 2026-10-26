@@ -63,7 +63,7 @@ Implies `read_customers` per [Access Scopes](https://shopify.dev/docs/api/usage/
 | Bulk customer export | S8 | `bulkOperationRunQuery` with customers | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
 | Customer webhooks | S8 | `customers/create`, `customers/update`, `customers/delete` | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
 
-> **Protected Customer Data:** PCD Level 1 (Name, Email): request completed, pending Shopify review, not yet approved. Fields fetched: `id`, `tags`, `email`, `displayName`. Fields NEVER fetched: `phone`, `addresses`, `firstName`, `lastName`, `defaultAddress`. See "Protected Customer Data" section below.
+> **Protected Customer Data:** PCD Level 2 (Name, Email): Draft, not yet submitted (Raghav to submit), as of 26 Oct 17:15 IST. Fields fetched: `id`, `tags`, `email`, `displayName`. Fields NEVER fetched: `phone`, `addresses`, `firstName`, `lastName`, `defaultAddress`. See "Protected Customer Data" section below.
 
 #### write_orders
 
@@ -154,9 +154,9 @@ read_all_orders,read_draft_orders,read_payment_terms,write_companies,write_custo
 
 ## Protected Customer Data
 
-**Status:** PCD Level 1 (Name, Email): request completed, pending Shopify review, not yet approved
+**Status:** PCD Level 2 (Name, Email): Draft, not yet submitted (Raghav to submit), as of 26 Oct 17:15 IST
 
-**Level:** Level 1 + Name + Email
+**Level:** Level 2 (protected customer fields: Name, Email; no phone, no address)
 
 | Field | Fetched | Stored | Purpose |
 |-------|---------|--------|---------|
