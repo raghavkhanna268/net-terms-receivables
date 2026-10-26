@@ -562,6 +562,8 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
     // Create a Shop row so that moveToDeadLetter sees the shop as existing and NOT uninstalled.
     // This ensures non-shop errors keep the full message - only shop-gone scenarios sanitize.
+    // First delete the uninstalled Shop created by beforeEach, then insert a non-uninstalled one.
+    await sqlRef`DELETE FROM "Shop" WHERE domain = ${testContext.missingShopDomain}`;
     await sqlRef`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
       VALUES (${shopId}, ${testContext.missingShopDomain}, 'INR', NOW(), NOW())
