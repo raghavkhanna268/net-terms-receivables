@@ -145,6 +145,31 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       await sql`DELETE FROM s6_bulk_operations WHERE shop = ${uninstalledShopDomain}`;
       await sql`DELETE FROM "Shop" WHERE id = ${uninstalledShopId}`;
     });
+
+    it("ignores closed rows (reinstall_reset) while finding unclosed siblings", async () => {
+      const closedOpId = `gid://shopify/BulkOperation/closed-${TEST_SUFFIX}`;
+      const unclosedOpId = `gid://shopify/BulkOperation/unclosed-${TEST_SUFFIX}`;
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, closed_at, closed_reason)
+        VALUES (${closedOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies', ${twoHoursAgo}, NOW(), 'reinstall_reset')
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at)
+        VALUES (${unclosedOpId}, ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', ${twoHoursAgo})
+      `;
+
+      const { findStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      const result = await findStaleBulkOperations(sql, 60);
+
+      const foundClosed = result.find((r) => r.bulk_operation_id === closedOpId);
+      expect(foundClosed).toBeUndefined();
+
+      const foundUnclosed = result.find((r) => r.bulk_operation_id === unclosedOpId);
+      expect(foundUnclosed).toBeDefined();
+    });
   });
 
   describe("markBulkOperationFailed", () => {
@@ -176,6 +201,26 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at, failure_count)
         VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies', ${twoHoursAgo}, ${oneHourAgo}, 0)
+      `;
+
+      const { markBulkOperationFailed } = await import("../bulk-op-recovery.server");
+      const result = await markBulkOperationFailed(sql, bulkOpId, TEST_SHOP_DOMAIN);
+
+      expect(result).toBe(false);
+
+      const [row] = await sql<{ failure_count: number }[]>`
+        SELECT failure_count FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row.failure_count).toBe(0);
+    });
+
+    it("returns false for closed operation (reinstall_reset)", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/mark-closed-${TEST_SUFFIX}`;
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count, closed_at, closed_reason)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies', ${twoHoursAgo}, 0, NOW(), 'reinstall_reset')
       `;
 
       const { markBulkOperationFailed } = await import("../bulk-op-recovery.server");
@@ -537,6 +582,63 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
         LIMIT 1
       `;
       expect(queuedMsg.message.topic).toBe("BULK_OPERATIONS_FINISH");
+    });
+
+    it("ignores closed rows while processing unclosed siblings", async () => {
+      const { adminGraphQL } = await import("../admin-client.server");
+
+      const closedOpId = `gid://shopify/BulkOperation/closed-shop-${TEST_SUFFIX}`;
+      const unclosedOpId = `gid://shopify/BulkOperation/unclosed-shop-${TEST_SUFFIX}`;
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const closedAt = new Date(Date.now() - 1 * 60 * 60 * 1000);
+
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        data: { node: { status: "COMPLETED" } },
+        retryable: false,
+      });
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, closed_at, closed_reason)
+        VALUES (${closedOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies', ${twoHoursAgo}, ${closedAt}, 'reinstall_reset')
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at)
+        VALUES (${unclosedOpId}, ${TEST_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', ${twoHoursAgo})
+      `;
+
+      const { recoverStaleBulkOperationsForShop } = await import("../bulk-op-recovery.server");
+      const result = await recoverStaleBulkOperationsForShop(sql, TEST_SHOP_DOMAIN, 60);
+
+      expect(result.foundCount).toBe(1);
+      expect(result.enqueuedCount).toBe(1);
+
+      const closedAttempt = result.attempts.find((a) => a.bulkOperationId === closedOpId);
+      expect(closedAttempt).toBeUndefined();
+
+      const unclosedAttempt = result.attempts.find((a) => a.bulkOperationId === unclosedOpId);
+      expect(unclosedAttempt).toBeDefined();
+      expect(unclosedAttempt?.status).toBe("enqueued");
+
+      const [closedOp] = await sql<{ closed_at: Date; closed_reason: string }[]>`
+        SELECT closed_at, closed_reason FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${closedOpId}
+      `;
+      expect(closedOp.closed_at.getTime()).toBe(closedAt.getTime());
+      expect(closedOp.closed_reason).toBe("reinstall_reset");
+
+      const closedQueuedMsgs = await sql<{ msg_id: string }[]>`
+        SELECT msg_id::text FROM pgmq.q_s6_bulk
+        WHERE message->>'bulkOperationId' = ${closedOpId}
+      `;
+      expect(closedQueuedMsgs).toHaveLength(0);
+
+      const unclosedQueuedMsgs = await sql<{ msg_id: string }[]>`
+        SELECT msg_id::text FROM pgmq.q_s6_bulk
+        WHERE message->>'bulkOperationId' = ${unclosedOpId}
+      `;
+      expect(unclosedQueuedMsgs).toHaveLength(1);
     });
   });
 });
