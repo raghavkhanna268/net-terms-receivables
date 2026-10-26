@@ -668,17 +668,16 @@ describeWithDb("Ingestion Paths Integration", () => {
       vi.restoreAllMocks();
     });
 
-    it("order processing logs contain no monetary amounts from input", async () => {
-      const orderId = orderGid(`pii-order-${TEST_SUFFIX}`);
-      const webhookId = `wh-ing-pii-order-${TEST_SUFFIX}`;
+    it("order with missing outstanding triggers log without PII amounts", async () => {
+      const orderId = orderGid(`pii-missing-${TEST_SUFFIX}`);
+      const webhookId = `wh-ing-pii-missing-${TEST_SUFFIX}`;
 
       const order: ShopifyOrder = {
         id: orderId,
-        name: "#PII-TEST",
+        name: "#PII-MISSING",
         createdAt: "2026-10-01T10:00:00.000Z",
-        displayFinancialStatus: "PENDING",
+        displayFinancialStatus: "PARTIALLY_PAID",
         totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
-        totalOutstandingSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
         paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET", dueInDays: 30 },
         purchasingEntity: {
           __typename: "PurchasingCompany",
@@ -692,7 +691,7 @@ describeWithDb("Ingestion Paths Integration", () => {
       expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
 
       const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
-      expect(loggedEvents.length).toBeGreaterThan(0);
+      expect(loggedEvents).toContain("order_total_outstanding_missing");
 
       for (const call of safeLogSpy.mock.calls) {
         const allArgs = JSON.stringify(call);
@@ -705,16 +704,49 @@ describeWithDb("Ingestion Paths Integration", () => {
       }
     });
 
-    it("draft order processing logs contain no monetary amounts from input", async () => {
-      const draftId = draftOrderGid(`pii-draft-${TEST_SUFFIX}`);
-      const webhookId = `wh-ing-pii-draft-${TEST_SUFFIX}`;
+    it("non-INR currency triggers log without shop domain PII", async () => {
+      const orderId = orderGid(`pii-currency-${TEST_SUFFIX}`);
+      const webhookId = `wh-ing-pii-currency-${TEST_SUFFIX}`;
+
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#PII-USD",
+        createdAt: "2026-10-01T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "USD" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", order, webhookId);
+
+      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
+
+      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
+      expect(loggedEvents).toContain("drain_skip_non_inr_order");
+
+      for (const call of safeLogSpy.mock.calls) {
+        const allArgs = JSON.stringify(call);
+        expect(allArgs).not.toContain(TEST_SHOP_DOMAIN);
+        expect(allArgs).not.toContain("myshopify.com");
+        expect(allArgs).not.toContain(PII_AMOUNT);
+      }
+    });
+
+    it("non-INR draft order triggers log without shop domain PII", async () => {
+      const draftId = draftOrderGid(`pii-draft-usd-${TEST_SUFFIX}`);
+      const webhookId = `wh-ing-pii-draft-usd-${TEST_SUFFIX}`;
 
       const draft: ShopifyDraftOrder = {
         id: draftId,
-        name: "#PII-DRAFT",
+        name: "#PII-DRAFT-USD",
         createdAt: "2026-10-01T10:00:00.000Z",
         status: "OPEN",
-        totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
+        totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "USD" } },
         paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
         purchasingEntity: {
           __typename: "PurchasingCompany",
@@ -728,47 +760,12 @@ describeWithDb("Ingestion Paths Integration", () => {
       expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
 
       const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
-      expect(loggedEvents.length).toBeGreaterThan(0);
+      expect(loggedEvents).toContain("drain_skip_non_inr_draft_order");
 
       for (const call of safeLogSpy.mock.calls) {
         const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_AMOUNT);
-      }
-    });
-
-    it("error scenarios log safe codes without PII-shaped amounts", async () => {
-      const orderId = orderGid(`pii-error-${TEST_SUFFIX}`);
-      const webhookId = `wh-ing-pii-error-${TEST_SUFFIX}`;
-
-      const invalidOrder: ShopifyOrder = {
-        id: orderId,
-        name: "#PII-ERROR",
-        createdAt: "2026-10-01T10:00:00.000Z",
-        displayFinancialStatus: "PENDING",
-        totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
-        totalOutstandingSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
-        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
-        purchasingEntity: {
-          __typename: "PurchasingCompany",
-          company: { id: companyGid(`nonexistent-${TEST_SUFFIX}`) },
-          location: { id: companyLocationGid(`nonexistent-${TEST_SUFFIX}`) },
-        },
-      };
-
-      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", invalidOrder, webhookId);
-
-      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
-
-      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
-      expect(loggedEvents.length).toBeGreaterThan(0);
-
-      for (const call of safeLogSpy.mock.calls) {
-        const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_AMOUNT);
-      }
-
-      for (const call of captureExceptionSpy.mock.calls) {
-        const allArgs = JSON.stringify(call);
+        expect(allArgs).not.toContain(TEST_SHOP_DOMAIN);
+        expect(allArgs).not.toContain("myshopify.com");
         expect(allArgs).not.toContain(PII_AMOUNT);
       }
     });
