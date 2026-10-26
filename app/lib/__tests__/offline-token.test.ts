@@ -1181,7 +1181,7 @@ describeWithDb("401 invalid_request leak test (issue #310)", () => {
   const originalConsoleError = console.error;
 
   // Use a placeholder shop distinct from TEST_SHOP
-  const LEAK_TEST_SHOP = "example-shop.myshopify.com";
+  const LEAK_TEST_SHOP = "test-leak-shop.myshopify.com";
   const LEAK_TEST_SESSION_ID = `offline_${LEAK_TEST_SHOP}`;
 
   beforeEach(async () => {
@@ -1261,12 +1261,17 @@ describeWithDb("401 invalid_request leak test (issue #310)", () => {
     expect(allOutput).not.toContain("shprt_dead_refresh_token");
     expect(allOutput).not.toContain("shpat_old_token");
 
+    // CRITICAL: Generic token prefixes must not appear anywhere
+    expect(allOutput).not.toContain("shpat_");
+    expect(allOutput).not.toContain("shprt_");
+
     // CRITICAL: Client secret must not appear
     expect(allOutput).not.toContain(TEST_CLIENT_SECRET);
 
     // CRITICAL: Shop domain must not appear (only hash)
     expect(allOutput).not.toContain(LEAK_TEST_SHOP);
-    expect(allOutput).not.toContain("example-shop");
+    expect(allOutput).not.toContain("test-leak-shop");
+    expect(allOutput).not.toContain("myshopify.com");
 
     // The error message returned should also not contain sensitive data
     expect(result.error).not.toContain(fakeAccessToken);
