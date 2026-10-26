@@ -179,11 +179,40 @@ URL in shell history; read it from a file or a prompt:
 
 ## Retention
 
-The workflow **never deletes** anything, so objects accumulate. The retention
-policy is a later decision:
+The workflow applies **30-day rolling retention** with a keep-newest-7 safety
+floor. The prune job runs after every successful backup.
 
-- The R2 free tier includes 10 GB-month of storage. Watch the bucket size.
-- When a policy is agreed, use an **R2 lifecycle rule** on the `db/` prefix (for
-  example, expire after N days) instead of adding delete permissions to CI.
-- Keep the retained age private keys for at least as long as the retention
-  window.
+### Policy
+
+| Rule                | Description                                                     |
+|---------------------|-----------------------------------------------------------------|
+| **Retention period**| 30 days (objects older than 30 days by `LastModified` are eligible) |
+| **Keep-newest-7**   | The 7 most recent backups are **always kept**, even if all are >30 days old |
+| **Prefix scope**    | Only objects under `db/` in bucket `ntr-db-backups` are considered |
+| **Prefix guard**    | Strict check: the job exits non-zero if any listed key doesn't start with `db/` |
+
+This means a stalled backup job can never delete the last good copies: at worst
+you keep 7 backups indefinitely.
+
+### Dry-run-first rollout
+
+The prune mode defaults to `dry_run`:
+
+- **Scheduled runs** (cron): always `dry_run` until a follow-up PR changes the
+  default. Logs print counts only: `total=`, `eligible=`, `kept=`.
+- **Manual dispatch**: you can select `delete` to actually remove eligible
+  objects. Logs then also print `deleted=`.
+
+Once the dry-run output looks correct for a few days, a follow-up PR can flip
+scheduled runs to `delete`.
+
+### Output safety
+
+Public Actions logs never print object keys, sizes per object, or any content
+that could identify shops. Only aggregate counts are logged.
+
+### Private-key retention
+
+Keep the age private key for at least as long as the retention window (30 days).
+If you rotate the key, keep the old private key until all backups encrypted to
+it have aged out.
