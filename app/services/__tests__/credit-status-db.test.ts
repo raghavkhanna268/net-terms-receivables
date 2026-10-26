@@ -394,11 +394,16 @@ describeWithDb("syncVersion race condition (real functions)", () => {
     let resolveA: (value: unknown) => void;
     const deferredA = new Promise((resolve) => { resolveA = resolve; });
 
+    // Promise that resolves when call A's metafield write starts (transaction committed)
+    let signalCallAStarted: () => void;
+    const callAStartedPromise = new Promise<void>((resolve) => { signalCallAStarted = resolve; });
+
     let callCount = 0;
     mockShopifyGraphQLRequest.mockImplementation(() => {
       callCount++;
       if (callCount === 1) {
-        // Call A - deferred
+        // Call A - signal transaction committed, then defer
+        signalCallAStarted();
         return deferredA;
       }
       // Call B - immediate success
@@ -414,8 +419,8 @@ describeWithDb("syncVersion race condition (real functions)", () => {
       manualHold: false,
     });
 
-    // Wait a tick for A's transaction to complete
-    await new Promise(r => setTimeout(r, 50));
+    // Wait for A's transaction to commit (signaled when mock is called)
+    await callAStartedPromise;
 
     // Get A's syncVersion
     const [afterA] = await sql<{ syncVersion: number }[]>`
@@ -464,11 +469,16 @@ describeWithDb("syncVersion race condition (real functions)", () => {
     let resolveA: (value: unknown) => void;
     const deferredA = new Promise((resolve) => { resolveA = resolve; });
 
+    // Promise that resolves when call A's metafield write starts (transaction committed)
+    let signalCallAStarted: () => void;
+    const callAStartedPromise = new Promise<void>((resolve) => { signalCallAStarted = resolve; });
+
     let callCount = 0;
     mockShopifyGraphQLRequest.mockImplementation(() => {
       callCount++;
       if (callCount === 1) {
-        // Call A - deferred
+        // Call A - signal transaction committed, then defer
+        signalCallAStarted();
         return deferredA;
       }
       // Call B - fails
@@ -484,8 +494,8 @@ describeWithDb("syncVersion race condition (real functions)", () => {
       manualHold: false,
     });
 
-    // Wait for A's transaction
-    await new Promise(r => setTimeout(r, 50));
+    // Wait for A's transaction to commit (signaled when mock is called)
+    await callAStartedPromise;
 
     // Call B runs but metafield fails → syncPending stays true
     const resultB = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {
