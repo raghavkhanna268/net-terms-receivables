@@ -277,10 +277,10 @@ When disabled or unset:
 
 ### Pre-Launch
 
-- [ ] Complete Shopify Protected Customer Data (PCD) approval form
-- [ ] Fill in `[TBD: ...]` sections in `docs/privacy.md` with actual company details
+- [x] PCD request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing (Level 2: Name and Email only)
+- [x] Fill in `[TBD: ...]` sections in `docs/privacy.md` with actual company details (#313, #357)
 - [ ] Set up DPAs with Cloudflare and Supabase
-- [ ] Accept [Resend DPA](https://resend.com/legal/dpa) before enabling email notifications
+- [x] Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard (product-owner ruling, 2026-10-26).
 - [ ] Configure data retention policies for audit events
 - [ ] Decide on email delivery for data requests (currently in-admin only)
 - [ ] Verify CUSTOMER_PII_FIELDS flag is off in production until PCD approval
