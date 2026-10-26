@@ -23,6 +23,7 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { DateTime } from "luxon";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
+import { syncClockToDb as syncClockToDbBase } from "../../../tests/helpers/db-clock";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -75,12 +76,11 @@ function computeDatesFromDbNow(dbNow: Date, testTimezone: string) {
 /**
  * Read NOW() from the database and sync JS clock to it.
  * Returns the DB instant and computed test timezone.
+ * Uses the shared syncClockToDb helper and adds timezone computation.
  */
 async function syncClockToDb(sql: ReturnType<typeof postgres>) {
-  const [row] = await sql<{ now: Date }[]>`SELECT NOW() AS now`;
-  const dbNow = row.now;
+  const dbNow = await syncClockToDbBase(sql);
   const testTimezone = computeTestTimezone(dbNow);
-  vi.setSystemTime(dbNow);
   return { dbNow, testTimezone };
 }
 
