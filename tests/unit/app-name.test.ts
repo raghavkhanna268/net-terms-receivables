@@ -179,13 +179,11 @@ function isInSkipPath(filePath: string): boolean {
   return false;
 }
 
-function isPendingFollowup(filePath: string, lineNumber: number): boolean {
-  return PENDING_FOLLOWUP_ALLOWLIST.some(
-    (entry) => filePath === entry.file && lineNumber === entry.line
-  );
-}
-
-function isAllowlisted(content: string, offset: number): boolean {
+/**
+ * Check if the offset is on a line matching an allowlist pattern.
+ * Uses exact line matching (not a context window).
+ */
+export function isAllowlisted(content: string, offset: number): boolean {
   const lineStart = content.lastIndexOf("\n", offset - 1) + 1;
   const lineEnd = content.indexOf("\n", offset);
   const line = content.slice(lineStart, lineEnd === -1 ? content.length : lineEnd);
@@ -193,7 +191,39 @@ function isAllowlisted(content: string, offset: number): boolean {
   return ALLOWLIST_PATTERNS.some(({ pattern }) => pattern.test(line));
 }
 
-function isInComment(content: string, offset: number): boolean {
+/**
+ * Check if offset is inside a string literal.
+ * Handles single quotes, double quotes, and template literals.
+ */
+function isInsideStringLiteral(content: string, offset: number): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+
+  for (let i = 0; i < offset && i < content.length; i++) {
+    const char = content[i];
+    const prev = i > 0 ? content[i - 1] : "";
+
+    if (prev === "\\") continue;
+
+    if (char === "'" && !inDouble && !inTemplate) {
+      inSingle = !inSingle;
+    } else if (char === '"' && !inSingle && !inTemplate) {
+      inDouble = !inDouble;
+    } else if (char === "`" && !inSingle && !inDouble) {
+      inTemplate = !inTemplate;
+    }
+  }
+
+  return inSingle || inDouble || inTemplate;
+}
+
+/**
+ * Check if offset is inside a comment (line or block).
+ * Properly handles line comments, block comments, unclosed block comments
+ * (not treated as comments), and comment markers inside string literals.
+ */
+export function isInComment(content: string, offset: number): boolean {
   const lineStart = content.lastIndexOf("\n", offset) + 1;
   const lineContent = content.slice(lineStart, offset);
   const trimmed = lineContent.trim();
@@ -201,9 +231,26 @@ function isInComment(content: string, offset: number): boolean {
   if (trimmed.startsWith("//")) return true;
   if (trimmed.startsWith("*")) return true;
 
-  const lastBlockOpen = content.lastIndexOf("/*", offset);
-  const lastBlockClose = content.lastIndexOf("*/", offset);
-  if (lastBlockOpen !== -1 && lastBlockOpen > lastBlockClose) {
+  let lastValidBlockOpen = -1;
+  let searchStart = 0;
+
+  while (true) {
+    const blockOpen = content.indexOf("/*", searchStart);
+    if (blockOpen === -1 || blockOpen >= offset) break;
+
+    if (!isInsideStringLiteral(content, blockOpen)) {
+      const blockClose = content.indexOf("*/", blockOpen + 2);
+      if (blockClose === -1 || blockClose >= offset) {
+        lastValidBlockOpen = blockOpen;
+        break;
+      }
+      searchStart = blockClose + 2;
+    } else {
+      searchStart = blockOpen + 2;
+    }
+  }
+
+  if (lastValidBlockOpen !== -1) {
     const nextClose = content.indexOf("*/", offset);
     if (nextClose !== -1) {
       return true;
@@ -211,6 +258,40 @@ function isInComment(content: string, offset: number): boolean {
   }
 
   return false;
+}
+
+/**
+ * Find violations in file content after applying comment and allowlist filters.
+ * This is the core logic used by the guard test.
+ */
+export function findViolations(
+  content: string,
+  filePath: string,
+  pendingAllowlist: Array<{ file: string; line: number }> = []
+): OldNameMatch[] {
+  const matches = scanForOldName(content, filePath);
+  const violations: OldNameMatch[] = [];
+
+  for (const match of matches) {
+    if (isInComment(content, match.offset)) {
+      continue;
+    }
+
+    if (isAllowlisted(content, match.offset)) {
+      continue;
+    }
+
+    const isPending = pendingAllowlist.some(
+      (entry) => filePath === entry.file && match.line === entry.line
+    );
+    if (isPending) {
+      continue;
+    }
+
+    violations.push(match);
+  }
+
+  return violations;
 }
 
 function findTsFiles(dir: string, files: string[] = []): string[] {
@@ -291,7 +372,7 @@ describe("App Name Guard", () => {
   it("no old app name in UI strings (app/**/*.{ts,tsx})", () => {
     const appDir = path.join(process.cwd(), "app");
     const files = findTsFiles(appDir);
-    const violations: OldNameMatch[] = [];
+    const allViolations: OldNameMatch[] = [];
 
     for (const filePath of files) {
       const relativePath = path.relative(process.cwd(), filePath);
@@ -301,31 +382,16 @@ describe("App Name Guard", () => {
       }
 
       const content = fs.readFileSync(filePath, "utf-8");
-      const matches = scanForOldName(content, relativePath);
-
-      for (const match of matches) {
-        if (isInComment(content, match.offset)) {
-          continue;
-        }
-
-        if (isAllowlisted(content, match.offset)) {
-          continue;
-        }
-
-        if (isPendingFollowup(relativePath, match.line)) {
-          continue;
-        }
-
-        violations.push(match);
-      }
+      const violations = findViolations(content, relativePath, PENDING_FOLLOWUP_ALLOWLIST);
+      allViolations.push(...violations);
     }
 
-    if (violations.length > 0) {
-      const message = violations
+    if (allViolations.length > 0) {
+      const message = allViolations
         .map((v) => `  ${v.file}:${v.line}: ${v.text}`)
         .join("\n");
       expect.fail(
-        `Found ${violations.length} occurrence(s) of old app name in UI strings:\n${message}`
+        `Found ${allViolations.length} occurrence(s) of old app name in UI strings:\n${message}`
       );
     }
   });
@@ -337,7 +403,7 @@ describe("App Name Guard", () => {
     }
 
     const files = findTsFiles(emailsDir);
-    const violations: OldNameMatch[] = [];
+    const allViolations: OldNameMatch[] = [];
 
     for (const filePath of files) {
       const relativePath = path.relative(process.cwd(), filePath);
@@ -347,27 +413,16 @@ describe("App Name Guard", () => {
       }
 
       const content = fs.readFileSync(filePath, "utf-8");
-      const matches = scanForOldName(content, relativePath);
-
-      for (const match of matches) {
-        if (isInComment(content, match.offset)) {
-          continue;
-        }
-
-        if (isPendingFollowup(relativePath, match.line)) {
-          continue;
-        }
-
-        violations.push(match);
-      }
+      const violations = findViolations(content, relativePath, PENDING_FOLLOWUP_ALLOWLIST);
+      allViolations.push(...violations);
     }
 
-    if (violations.length > 0) {
-      const message = violations
+    if (allViolations.length > 0) {
+      const message = allViolations
         .map((v) => `  ${v.file}:${v.line}: ${v.text}`)
         .join("\n");
       expect.fail(
-        `Found ${violations.length} occurrence(s) of old app name in email templates:\n${message}`
+        `Found ${allViolations.length} occurrence(s) of old app name in email templates:\n${message}`
       );
     }
   });
@@ -427,7 +482,7 @@ const b = "Net Terms Receivables";
     expect(matches[1].line).toBe(3);
   });
 
-  it("computes matchLength from actual matched text", () => {
+  it("computes matchLength from actual matched text (fails on hardcoded 22)", () => {
     const fixture = `const name = "Net Terms Receivables";`;
     const matches = scanForOldName(fixture, "test-fixture.ts");
     expect(matches.length).toBe(1);
@@ -439,54 +494,73 @@ const b = "Net Terms Receivables";
     Receivables";`;
     const matches = scanForOldName(fixture, "test-fixture.ts");
     expect(matches.length).toBe(1);
-    expect(matches[0].matchLength).toBeGreaterThan(22);
+    expect(matches[0].matchLength).toBe(25);
   });
 });
 
 describe("isInComment (unit tests)", () => {
-  it("detects line comment", () => {
-    const fixture = `// Net Terms Receivables comment`;
-    const matches = scanForOldName(fixture, "test-fixture.ts");
-    expect(matches.length).toBe(1);
+  it("filters match inside line comment", () => {
+    const fixture = `// Net Terms Receivables comment
+const x = 1;`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(0);
   });
 
-  it("detects block comment", () => {
+  it("filters match inside properly closed block comment", () => {
     const fixture = `/* Net Terms Receivables */ const x = 1;`;
-    const matches = scanForOldName(fixture, "test-fixture.ts");
-    expect(matches.length).toBe(1);
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(0);
   });
 
-  it("unclosed /* does not mark rest of file as comment", () => {
+  it("unclosed /* does not hide a later real match (fails on main)", () => {
     const fixture = `const x = "text /* not a comment";
 const y = "Net Terms Receivables";`;
-    const matches = scanForOldName(fixture, "test-fixture.ts");
-    expect(matches.length).toBe(1);
-    expect(matches[0].line).toBe(2);
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
   });
 
-  it("properly closed block comment is detected", () => {
-    const fixture = `/* 
-Net Terms Receivables 
-*/ const after = 1;`;
-    const matches = scanForOldName(fixture, "test-fixture.ts");
-    expect(matches.length).toBe(1);
+  it("/* inside string literal does not hide later match (fails on main)", () => {
+    const fixture = `const regex = "pattern /* here";
+const name = "Net Terms Receivables";
+const end = "and */ done";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
+  });
+
+  it("real block comment still filters correctly", () => {
+    const fixture = `const before = 1;
+/* 
+Net Terms Receivables inside comment
+*/
+const after = "Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(5);
   });
 });
 
 describe("isAllowlisted (unit tests)", () => {
-  it("matches pattern on exact line containing match", () => {
+  it("allowlist entry only exempts its exact line (fails on main)", () => {
     const fixture = `const url = "github.com/user/net-terms-receivables";
 const name = "Net Terms Receivables";`;
-    const matches = scanForOldName(fixture, "test-fixture.ts");
-    expect(matches.length).toBe(1);
-    expect(matches[0].line).toBe(2);
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
   });
 
-  it("does not match pattern from adjacent line", () => {
-    const fixture = `const url = "github.com/user/net-terms-receivables";
-const name = "Net Terms Receivables";`;
-    const matches = scanForOldName(fixture, "test-fixture.ts");
-    expect(matches.length).toBe(1);
-    expect(matches[0].text).toContain("Net Terms Receivables");
+  it("allowlist pattern on same line filters the match", () => {
+    const fixture = `const url = "github.com/user/net-terms-receivables Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(0);
+  });
+
+  it("allowlist does not apply across lines within 100 chars (fails on main)", () => {
+    const fixture = `const h = "net-terms-receivables";
+const m = "Net Terms Receivables";`;
+    const violations = findViolations(fixture, "test-fixture.ts");
+    expect(violations.length).toBe(1);
+    expect(violations[0].line).toBe(2);
   });
 });
