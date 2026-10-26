@@ -1991,21 +1991,25 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       }
     });
 
-    it("OP_NOT_FOUND: unregistered operation returns bulk_op_not_found with no GID", async () => {
+    it("OP_NOT_FOUND: unregistered operation via drain emits bulk_message_failed with no GID", async () => {
       // S25-followup: Test BULK_ERROR_CODES.OP_NOT_FOUND when operation was never registered.
-      // Asserts that the error message and any logged context contain no GID.
-      const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
+      // Drives the message through runDrain() so the REAL safeLog emits bulk_message_failed.
+      // Asserts: log line exists, errorCode === 'bulk_op_not_found', no GID in logged context,
+      // and DLQ row error is 'permanent:bulk_op_not_found'.
+      const { runDrain, DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
+      const { BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const SHOP_ID = `shop-op-not-found-${TEST_SUFFIX}`;
       const SHOP_DOMAIN = `op-not-found-${TEST_SUFFIX}.myshopify.com`;
       const bulkOpId = `gid://shopify/BulkOperation/never-registered-${TEST_SUFFIX}`;
       const webhookId = `finish:never-registered:${bulkOpId}`;
 
-      // Spy on console methods to capture safeLog output (safeLog calls console.log/warn/etc)
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      // Spy on console methods to capture safeLog output (safeLog uses console.warn for "warn" level)
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+      const consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
 
       try {
         await sql`
@@ -2015,41 +2019,76 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
         // Note: We intentionally do NOT create an s6_bulk_operations row
 
+        // Clear any existing messages
+        await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${SHOP_DOMAIN}`;
+        await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${SHOP_DOMAIN}`;
+
+        // Insert message directly into pgmq. pgmq.read() increments read_ct by 1,
+        // so insert with maxRetries - 1 to have read_ct = maxRetries after read.
+        // This ensures permanent errors go to DLQ immediately.
         const message = {
-          topic: "BULK_OPERATIONS_FINISH" as const,
+          topic: "BULK_OPERATIONS_FINISH",
           shop: SHOP_DOMAIN,
           webhookId,
           bulkOperationId: bulkOpId,
-          bulkType: "companies" as const,
+          bulkType: "companies",
           enqueuedAt: new Date().toISOString(),
         };
-        const result = await processBulkOperation(sql, message);
 
-        // Assertions on returned result
-        expect(result.success).toBe(false);
-        expect(result.error).toBe(BULK_ERROR_CODES.OP_NOT_FOUND);
-        expect(result.errorCode).toBe(BULK_ERROR_CODES.OP_NOT_FOUND);
-        expect(result.errorType).toBe("permanent");
+        await sql`
+          INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
+          VALUES (NOW(), ${DEFAULT_DRAIN_CONFIG.maxRetries - 1}, NOW(), ${sql.json(message)})
+        `;
 
-        // Key assertions: no GID in error string or logged context
-        expect(result.error).not.toContain("gid://");
+        // Process the drain (which processes both sync and bulk queues)
+        const result = await runDrain(sql, {
+          ...DEFAULT_DRAIN_CONFIG,
+          batchSize: 1,
+          timeBudgetMs: 5000,
+        });
 
-        // Check all console calls for GID patterns (safeLog outputs to console)
-        const allCalls = [
-          ...consoleSpy.mock.calls,
-          ...consoleWarnSpy.mock.calls,
-          ...consoleErrorSpy.mock.calls,
-          ...consoleInfoSpy.mock.calls,
-        ];
-        for (const call of allCalls) {
-          const callString = JSON.stringify(call);
-          expect(callString).not.toContain("gid://");
-        }
+        // Should have dead-lettered exactly 1 message (permanent error)
+        expect(result.deadLettered).toBe(1);
+
+        // Find the bulk_message_failed log line by event name (no loop)
+        // safeLog("warn", "bulk_message_failed", ...) outputs to console.warn as a single JSON string
+        const bulkMessageFailedCall = consoleWarnSpy.mock.calls.find((call) => {
+          const arg = call[0];
+          if (typeof arg !== "string") return false;
+          try {
+            const parsed = JSON.parse(arg);
+            return parsed.event === "bulk_message_failed";
+          } catch {
+            return false;
+          }
+        });
+
+        // Assert the log line exists (not a conditional assert)
+        expect(bulkMessageFailedCall).toBeDefined();
+
+        // Parse and verify the logged fields
+        const loggedData = JSON.parse(bulkMessageFailedCall![0] as string);
+        expect(loggedData.errorCode).toBe(BULK_ERROR_CODES.OP_NOT_FOUND);
+
+        // Assert no GID in the raw call args
+        const callArgsJson = JSON.stringify(bulkMessageFailedCall);
+        expect(callArgsJson).not.toContain("gid://");
+
+        // Verify DLQ row exists with the correct error
+        const [dlqRow] = await sql<{ error: string }[]>`
+          SELECT error FROM s6_dead_letter
+          WHERE original_queue = 's6_bulk'
+            AND message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(dlqRow).toBeDefined();
+        expect(dlqRow.error).toBe("permanent:bulk_op_not_found");
       } finally {
-        consoleSpy.mockRestore();
+        consoleLogSpy.mockRestore();
         consoleWarnSpy.mockRestore();
         consoleErrorSpy.mockRestore();
         consoleInfoSpy.mockRestore();
+        consoleDebugSpy.mockRestore();
+        await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${SHOP_DOMAIN}`;
         await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
       }
     });
