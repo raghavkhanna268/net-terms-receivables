@@ -43,6 +43,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
+  // #292: GDPR data-request list is EXEMPT from currency gating.
+  // This is a compliance view for customers/data_request webhooks.
+
   // Purge expired data requests on access (in-app purge for databases without pg_cron)
   await purgeExpiredDataRequests(sql, shop.id);
 

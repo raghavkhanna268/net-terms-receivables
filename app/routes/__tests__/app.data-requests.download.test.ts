@@ -150,5 +150,58 @@ describe("app.data-requests.$id.download", () => {
 
       expect(mockAuthenticate).toHaveBeenCalledWith(request);
     });
+
+    it("returns export for USD shop (GDPR exempt from currency gate)", async () => {
+      const exportData = {
+        customerGid: "gid://shopify/Customer/789",
+        requestId: "req-usd-456",
+        requestedAt: "2026-01-02T00:00:00.000Z",
+        data: {
+          taggedCustomer: { tags: ["net-terms"], tagActive: true },
+          draftOrders: [],
+          buyerAccount: { id: "acc-001", name: "USD Buyer" },
+          invoices: [{ id: "inv-001", amountPaise: "100000" }],
+        },
+      };
+
+      // Shop with USD currency - export should still work
+      mockSql.mockResolvedValueOnce([{ id: "shop-usd", currency: "USD" }]);
+      mockGetDataRequestExport.mockResolvedValueOnce(exportData);
+
+      const request = new Request("https://example.com/app/data-requests/req-usd-456/download");
+      const response = await loader(createMockLoaderArgs(request, { id: "req-usd-456" }));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("application/json");
+
+      const json = (await response.json()) as { customerGid: string; data: { invoices: unknown[] } };
+      expect(json.customerGid).toBe("gid://shopify/Customer/789");
+      expect(json.data.invoices).toHaveLength(1);
+    });
+
+    it("returns export for shop with NULL currency (GDPR exempt from currency gate)", async () => {
+      const exportData = {
+        customerGid: "gid://shopify/Customer/999",
+        requestId: "req-null-789",
+        requestedAt: "2026-01-03T00:00:00.000Z",
+        data: {
+          taggedCustomer: null,
+          draftOrders: [],
+          buyerAccount: null,
+          invoices: [],
+        },
+      };
+
+      // Shop with NULL currency - export should still work
+      mockSql.mockResolvedValueOnce([{ id: "shop-null", currency: null }]);
+      mockGetDataRequestExport.mockResolvedValueOnce(exportData);
+
+      const request = new Request("https://example.com/app/data-requests/req-null-789/download");
+      const response = await loader(createMockLoaderArgs(request, { id: "req-null-789" }));
+
+      expect(response.status).toBe(200);
+      const json = (await response.json()) as { customerGid: string };
+      expect(json.customerGid).toBe("gid://shopify/Customer/999");
+    });
   });
 });

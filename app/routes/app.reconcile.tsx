@@ -37,7 +37,8 @@ import { applyMatch, unmatchMatch, RECONCILE_HUMAN_MESSAGES } from "~/services/a
 import { formatPaiseAmount } from "~/lib/aging";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
-import { isShopCurrencySupported } from "~/lib/shop-currency.server";
+import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 const PAGE_SIZE = 20;
 
@@ -123,14 +124,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const selectedPaymentId = url.searchParams.get("payment") ?? null;
 
   // Get shop ID
-  const [shop] = await sql<{ id: string; currency: string }[]>`
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
     return {
       shopCurrency: "INR",
-      currencySupported: false,
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -138,11 +138,24 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Shop not found",
       tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
+      notSupported: false,
     };
   }
 
-  // G7: Check currency support for reconcile actions
-  const currencySupported = isShopCurrencySupported(shop.currency);
+  // #292: Check currency gate - if not supported, return minimal payload with no amounts
+  if (!isCurrencyGateOpen(shop.currency)) {
+    return {
+      shopCurrency: getEffectiveCurrency(shop.currency),
+      payments: [],
+      matches: [],
+      selectedPayment: null,
+      pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
+      view,
+      error: null,
+      tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
+      notSupported: true,
+    };
+  }
 
   let payments: PaymentSummary[] = [];
   let matches: MatchSummary[] = [];
@@ -312,8 +325,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       err: toErrorCode(err),
     });
     return {
-      shopCurrency: shop.currency,
-      currencySupported,
+      shopCurrency: getEffectiveCurrency(shop.currency),
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -321,6 +333,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Failed to load reconciliation data",
       tabCounts,
+      notSupported: false,
     };
   }
 
@@ -333,8 +346,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   });
 
   return {
-    shopCurrency: shop.currency,
-    currencySupported,
+    shopCurrency: getEffectiveCurrency(shop.currency),
     payments,
     matches,
     selectedPayment,
@@ -342,6 +354,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     view,
     error: null,
     tabCounts,
+    notSupported: false,
   };
 };
 
@@ -363,8 +376,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return { success: false, error: "Shop not found" };
   }
 
-  // G7: Currency guard - refuse all reconcile actions for non-INR or unknown shops
-  if (!isShopCurrencySupported(shop.currency)) {
+  // #292/G7: Currency guard - refuse all reconcile actions for non-INR or unknown shops
+  if (!isCurrencyGateOpen(shop.currency)) {
     return { success: false, error: "Currency not supported" };
   }
 
@@ -1016,9 +1029,9 @@ function PushingMatchesView({
 }
 
 export default function ReconcilePage() {
+  const loaderData = useLoaderData<typeof loader>();
   const {
     shopCurrency,
-    currencySupported,
     payments,
     matches,
     selectedPayment,
@@ -1026,24 +1039,26 @@ export default function ReconcilePage() {
     view,
     error,
     tabCounts,
-  } = useLoaderData<typeof loader>();
+  } = loaderData;
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
-  // G7: Disable actions for non-INR or unknown shops
-  const actionsDisabled = isSubmitting || !currencySupported;
+  const actionsDisabled = isSubmitting;
+
+  // #292: When currency not supported, show only the banner
+  if ("notSupported" in loaderData && loaderData.notSupported) {
+    return (
+      <s-page heading="Payment Reconciliation">
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
 
   return (
     <s-page heading="Payment Reconciliation">
-      {/* G7: Currency not supported banner */}
-      {!currencySupported && (
-        <s-section>
-          <s-banner tone="critical" heading="Currency Not Supported">
-            Payment reconciliation is only available for INR stores. Your store
-            currency ({!shopCurrency || shopCurrency === "XXX" ? "unknown" : shopCurrency}) is not supported.
-          </s-banner>
-        </s-section>
-      )}
-
       {error && (
         <s-section>
           <s-banner tone="critical" heading="Error">
