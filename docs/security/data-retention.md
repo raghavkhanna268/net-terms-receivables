@@ -71,7 +71,7 @@
 
 3. **pgmq queue tables:** Shop-scoped messages deleted by `deleteShop()` from `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 174-188 in `compliance.server.ts`).
 
-   Processed sync-queue messages are kept for 30 days for troubleshooting and will be deleted after 30 days once the purge job is enabled.
+   Processed sync-queue messages are kept for 30 days for troubleshooting, then deleted.
 
    Status: scheduled daily. The pg_cron job `pgmq_purge_archives_30d` (`30 5 * * *`, daily 05:30 UTC; `prisma/migrations/20261125000000_pgmq_archive_purge_schedule/migration.sql`) runs `public.pgmq_purge_archives_30d()` (`prisma/migrations/20261124000000_pgmq_archive_purge/migration.sql`), which deletes rows archived more than 30 days ago from `pgmq.a_s6_sync` and `pgmq.a_s6_bulk` in bounded batches.
 

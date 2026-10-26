@@ -81,6 +81,7 @@ describe("pgmq archive purge schedule migration", () => {
       "Processed sync-queue messages are kept for 30 days for troubleshooting, then deleted.",
     );
     expect(doc).toMatch(/Status: scheduled daily\./);
+    expect(doc).not.toContain("once the purge job is enabled");
     expect(doc).not.toMatch(
       /pgmq_purge_archives_30d\(\)`[^\n]*not scheduled yet/,
     );
