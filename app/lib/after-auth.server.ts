@@ -20,6 +20,7 @@ import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY, isShopCurrencySupported } from "./shop-currency.server";
 import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "./shop-currency-guard.server";
+import { enqueueCreditStatusRecompute } from "~/services/credit-status-recompute.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -625,7 +626,7 @@ export function evictShopFromSetupCache(shop: string): void {
  * - Shop is installed (uninstalledAt IS NULL)
  * - Shop currency is INR (SUPPORTED_SHOP_CURRENCY)
  * - Owner present: COMPANY must have companyLocationId, TAGGED_CUSTOMER must have customerId
- * - Not redacted: customerId NOT LIKE '%_redacted_%' (uses ESCAPE '\\' for underscore)
+ * - Not redacted: customerId NOT LIKE '%_redacted_%' (uses ESCAPE '\' for underscore)
  * - No permanent error code (metafieldSyncErrorCode IS NULL)
  *
  * Order: HELD accounts first (highest enforcement risk), then by id ascending.
@@ -633,7 +634,7 @@ export function evictShopFromSetupCache(shop: string): void {
  * and are picked up by the daily sweep at 100/day.
  *
  * Source: 'sync' (uses per-ms dedupe key, distinct from daily_sweep's per-day key).
- * Messages are batch-inserted via INSERT...SELECT for efficiency.
+ * Uses enqueueCreditStatusRecompute helper for consistent message shape.
  *
  * @see prisma/migrations/20261111000000_sweep_skip_uninstalled/migration.sql - Part 3 resync
  * @see enqueue_credit_status_recomputes() function in that migration
@@ -652,48 +653,30 @@ async function enqueueReinstallResync(
   shopId: string,
   shopDomain: string,
 ): Promise<number> {
-  const nowMsStr = String(Date.now());
-
-  const result = await sql<{ enqueued_count: number }[]>`
-    WITH eligible_accounts AS (
-      SELECT ba.id
-      FROM "BuyerAccount" ba
-      JOIN "Shop" s ON s.id = ba."shopId"
-      WHERE ba."shopId" = ${shopId}
-        AND ba."syncPending" = true
-        AND (ba."metafieldSyncedAt" IS NULL OR ba."metafieldSyncedAt" < NOW() - INTERVAL '1 day')
-        AND s."uninstalledAt" IS NULL
-        AND s.currency = ${SUPPORTED_SHOP_CURRENCY}
-        AND NOT (ba.kind = 'COMPANY' AND ba."companyLocationId" IS NULL)
-        AND NOT (ba.kind = 'TAGGED_CUSTOMER' AND ba."customerId" IS NULL)
-        AND (ba."customerId" IS NULL OR ba."customerId" NOT LIKE ${REDACTED_CUSTOMER_PATTERN} ESCAPE '\\')
-        AND ba."metafieldSyncErrorCode" IS NULL
-      ORDER BY
-        CASE WHEN ba."holdState" = 'HELD' THEN 0 ELSE 1 END,
-        ba.id
-      LIMIT ${REINSTALL_ENQUEUE_CAP}
-    ),
-    inserted AS (
-      INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-      SELECT
-        NOW(),
-        0,
-        NOW(),
-        jsonb_build_object(
-          'topic', 'CREDIT_STATUS_RECOMPUTE',
-          'shop', ${shopDomain}::text,
-          'buyerAccountId', ea.id,
-          'source', 'sync',
-          'webhookId', 'credit_recompute:' || ea.id || ':' || ${nowMsStr}::text,
-          'resourceGid', ea.id
-        )
-      FROM eligible_accounts ea
-      RETURNING 1
-    )
-    SELECT COUNT(*)::int AS enqueued_count FROM inserted
+  const accounts = await sql<{ id: string }[]>`
+    SELECT ba.id
+    FROM "BuyerAccount" ba
+    JOIN "Shop" s ON s.id = ba."shopId"
+    WHERE ba."shopId" = ${shopId}
+      AND ba."syncPending" = true
+      AND (ba."metafieldSyncedAt" IS NULL OR ba."metafieldSyncedAt" < NOW() - INTERVAL '1 day')
+      AND s."uninstalledAt" IS NULL
+      AND s.currency = ${SUPPORTED_SHOP_CURRENCY}
+      AND NOT (ba.kind = 'COMPANY' AND ba."companyLocationId" IS NULL)
+      AND NOT (ba.kind = 'TAGGED_CUSTOMER' AND ba."customerId" IS NULL)
+      AND (ba."customerId" IS NULL OR ba."customerId" NOT LIKE ${REDACTED_CUSTOMER_PATTERN} ESCAPE '\\')
+      AND ba."metafieldSyncErrorCode" IS NULL
+    ORDER BY
+      CASE WHEN ba."holdState" = 'HELD' THEN 0 ELSE 1 END,
+      ba.id
+    LIMIT ${REINSTALL_ENQUEUE_CAP}
   `;
 
-  return result[0]?.enqueued_count ?? 0;
+  for (const account of accounts) {
+    await enqueueCreditStatusRecompute(sql, shopDomain, account.id, "sync");
+  }
+
+  return accounts.length;
 }
 
 /**

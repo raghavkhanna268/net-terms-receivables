@@ -2,13 +2,18 @@
  * #294 PR2: DB-backed integration tests for reinstall credit status re-push.
  *
  * Tests verify:
- * 1. POSITIVE: Reinstall of INR shop enqueues >0 messages and logs existing info key
+ * 1. POSITIVE: Reinstall of INR shop enqueues exactly 1 message with correct shape
  * 2. NEGATIVE: Non-INR, XXX/NULL currency, failing setup, and still-uninstalled all get 0
  * 3. Eligibility exclusions: no-owner, redacted (but not lookalikes), permanent error
  * 4. Cap enforcement: 500 max and exact-500, HELD-first ordering
- * 5. Enqueue failure doesn't fail auth (try/catch present)
+ * 5. Enqueue failure doesn't fail auth (try/catch present) with no leaks
  * 6. No sensitive data leaks in logs
  * 7. 'sync' source is handled by all consumers
+ * 8. Message shape matches helper (6 keys, headers NULL, read_ct 0)
+ * 9. Helper-direct tests for currency filtering (c-SQL)
+ * 10. Late uninstall test (d-JS)
+ * 11. Second same-day reinstall produces distinct webhookIds
+ * 12. No-owner accounts are excluded
  *
  * Uses the same exclusions as Part 3 resync in enqueue_credit_status_recomputes(),
  * plus the INR filter and HELD-first ordering.
@@ -102,18 +107,19 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
   });
 
   describe("POSITIVE: reinstall of INR shop enqueues messages", () => {
-    it("uninstalled INR shop enqueues >0 messages and logs cleared_uninstalled_at_and_metafield_errors", async () => {
+    it("uninstalled INR shop enqueues exactly 1 message with correct shape and logs cleared_uninstalled_at_and_metafield_errors", async () => {
       // Set uninstalledAt so reinstall branch runs
       await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${inrShopId}`;
 
+      const testAccountId = `pos-test-acct-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
+          id, "shopId", kind, "companyId", "companyLocationId", name,
           "holdState", "syncPending", "metafieldSyncedAt",
           "createdAt", "updatedAt"
         )
         VALUES
-          (${inrShopId}, 'COMPANY'::"AccountKind",
+          (${testAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
            'gid://shopify/Company/pos-1', 'gid://shopify/CompanyLocation/pos-1',
            'Positive Test Account', 'OK', true, NULL, NOW(), NOW())
       `;
@@ -148,14 +154,14 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       runAfterAuth(INR_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
       for (let n = 0; n < waitUntilPromises.length; n++) await waitUntilPromises[n];
 
-      // Verify messages enqueued
+      // Verify exactly 1 message enqueued
       const messages = await sql<{ count: number }[]>`
         SELECT COUNT(*)::int AS count
         FROM pgmq.q_s6_sync
         WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
           AND message->>'shop' = ${INR_SHOP}
       `;
-      expect(messages[0].count).toBeGreaterThan(0);
+      expect(messages[0].count).toBe(1);
 
       // Verify existing info log key was used
       const logCalls = consoleLogSpy.mock.calls.map(c => JSON.stringify(c));
@@ -163,6 +169,95 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       expect(hasReinstallLog).toBe(true);
 
       consoleLogSpy.mockRestore();
+    });
+
+    it("message has exact 6-key shape with headers NULL and read_ct 0 (read-back test)", async () => {
+      const testAccountId = `shape-test-acct-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${testAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/shape-1', 'gid://shopify/CompanyLocation/shape-1',
+           'Shape Test Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+      expect(enqueuedCount).toBe(1);
+
+      // Read back with pgmq.read to verify shape
+      const [msg] = await sql<{
+        msg_id: string;
+        read_ct: number;
+        message: Record<string, unknown>;
+        headers: unknown;
+      }[]>`
+        SELECT msg_id, read_ct, message, headers
+        FROM pgmq.q_s6_sync
+        WHERE message->>'buyerAccountId' = ${testAccountId}
+      `;
+
+      expect(msg).toBeDefined();
+      expect(msg.read_ct).toBe(0);
+      expect(msg.headers).toBeNull();
+
+      // Verify exact 6 keys
+      const messageKeys = Object.keys(msg.message).sort();
+      expect(messageKeys).toEqual(["buyerAccountId", "resourceGid", "shop", "source", "topic", "webhookId"]);
+
+      // Verify values
+      expect(msg.message.topic).toBe("CREDIT_STATUS_RECOMPUTE");
+      expect(msg.message.shop).toBe(INR_SHOP);
+      expect(msg.message.buyerAccountId).toBe(testAccountId);
+      expect(msg.message.source).toBe("sync");
+      expect(msg.message.resourceGid).toBe(testAccountId);
+      expect(msg.message.webhookId).toMatch(new RegExp(`^credit_recompute:${testAccountId}:\\d+$`));
+    });
+
+    it("second same-day reinstall produces distinct webhookIds", async () => {
+      const testAccountId = `second-reinstall-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${testAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/second-1', 'gid://shopify/CompanyLocation/second-1',
+           'Second Reinstall Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+
+      // First reinstall at time t
+      const dateNowSpy = vi.spyOn(Date, "now");
+      dateNowSpy.mockReturnValue(1700000000000);
+
+      await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      // Second reinstall at time t+1
+      dateNowSpy.mockReturnValue(1700000000001);
+      await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      dateNowSpy.mockRestore();
+
+      // Get both webhookIds
+      const webhookIds = await sql<{ webhookId: string }[]>`
+        SELECT message->>'webhookId' AS "webhookId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'buyerAccountId' = ${testAccountId}
+        ORDER BY msg_id
+      `;
+
+      expect(webhookIds).toHaveLength(2);
+      expect(webhookIds[0].webhookId).not.toBe(webhookIds[1].webhookId);
+      expect(webhookIds[0].webhookId).toContain(":1700000000000");
+      expect(webhookIds[1].webhookId).toContain(":1700000000001");
     });
   });
 
@@ -425,6 +520,93 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, uninstalledShopId, UNINSTALLED_SHOP);
       expect(enqueuedCount).toBe(0);
     });
+
+    it("helper-direct: USD shop returns 0 (c-SQL test)", async () => {
+      // USD shop is installed (uninstalledAt = NULL) but currency is not INR
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${usdShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/usd-direct', 'gid://shopify/CompanyLocation/usd-direct',
+           'USD Direct Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+
+      // Verify shop is installed
+      const shopCheck = await sql<{ uninstalledAt: Date | null; currency: string }[]>`
+        SELECT "uninstalledAt", currency FROM "Shop" WHERE id = ${usdShopId}
+      `;
+      expect(shopCheck[0].uninstalledAt).toBeNull();
+      expect(shopCheck[0].currency).toBe("USD");
+
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, usdShopId, USD_SHOP);
+      expect(enqueuedCount).toBe(0);
+    });
+
+    it("helper-direct: XXX shop returns 0 (c-SQL test)", async () => {
+      // XXX shop is installed but currency is invalid
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${xxxShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/xxx-direct', 'gid://shopify/CompanyLocation/xxx-direct',
+           'XXX Direct Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+
+      // Verify shop is installed
+      const shopCheck = await sql<{ uninstalledAt: Date | null; currency: string }[]>`
+        SELECT "uninstalledAt", currency FROM "Shop" WHERE id = ${xxxShopId}
+      `;
+      expect(shopCheck[0].uninstalledAt).toBeNull();
+      expect(shopCheck[0].currency).toBe("XXX");
+
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, xxxShopId, XXX_SHOP);
+      expect(enqueuedCount).toBe(0);
+    });
+
+    it("late uninstall: shop re-uninstalled after clear gets 0 from helper (d-JS test)", async () => {
+      // This tests the SQL-level guard: if shop.uninstalledAt is set,
+      // the SELECT returns no rows even with eligible accounts.
+      // In production, a late uninstall (between clear and enqueue) is caught by this guard.
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/late-uninst', 'gid://shopify/CompanyLocation/late-uninst',
+           'Late Uninstall Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      // First verify the shop is installed and would normally enqueue
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const firstCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+      expect(firstCount).toBe(1);
+
+      // Clear the queue for this test
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${INR_SHOP}`;
+
+      // Now simulate late uninstall - set uninstalledAt
+      await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${inrShopId}`;
+
+      // The helper should now return 0 because the SQL guard catches the uninstalled state
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+      expect(enqueuedCount).toBe(0);
+    });
   });
 
   describe("eligibility exclusions", () => {
@@ -525,6 +707,56 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       expect(messages).toHaveLength(1);
       expect(messages[0].name).toBe("No Error");
     });
+
+    it("no-owner accounts are NOT enqueued (rolled-back constraint test)", async () => {
+      vi.resetModules();
+
+      // Use a transaction to temporarily drop the constraint, insert invalid rows, test, and rollback
+      await expect(
+        sql.begin(async (tx) => {
+          // Drop the constraint temporarily
+          await tx`ALTER TABLE "BuyerAccount" DROP CONSTRAINT IF EXISTS "BuyerAccount_kind_consistency"`;
+
+          // Insert accounts without owners (violates usual constraint)
+          await tx`
+            INSERT INTO "BuyerAccount" (
+              "shopId", kind, "companyId", "companyLocationId", "customerId", name,
+              "holdState", "syncPending", "metafieldSyncedAt",
+              "createdAt", "updatedAt"
+            )
+            VALUES
+              (${inrShopId}, 'COMPANY'::"AccountKind",
+               'gid://shopify/Company/no-owner', NULL,
+               NULL, 'No Owner Company', 'OK', true, NULL, NOW(), NOW()),
+              (${inrShopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+               NULL, NULL, NULL,
+               'No Owner Customer', 'OK', true, NULL, NOW(), NOW()),
+              (${inrShopId}, 'COMPANY'::"AccountKind",
+               'gid://shopify/Company/has-owner', 'gid://shopify/CompanyLocation/has-owner',
+               NULL, 'Has Owner', 'OK', true, NULL, NOW(), NOW())
+          `;
+
+          const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+          const enqueuedCount = await _enqueueReinstallResyncForTesting(tx, inrShopId, INR_SHOP);
+
+          // Only the account with owner should be enqueued
+          expect(enqueuedCount).toBe(1);
+
+          const messages = await tx<{ name: string }[]>`
+            SELECT ba.name
+            FROM pgmq.q_s6_sync q
+            JOIN "BuyerAccount" ba ON ba.id = q.message->>'buyerAccountId'
+            WHERE q.message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+              AND q.message->>'shop' = ${INR_SHOP}
+          `;
+          expect(messages).toHaveLength(1);
+          expect(messages[0].name).toBe("Has Owner");
+
+          // Throw to rollback the transaction (don't persist invalid rows)
+          throw new Error("ROLLBACK_EXPECTED");
+        })
+      ).rejects.toThrow("ROLLBACK_EXPECTED");
+    });
   });
 
   describe("cap boundary and HELD-first ordering", () => {
@@ -554,7 +786,7 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       expect(enqueuedCount).toBe(500);
     });
 
-    it("cap: 501 eligible gives 500, and the 501st keeps syncPending=true", async () => {
+    it("cap: 501 eligible gives 500; 0500 has NO message, 0000-0499 all do", async () => {
       vi.resetModules();
 
       for (let i = 0; i < 501; i++) {
@@ -581,6 +813,30 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
 
       expect(enqueuedCount).toBe(500);
 
+      // Verify the 501st (0500) has NO message
+      const msg0500 = await sql<{ count: number }[]>`
+        SELECT COUNT(*)::int AS count
+        FROM pgmq.q_s6_sync
+        WHERE message->>'buyerAccountId' = ${`cap-test-0500-${TEST_SUFFIX}`}
+      `;
+      expect(msg0500[0].count).toBe(0);
+
+      // Verify all 0000-0499 have messages
+      const enqueuedIds = await sql<{ id: string }[]>`
+        SELECT message->>'buyerAccountId' AS id
+        FROM pgmq.q_s6_sync
+        WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'shop' = ${INR_SHOP}
+      `;
+      expect(enqueuedIds).toHaveLength(500);
+
+      // All enqueued IDs should be 0000-0499
+      for (let i = 0; i < 500; i++) {
+        const expectedId = `cap-test-${String(i).padStart(4, '0')}-${TEST_SUFFIX}`;
+        expect(enqueuedIds.some(m => m.id === expectedId)).toBe(true);
+      }
+
+      // Additionally verify syncPending is still true for all (enqueue doesn't change it)
       const stillPending = await sql<{ count: number }[]>`
         SELECT COUNT(*)::int AS count
         FROM "BuyerAccount"
@@ -645,15 +901,60 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
     });
   });
 
-  describe("enqueue failure doesn't fail auth", () => {
-    it("runAfterAuth completes even when enqueue query errors (try/catch present)", async () => {
-      await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${inrShopId}`;
+  describe("enqueue failure doesn't fail auth (mutation h)", () => {
+    it("runAfterAuth completes when enqueue SELECT fails; no leaks in logs", async () => {
+      const FAILURE_SHOP = `test-reinstall-enqueue-fail-${TEST_SUFFIX}.myshopify.com`;
 
-      // Don't insert any accounts - the enqueue should succeed with 0 accounts
-      // The try/catch is tested by the code path completing without throw
+      // Create shop and set as uninstalled
+      const [failShop] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${FAILURE_SHOP}, 'Asia/Kolkata', 'INR', 'free', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${failShop.id}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/fail-test', 'gid://shopify/CompanyLocation/fail-test',
+           'Failure Test Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      // Create a sql wrapper that fails on SELECT queries after clearUninstalledAt
+      let selectCount = 0;
+      const errorMessage = `boom ${FAILURE_SHOP} shpat_fake_token_123`;
+
+      const failingSql = new Proxy(sql, {
+        apply: (_target, _thisArg, args) => {
+          const queryStr = String(args[0]?.strings?.join?.("") ?? args[0] ?? "");
+          // Let the first few queries (upsert, clear) pass, fail the SELECT for eligible accounts
+          if (queryStr.includes("SELECT") && queryStr.includes("BuyerAccount") && queryStr.includes("syncPending")) {
+            selectCount++;
+            if (selectCount >= 1) {
+              return Promise.reject(new Error(errorMessage));
+            }
+          }
+          return Reflect.apply(sql, sql, args);
+        },
+        get: (target, prop, receiver) => {
+          if (prop === "begin") {
+            return target.begin.bind(target);
+          }
+          return Reflect.get(target, prop, receiver);
+        }
+      }) as typeof sql;
+
+      // Capture console calls with real log.server (no mocking)
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       vi.doMock("../request-context.server", () => ({
-        getRequestSql: vi.fn(() => sql),
+        getRequestSql: vi.fn(() => failingSql),
       }));
       vi.doMock("../metafield-definitions.server", () => ({
         ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
@@ -678,11 +979,55 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
 
+      // Should not throw
       expect(() => {
-        runAfterAuth(INR_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+        runAfterAuth(FAILURE_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
       }).not.toThrow();
 
+      // Drain loop should resolve (try/catch present)
       for (let n = 0; n < waitUntilPromises.length; n++) await waitUntilPromises[n];
+
+      // Verify uninstalledAt was cleared (reinstall happened)
+      const shopRow = await sql<{ uninstalledAt: Date | null; syncPending?: boolean }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${failShop.id}
+      `;
+      expect(shopRow[0].uninstalledAt).toBeNull();
+
+      // Verify syncPending still true (enqueue failed, no change)
+      const accountRow = await sql<{ syncPending: boolean }[]>`
+        SELECT "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${failShop.id}
+      `;
+      expect(accountRow[0].syncPending).toBe(true);
+
+      // Verify no queue rows exist for this shop
+      const queueRows = await sql<{ count: number }[]>`
+        SELECT COUNT(*)::int AS count
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${FAILURE_SHOP}
+      `;
+      expect(queueRows[0].count).toBe(0);
+
+      // Verify no sensitive data leaked in logs
+      const allCalls = [
+        ...consoleSpy.mock.calls,
+        ...consoleWarnSpy.mock.calls,
+        ...consoleLogSpy.mock.calls,
+      ];
+
+      for (const call of allCalls) {
+        const callStr = JSON.stringify(call);
+        expect(callStr).not.toContain(".myshopify.com");
+        expect(callStr).not.toMatch(/shpat_/i);
+        expect(callStr).not.toContain("boom");
+      }
+
+      consoleSpy.mockRestore();
+      consoleWarnSpy.mockRestore();
+      consoleLogSpy.mockRestore();
+
+      // Cleanup
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${failShop.id}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${failShop.id}`;
     });
   });
 
