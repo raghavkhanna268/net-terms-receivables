@@ -90,6 +90,14 @@ api_version = "2026-10"
   uri = "/webhooks/draft_orders"
   topics = ["draft_orders/create", "draft_orders/update", "draft_orders/delete"]
 
+  # #342: Shop update webhook for currency change detection
+  # Triggers shop_config metafield and Shop.currency update without waiting for /app load
+  # Per shopify.dev/docs/api/admin-graphql WebhookSubscriptionTopic enum: shop/update
+  # requires no special scope beyond app installation.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/shop/update"
+  topics = ["shop/update"]
+
 [auth]
 redirect_urls = ["https://net-terms-receivables.raghavkhanna.workers.dev/auth/callback"]
 
