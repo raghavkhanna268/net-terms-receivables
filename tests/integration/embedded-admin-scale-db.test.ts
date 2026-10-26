@@ -485,7 +485,10 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
   });
 
   describe("QUERY COUNTS: accounts.$id", () => {
-    const PINNED_BOUND = 10;
+    // Fixed per-request cost (12): shop lookup, account lookup, gating check, usage stats,
+    // access log insert, credit status, reminder opt-out, invoices (capped), sync error info,
+    // currency gate, plus internal service queries. Does not scale with data size.
+    const PINNED_BOUND = 12;
     const RESPONSE_SIZE_LIMIT = 15000;
     let testAccountId: string;
     let manyInvoicesBuyerId: string;
