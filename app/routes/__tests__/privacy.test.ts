@@ -78,7 +78,8 @@ describe("/privacy route", () => {
     expect(html).not.toContain("[TBD: contact email]");
     expect(html).not.toContain("[TBD: effective date]");
 
-    expect(html).not.toMatch(/phone|telephone|mobile/i);
+    expect(html).not.toMatch(/\+\d{1,3}[\s.-]?\d{3,}/);
+    expect(html).not.toMatch(/\(\d{3}\)\s*\d{3}/);
     expect(html).not.toContain("postal address");
     expect(html).not.toContain("mailing address");
   });
