@@ -236,7 +236,7 @@ For Cloudflare Workers Free tier (10ms CPU budget):
 
 ## Data Privacy
 
-- No PII beyond PCD Level 1 (customer name and email only)
+- No PII beyond PCD Level 2 (protected customer fields: Name, Email only)
 - `narration` and `payerText` contain raw bank statement data (payer names only)
 - Match `reasons` contain only match types, amounts, and normalized tokens
 - No customer phone or address extracted or stored
