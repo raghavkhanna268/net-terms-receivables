@@ -1631,10 +1631,12 @@ jobs:
                                       else ((.exposurePaise | tonumber) > (.limitPaise | tonumber)) end),
                          updatedAt}) end)}]
                   | from_entries' "$HTTP_RESPONSE")
+                # QA 2 audit: internal DB ids (cuids like buyer_account_id) are allowed.
+                # Shopify GIDs (company_id, company_location_id, customer_id) are removed.
                 echo "fixtures (one per line):"
                 printf '%s\n' "$FIXTURES" | jq -c --argjson mf "$MF_MAP" '
                   . as $a | ($a.company_location_id // $a.customer_id) as $owner
-                  | {buyer_account_id, kind, company_id, company_location_id, customer_id,
+                  | {buyer_account_id, kind,
                      hold_state, manual_hold, bypass, manual_hold_reason_code, overdue,
                      owner_found: ($owner != null and ($mf | has($owner))),
                      credit_status: (if $owner == null then null else $mf[$owner] end)}'
