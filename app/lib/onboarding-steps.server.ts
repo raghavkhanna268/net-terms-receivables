@@ -271,7 +271,8 @@ export function computeOnboardingState(
   inputs: OnboardingStepInputs
 ): OnboardingState {
   const steps: OnboardingStep[] = [
-    computeDefaultTermsStep(inputs.defaultTermsDays),
+    // Re-enable in v1.1 once a default-terms settings route exists
+    // computeDefaultTermsStep(inputs.defaultTermsDays),
     computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),
