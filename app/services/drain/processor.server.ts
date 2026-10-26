@@ -1303,6 +1303,19 @@ async function processSyncQueue(
       break;
     }
 
+    // Skip already-sanitized messages (re-enqueued by hand) BEFORE any other checks.
+    // These messages don't have a shop field and should be archived directly.
+    if ((msg.message as Record<string, unknown>).sanitized === true) {
+      safeLog("warn", "drain_skip_sanitized_message", {
+        queue: S6_QUEUES.SYNC,
+        originalMsgId: msg.msg_id,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+
     // #292: Skip non-INR shops (but let terminal topics through for existing rows)
     // Shop not in map → let handler fail with shop_not_found → sanitized DLQ path
     // Shop in map with unsupported currency (NULL/""/XXX/non-INR) → skip non-terminal, pass terminal
@@ -1316,7 +1329,8 @@ async function processSyncQueue(
     // is definitively absent, delete the message (not archive, not DLQ) to prevent
     // post-redact data from being written or retained. DB errors stay retryable.
     // The check and delete run in one transaction to prevent a reinstall between them.
-    if (!shopFound) {
+    // Skip if shop is undefined/null (malformed message) - let handlers deal with it.
+    if (!shopFound && msg.message.shop) {
       try {
         const deleted = await sql.begin(async (tx) => {
           const [shopRow] = await tx<[{ id: string }?]>`
@@ -1361,18 +1375,6 @@ async function processSyncQueue(
     // G8: Terminal topics (PAID, CANCELLED, DRAFT_DELETE) pass through to handlers
     // which will update existing rows without importing new amounts
     // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
-
-    // Skip already-sanitized messages (re-enqueued by hand)
-    if ((msg.message as Record<string, unknown>).sanitized === true) {
-      safeLog("warn", "drain_skip_sanitized_message", {
-        queue: S6_QUEUES.SYNC,
-        originalMsgId: msg.msg_id,
-        topic: msg.message.topic,
-      });
-      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
-      result.skipped++;
-      continue;
-    }
 
     const handler = getSyncHandler(msg.message.topic);
 
@@ -1577,6 +1579,19 @@ async function processBulkQueue(
       break;
     }
 
+    // Skip already-sanitized messages (re-enqueued by hand) BEFORE any other checks.
+    // These messages don't have a shop field and should be archived directly.
+    if ((msg.message as Record<string, unknown>).sanitized === true) {
+      safeLog("warn", "drain_skip_sanitized_message", {
+        queue: S6_QUEUES.BULK,
+        originalMsgId: msg.msg_id,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+
     // #292: Skip non-INR shops
     // Shop not in map → let handler fail with shop_not_found → sanitized DLQ path
     // Shop in map with unsupported currency → skip (bulk queue has no terminal topics)
@@ -1590,7 +1605,8 @@ async function processBulkQueue(
     // is definitively absent, delete the message (not archive, not DLQ) to prevent
     // post-redact data from being written or retained. DB errors stay retryable.
     // The check and delete run in one transaction to prevent a reinstall between them.
-    if (!shopFound) {
+    // Skip if shop is undefined/null (malformed message) - let handlers deal with it.
+    if (!shopFound && msg.message.shop) {
       try {
         const deleted = await sql.begin(async (tx) => {
           const [shopRow] = await tx<[{ id: string }?]>`
@@ -1630,18 +1646,6 @@ async function processBulkQueue(
         msg.message.shop,
         (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
       );
-      continue;
-    }
-
-    // Skip already-sanitized messages (re-enqueued by hand)
-    if ((msg.message as Record<string, unknown>).sanitized === true) {
-      safeLog("warn", "drain_skip_sanitized_message", {
-        queue: S6_QUEUES.BULK,
-        originalMsgId: msg.msg_id,
-        topic: msg.message.topic,
-      });
-      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
-      result.skipped++;
       continue;
     }
 

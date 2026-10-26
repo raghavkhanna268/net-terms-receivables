@@ -381,7 +381,8 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
   });
 
   describe("bulk progress continuation via runDrain", () => {
-    it("no Shop row: no continuation sent, but archive still happens", async () => {
+    // #239 PR1: With drain guard, messages for missing shops are DELETED (not archived)
+    it("no Shop row: drain guard deletes message - no archive, no DLQ", async () => {
       const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
       const mockedProcessBulkOperation = vi.mocked(processBulkOperation);
       mockedProcessBulkOperation.mockImplementation(async () => ({
@@ -402,25 +403,32 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
         enqueuedAt: new Date().toISOString(),
       };
 
-      const [sendResult] = await sql<[{ send: string }]>`
+      await sql<[{ send: string }]>`
         SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(bulkMsg)})
       `;
-      const msgId = sendResult.send;
 
       await runDrain(sql, { batchSize: 10, timeBudgetMs: 5000 });
 
-      // No continuation sent
+      // Message deleted (not in queue)
       const [queueCount] = await sql<[{ count: string }]>`
         SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
         WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
       `;
       expect(parseInt(queueCount.count, 10)).toBe(0);
 
-      // Message archived
+      // Message NOT archived (drain guard deletes, doesn't archive)
       const [archiveCount] = await sql<[{ count: string }]>`
-        SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}::bigint
+        SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk
+        WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
       `;
-      expect(parseInt(archiveCount.count, 10)).toBe(1);
+      expect(parseInt(archiveCount.count, 10)).toBe(0);
+
+      // Message NOT in DLQ
+      const [dlqCount] = await sql<[{ count: string }]>`
+        SELECT COUNT(*)::text as count FROM s6_dead_letter
+        WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
+      `;
+      expect(parseInt(dlqCount.count, 10)).toBe(0);
 
       mockedProcessBulkOperation.mockRestore();
     });

@@ -726,6 +726,48 @@ describeWithDb("redact-late-messages: drain guard deletes messages for redacted 
       await assertShopBUntouched();
       await assertNearMissXUntouched();
     });
+
+    it("Reinstall race: Shop row reappears before re-check - message NOT deleted", async () => {
+      await setupShops();
+      await deleteShopA();
+
+      const webhookId = `wh-reinstall-${testContext.suffix}`;
+      const message = {
+        shop: testContext.shopA.domain,
+        topic: "ORDERS_CREATE",
+        webhookId,
+        resourceGid: `gid://shopify/Order/reinstall-${testContext.suffix}`,
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      await sqlRef`
+        INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
+        VALUES (NOW() + interval '10 seconds', 0, NOW(), ${sqlRef.json(message)}::jsonb)
+      `;
+
+      const now = new Date();
+      await sqlRef`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${testContext.shopA.id}, ${testContext.shopA.domain}, 'INR', ${now}, ${now})
+      `;
+
+      await sqlRef`
+        UPDATE pgmq.q_s6_sync
+        SET vt = NOW() - interval '1 second'
+        WHERE message->>'webhookId' = ${webhookId}
+      `;
+
+      const { runDrain } = await import("~/services/drain/processor.server");
+      await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+      const output = getAllConsoleOutput().join("\n");
+      expect(output).not.toContain("drain_shop_missing_deleted");
+
+      const [shopRow] = await sqlRef<[{ count: string }]>`
+        SELECT COUNT(*)::text as count FROM "Shop" WHERE id = ${testContext.shopA.id}
+      `;
+      expect(parseInt(shopRow.count, 10), "Shop A should exist after reinstall").toBe(1);
+    });
   });
 
   describe("Logging leak test (real safeLog, no mocks)", () => {
@@ -762,11 +804,19 @@ describeWithDb("redact-late-messages: drain guard deletes messages for redacted 
         expect(logLine).not.toContain("myshopify.com");
         expect(logLine).not.toContain(webhookId);
         expect(logLine).not.toContain("wh-leak-test");
+        expect(logLine).not.toContain("payload");
+        expect(logLine).not.toContain("shpat_");
+        expect(logLine).not.toContain("shpua_");
         
         expect(logLine).toContain('"queue":"sync"');
         expect(logLine).toContain('"topic":"COMPANIES_DELETE"');
         expect(logLine).toContain('"msg_id"');
         expect(logLine).toContain('"count":1');
+        
+        const parsed = JSON.parse(logLine);
+        const allowedKeys = ["event", "queue", "topic", "msg_id", "count"];
+        const actualKeys = Object.keys(parsed);
+        expect(actualKeys.sort()).toEqual(allowedKeys.sort());
       }
 
       for (const logLine of allOutput) {

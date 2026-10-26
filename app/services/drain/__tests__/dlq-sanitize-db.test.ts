@@ -26,6 +26,7 @@ function makeTestId(): string {
 const testContext = {
   suffix: "",
   missingShopDomain: "",
+  redactedShopDomain: "",  // #239 PR1: For drain guard tests (Shop row absent)
 };
 
 let sqlRef: ReturnType<typeof postgres>;
@@ -165,6 +166,24 @@ vi.mock("~/services/sync/customer.server", async (importOriginal) => {
   };
 });
 
+vi.mock("~/services/sync/bulk-jsonl-processor.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/sync/bulk-jsonl-processor.server")>();
+  return {
+    ...actual,
+    processBulkOperation: vi.fn().mockImplementation(async (_sql: unknown, message: { shop: string }) => {
+      if (message.shop === testContext.missingShopDomain) {
+        return {
+          success: false,
+          error: "shop_not_found",
+          errorCode: "shop_not_found",
+          errorType: "permanent" as const,
+        };
+      }
+      return { success: true, action: "skipped" };
+    }),
+  };
+});
+
 describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleInfoSpy: ReturnType<typeof vi.spyOn>;
@@ -202,9 +221,25 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     vi.clearAllMocks();
     testContext.suffix = makeTestId();
     testContext.missingShopDomain = `test-sanitize-missing-${testContext.suffix}.myshopify.com`;
+    testContext.redactedShopDomain = `test-sanitize-redacted-${testContext.suffix}.myshopify.com`;
 
     // Archive foreign rows before each test to prevent batch pollution
     await archiveForeignQueueMessages();
+
+    // #239 PR1: Insert Shop row for missingShopDomain so drain guard doesn't trigger.
+    // Handlers are mocked to return shop_not_found for this domain, simulating
+    // API-level shop_not_found (e.g., uninstalled shop without proper session).
+    // The redactedShopDomain has NO Shop row, so drain guard deletes those messages.
+    await sqlRef`
+      INSERT INTO "Shop" (id, domain, currency, "uninstalledAt")
+      VALUES (
+        ${`shop-dlq-${testContext.suffix}`},
+        ${testContext.missingShopDomain},
+        'INR',
+        NOW()
+      )
+      ON CONFLICT (domain) DO NOTHING
+    `;
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
@@ -227,8 +262,10 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${testContext.suffix}%`}`;
     await sqlRef`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${`%${testContext.suffix}%`}`;
     await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${testContext.suffix}%`}`;
+    await sqlRef`DELETE FROM "Shop" WHERE domain = ${testContext.missingShopDomain}`;
+    await sqlRef`DELETE FROM "Shop" WHERE domain = ${testContext.redactedShopDomain}`;
 
-    await assertNoQueueLeftovers(sqlRef, [testContext.missingShopDomain], "dlq-sanitize-db.test.ts");
+    await assertNoQueueLeftovers(sqlRef, [testContext.missingShopDomain, testContext.redactedShopDomain], "dlq-sanitize-db.test.ts");
   });
 
   function getAllConsoleOutput(): string[] {
@@ -450,11 +487,11 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(allOutput).toContain("dlq_sanitized_shop_not_found");
   });
 
-  // #239 PR1: With the drain guard, messages for missing shops are deleted (not DLQ'd)
-  it("draft_orders shop_not_found deletes message via drain guard (not DLQ)", async () => {
+  // #239 PR1: With the drain guard, messages for REDACTED shops (Shop row absent) are deleted (not DLQ'd)
+  it("draft_orders for redacted shop deletes message via drain guard (not DLQ)", async () => {
     const webhookId = `wh-draft-${testContext.suffix}`;
     const message = {
-      shop: testContext.missingShopDomain,
+      shop: testContext.redactedShopDomain,  // No Shop row → drain guard triggers
       topic: "DRAFT_ORDERS_CREATE",
       webhookId,
       resourceGid: `gid://shopify/DraftOrder/draft-${testContext.suffix}`,
@@ -489,11 +526,11 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(allOutput).toContain("drain_shop_missing_deleted");
   });
 
-  // #239 PR1: With the drain guard, messages for missing shops are deleted (not DLQ'd)
-  it("customers shop_not_found deletes message via drain guard (not DLQ)", async () => {
+  // #239 PR1: With the drain guard, messages for REDACTED shops (Shop row absent) are deleted (not DLQ'd)
+  it("customers for redacted shop deletes message via drain guard (not DLQ)", async () => {
     const webhookId = `wh-cust-${testContext.suffix}`;
     const message = {
-      shop: testContext.missingShopDomain,
+      shop: testContext.redactedShopDomain,  // No Shop row → drain guard triggers
       topic: "CUSTOMERS_CREATE",
       webhookId,
       resourceGid: `gid://shopify/Customer/cust-${testContext.suffix}`,
