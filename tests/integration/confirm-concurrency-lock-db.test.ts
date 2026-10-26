@@ -2,19 +2,19 @@
  * DB integration test: Deterministic concurrency proof for confirmMatch locking.
  *
  * This test PROVES that the Payment row lock in confirmMatch prevents over-allocation
- * by using two SEPARATE DB connections and forcing deterministic interleaving:
+ * by using SEPARATE DB connections and forcing deterministic interleaving:
  *
  * Test 1 (full allocation):
- * 1. Connection A (max:1) begins a transaction and acquires the Payment row lock
- * 2. Connection B calls confirmMatch - it must block waiting for A's lock
- * 3. Test verifies B is blocked via pg_stat_activity (wait_event_type = 'Lock')
- * 4. A confirms match1 at full payment amount and commits
- * 5. B unblocks, sees A's allocation, fails with "Payment fully allocated"
+ * 1. sqlLock (max:1) begins a transaction and acquires the Payment row lock
+ * 2. sqlA and sqlB call confirmMatch - they block waiting for sqlLock's lock
+ * 3. sqlLock commits, releasing the lock
+ * 4. One of A/B wins the lock race, confirms, drops the other's match to 'unmatched'
+ * 5. The loser finds its match is 'unmatched', fails with 'Match not found or already processed'
  *
  * Test 2 (partial allocation):
- * 1. A acquires lock, confirms match1 at 10000 (partial of 15000 payment)
- * 2. B was waiting, now unblocks and sees 5000 remaining
- * 3. B confirms match2 but capped at 5000
+ * 1. sqlLock acquires lock, sqlA and sqlB both start confirmMatch and block
+ * 2. sqlLock commits; winner confirms at 10000 (partial of 15000 payment)
+ * 3. Loser gets lock, sees 5000 remaining, confirms capped at 5000
  * 4. Total = 15000 = payment amount (no over-allocation)
  *
  * CRITICAL: This test FAILS if the FOR UPDATE lock on Payment is removed.
@@ -28,25 +28,17 @@ import {
   expect,
   beforeAll,
   afterAll,
-  vi,
 } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "../../app/lib/db-light.server.js";
 import { confirmMatch } from "../../app/services/matcher.server.js";
 import { assertNoQueueLeftovers } from "../helpers/queue-leftovers.js";
 
-vi.mock("../../app/services/credit-status-recompute.server", async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>;
-  return {
-    ...actual,
-    enqueueRecomputeForInvoice: vi.fn().mockResolvedValue(undefined),
-  };
-});
-
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", () => {
+  let sqlLock: ReturnType<typeof postgres>;
   let sqlA: ReturnType<typeof postgres>;
   let sqlB: ReturnType<typeof postgres>;
   let sqlMain: ReturnType<typeof postgres>;
@@ -61,7 +53,8 @@ describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", 
 
   beforeAll(async () => {
     sqlMain = postgres(TEST_DATABASE_URL!, { ...sqlOptions, onnotice: () => {} });
-    sqlA = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1, onnotice: () => {} });
+    sqlLock = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
+    sqlA = postgres(TEST_DATABASE_URL!, { ...sqlOptions, onnotice: () => {} });
     sqlB = postgres(TEST_DATABASE_URL!, { ...sqlOptions, onnotice: () => {} });
 
     const [shop] = await sqlMain<{ id: string }[]>`
@@ -126,11 +119,12 @@ describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", 
     await assertNoQueueLeftovers(sqlMain, [TEST_SHOP_DOMAIN], "confirm-concurrency-lock-db.test.ts");
 
     await sqlMain.end();
+    await sqlLock.end();
     await sqlA.end();
     await sqlB.end();
   });
 
-  it("confirmMatch B blocks on Payment lock; A confirms first, B fails with full allocation", async () => {
+  it("confirmMatch B blocks on Payment lock; A confirms, B finds match2 unmatched", async () => {
     const importId = `import-lock-${runId}`;
     const paymentId = `payment-lock-${runId}`;
 
@@ -169,33 +163,32 @@ describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", 
       WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice2Id} AND state = 'suggested'
     `;
 
-    await sqlA`BEGIN`;
-
-    await sqlA`
+    await sqlLock`BEGIN`;
+    await sqlLock`
       SELECT id FROM "Payment"
       WHERE id = ${paymentId} AND "shopId" = ${testShopId}
       FOR UPDATE
     `;
 
+    const confirmAPromise = confirmMatch(sqlA, testShopId, match1.id, "user-A");
     const confirmBPromise = confirmMatch(sqlB, testShopId, match2.id, "user-B");
 
-    let bIsBlocked = false;
+    let blockedCount = 0;
     const maxWaitMs = 5000;
-    const pollIntervalMs = 50;
+    const pollIntervalMs = 100;
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWaitMs) {
-      const waitingBackends = await sqlMain<{ pid: number; query: string; wait_event_type: string | null }[]>`
-        SELECT pid, query, wait_event_type
+      const waitingBackends = await sqlMain<{ pid: number }[]>`
+        SELECT pid
         FROM pg_stat_activity
-        WHERE state = 'active'
+        WHERE datname = current_database()
+          AND pid <> pg_backend_pid()
           AND wait_event_type = 'Lock'
-          AND query LIKE '%Payment%'
-          AND query LIKE '%FOR UPDATE%'
       `;
 
-      if (waitingBackends.length > 0) {
-        bIsBlocked = true;
+      blockedCount = waitingBackends.length;
+      if (blockedCount >= 2) {
         break;
       }
 
@@ -203,23 +196,28 @@ describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", 
     }
 
     expect(
-      bIsBlocked,
-      "confirmMatch B must block on Payment row lock (proves the FOR UPDATE lock is working)"
-    ).toBe(true);
+      blockedCount,
+      "Both confirmMatch calls must block on Payment row lock"
+    ).toBeGreaterThanOrEqual(2);
 
-    const confirmAResult = await confirmMatch(sqlA, testShopId, match1.id, "user-A");
+    await sqlLock`COMMIT`;
 
-    await sqlA`COMMIT`;
+    const [confirmAResult, confirmBResult] = await Promise.all([confirmAPromise, confirmBPromise]);
 
-    const confirmBResult = await confirmBPromise;
+    const successCount = [confirmAResult, confirmBResult].filter((r) => r.success).length;
+    const failCount = [confirmAResult, confirmBResult].filter((r) => !r.success).length;
 
-    expect(confirmAResult.success).toBe(true);
+    expect(successCount).toBe(1);
+    expect(failCount).toBe(1);
 
-    expect(confirmBResult.success).toBe(false);
-    expect(
-      ["Payment fully allocated", "Match not found or already processed"].includes(confirmBResult.error ?? ""),
-      `B should fail with allocation or match state error, got: ${confirmBResult.error}`
-    ).toBe(true);
+    const loser = confirmAResult.success ? confirmBResult : confirmAResult;
+    expect(loser.error).toBe("Match not found or already processed");
+
+    const loserMatchId = confirmAResult.success ? match2.id : match1.id;
+    const [loserMatchState] = await sqlMain<{ state: string }[]>`
+      SELECT state FROM "Match" WHERE id = ${loserMatchId}
+    `;
+    expect(loserMatchState.state).toBe("unmatched");
 
     const confirmedMatches = await sqlMain<{ id: string; amount: string }[]>`
       SELECT id, amount::text FROM "Match"
@@ -228,7 +226,6 @@ describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", 
     `;
 
     expect(confirmedMatches.length).toBe(1);
-    expect(confirmedMatches[0].id).toBe(match1.id);
 
     const totalConfirmedPaise = Math.round(parseFloat(confirmedMatches[0].amount) * 100);
     expect(totalConfirmedPaise).toBe(1000000);
@@ -289,46 +286,43 @@ describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", 
       WHERE "shopId" = ${testShopId} AND "paymentId" = ${paymentId} AND "invoiceId" = ${invoice2Id} AND state = 'suggested'
     `;
 
-    await sqlA`BEGIN`;
-
-    await sqlA`
+    await sqlLock`BEGIN`;
+    await sqlLock`
       SELECT id FROM "Payment"
       WHERE id = ${paymentId} AND "shopId" = ${testShopId}
       FOR UPDATE
     `;
 
+    const confirmAPromise = confirmMatch(sqlA, testShopId, match1.id, "user-A");
     const confirmBPromise = confirmMatch(sqlB, testShopId, match2.id, "user-B");
 
-    let bIsBlocked = false;
+    let blockedCount = 0;
     const maxWaitMs = 5000;
-    const pollIntervalMs = 50;
+    const pollIntervalMs = 100;
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWaitMs) {
       const waitingBackends = await sqlMain<{ pid: number }[]>`
         SELECT pid
         FROM pg_stat_activity
-        WHERE state = 'active'
+        WHERE datname = current_database()
+          AND pid <> pg_backend_pid()
           AND wait_event_type = 'Lock'
-          AND query LIKE '%Payment%'
-          AND query LIKE '%FOR UPDATE%'
       `;
 
-      if (waitingBackends.length > 0) {
-        bIsBlocked = true;
+      blockedCount = waitingBackends.length;
+      if (blockedCount >= 2) {
         break;
       }
 
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
 
-    expect(bIsBlocked, "B must block on Payment lock").toBe(true);
+    expect(blockedCount, "Both A and B must block on Payment lock").toBeGreaterThanOrEqual(2);
 
-    const confirmAResult = await confirmMatch(sqlA, testShopId, match1.id, "user-A");
+    await sqlLock`COMMIT`;
 
-    await sqlA`COMMIT`;
-
-    const confirmBResult = await confirmBPromise;
+    const [confirmAResult, confirmBResult] = await Promise.all([confirmAPromise, confirmBPromise]);
 
     expect(confirmAResult.success).toBe(true);
     expect(confirmBResult.success).toBe(true);
@@ -351,14 +345,18 @@ describeWithDb("confirmMatch concurrency lock: deterministic interleave proof", 
     const match1AmountPaise = Math.round(parseFloat(match1Confirmed!.amount) * 100);
     const match2AmountPaise = Math.round(parseFloat(match2Confirmed!.amount) * 100);
 
-    expect(match1AmountPaise).toBe(1000000);
-    expect(
-      match2AmountPaise,
-      "B's allocation must be capped at remaining (15000 - 10000 = 5000 INR = 500000 paise)"
-    ).toBe(500000);
-
     const totalConfirmedPaise = match1AmountPaise + match2AmountPaise;
-    expect(totalConfirmedPaise).toBe(1500000);
+    expect(
+      totalConfirmedPaise,
+      "Total confirmed must equal payment (15000 INR = 1500000 paise)"
+    ).toBe(1500000);
+
+    const amounts = [match1AmountPaise, match2AmountPaise].sort((a, b) => b - a);
+    expect(amounts[0]).toBe(1000000);
+    expect(
+      amounts[1],
+      "Second allocation must be capped at remaining (15000 - 10000 = 5000 INR = 500000 paise)"
+    ).toBe(500000);
 
     const [paymentAfter] = await sqlMain<{ status: string }[]>`
       SELECT status FROM "Payment" WHERE id = ${paymentId}
