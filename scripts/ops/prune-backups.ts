@@ -189,7 +189,7 @@ export async function main(): Promise<number> {
 
   // Strict bucket validation
   if (!validateBucket(bucket, BUCKET)) {
-    console.log(`prune_error=true reason=bucket_mismatch expected=${BUCKET}`);
+    console.log("prune_error=true reason=bucket_mismatch expected=" + BUCKET);
     return 1;
   }
 
@@ -225,13 +225,21 @@ export async function main(): Promise<number> {
         result.deleted++;
       }
     }
+    // Structured output: counts only (no keys, sizes, or shop data)
     console.log(
-      `prune_mode=delete total=${result.total} eligible=${result.eligible} kept=${result.kept} deleted=${result.deleted}`
+      "prune_mode=delete" +
+        " total=" + result.total +
+        " eligible=" + result.eligible +
+        " kept=" + result.kept +
+        " deleted=" + result.deleted
     );
   } else {
     // Dry-run: print counts only
     console.log(
-      `prune_mode=dry_run total=${result.total} eligible=${result.eligible} kept=${result.kept}`
+      "prune_mode=dry_run" +
+        " total=" + result.total +
+        " eligible=" + result.eligible +
+        " kept=" + result.kept
     );
   }
 
