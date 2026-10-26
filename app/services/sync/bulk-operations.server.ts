@@ -312,7 +312,7 @@ export const BULK_DRAFT_ORDERS_QUERY = `
     bulkOperationRunQuery(
       query: """
       {
-        draftOrders(query: "status:open OR status:invoice_sent") {
+        draftOrders(query: "status:OPEN OR status:INVOICE_SENT") {
           edges {
             node {
               id

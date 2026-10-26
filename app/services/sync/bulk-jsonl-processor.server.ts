@@ -852,10 +852,10 @@ async function processCustomerLines(
 /**
  * Process a batch of JSONL lines for draft orders (S8 PR-B).
  *
- * Only processes draft orders with payment terms. Others are skipped.
+ * Only processes draft orders with payment terms and INR currency. Others are skipped.
  * Resolves buyer accounts from purchasingEntity or customer reference.
  */
-async function processDraftOrderLines(
+export async function processDraftOrderLines(
   sql: Sql,
   shop: string,
   lines: string[]
@@ -870,12 +870,28 @@ async function processDraftOrderLines(
   }
 
   const mappedOrders = [];
+  let skippedNonInrCount = 0;
+
   for (const draftOrder of draftOrders) {
     const shopifyDraftOrder = bulkDraftOrderToShopifyDraftOrder(draftOrder);
+
+    // #292: Track non-INR/missing-currency skips for logging (same as webhook path)
+    const currency = shopifyDraftOrder.totalPriceSet?.shopMoney?.currencyCode;
+    if (!currency || currency !== SUPPORTED_SHOP_CURRENCY) {
+      skippedNonInrCount++;
+      continue;
+    }
+
     const mapped = await processBulkDraftOrder(sql, shop, shopifyDraftOrder);
     if (mapped) {
       mappedOrders.push(mapped);
     }
+  }
+
+  // Log skipped non-INR drafts using existing log code (count-only, no PII)
+  if (skippedNonInrCount > 0) {
+    const hash = await shopHash(shop);
+    safeLog("info", "drain_skip_non_inr_draft_order", { shopHash: hash, count: skippedNonInrCount });
   }
 
   const upserted = await bulkUpsertDraftOrders(sql, mappedOrders);

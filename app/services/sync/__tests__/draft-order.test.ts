@@ -489,9 +489,9 @@ describeWithDb("Draft Order Sync", () => {
         id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-1`,
         name: "#BP1",
         createdAt: "2026-10-25T10:00:00.000Z",
-        status: "open",
+        status: "OPEN", // GraphQL returns UPPERCASE enum
         totalPriceSet: {
-          shopMoney: { amount: "5000.00", currencyCode: "USD" },
+          shopMoney: { amount: "5000.00", currencyCode: "INR" },
         },
         paymentTerms: {
           id: "pt1",
@@ -514,7 +514,7 @@ describeWithDb("Draft Order Sync", () => {
       expect(result!.buyerAccountId).toBe(TEST_ACCOUNT_ID);
       expect(result!.total).toBe("5000.00");
       expect(result!.hasPaymentTerms).toBe(true);
-      expect(result!.status).toBe("open");
+      expect(result!.status).toBe("open"); // Normalized to lowercase
     });
 
     it("returns null for draft order without payment terms", async () => {
@@ -522,9 +522,9 @@ describeWithDb("Draft Order Sync", () => {
         id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-2`,
         name: "#BP2",
         createdAt: "2026-10-25T10:00:00.000Z",
-        status: "open",
+        status: "OPEN",
         totalPriceSet: {
-          shopMoney: { amount: "3000.00", currencyCode: "USD" },
+          shopMoney: { amount: "3000.00", currencyCode: "INR" },
         },
         paymentTerms: null,
       };
@@ -539,7 +539,10 @@ describeWithDb("Draft Order Sync", () => {
         id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-3`,
         name: "#BP3",
         createdAt: "2026-10-25T10:00:00.000Z",
-        status: "open",
+        status: "OPEN",
+        totalPriceSet: {
+          shopMoney: { amount: "3000.00", currencyCode: "INR" },
+        },
         paymentTerms: {
           id: "pt1",
           paymentTermsName: "Net 30",
@@ -575,9 +578,9 @@ describeWithDb("Draft Order Sync", () => {
           id: `gid://shopify/DraftOrder/bulk-proc-${TEST_SUFFIX}-cust`,
           name: "#BPCUST",
           createdAt: "2026-10-25T10:00:00.000Z",
-          status: "invoice_sent",
+          status: "INVOICE_SENT", // GraphQL returns UPPERCASE enum
           totalPriceSet: {
-            shopMoney: { amount: "7500.00", currencyCode: "USD" },
+            shopMoney: { amount: "7500.00", currencyCode: "INR" },
           },
           paymentTerms: {
             id: "pt1",
@@ -592,6 +595,7 @@ describeWithDb("Draft Order Sync", () => {
 
         expect(result).not.toBeNull();
         expect(result!.buyerAccountId).toBe(testCustomerAccountId);
+        expect(result!.status).toBe("invoice_sent"); // Normalized to lowercase
       } finally {
         await sql`DELETE FROM "BuyerAccount" WHERE id = ${testCustomerAccountId}`;
       }

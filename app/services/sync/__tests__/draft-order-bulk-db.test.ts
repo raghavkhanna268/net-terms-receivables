@@ -22,6 +22,7 @@ import {
   parseDraftOrderBulkJsonl,
   bulkDraftOrderToShopifyDraftOrder,
 } from "../bulk-parser.server";
+import { processDraftOrderLines } from "../bulk-jsonl-processor.server";
 import type { ShopifyDraftOrder } from "../types";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -120,7 +121,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
             name: "#BOPEN1",
             createdAt: "2026-10-25T10:00:00Z",
             status: "open",
-            totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "USD" } },
+            totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
             paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
           },
           TEST_ACCOUNT_ID
@@ -132,7 +133,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
             name: "#BOPEN2",
             createdAt: "2026-10-25T11:00:00Z",
             status: "open",
-            totalPriceSet: { shopMoney: { amount: "2500.00", currencyCode: "USD" } },
+            totalPriceSet: { shopMoney: { amount: "2500.00", currencyCode: "INR" } },
             paymentTerms: { id: "pt2", paymentTermsName: "Net 45", paymentTermsType: "NET" },
           },
           TEST_ACCOUNT_ID
@@ -159,7 +160,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
             name: "#BSENT1",
             createdAt: "2026-10-25T12:00:00Z",
             status: "invoice_sent",
-            totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "USD" } },
+            totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "INR" } },
             paymentTerms: { id: "pt3", paymentTermsName: "Net 60", paymentTermsType: "NET" },
           },
           TEST_ACCOUNT_ID
@@ -187,7 +188,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
           name: "#BIDEM",
           createdAt: "2026-10-25T10:00:00Z",
           status: "open",
-          totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "USD" } },
+          totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
           paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
         },
         TEST_ACCOUNT_ID
@@ -202,7 +203,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
           name: "#BIDEM",
           createdAt: "2026-10-25T10:00:00Z",
           status: "open",
-          totalPriceSet: { shopMoney: { amount: "1500.00", currencyCode: "USD" } },
+          totalPriceSet: { shopMoney: { amount: "1500.00", currencyCode: "INR" } },
           paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
         },
         TEST_ACCOUNT_ID
@@ -226,7 +227,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
           name: "#BSENTIDEM",
           createdAt: "2026-10-25T10:00:00Z",
           status: "invoice_sent",
-          totalPriceSet: { shopMoney: { amount: "3000.00", currencyCode: "USD" } },
+          totalPriceSet: { shopMoney: { amount: "3000.00", currencyCode: "INR" } },
           paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
         },
         TEST_ACCOUNT_ID
@@ -241,7 +242,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
           name: "#BSENTIDEM",
           createdAt: "2026-10-25T10:00:00Z",
           status: "invoice_sent",
-          totalPriceSet: { shopMoney: { amount: "3500.00", currencyCode: "USD" } },
+          totalPriceSet: { shopMoney: { amount: "3500.00", currencyCode: "INR" } },
           paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
         },
         TEST_ACCOUNT_ID
@@ -283,7 +284,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         name: "#BUCKET1-CO",
         createdAt: "2026-10-25T10:00:00Z",
         status: "open",
-        totalPriceSet: { shopMoney: { amount: "7500.00", currencyCode: "USD" } },
+        totalPriceSet: { shopMoney: { amount: "7500.00", currencyCode: "INR" } },
         paymentTerms: {
           id: "pt1",
           paymentTermsName: "Net 30",
@@ -311,7 +312,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         name: "#BUCKET2-CUST",
         createdAt: "2026-10-25T11:00:00Z",
         status: "invoice_sent",
-        totalPriceSet: { shopMoney: { amount: "4000.00", currencyCode: "USD" } },
+        totalPriceSet: { shopMoney: { amount: "4000.00", currencyCode: "INR" } },
         paymentTerms: {
           id: "pt2",
           paymentTermsName: "Net 45",
@@ -336,7 +337,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         name: "#BUCKET3-NEITHER",
         createdAt: "2026-10-25T12:00:00Z",
         status: "open",
-        totalPriceSet: { shopMoney: { amount: "2000.00", currencyCode: "USD" } },
+        totalPriceSet: { shopMoney: { amount: "2000.00", currencyCode: "INR" } },
         paymentTerms: {
           id: "pt3",
           paymentTermsName: "Net 60",
@@ -371,8 +372,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
   describe("parseDraftOrderBulkJsonl + bulkUpsertDraftOrders integration", () => {
     it("parses JSONL and upserts draft orders end-to-end", async () => {
       const jsonl = [
-        `{"id":"gid://shopify/DraftOrder/e2e-open-${TEST_SUFFIX}","name":"#E2EOPEN","createdAt":"2026-10-25T10:00:00Z","status":"open","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"USD"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`,
-        `{"id":"gid://shopify/DraftOrder/e2e-sent-${TEST_SUFFIX}","name":"#E2ESENT","createdAt":"2026-10-25T11:00:00Z","status":"invoice_sent","totalPriceSet":{"shopMoney":{"amount":"2000.00","currencyCode":"USD"}},"paymentTerms":{"id":"pt2","paymentTermsName":"Net 45","paymentTermsType":"NET"}}`,
+        `{"id":"gid://shopify/DraftOrder/e2e-open-${TEST_SUFFIX}","name":"#E2EOPEN","createdAt":"2026-10-25T10:00:00Z","status":"open","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`,
+        `{"id":"gid://shopify/DraftOrder/e2e-sent-${TEST_SUFFIX}","name":"#E2ESENT","createdAt":"2026-10-25T11:00:00Z","status":"invoice_sent","totalPriceSet":{"shopMoney":{"amount":"2000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt2","paymentTermsName":"Net 45","paymentTermsType":"NET"}}`,
       ].join("\n");
 
       const { draftOrders, errors } = parseDraftOrderBulkJsonl(jsonl);
@@ -405,7 +406,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
     });
 
     it("re-run is idempotent (no duplicates)", async () => {
-      const jsonl = `{"id":"gid://shopify/DraftOrder/rerun-${TEST_SUFFIX}","name":"#RERUN","createdAt":"2026-10-25T10:00:00Z","status":"open","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"USD"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`;
+      const jsonl = `{"id":"gid://shopify/DraftOrder/rerun-${TEST_SUFFIX}","name":"#RERUN","createdAt":"2026-10-25T10:00:00Z","status":"open","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`;
 
       const { draftOrders } = parseDraftOrderBulkJsonl(jsonl);
       const shopifyDraftOrder = bulkDraftOrderToShopifyDraftOrder(draftOrders[0]);
@@ -561,6 +562,436 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         WHERE "shopId" = ${TEST_SHOP_ID}
       `;
       expect(reminderRows).toHaveLength(0);
+    });
+  });
+
+  describe("#292 INR currency guard on bulk path", () => {
+    it("processBulkDraftOrder returns null for USD draft (draft_order_currency_not_supported)", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/usd-bulk-${TEST_SUFFIX}`,
+        name: "#USD-BULK",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "USD" } },
+        paymentTerms: {
+          id: "pt-usd",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+      expect(result).toBeNull();
+
+      const rows = await sql`
+        SELECT draft_order_id FROM s8_draft_orders WHERE draft_order_id = ${draftOrder.id}
+      `;
+      expect(rows).toHaveLength(0);
+    });
+
+    it("processBulkDraftOrder returns null for missing currency (draft_order_currency_missing)", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/nocurrency-bulk-${TEST_SUFFIX}`,
+        name: "#NOCURRENCY-BULK",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        paymentTerms: {
+          id: "pt-nocurrency",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+      expect(result).toBeNull();
+
+      const rows = await sql`
+        SELECT draft_order_id FROM s8_draft_orders WHERE draft_order_id = ${draftOrder.id}
+      `;
+      expect(rows).toHaveLength(0);
+    });
+
+    it("processBulkDraftOrder accepts INR draft", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/inr-bulk-${TEST_SUFFIX}`,
+        name: "#INR-BULK",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-inr",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+      expect(result).not.toBeNull();
+      expect(result!.total).toBe("5000.00");
+    });
+  });
+
+  describe("status casing normalization", () => {
+    it("UPPERCASE status from GraphQL is stored as lowercase", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/upper-open-${TEST_SUFFIX}`,
+        name: "#UPPER-OPEN",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "OPEN", // GraphQL returns UPPERCASE enum
+        totalPriceSet: { shopMoney: { amount: "1500.00", currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-upper",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      expect(mapped!.status).toBe("open"); // Normalized to lowercase
+
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftOrder.id}
+      `;
+      expect(row.status).toBe("open");
+    });
+
+    it("INVOICE_SENT from GraphQL is stored as invoice_sent", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/upper-sent-${TEST_SUFFIX}`,
+        name: "#UPPER-SENT",
+        createdAt: "2026-10-25T11:00:00Z",
+        status: "INVOICE_SENT", // GraphQL returns UPPERCASE enum
+        totalPriceSet: { shopMoney: { amount: "2500.00", currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-upper-sent",
+          paymentTermsName: "Net 45",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      expect(mapped!.status).toBe("invoice_sent"); // Normalized to lowercase
+
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftOrder.id}
+      `;
+      expect(row.status).toBe("invoice_sent");
+    });
+
+    it("COMPLETED from GraphQL is stored as completed", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/upper-completed-${TEST_SUFFIX}`,
+        name: "#UPPER-COMPLETED",
+        createdAt: "2026-10-25T12:00:00Z",
+        status: "COMPLETED", // GraphQL returns UPPERCASE enum
+        totalPriceSet: { shopMoney: { amount: "3500.00", currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-upper-completed",
+          paymentTermsName: "Net 60",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      expect(mapped!.status).toBe("completed"); // Normalized to lowercase
+
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftOrder.id}
+      `;
+      expect(row.status).toBe("completed");
+    });
+
+    it("existing UPPERCASE row re-processed ends up lowercase and counts toward exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/resync-upper-${TEST_SUFFIX}`;
+      const draftAmount = "8500.00";
+
+      // Insert row directly with UPPERCASE status (simulating pre-fix webhook data)
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#RESYNC-UPPER', ${draftAmount},
+          true, 'OPEN', NOW(), NOW()
+        )
+      `;
+
+      // Verify it was stored UPPERCASE
+      const [beforeRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftId}
+      `;
+      expect(beforeRow.status).toBe("OPEN");
+
+      // UPPERCASE row does NOT count toward exposure per credit-status.server.ts
+      // which uses: status IN ('open', 'invoice_sent') - case-sensitive match
+      const [exposureBefore] = await sql<{ total: string }[]>`
+        SELECT COALESCE(SUM(total), '0.00') as total
+        FROM s8_draft_orders
+        WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
+          AND has_payment_terms = true
+          AND status IN ('open', 'invoice_sent')
+      `;
+      expect(exposureBefore.total).toBe("0.00");
+
+      // Re-process through the normalized bulk path
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftId,
+        name: "#RESYNC-UPPER",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "OPEN", // GraphQL returns UPPERCASE
+        totalPriceSet: { shopMoney: { amount: draftAmount, currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-resync",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      expect(mapped!.status).toBe("open"); // Normalized to lowercase
+
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      // Verify status is now lowercase
+      const [afterRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftId}
+      `;
+      expect(afterRow.status).toBe("open");
+
+      // NOW it counts toward exposure (same query as credit-status.server.ts)
+      const [exposureAfter] = await sql<{ total: string }[]>`
+        SELECT COALESCE(SUM(total), '0.00') as total
+        FROM s8_draft_orders
+        WHERE buyer_account_id = ${TEST_ACCOUNT_ID}
+          AND has_payment_terms = true
+          AND status IN ('open', 'invoice_sent')
+      `;
+      expect(exposureAfter.total).toBe(draftAmount);
+    });
+  });
+
+  describe("bulk-imported draft exposure counting", () => {
+    it("bulk-imported OPEN draft with terms counts toward buyer's pending exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/exp-open-${TEST_SUFFIX}`;
+      const draftAmount = "7500.00";
+
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftId,
+        name: "#EXP-OPEN",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "OPEN", // GraphQL UPPERCASE
+        totalPriceSet: { shopMoney: { amount: draftAmount, currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-exp",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe(draftAmount);
+    });
+
+    it("bulk-imported INVOICE_SENT draft counts toward buyer's pending exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/exp-sent-${TEST_SUFFIX}`;
+      const draftAmount = "4000.00";
+
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftId,
+        name: "#EXP-SENT",
+        createdAt: "2026-10-25T11:00:00Z",
+        status: "INVOICE_SENT", // GraphQL UPPERCASE
+        totalPriceSet: { shopMoney: { amount: draftAmount, currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-exp-sent",
+          paymentTermsName: "Net 45",
+          paymentTermsType: "NET",
+          dueInDays: 45,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe(draftAmount);
+    });
+
+    it("bulk-imported COMPLETED draft does NOT count toward exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/exp-completed-${TEST_SUFFIX}`;
+
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftId,
+        name: "#EXP-COMPLETED",
+        createdAt: "2026-10-25T12:00:00Z",
+        status: "COMPLETED", // GraphQL UPPERCASE
+        totalPriceSet: { shopMoney: { amount: "9000.00", currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-exp-completed",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe("0.00");
+    });
+
+    it("null-buyer draft with OPEN status does NOT count toward any buyer exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/exp-null-${TEST_SUFFIX}`;
+
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftId,
+        name: "#EXP-NULL",
+        createdAt: "2026-10-25T13:00:00Z",
+        status: "OPEN",
+        totalPriceSet: { shopMoney: { amount: "6000.00", currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-exp-null",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+      };
+
+      const mapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+      expect(mapped).not.toBeNull();
+      expect(mapped!.buyerAccountId).toBeNull();
+      await bulkUpsertDraftOrders(sql, [mapped!]);
+
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe("0.00");
+    });
+  });
+
+  describe("processDraftOrderLines integration (processLines path)", () => {
+    it("only stores INR drafts, skips USD and missing-currency drafts", async () => {
+      const jsonlLines = [
+        `{"id":"gid://shopify/DraftOrder/pdl-inr-${TEST_SUFFIX}","name":"#PDL-INR","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`,
+        `{"id":"gid://shopify/DraftOrder/pdl-usd-${TEST_SUFFIX}","name":"#PDL-USD","createdAt":"2026-10-25T11:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"2000.00","currencyCode":"USD"}},"paymentTerms":{"id":"pt2","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`,
+        `{"id":"gid://shopify/DraftOrder/pdl-nocurrency-${TEST_SUFFIX}","name":"#PDL-NOCURRENCY","createdAt":"2026-10-25T12:00:00Z","status":"OPEN","paymentTerms":{"id":"pt3","paymentTermsName":"Net 30","paymentTermsType":"NET"}}`,
+        `{"id":"gid://shopify/DraftOrder/pdl-inr2-${TEST_SUFFIX}","name":"#PDL-INR2","createdAt":"2026-10-25T13:00:00Z","status":"INVOICE_SENT","totalPriceSet":{"shopMoney":{"amount":"3000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt4","paymentTermsName":"Net 45","paymentTermsType":"NET"}}`,
+      ];
+
+      const upsertedCount = await processDraftOrderLines(sql, TEST_SHOP_DOMAIN, jsonlLines);
+
+      expect(upsertedCount).toBe(2);
+
+      const rows = await sql`
+        SELECT draft_order_id, name, status FROM s8_draft_orders
+        WHERE shop_id = ${TEST_SHOP_ID}
+        ORDER BY name
+      `;
+      expect(rows).toHaveLength(2);
+      expect(rows[0].name).toBe("#PDL-INR");
+      expect(rows[0].status).toBe("open"); // Normalized to lowercase
+      expect(rows[1].name).toBe("#PDL-INR2");
+      expect(rows[1].status).toBe("invoice_sent"); // Normalized to lowercase
+
+      const usdRow = await sql`
+        SELECT draft_order_id FROM s8_draft_orders
+        WHERE draft_order_id = ${`gid://shopify/DraftOrder/pdl-usd-${TEST_SUFFIX}`}
+      `;
+      expect(usdRow).toHaveLength(0);
+
+      const noCurrencyRow = await sql`
+        SELECT draft_order_id FROM s8_draft_orders
+        WHERE draft_order_id = ${`gid://shopify/DraftOrder/pdl-nocurrency-${TEST_SUFFIX}`}
+      `;
+      expect(noCurrencyRow).toHaveLength(0);
+    });
+
+    it("UPPERCASE status JSONL through processLines stores lowercase and counts toward exposure", async () => {
+      const jsonlLines = [
+        `{"id":"gid://shopify/DraftOrder/pdl-upper-${TEST_SUFFIX}","name":"#PDL-UPPER","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"5500.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${TEST_COMPANY_ID}"},"location":{"id":"${TEST_LOCATION_ID}"}}}`,
+      ];
+
+      const upsertedCount = await processDraftOrderLines(sql, TEST_SHOP_DOMAIN, jsonlLines);
+      expect(upsertedCount).toBe(1);
+
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders
+        WHERE draft_order_id = ${`gid://shopify/DraftOrder/pdl-upper-${TEST_SUFFIX}`}
+      `;
+      expect(row.status).toBe("open"); // Normalized to lowercase
+
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe("5500.00");
     });
   });
 });

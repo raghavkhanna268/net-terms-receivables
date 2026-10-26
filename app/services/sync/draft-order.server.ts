@@ -184,6 +184,11 @@ export function mapDraftOrder(
 } {
   const total = draftOrder.totalPriceSet?.shopMoney.amount ?? "0.00";
 
+  // Normalize status to lowercase for DB storage
+  // GraphQL returns UPPERCASE enum (OPEN, INVOICE_SENT, COMPLETED)
+  // but exposure queries use lowercase ('open', 'invoice_sent')
+  const normalizedStatus = (draftOrder.status ?? "open").toLowerCase();
+
   return {
     shopId,
     draftOrderId: draftOrder.id,
@@ -191,7 +196,7 @@ export function mapDraftOrder(
     name: draftOrder.name,
     total,
     hasPaymentTerms: !!draftOrder.paymentTerms,
-    status: draftOrder.status ?? "open",
+    status: normalizedStatus,
     createdAt: new Date(draftOrder.createdAt),
   };
 }
@@ -374,6 +379,13 @@ export async function processBulkDraftOrder(
   draftOrder: ShopifyDraftOrder
 ): Promise<ReturnType<typeof mapDraftOrder> | null> {
   if (!draftOrder.paymentTerms) {
+    return null;
+  }
+
+  // #292: Per-draft-order currency guard - skip drafts with missing or non-INR currency
+  // Same guard as the webhook path to maintain parity
+  const draftCurrency = draftOrder.totalPriceSet?.shopMoney?.currencyCode;
+  if (!draftCurrency || draftCurrency !== SUPPORTED_SHOP_CURRENCY) {
     return null;
   }
 
