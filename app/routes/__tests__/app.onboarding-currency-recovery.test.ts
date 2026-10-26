@@ -31,6 +31,7 @@ const mockSql = Object.assign(createMockSqlFn(), {
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
   getRequestWaitUntil: vi.fn(() => () => {}),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-currency-recovery-tests" })),
 }));
 
 vi.mock("~/services/plan.server", () => ({

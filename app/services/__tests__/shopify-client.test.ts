@@ -25,9 +25,10 @@ vi.mock("~/shopify.server", () => ({
   getShopifyApp: () => mockShopifyApp,
 }));
 
-// Mock request context (for getRequestSql)
+// Mock request context (for getRequestSql and getRequestEnv)
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => ({})),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-shopify-client-tests" })),
 }));
 
 // Mock offline-token module - returns success by default

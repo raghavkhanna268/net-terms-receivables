@@ -47,6 +47,7 @@ const mockSql = Object.assign(
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-compliance-tests" })),
 }));
 
 const mockDeleteShop = vi.fn();

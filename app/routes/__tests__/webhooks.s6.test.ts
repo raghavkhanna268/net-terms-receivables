@@ -27,6 +27,7 @@ const mockSql = Object.assign(
 // Mock the request context module
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-s6-tests" })),
 }));
 
 // Mock the pgmq module

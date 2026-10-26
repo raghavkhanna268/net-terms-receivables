@@ -17,15 +17,15 @@ vi.mock("../admin-client.server", () => ({
   adminGraphQL: (...args: unknown[]) => mockAdminGraphQL(...args),
 }));
 
-// Mock request context - must include getRequestSql for shopify.server.ts
-vi.mock("~/lib/request-context.server", async (importOriginal) => {
-  const actual = await importOriginal() as Record<string, unknown>;
-  return {
-    ...actual,
-    getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
-    getRequestSql: vi.fn(() => null),
-  };
-});
+// Mock request context - must include getRequestSql for shopify.server.ts and getRequestEnv for shopHash
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestEnv: vi.fn(() => ({
+    CUSTOMER_PII_FIELDS: "1",
+    LOG_HASH_KEY: "test-key-for-customer-fetch-tests",
+  })),
+  getRequestSql: vi.fn(() => null),
+  requestContext: { getStore: vi.fn(() => null) },
+}));
 
 // Import after mocks
 import {
@@ -336,7 +336,10 @@ describe("Real handleCustomer tests with fallback", () => {
     }));
 
     vi.doMock("~/lib/request-context.server", () => ({
-      getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
+      getRequestEnv: vi.fn(() => ({
+        CUSTOMER_PII_FIELDS: "1",
+        LOG_HASH_KEY: "test-key-for-customer-fetch-tests",
+      })),
       getRequestSql: vi.fn(() => ({})),
     }));
 

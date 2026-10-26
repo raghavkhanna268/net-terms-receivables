@@ -501,7 +501,7 @@ export async function bulkUpsertBuyerAccounts(
         SELECT domain FROM "Shop" WHERE id = ${shopId}
       `;
       if (shop) {
-        hash = await shopHash(shop.domain);
+        hash = (await shopHash(shop.domain)) ?? null;
       }
     }
 

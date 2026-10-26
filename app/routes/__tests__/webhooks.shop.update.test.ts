@@ -41,6 +41,7 @@ const mockSql = Object.assign(createMockSqlFn(), {
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
   getRequestWaitUntil: vi.fn(() => () => {}),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-shop-update-tests" })),
 }));
 
 const mockShopifyGraphQLQueue = vi.fn();

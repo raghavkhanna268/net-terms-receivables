@@ -21,6 +21,10 @@ vi.mock("~/lib/db-light.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
 
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-compliance-tests" })),
+}));
+
 import {
   deleteShop,
   purgePgmqMessages,

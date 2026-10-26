@@ -9,9 +9,12 @@ export function logWithShopId(shopId: string) {
   console.log("Processing", { shopId });
 }
 
-// Safe: shopHash is allowlisted
+// Safe: shopHash is allowlisted (keyed by LOG_HASH_KEY, returns undefined if key missing)
 export async function logWithShopHash(shop: string) {
-  safeLog("info", "test_event", { shopHash: await shopHash(shop) });
+  const hash = await shopHash(shop);
+  if (hash) {
+    safeLog("info", "test_event", { shopHash: hash });
+  }
 }
 
 // Safe: count metrics are allowlisted

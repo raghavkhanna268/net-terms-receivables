@@ -37,6 +37,7 @@ vi.mock("../request-context.server", () => ({
     }
     return testSql;
   }),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-syncshopinfo-db-tests" })),
 }));
 
 // Mock shop-config.server to track metafield writes

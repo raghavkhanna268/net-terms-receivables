@@ -14,6 +14,7 @@ export interface WorkerEnv {
   CUSTOMER_PII_FIELDS?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM?: string;
+  LOG_HASH_KEY?: string;
   /** S18: HMAC secret for signed unsubscribe tokens (wrangler secret, never in code) */
   REMINDER_UNSUBSCRIBE_SECRET?: string;
   /** S18: Previous secret for key rotation (optional, wrangler secret) */

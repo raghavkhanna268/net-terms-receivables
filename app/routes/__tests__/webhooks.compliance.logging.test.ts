@@ -61,6 +61,7 @@ const mockSql = Object.assign(
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-compliance-logging-tests" })),
 }));
 
 const mockDeleteWebhookReceiptsForShop = vi.fn().mockResolvedValue(0);

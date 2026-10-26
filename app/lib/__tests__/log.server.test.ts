@@ -1,5 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createHmac, createHash } from "node:crypto";
 import { safeLog, toErrorCode, shopHash, redactString } from "../log.server";
+import { requestContext, type RequestStore } from "../request-context.server";
+
+const TEST_LOG_HASH_KEY = "test-key-for-unit-tests-only-not-real";
+
+function withRequestContext<T>(
+  store: Partial<RequestStore>,
+  fn: () => T
+): T {
+  return requestContext.run(
+    {
+      getSql: () => {
+        throw new Error("SQL not available in this test");
+      },
+      ...store,
+    },
+    fn
+  );
+}
 
 describe("log.server", () => {
   describe("safeLog", () => {
@@ -307,41 +326,186 @@ describe("log.server", () => {
   });
 
   describe("shopHash", () => {
-    it("returns 12-character hex string", async () => {
-      const hash = await shopHash("test-shop.myshopify.com");
-      expect(hash).toHaveLength(12);
-      expect(hash).toMatch(/^[0-9a-f]+$/);
+    describe("with key present", () => {
+      it("returns 12-character lowercase hex string", async () => {
+        const hash = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash("test-shop.myshopify.com")
+        );
+        expect(hash).toHaveLength(12);
+        expect(hash).toMatch(/^[0-9a-f]{12}$/);
+      });
+
+      it("is case-insensitive (lowercases domain before hashing)", async () => {
+        const hash1 = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash("Test-Shop.myshopify.com")
+        );
+        const hash2 = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash("test-shop.myshopify.com")
+        );
+        expect(hash1).toBe(hash2);
+      });
+
+      it("produces different hashes for different domains", async () => {
+        const hash1 = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash("shop1.myshopify.com")
+        );
+        const hash2 = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash("shop2.myshopify.com")
+        );
+        expect(hash1).not.toBe(hash2);
+      });
+
+      it("is deterministic", async () => {
+        const hash1 = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash("test.myshopify.com")
+        );
+        const hash2 = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash("test.myshopify.com")
+        );
+        expect(hash1).toBe(hash2);
+      });
+
+      it("equals independently computed HMAC-SHA-256 prefix (node:crypto oracle)", async () => {
+        const domain = "test-oracle.myshopify.com";
+        const hash = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash(domain)
+        );
+
+        const expectedHmac = createHmac("sha256", TEST_LOG_HASH_KEY)
+          .update(domain.toLowerCase())
+          .digest("hex")
+          .slice(0, 12);
+
+        expect(hash).toBe(expectedHmac);
+      });
+
+      it("does NOT equal the plain SHA-256 prefix of the domain", async () => {
+        const domain = "test-sha256.myshopify.com";
+        const hash = await withRequestContext(
+          { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+          () => shopHash(domain)
+        );
+
+        const plainSha256 = createHash("sha256")
+          .update(domain.toLowerCase())
+          .digest("hex")
+          .slice(0, 12);
+
+        expect(hash).not.toBe(plainSha256);
+      });
+
+      it("key rotation yields different hash matching new key oracle, old result not cached", async () => {
+        const domain = "test-rotation.myshopify.com";
+        const oldKey = "old-key-for-rotation-test";
+        const newKey = "new-key-for-rotation-test";
+
+        const hashWithOldKey = await withRequestContext(
+          { env: { LOG_HASH_KEY: oldKey } },
+          () => shopHash(domain)
+        );
+
+        const hashWithNewKey = await withRequestContext(
+          { env: { LOG_HASH_KEY: newKey } },
+          () => shopHash(domain)
+        );
+
+        expect(hashWithOldKey).not.toBe(hashWithNewKey);
+
+        const expectedOldHmac = createHmac("sha256", oldKey)
+          .update(domain.toLowerCase())
+          .digest("hex")
+          .slice(0, 12);
+        expect(hashWithOldKey).toBe(expectedOldHmac);
+
+        const expectedNewHmac = createHmac("sha256", newKey)
+          .update(domain.toLowerCase())
+          .digest("hex")
+          .slice(0, 12);
+        expect(hashWithNewKey).toBe(expectedNewHmac);
+      });
     });
 
-    it("is case-insensitive", async () => {
-      const hash1 = await shopHash("Test-Shop.myshopify.com");
-      const hash2 = await shopHash("test-shop.myshopify.com");
-      expect(hash1).toBe(hash2);
-    });
+    describe("with key missing (fail closed)", () => {
+      it("returns undefined when no request context", async () => {
+        const hash = await shopHash("test.myshopify.com");
+        expect(hash).toBeUndefined();
+      });
 
-    it("produces different hashes for different domains", async () => {
-      const hash1 = await shopHash("shop1.myshopify.com");
-      const hash2 = await shopHash("shop2.myshopify.com");
-      expect(hash1).not.toBe(hash2);
-    });
+      it("returns undefined when context has no env", async () => {
+        const hash = await withRequestContext({}, () =>
+          shopHash("test.myshopify.com")
+        );
+        expect(hash).toBeUndefined();
+      });
 
-    it("is deterministic", async () => {
-      const hash1 = await shopHash("test.myshopify.com");
-      const hash2 = await shopHash("test.myshopify.com");
-      expect(hash1).toBe(hash2);
-    });
+      it("returns undefined when env has no LOG_HASH_KEY", async () => {
+        const hash = await withRequestContext(
+          { env: { CUSTOMER_PII_FIELDS: "1" } },
+          () => shopHash("test.myshopify.com")
+        );
+        expect(hash).toBeUndefined();
+      });
 
-    it("matches exact 12-char hex format when logged", async () => {
-      const hash = await shopHash("test-shop.myshopify.com");
-      expect(hash).toMatch(/^[0-9a-f]{12}$/);
+      it("returns undefined when LOG_HASH_KEY is empty string", async () => {
+        const hash = await withRequestContext(
+          { env: { LOG_HASH_KEY: "" } },
+          () => shopHash("test.myshopify.com")
+        );
+        expect(hash).toBeUndefined();
+      });
+
+      it("safeLog omits shopHash field when key is missing", async () => {
+        const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+        const hash = await shopHash("test.myshopify.com");
+        safeLog("info", "test_event", { shopId: "id-123", shopHash: hash });
+
+        const output = consoleLogSpy.mock.calls[0][0];
+        const parsed = JSON.parse(output);
+
+        expect(parsed.shopId).toBe("id-123");
+        expect(parsed.shopHash).toBeUndefined();
+        expect("shopHash" in parsed).toBe(false);
+        expect(output).not.toContain("shopHash");
+
+        consoleLogSpy.mockRestore();
+      });
+
+      it("safeLog output has no plain SHA-256 hash anywhere when key missing", async () => {
+        const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+        const domain = "test-nofallback.myshopify.com";
+
+        const plainSha256 = createHash("sha256")
+          .update(domain.toLowerCase())
+          .digest("hex")
+          .slice(0, 12);
+
+        const hash = await shopHash(domain);
+        safeLog("info", "test_event", { shopId: "id-456", shopHash: hash });
+
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).not.toContain(plainSha256);
+
+        consoleLogSpy.mockRestore();
+      });
     });
   });
 
   describe("safeLog Promise detection", () => {
     it("throws when given an unawaited Promise for shopHash", () => {
-      expect(() => {
-        safeLog("info", "test_event", { shopHash: shopHash("test.myshopify.com") });
-      }).toThrow('safeLog received unawaited Promise for key "shopHash" - did you forget to await?');
+      withRequestContext({ env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } }, () => {
+        expect(() => {
+          safeLog("info", "test_event", { shopHash: shopHash("test.myshopify.com") });
+        }).toThrow('safeLog received unawaited Promise for key "shopHash" - did you forget to await?');
+      });
     });
 
     it("throws descriptive error for any Promise value in allowlisted key", () => {
@@ -352,15 +516,19 @@ describe("log.server", () => {
 
     it("works correctly with awaited shopHash", async () => {
       const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-      const hash = await shopHash("test-shop.myshopify.com");
+
+      const hash = await withRequestContext(
+        { env: { LOG_HASH_KEY: TEST_LOG_HASH_KEY } },
+        () => shopHash("test-shop.myshopify.com")
+      );
       safeLog("info", "test_event", { shopHash: hash });
-      
+
       const output = consoleLogSpy.mock.calls[0][0];
       expect(output).toContain('"shopHash":"');
-      
+
       const parsed = JSON.parse(output);
       expect(parsed.shopHash).toMatch(/^[0-9a-f]{12}$/);
-      
+
       consoleLogSpy.mockRestore();
     });
   });

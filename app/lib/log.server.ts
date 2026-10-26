@@ -9,10 +9,16 @@
  * status, reason, code, err, count/*Count, boolean flags, durationMs, timestamps.
  * Note: webhookId is explicitly BANNED (#332) and will be redacted.
  *
+ * shopHash is an HMAC-SHA-256 prefix keyed by LOG_HASH_KEY. It is not
+ * reversible without the secret key. If the key is missing, shopHash returns
+ * undefined and safeLog omits the field.
+ *
  * Any other key, or any string value matching sensitive patterns, is redacted.
  *
  * @module
  */
+
+import { getRequestEnv } from "./request-context.server";
 
 /**
  * Allowlisted field patterns for safe logging.
@@ -421,22 +427,62 @@ export function toErrorCode(err: unknown): string {
   return "unknown";
 }
 
+let cachedKey: { key: string; cryptoKey: CryptoKey } | undefined;
+
 /**
- * Compute a SHA-256 hash of a shop domain for safe logging.
+ * Get or create the HMAC CryptoKey for the given key string.
  *
- * Returns the first 12 hex characters of the hash.
+ * Caches a single key at a time. On key rotation (different key string),
+ * the old cached key is replaced. The HMAC key is the UTF-8 bytes of the
+ * LOG_HASH_KEY string exactly as set in the Worker secret (e.g., if DevOps
+ * sets 32 random bytes base64-encoded, the base64 text itself is the key;
+ * it is NOT base64-decoded).
+ */
+async function getHmacKey(keyString: string): Promise<CryptoKey> {
+  if (cachedKey && cachedKey.key === keyString) {
+    return cachedKey.cryptoKey;
+  }
+
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(keyString);
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    keyData,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  cachedKey = { key: keyString, cryptoKey };
+  return cryptoKey;
+}
+
+/**
+ * Compute an HMAC-SHA-256 of a shop domain for safe logging.
+ *
+ * Returns the first 12 lowercase hex characters of the HMAC, or undefined
+ * if the LOG_HASH_KEY secret is missing from the Worker env.
+ *
+ * The HMAC is keyed by LOG_HASH_KEY and is not reversible without the secret.
+ * The key is the UTF-8 bytes of the LOG_HASH_KEY string exactly as set
+ * (e.g., if DevOps sets 32 random bytes base64-encoded, the base64 text
+ * itself is the key; it is NOT base64-decoded).
+ *
  * Used for compliance/redact paths where no shopId exists.
- *
  * Uses Web Crypto API for Cloudflare Workers compatibility.
  *
  * @param domain - Shop domain (e.g., "example.myshopify.com")
- * @returns First 12 hex characters of SHA-256 hash
+ * @returns First 12 hex characters of HMAC-SHA-256, or undefined if key missing
  */
-export async function shopHash(domain: string): Promise<string> {
+export async function shopHash(domain: string): Promise<string | undefined> {
+  const env = getRequestEnv();
+  const key = env?.LOG_HASH_KEY;
+  if (!key) return undefined;
+
+  const cryptoKey = await getHmacKey(key);
   const encoder = new TextEncoder();
   const data = encoder.encode(domain.toLowerCase());
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const signature = await crypto.subtle.sign("HMAC", cryptoKey, data);
+  const hashArray = Array.from(new Uint8Array(signature));
   const hashHex = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
   return hashHex.slice(0, 12);
 }
