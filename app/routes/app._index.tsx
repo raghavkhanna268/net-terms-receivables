@@ -762,7 +762,7 @@ export default function Index() {
         <s-section>
           <s-banner tone="critical" heading="Currency Conversion Not Available">
             {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
-            Please <a href={SUPPORT_EMAIL_MAILTO}>contact support</a> for assistance.
+            Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
           </s-banner>
         </s-section>
       )}
