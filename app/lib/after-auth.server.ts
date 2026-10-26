@@ -52,6 +52,22 @@ const setupCompletedShops = new Set<string>();
 const inFlightSetups = new Map<string, Promise<void>>();
 
 /**
+ * In-flight CRITICAL registration promises by shop.
+ * 
+ * This is separate from inFlightSetups because:
+ * - inFlightSetups tracks the FULL setup (critical + background sync)
+ * - This map tracks only the CRITICAL registration that the Setup Guide depends on
+ * 
+ * Bug B fix: When two concurrent reinstall loads race:
+ * - Winner (gets RETURNING row): adds critical promise here, awaits it
+ * - Loser (gets empty): finds critical promise here, AWAITS it before returning
+ * 
+ * This ensures BOTH calls' runAfterAuth resolves only after critical registration
+ * is complete, so neither renders the Setup Guide with stale "Missing" state.
+ */
+const inFlightCriticalRegistrations = new Map<string, Promise<boolean>>();
+
+/**
  * Runs after-authentication hooks for a shop.
  *
  * Gap 1 (awaited reinstall clear): The critical reinstall path is now AWAITED,
@@ -152,13 +168,18 @@ async function clearAndMaybeSetup(
   if (reinstallResult.wasReinstalled) {
     setupCompletedShops.delete(shop);
 
-    // Check if there's already an in-flight setup for this shop.
+    // Check if there's already an in-flight CRITICAL registration for this shop.
     // Another concurrent reinstall load may have already started registration.
-    const existingPromise = inFlightSetups.get(shop);
-    if (existingPromise) {
-      // Another call is handling this shop's setup - wait for it
-      waitUntil(existingPromise);
-      await existingPromise;
+    const existingCriticalPromise = inFlightCriticalRegistrations.get(shop);
+    if (existingCriticalPromise) {
+      // Another call is handling this shop's critical registration - AWAIT it.
+      // Bug B fix: We MUST await (not just waitUntil) so runAfterAuth doesn't resolve
+      // until registration is complete. Otherwise the Setup Guide renders stale state.
+      const existingFullPromise = inFlightSetups.get(shop);
+      if (existingFullPromise) {
+        waitUntil(existingFullPromise);
+      }
+      await existingCriticalPromise;
       return;
     }
 
@@ -167,6 +188,9 @@ async function clearAndMaybeSetup(
     const criticalResultPromise = new Promise<boolean>((resolve) => {
       resolveCritical = resolve;
     });
+
+    // Store critical promise IMMEDIATELY so concurrent calls find it
+    inFlightCriticalRegistrations.set(shop, criticalResultPromise);
 
     // Create the full setup promise (critical + background) for deduplication.
     // Other concurrent calls will wait on this via inFlightSetups.
@@ -189,9 +213,26 @@ async function clearAndMaybeSetup(
       resolveCritical(false);
       throw error;
     } finally {
-      // Clean up in-flight entry after full setup completes
-      fullSetupPromise.finally(() => inFlightSetups.delete(shop));
+      // Clean up in-flight entries after full setup completes
+      fullSetupPromise.finally(() => {
+        inFlightSetups.delete(shop);
+        inFlightCriticalRegistrations.delete(shop);
+      });
     }
+    return;
+  }
+
+  // Loser path: wasReinstalled=false because another concurrent call already cleared it.
+  // But we still need to await the winner's critical registration before returning.
+  const existingCriticalPromise = inFlightCriticalRegistrations.get(shop);
+  if (existingCriticalPromise) {
+    // Bug B fix: AWAIT the winner's critical registration so runAfterAuth doesn't
+    // resolve until registration is complete. The Setup Guide renders after this.
+    const existingFullPromise = inFlightSetups.get(shop);
+    if (existingFullPromise) {
+      waitUntil(existingFullPromise);
+    }
+    await existingCriticalPromise;
     return;
   }
 
@@ -615,12 +656,13 @@ async function runSetup(
 }
 
 /**
- * Reset the setup cache and in-flight map - only for testing purposes.
+ * Reset the setup cache and in-flight maps - only for testing purposes.
  * @internal
  */
 export function _resetSetupCacheForTesting(): void {
   setupCompletedShops.clear();
   inFlightSetups.clear();
+  inFlightCriticalRegistrations.clear();
 }
 
 /**
