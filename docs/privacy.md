@@ -213,7 +213,7 @@ When a customer requests their data:
 
 **Data delivery:**
 - **Primary:** In-admin download via data requests page (creates download, marks as downloaded on success)
-- **Notification:** Email to shop owner via Resend API (not yet enabled)
+- **Notification:** Email to shop owner via Resend API
 - **Retention:** Exports are retained for **30 days** (data minimisation), then purged automatically
 
 **Shopify compliance deadline:** Per [Shopify compliance webhook documentation](https://shopify.dev/docs/apps/build/privacy-law-compliance#customers-data_request), merchants must provide the customer's data within **30 days** of receiving the request. Our 30-day export retention ensures exports remain available for the full compliance window.

@@ -111,9 +111,9 @@ We use the following sub-processors to provide the App:
 |---------------|---------|----------------|----------|
 | **Cloudflare, Inc.** | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit; edge processing | Global (Worker placed ap-south-1 via region hint) |
 | **Supabase, Inc.** | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All App data at rest | AWS ap-south-1 (Mumbai, India) |
+| **Resend, Inc.** | Email delivery (data request notifications, payment reminders) | Buyer email, name, invoice details | Tokyo, Japan (ap-northeast-1) data region |
 
-**Not in use; will be listed here before they are enabled:**
-- Plus Five Five, Inc. (Resend) — email delivery
+**Not in use; will be listed here before it is enabled:**
 - Functional Software, Inc. d/b/a Sentry — error monitoring
 
 **Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa).
@@ -161,9 +161,10 @@ In the event of a personal data breach affecting your data:
 ### 10. Cross-Border Transfers
 
 Personal data may be transferred to:
+- **Japan:** Resend (Tokyo, ap-northeast-1) for email delivery
 - **EU/other:** Cloudflare edge nodes (transient processing only)
 
-When Resend and Sentry are enabled, transfers to the US will be documented here.
+When Sentry is enabled, its transfer region will be documented here.
 
 ### 11. Term and Termination
 
