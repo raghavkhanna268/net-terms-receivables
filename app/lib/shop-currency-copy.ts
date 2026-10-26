@@ -16,3 +16,15 @@ export const CURRENCY_NOT_SUPPORTED_BANNER_COPY =
   "To use it, the store owner must change the store currency to Indian Rupee (INR) in " +
   "Shopify admin → Settings → General → Store defaults → Currency display → ⋯ → Change store currency, " +
   "then reload this page. If your store already has orders, Shopify asks you to confirm the change.";
+
+/**
+ * #292: Banner copy for currency flip blocked due to existing financial data.
+ *
+ * Shown when a shop with non-INR historical data (Invoice, Payment, or DraftOrder rows)
+ * switches to INR in Shopify. The flip is blocked to prevent relabeling existing
+ * USD/EUR/etc. amounts as rupees.
+ */
+export const CURRENCY_FLIP_BLOCKED_BANNER_COPY =
+  `This store has existing receivables data from when it used a different currency. ` +
+  `${APP_NAME} cannot convert this data to INR, so the app is unavailable for this store. ` +
+  "Please contact support for assistance.";

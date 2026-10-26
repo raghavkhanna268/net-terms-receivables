@@ -7,11 +7,23 @@
  * - Shops that switched away from INR
  * - Shops that switched to INR (recovery)
  * - Stale shop_config metafield (e.g., after-auth write failed)
+ *
+ * #292 Currency Flip Safety:
+ * When a shop with non-INR stored currency (real code, not NULL/XXX) switches
+ * to INR in Shopify, AND the shop already has financial rows (Invoice, Payment,
+ * or s8_draft_orders), the flip is BLOCKED to prevent relabeling existing
+ * USD-era data as rupees. The function returns flipBlocked: true in this case.
+ *
+ * Behavior for NULL/XXX stored currency with live INR:
+ * - NULL: Treated as unknown currency, flip allowed (same as today's fresh install)
+ * - XXX: Treated as failed query sentinel, flip allowed (recovery path)
+ * These are considered "unknown" rather than "known non-INR", so existing rows
+ * (if any) are assumed to be from INR-era or non-existent.
  */
 
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash } from "~/lib/log.server";
-import { NO_CURRENCY_SENTINEL, validateCurrencyCode } from "~/lib/shop-currency.server";
+import { NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY, validateCurrencyCode } from "~/lib/shop-currency.server";
 import { writeShopConfigMetafield } from "./shop-config.server";
 
 /**
@@ -35,6 +47,49 @@ interface ShopCurrencyAndIdResponse {
 }
 
 /**
+ * Result of checkAndRecoverCurrency.
+ *
+ * @property currency - The effective currency after recovery (or stored currency if blocked/failed)
+ * @property flipBlocked - True when a non-INR→INR flip was blocked due to existing financial rows
+ */
+export interface CurrencyRecoveryResult {
+  currency: string;
+  flipBlocked: boolean;
+}
+
+/**
+ * Check if a shop has any financial rows (Invoice, Payment, or s8_draft_orders).
+ * Used to determine if a currency flip should be blocked.
+ *
+ * Uses EXISTS queries for efficiency - stops scanning as soon as one row is found.
+ * Exported for testing.
+ */
+export async function hasFinancialRows(sql: Sql, shopId: string): Promise<boolean> {
+  const [result] = await sql<{ has_rows: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM "Invoice" WHERE "shopId" = ${shopId}
+      UNION ALL
+      SELECT 1 FROM "Payment" WHERE "shopId" = ${shopId}
+      UNION ALL
+      SELECT 1 FROM s8_draft_orders WHERE shop_id = ${shopId}
+    ) AS has_rows
+  `;
+  return result?.has_rows ?? false;
+}
+
+/**
+ * Check if a stored currency is a known non-INR currency (real code, not NULL/XXX).
+ * Returns true for USD, EUR, etc. Returns false for INR, XXX, null, empty string.
+ * Exported for testing.
+ */
+export function isKnownNonInrCurrency(currency: string | null | undefined): boolean {
+  if (!currency) return false;
+  if (currency === NO_CURRENCY_SENTINEL) return false;
+  if (currency === SUPPORTED_SHOP_CURRENCY) return false;
+  return /^[A-Z]{3}$/.test(currency);
+}
+
+/**
  * #292: Re-read currency to catch shop currency changes.
  *
  * Called on every /app and /app/onboarding load to catch:
@@ -53,6 +108,16 @@ interface ShopCurrencyAndIdResponse {
  * - Write shop_config metafield FIRST, only save DB on success
  * - If read fails: keep current value
  *
+ * #292 Currency Flip Safety:
+ * When stored currency is non-INR (real code like USD/EUR, not NULL/XXX), live
+ * currency is INR, AND the shop has any financial rows, the flip is BLOCKED:
+ * - Do NOT update Shop.currency
+ * - Do NOT push the INR shop_config metafield
+ * - Do NOT clear the not-supported state
+ * - Return flipBlocked: true so callers can show the appropriate banner
+ *
+ * A shop with ZERO financial rows flips exactly as today.
+ *
  * Never writes 'XXX' over a known value.
  */
 export async function checkAndRecoverCurrency(
@@ -60,7 +125,7 @@ export async function checkAndRecoverCurrency(
   shopDomain: string,
   currentCurrency: string,
   admin: AdminGraphqlClient,
-): Promise<string> {
+): Promise<CurrencyRecoveryResult> {
   try {
     const response = await admin.graphql(`
       query ShopCurrencyAndId {
@@ -75,15 +140,15 @@ export async function checkAndRecoverCurrency(
     `);
     const data = (await response.json()) as ShopCurrencyAndIdResponse;
 
-    const shopId = data.data?.shop?.id;
+    const shopGid = data.data?.shop?.id;
     const fetchedCurrency = validateCurrencyCode(data.data?.shop?.currencyCode);
 
-    if (!fetchedCurrency || !shopId) {
-      return currentCurrency;
+    if (!fetchedCurrency || !shopGid) {
+      return { currency: currentCurrency, flipBlocked: false };
     }
 
     if (fetchedCurrency === NO_CURRENCY_SENTINEL) {
-      return currentCurrency;
+      return { currency: currentCurrency, flipBlocked: false };
     }
 
     let shopConfigCurrency: string | null = null;
@@ -99,6 +164,22 @@ export async function checkAndRecoverCurrency(
 
     const hash = await shopHash(shopDomain);
 
+    // #292 Currency Flip Safety: Block non-INR→INR flip when financial rows exist
+    // Conditions: stored is known non-INR (USD, EUR, etc.), live is INR, has financial rows
+    if (
+      isKnownNonInrCurrency(currentCurrency) &&
+      fetchedCurrency === SUPPORTED_SHOP_CURRENCY
+    ) {
+      // Need shopId from DB to check financial rows
+      const [shopRow] = await sql<{ id: string }[]>`
+        SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+      `;
+      if (shopRow && await hasFinancialRows(sql, shopRow.id)) {
+        safeLog("info", "currency_flip_blocked", { shopHash: hash });
+        return { currency: currentCurrency, flipBlocked: true };
+      }
+    }
+
     const shopConfigMissing = shopConfigCurrency === null;
     const shopConfigStale =
       shopConfigCurrency !== null && shopConfigCurrency !== fetchedCurrency;
@@ -110,7 +191,7 @@ export async function checkAndRecoverCurrency(
     if (needsShopConfigPush) {
       const writeResult = await writeShopConfigMetafield(
         admin,
-        shopId,
+        shopGid,
         fetchedCurrency,
       );
 
@@ -120,7 +201,7 @@ export async function checkAndRecoverCurrency(
           shopHash: hash,
           err: errCode,
         });
-        return currentCurrency;
+        return { currency: currentCurrency, flipBlocked: false };
       }
 
       if (shopConfigStale && !dbNeedsUpdate) {
@@ -143,10 +224,10 @@ export async function checkAndRecoverCurrency(
       }
     }
 
-    return fetchedCurrency;
+    return { currency: fetchedCurrency, flipBlocked: false };
   } catch {
     const hash = await shopHash(shopDomain);
     safeLog("warn", "currency_check_failed", { shopHash: hash });
-    return currentCurrency;
+    return { currency: currentCurrency, flipBlocked: false };
   }
 }

@@ -24,7 +24,7 @@ import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
-import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
@@ -240,9 +240,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   timing.endPhase("shop_lookup");
 
   // #292: Re-read currency for non-INR shops to enable recovery when shop changes to INR
-  const shopCurrency = shop
+  const currencyResult = shop
     ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin)
-    : NO_CURRENCY_SENTINEL;
+    : { currency: NO_CURRENCY_SENTINEL, flipBlocked: false };
+  const shopCurrency = currencyResult.currency;
+  const currencyFlipBlocked = currencyResult.flipBlocked;
 
   // Time onboarding_checks phase
   if (shop && !skipOnboarding) {
@@ -376,6 +378,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     storeHandle,
     shopCurrency,
     currencySupported,
+    currencyFlipBlocked,
     plan: planData
       ? {
           key: resolvePlanKey(planData.plan.key),
@@ -732,6 +735,7 @@ export default function Index() {
     error,
     newAccountsPausedBanner,
     currencySupported,
+    currencyFlipBlocked,
   } = useLoaderData<typeof loader>();
 
   const planKey = (plan?.key ?? "none") as PlanKey;
@@ -752,8 +756,17 @@ export default function Index() {
 
   return (
     <s-page heading="Net Terms Receivables">
-      {/* #292: Currency Not Supported Banner */}
-      {!currencySupported && (
+      {/* #292: Currency Flip Blocked Banner (non-INR→INR with existing data) */}
+      {currencyFlipBlocked && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Conversion Not Available">
+            {CURRENCY_FLIP_BLOCKED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      )}
+
+      {/* #292: Currency Not Supported Banner (non-INR shop without blocked flip) */}
+      {!currencySupported && !currencyFlipBlocked && (
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}

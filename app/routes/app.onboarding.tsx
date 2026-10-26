@@ -45,7 +45,7 @@ import {
   type InitialSyncState,
 } from "~/lib/initial-sync.server";
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
-import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 
 /**
@@ -373,12 +373,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
   const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
-  const shopCurrency = await checkAndRecoverCurrency(
+  const currencyResult = await checkAndRecoverCurrency(
     sql,
     shopDomain,
     storedCurrency,
     admin,
   );
+  const shopCurrency = currencyResult.currency;
+  const currencyFlipBlocked = currencyResult.flipBlocked;
   const currencySupported = isShopCurrencySupported(shopCurrency);
 
   const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
@@ -458,6 +460,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     initialSyncState: syncState,
     newAccountsPausedBanner,
     currencySupported,
+    currencyFlipBlocked,
   };
 };
 
@@ -599,13 +602,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
     `;
     const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
-    const recoveredCurrency = await checkAndRecoverCurrency(
+    const currencyResult = await checkAndRecoverCurrency(
       sql,
       shopDomain,
       storedCurrency,
       admin,
     );
-    if (!isShopCurrencySupported(recoveredCurrency)) {
+    if (!isShopCurrencySupported(currencyResult.currency)) {
       return {
         success: false,
         error: "Sync not available for non-INR stores",
@@ -832,7 +835,7 @@ function OnboardingChecklist({
 const POLL_INTERVAL_MS = 5000;
 
 export default function OnboardingPage() {
-  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported, currencyFlipBlocked } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -890,8 +893,17 @@ export default function OnboardingPage() {
 
   return (
     <s-page heading="Setup Guide">
-      {/* #292: Currency Not Supported Banner */}
-      {!currencySupported && (
+      {/* #292: Currency Flip Blocked Banner (non-INR→INR with existing data) */}
+      {currencyFlipBlocked && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Conversion Not Available">
+            {CURRENCY_FLIP_BLOCKED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      )}
+
+      {/* #292: Currency Not Supported Banner (non-INR shop without blocked flip) */}
+      {!currencySupported && !currencyFlipBlocked && (
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
