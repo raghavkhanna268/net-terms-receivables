@@ -25,6 +25,7 @@ on:
           - hold-audit-s12
           - offline-session-preflight
           - post-drain-aggregates
+          - reconcile-key-today
           - redriven-webhook-receipts
           - s12-hold-coverage
           - s22-retention-purge-preview
@@ -34,7 +35,7 @@ on:
         default: "0"
         type: string
       since:
-        description: "ISO-8601 UTC timestamp, e.g. 2026-10-24T08:29:23Z (post-drain-aggregates, redriven-webhook-receipts baseline, hold-audit-s12, s12-hold-coverage sweep run time)"
+        description: "ISO-8601 UTC timestamp, e.g. 2026-10-24T08:29:23Z (post-drain-aggregates, redriven-webhook-receipts baseline, hold-audit-s12, s12-hold-coverage sweep run time, reconcile-key-today UTC day; default = today)"
         required: false
         default: "1970-01-01T00:00:00Z"
         type: string
