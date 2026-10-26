@@ -33,33 +33,33 @@ export function getSyncErrorInfo(errorCode: string | null): SyncErrorInfo {
   if (errorCode === null) {
     return {
       category: "generic",
-      message: "Shopify metafield sync has been stopped after multiple failures. Automatic retries have stopped. Please contact support if this persists.",
+      message: "Credit settings couldn't sync to Shopify after multiple attempts. Automatic retries have stopped. Please contact support if this persists.",
     };
   }
 
   if ((KNOWN_SESSION_ERRORS as readonly string[]).includes(errorCode)) {
     return {
       category: "session",
-      message: "Shopify metafield sync failed because the app session is missing or expired. Automatic retries have stopped. Please reopen the app or reinstall it to restore the connection.",
+      message: "Credit settings couldn't sync to Shopify because the app session expired. Automatic retries have stopped. Reopen the app, or reinstall it to restore the connection.",
     };
   }
 
   if (errorCode === "access_denied") {
     return {
       category: "permission",
-      message: "Shopify metafield sync failed because the app is missing required permissions. Automatic retries have stopped. Please reinstall the app to grant the necessary access.",
+      message: "Credit settings couldn't sync to Shopify because the app is missing required permissions. Automatic retries have stopped. Please reinstall the app to grant the necessary access.",
     };
   }
 
   if (errorCode === "owner_not_found") {
     return {
       category: "owner",
-      message: "Shopify metafield sync failed because the company location or customer no longer exists in Shopify. The buyer account may need to be removed or reassigned.",
+      message: "Credit settings couldn't sync to Shopify because the company location or customer no longer exists. The buyer account may need to be removed or reassigned.",
     };
   }
 
   return {
     category: "generic",
-    message: "Shopify metafield sync has been stopped after repeated failures. Automatic retries have stopped. Please contact support for assistance.",
+    message: "Credit settings couldn't sync to Shopify after repeated attempts. Automatic retries have stopped. Please contact support for assistance.",
   };
 }
