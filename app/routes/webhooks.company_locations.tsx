@@ -47,7 +47,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (!ALLOWED_TOPICS.has(normalizedTopic)) {
     console.warn(
-      `[webhooks.company_locations] Unexpected topic ${normalizedTopic} wh=${webhookId}, ignoring`
+      `[webhooks.company_locations] Unexpected topic ${normalizedTopic}, ignoring`
     );
     return new Response(null, { status: 200 });
   }
@@ -57,7 +57,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (!resourceGid) {
     console.warn(
-      `[webhooks.company_locations] Missing admin_graphql_api_id in ${normalizedTopic} wh=${webhookId}`
+      `[webhooks.company_locations] Missing admin_graphql_api_id in ${normalizedTopic}`
     );
     return new Response(null, { status: 200 });
   }
@@ -74,17 +74,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   });
 
   if (result.status === "duplicate") {
-    console.log(`[webhooks.company_locations] Duplicate ${normalizedTopic} wh=${webhookId}, skipping`);
+    console.log(`[webhooks.company_locations] Duplicate ${normalizedTopic}, skipping`);
     return new Response(null, { status: 200 });
   }
 
   if (result.status === "error") {
-    console.error(`[webhooks.company_locations] Enqueue failed wh=${webhookId}`);
+    console.error("[webhooks.company_locations] Enqueue failed");
     throw new Error(result.code);
   }
 
   console.log(
-    `[webhooks.company_locations] Enqueued ${normalizedTopic} wh=${webhookId}: ${resourceGid}`
+    `[webhooks.company_locations] Enqueued ${normalizedTopic}: ${resourceGid}`
   );
 
   return new Response(null, { status: 200 });

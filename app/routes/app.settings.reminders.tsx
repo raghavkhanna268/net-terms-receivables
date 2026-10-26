@@ -75,7 +75,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       logs: [],
       providerConfigured: false,
       shopTimezone: "UTC",
-      statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0 } as ReminderStatusCounts,
+      statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 } as ReminderStatusCounts,
       delayedReminders: [] as DelayedReminder[],
       shopSentToday: 0,
     };
@@ -307,6 +307,8 @@ export function formatStatus(status: string): string {
       return "Delayed (daily limit)";
     case "skipped_daily_limit":
       return "Skipped (daily limit)";
+    case "skipped_opted_out":
+      return "Skipped (opted out)";
     default:
       return "Skipped";
   }
@@ -453,6 +455,9 @@ export default function RemindersSettingsPage() {
             {" · "}
             <s-text type="strong">Skipped (daily limit): </s-text>
             <s-text>{statusCounts.skippedDailyLimit}</s-text>
+            {" · "}
+            <s-text type="strong">Skipped (opted out): </s-text>
+            <s-text>{statusCounts.skippedOptedOut}</s-text>
           </s-paragraph>
 
           {delayedReminders.length > 0 && (
@@ -583,6 +588,13 @@ export default function RemindersSettingsPage() {
           the limit are delayed and retried over the next 3 days (shop time). If
           one still can&apos;t be sent within 3 days, or a later reminder for
           the same invoice replaces it, it&apos;s marked Skipped (daily limit).
+        </s-paragraph>
+      </s-section>
+
+      <s-section slot="aside" heading="Opted-Out Buyers">
+        <s-paragraph>
+          The buyer unsubscribed from reminder emails. Only you can turn
+          reminders back on for them.
         </s-paragraph>
       </s-section>
 
