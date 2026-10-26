@@ -61,6 +61,12 @@ import {
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
 import { isShopCurrencySupported } from "~/lib/shop-currency.server";
+import {
+  isShopNotFoundReason,
+  sanitizeSyncMessage,
+  sanitizeBulkMessage,
+  type SanitizedDeadLetterMessage,
+} from "./dead-letter-sanitize.server";
 
 /**
  * #292 G8: Terminal topics that must reach handlers even for non-INR shops.
@@ -74,12 +80,6 @@ const TERMINAL_TOPICS = new Set([
   "ORDERS_CANCELLED",
   "DRAFT_ORDERS_DELETE",
 ]);
-import {
-  isShopNotFoundReason,
-  sanitizeSyncMessage,
-  sanitizeBulkMessage,
-  type SanitizedDeadLetterMessage,
-} from "./dead-letter-sanitize.server";
 
 /**
  * Configuration for drain processing.
@@ -1165,12 +1165,13 @@ async function moveToDeadLetter(
 
 /**
  * #292: Batch lookup shop currencies for INR-only filtering.
- * Returns a map of shop domain to currency (or undefined if shop not found).
+ * Returns a map of shop domain to currency string. Shops not in the map were not found.
+ * NULL currency in DB is stored as empty string "" (sentinel) to distinguish from not found.
  */
 async function loadShopCurrencies(
   sql: Sql,
   shopDomains: string[]
-): Promise<Map<string, string | undefined>> {
+): Promise<Map<string, string>> {
   if (shopDomains.length === 0) {
     return new Map();
   }
@@ -1181,9 +1182,10 @@ async function loadShopCurrencies(
     SELECT domain, currency FROM "Shop" WHERE domain IN ${sql(uniqueDomains)}
   `;
 
-  const result = new Map<string, string | undefined>();
+  const result = new Map<string, string>();
   for (const row of rows) {
-    result.set(row.domain, row.currency ?? undefined);
+    // Store NULL as empty string to distinguish from "shop not found"
+    result.set(row.domain, row.currency ?? "");
   }
   return result;
 }
@@ -1224,21 +1226,12 @@ async function processSyncQueue(
     }
 
     // #292: Skip non-INR shops (but let terminal topics through for existing rows)
-    // G4: Also skip when Shop row doesn't exist (currency undefined in map)
+    // Shop not in map → let handler fail with shop_not_found → sanitized DLQ path
+    // Shop in map with unsupported currency (NULL/""/XXX/non-INR) → skip non-terminal, pass terminal
     const shopCurrency = shopCurrencies.get(msg.message.shop);
-    const isNonInr = shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency);
-    const isNoShopRow = !shopCurrencies.has(msg.message.shop);
-    
-    if (isNoShopRow) {
-      // G4: No Shop row - skip with fixed-code log, don't crash
-      safeLog("info", "drain_skip_no_shop_row", {
-        queue: S6_QUEUES.SYNC,
-        topic: msg.message.topic,
-      });
-      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
-      result.skipped++;
-      continue;
-    }
+    const shopFound = shopCurrencies.has(msg.message.shop);
+    // Fail closed: NULL/"" or unsupported currency treated as non-INR
+    const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
     
     if (isNonInr && !TERMINAL_TOPICS.has(msg.message.topic)) {
       // G8: Non-INR shop, non-terminal topic - skip (don't import new amounts)
@@ -1252,6 +1245,7 @@ async function processSyncQueue(
     }
     // G8: Terminal topics (PAID, CANCELLED, DRAFT_DELETE) pass through to handlers
     // which will update existing rows without importing new amounts
+    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
 
     // Skip already-sanitized messages (re-enqueued by hand)
     if ((msg.message as Record<string, unknown>).sanitized === true) {
@@ -1448,21 +1442,12 @@ async function processBulkQueue(
     }
 
     // #292: Skip non-INR shops
-    // G4: Also skip when Shop row doesn't exist (currency undefined in map)
+    // Shop not in map → let handler fail with shop_not_found → sanitized DLQ path
+    // Shop in map with unsupported currency → skip (bulk queue has no terminal topics)
     const shopCurrency = shopCurrencies.get(msg.message.shop);
-    const isNonInr = shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency);
-    const isNoShopRow = !shopCurrencies.has(msg.message.shop);
-    
-    if (isNoShopRow) {
-      // G4: No Shop row - skip with fixed-code log, don't crash
-      safeLog("info", "drain_skip_no_shop_row", {
-        queue: S6_QUEUES.BULK,
-        topic: msg.message.topic,
-      });
-      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
-      result.skipped++;
-      continue;
-    }
+    const shopFound = shopCurrencies.has(msg.message.shop);
+    // Fail closed: NULL/"" or unsupported currency treated as non-INR
+    const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
     
     if (isNonInr) {
       // G8: Bulk queue has no terminal topics - all non-INR are skipped
@@ -1474,6 +1459,7 @@ async function processBulkQueue(
       );
       continue;
     }
+    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
 
     // Skip already-sanitized messages (re-enqueued by hand)
     if ((msg.message as Record<string, unknown>).sanitized === true) {

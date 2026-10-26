@@ -1039,7 +1039,7 @@ export default function ReconcilePage() {
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             Payment reconciliation is only available for INR stores. Your store
-            currency ({shopCurrency || "unknown"}) is not supported.
+            currency ({!shopCurrency || shopCurrency === "XXX" ? "unknown" : shopCurrency}) is not supported.
           </s-banner>
         </s-section>
       )}

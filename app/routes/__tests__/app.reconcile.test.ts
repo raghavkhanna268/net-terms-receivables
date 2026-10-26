@@ -724,8 +724,9 @@ describe("Reconcile Route (M5)", () => {
   });
 
   describe("#292 G7: Currency guard for reconcile actions", () => {
-    it("action returns error for non-INR shop", async () => {
+    it("action returns error for non-INR shop and does not call matcher", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
+      const { runMatcher } = await import("~/services/matcher.server");
 
       // Return shop with non-INR currency (USD)
       mockSql.mockResolvedValueOnce([{ id: "shop-usd", currency: "USD" }]);
@@ -750,10 +751,13 @@ describe("Reconcile Route (M5)", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("Currency not supported");
+      // Verify matcher was NOT called due to currency guard
+      expect(runMatcher).not.toHaveBeenCalled();
     });
 
-    it("action returns error for unknown currency shop (XXX)", async () => {
+    it("action returns error for unknown currency shop (XXX) and does not call confirm", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
+      const { confirmMatch } = await import("~/services/matcher.server");
 
       // Return shop with unknown currency
       mockSql.mockResolvedValueOnce([{ id: "shop-xxx", currency: "XXX" }]);
@@ -779,10 +783,13 @@ describe("Reconcile Route (M5)", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("Currency not supported");
+      // Verify confirmMatch was NOT called due to currency guard
+      expect(confirmMatch).not.toHaveBeenCalled();
     });
 
-    it("action returns error for null currency shop", async () => {
+    it("action returns error for null currency shop and does not call apply", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
+      const { applyMatch } = await import("~/services/apply.server");
 
       // Return shop with null currency
       mockSql.mockResolvedValueOnce([{ id: "shop-null", currency: null }]);
@@ -808,6 +815,8 @@ describe("Reconcile Route (M5)", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("Currency not supported");
+      // Verify applyMatch was NOT called due to currency guard
+      expect(applyMatch).not.toHaveBeenCalled();
     });
 
     it("action proceeds for INR shop", async () => {
