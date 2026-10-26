@@ -27,12 +27,23 @@ vi.mock("~/lib/after-auth.server", () => ({
   evictShopFromSetupCache: (...args: unknown[]) => mockEvictShopFromSetupCache(...args),
 }));
 
+const mockGetOfflineAdminContext = vi.fn();
+vi.mock("~/lib/offline-admin.server", () => ({
+  getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
+}));
+
 const mockTx = vi.fn();
-const mockSql = Object.assign(vi.fn(), {
-  begin: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
-    return callback(mockTx);
-  }),
-});
+const mockSqlQuery = vi.fn();
+const mockSql = Object.assign(
+  function(strings: TemplateStringsArray, ...values: unknown[]) {
+    return mockSqlQuery(strings, ...values);
+  },
+  {
+    begin: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      return callback(mockTx);
+    }),
+  }
+);
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
@@ -74,7 +85,7 @@ describe("webhooks.app.uninstalled", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+    process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret", SHOPIFY_API_KEY: "test-client-id" };
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,
       topic: "app/uninstalled",
@@ -89,6 +100,8 @@ describe("webhooks.app.uninstalled", () => {
     mockDeleteProcessedWebhooksViaReceipts.mockResolvedValue(0);
     mockTx.mockResolvedValue(Object.assign([], { count: 0 }));
     mockEvictShopFromSetupCache.mockReturnValue(undefined);
+    mockSqlQuery.mockResolvedValue([]);
+    mockGetOfflineAdminContext.mockResolvedValue({ success: false, errorCode: "no_session", retryable: false, needsReauth: true });
   });
 
   afterEach(() => {

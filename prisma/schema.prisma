@@ -165,6 +165,10 @@ model Shop {
   /// When the shop uninstalled the app (S22). NULL means still installed.
   /// Full data deletion happens on shop/redact (48h later per Shopify docs).
   uninstalledAt    DateTime? @db.Timestamptz(3)
+  /// When the shop last completed installation or reinstallation (#261).
+  /// Used to detect stale app/uninstalled webhooks that arrive after a quick reinstall.
+  /// NULL for shops that installed before this column was added (backfill not needed).
+  lastInstalledAt  DateTime? @db.Timestamptz(3)
 
   // S21: Plan cache columns
   /// Cached plan key (free, starter, growth, scale). Defaults to free.

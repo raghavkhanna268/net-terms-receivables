@@ -186,7 +186,7 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
     const result = await sql<{ id: string; closed_count: number; deleted_claims_count: number }[]>`
       WITH reinstalled_shop AS (
         UPDATE "Shop"
-        SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL
+        SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL, "lastInstalledAt" = NOW()
         WHERE domain = ${shop} AND "uninstalledAt" IS NOT NULL
         RETURNING id
       ),
@@ -511,8 +511,8 @@ export async function upsertShopOnAuth(
       WHERE domain = ${shopDomain}
     ),
     upserted AS (
-      INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-      VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), ${currency}, 'free', NOW(), NOW())
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt", "lastInstalledAt")
+      VALUES (${shopDomain}, COALESCE(${timezone}, 'Asia/Kolkata'), ${currency}, 'free', NOW(), NOW(), NOW())
       ON CONFLICT (domain)
       DO UPDATE SET
         timezone = COALESCE(${timezone}, "Shop".timezone),
@@ -523,6 +523,12 @@ export async function upsertShopOnAuth(
         onboarding_dismissed_at = CASE
           WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
           ELSE "Shop".onboarding_dismissed_at
+        END,
+        -- #261: Set lastInstalledAt on reinstall (when uninstalledAt was set).
+        -- Plain re-auth of an installed shop does not bump this.
+        "lastInstalledAt" = CASE
+          WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NOW()
+          ELSE COALESCE("Shop"."lastInstalledAt", NOW())
         END,
         "updatedAt" = NOW()
       RETURNING id
