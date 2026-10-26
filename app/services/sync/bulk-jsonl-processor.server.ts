@@ -1323,7 +1323,7 @@ export async function processBulkOperation(
       });
 
       // Only chain to next stage if this caller won the completion claim
-      let nextStage: "customers" | "orders" | undefined;
+      let nextStage: "customers" | "orders" | "draft_orders" | undefined;
       if (claimed) {
         const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
         nextStage =
@@ -1476,7 +1476,7 @@ export async function processBulkOperation(
     });
 
     // Only chain to next stage if this caller won the completion claim
-    let nextStage: "customers" | "orders" | undefined;
+    let nextStage: "customers" | "orders" | "draft_orders" | undefined;
     if (claimed) {
       const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
       nextStage =
@@ -1649,7 +1649,7 @@ export async function processBulkOperation(
     });
 
     // Only chain to next stage if this caller won the completion claim
-    let nextStage: "customers" | "orders" | undefined;
+    let nextStage: "customers" | "orders" | "draft_orders" | undefined;
     if (claimed) {
       const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
       nextStage =

@@ -254,11 +254,30 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
     });
   });
 
-  describe("processBulkDraftOrder", () => {
-    it("processes draft order with payment terms and resolves buyer account", async () => {
+  describe("processBulkDraftOrder - three-bucket coverage", () => {
+    const TEST_CUSTOMER_ID = `gid://shopify/Customer/cust-s8b-${TEST_SUFFIX}`;
+    const TEST_CUSTOMER_ACCOUNT_ID = `account-cust-s8b-${TEST_SUFFIX}`;
+
+    beforeAll(async () => {
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "customerId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_CUSTOMER_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${TEST_CUSTOMER_ID}, 'Test S8B Tagged Customer',
+          NOW(), NOW()
+        )
+      `;
+    });
+
+    afterAll(async () => {
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${TEST_CUSTOMER_ACCOUNT_ID}`;
+    });
+
+    it("bucket 1: with purchasing company - maps to company/location buyer account", async () => {
       const draftOrder: ShopifyDraftOrder = {
-        id: `gid://shopify/DraftOrder/proc-${TEST_SUFFIX}`,
-        name: "#BPROC",
+        id: `gid://shopify/DraftOrder/bucket1-co-${TEST_SUFFIX}`,
+        name: "#BUCKET1-CO",
         createdAt: "2026-10-25T10:00:00Z",
         status: "open",
         totalPriceSet: { shopMoney: { amount: "7500.00", currencyCode: "USD" } },
@@ -283,7 +302,55 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
       expect(result!.hasPaymentTerms).toBe(true);
     });
 
-    it("returns null for draft order without payment terms", async () => {
+    it("bucket 2: customer-only - maps via customer to tagged customer buyer account", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/bucket2-cust-${TEST_SUFFIX}`,
+        name: "#BUCKET2-CUST",
+        createdAt: "2026-10-25T11:00:00Z",
+        status: "invoice_sent",
+        totalPriceSet: { shopMoney: { amount: "4000.00", currencyCode: "USD" } },
+        paymentTerms: {
+          id: "pt2",
+          paymentTermsName: "Net 45",
+          paymentTermsType: "NET",
+          dueInDays: 45,
+        },
+        customer: { id: TEST_CUSTOMER_ID },
+      };
+
+      const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+      expect(result).not.toBeNull();
+      expect(result!.shopId).toBe(TEST_SHOP_ID);
+      expect(result!.buyerAccountId).toBe(TEST_CUSTOMER_ACCOUNT_ID);
+      expect(result!.hasPaymentTerms).toBe(true);
+      expect(result!.status).toBe("invoice_sent");
+    });
+
+    it("bucket 3: neither company nor customer - SKIPPED (no buyer account)", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/bucket3-neither-${TEST_SUFFIX}`,
+        name: "#BUCKET3-NEITHER",
+        createdAt: "2026-10-25T12:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "2000.00", currencyCode: "USD" } },
+        paymentTerms: {
+          id: "pt3",
+          paymentTermsName: "Net 60",
+          paymentTermsType: "NET",
+          dueInDays: 60,
+        },
+      };
+
+      const result = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, draftOrder);
+
+      expect(result).not.toBeNull();
+      expect(result!.shopId).toBe(TEST_SHOP_ID);
+      expect(result!.buyerAccountId).toBeNull();
+      expect(result!.hasPaymentTerms).toBe(true);
+    });
+
+    it("returns null for draft order without payment terms (existing skip reason)", async () => {
       const draftOrder: ShopifyDraftOrder = {
         id: `gid://shopify/DraftOrder/noterms-${TEST_SUFFIX}`,
         name: "#BNOTERMS",
