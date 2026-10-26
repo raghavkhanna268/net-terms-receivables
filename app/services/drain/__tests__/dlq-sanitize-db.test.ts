@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -226,6 +227,8 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${testContext.suffix}%`}`;
     await sqlRef`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${`%${testContext.suffix}%`}`;
     await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${testContext.suffix}%`}`;
+
+    await assertNoQueueLeftovers(sqlRef, [testContext.missingShopDomain], "dlq-sanitize-db.test.ts");
   });
 
   function getAllConsoleOutput(): string[] {

@@ -9,14 +9,16 @@
  * - Exact amount match: +20 points
  * - Partial amount match: +10 points
  * - Overpayment: +10 points (reduced, flags excess)
- * - Payer name match: +10 points (fuzzy match on normalized name)
+ * - Confirmed payer alias: +30 points (whole-word match on normalized name)
+ * - Payer name match: +8 points (fuzzy match on normalized name)
+ * - Email prefix match: +6 points
  *
  * NOTE: UTR matching is NOT awarded at the payment-to-candidate level because
  * the UTR is extracted from the payment's own narration and would give the same
  * score to every candidate. UTR is only useful for deduplication at import time.
  *
  * Thresholds:
- * - High confidence (>=80): Invoice ref + amount match + name match
+ * - High confidence (>=80): Invoice ref + amount match + alias match
  * - Medium confidence (50-79): Amount + name match, needs review
  * - Low confidence (<50): Ambiguous, manual review required
  *
@@ -322,6 +324,21 @@ interface PayerNameMatchResult {
 }
 
 /**
+ * Check if `needle` appears as a whole word (at token boundaries) within `haystack`.
+ * Both strings should be normalized (lowercase, single-space-separated, no punctuation).
+ * Returns true if needle equals haystack or if needle appears surrounded by spaces or at string edges.
+ * Checks ALL occurrences of needle, not just the first.
+ */
+function containsWholeWord(haystack: string, needle: string): boolean {
+  if (needle.length === 0 || haystack.length === 0) return false;
+  if (haystack === needle) return true;
+
+  // Pad with spaces to simplify boundary checks at start/end
+  // For normalized single-space strings, this correctly detects whole-word matches
+  return (" " + haystack + " ").includes(" " + needle + " ");
+}
+
+/**
  * Score payer name match against buyer data.
  * IMPORTANT: Detail fields must NOT contain PII (no email, phone, address).
  */
@@ -342,11 +359,12 @@ function scorePayerNameMatch(
   }
 
   // Check aliases first (highest confidence - confirmed aliases only)
-  // Require minimum 3 chars for BOTH sides in substring matches to avoid false positives
+  // Use whole-word (token-boundary) matching to avoid false positives from partial substrings
+  // Require minimum 3 chars for BOTH sides to avoid false positives
   for (const alias of buyer.aliases) {
     const isExactMatch = alias === normalizedPayer;
-    const payerContainsAlias = normalizedPayer.length >= 3 && alias.length >= 3 && normalizedPayer.includes(alias);
-    const aliasContainsPayer = normalizedPayer.length >= 3 && alias.length >= 3 && alias.includes(normalizedPayer);
+    const payerContainsAlias = normalizedPayer.length >= 3 && alias.length >= 3 && containsWholeWord(normalizedPayer, alias);
+    const aliasContainsPayer = normalizedPayer.length >= 3 && alias.length >= 3 && containsWholeWord(alias, normalizedPayer);
     if (isExactMatch || payerContainsAlias || aliasContainsPayer) {
       return {
         matched: true,

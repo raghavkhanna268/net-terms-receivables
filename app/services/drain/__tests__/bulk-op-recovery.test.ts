@@ -19,9 +19,26 @@ vi.mock("../admin-client.server", () => ({
 vi.mock("~/lib/pgmq.server", () => ({
   sendBulkMessage: vi.fn().mockResolvedValue({ msgId: "mock-msg-id" }),
   BULK_OPERATIONS_FINISH_TOPIC: "BULK_OPERATIONS_FINISH",
+  S6_QUEUES: { SYNC: "s6_sync", BULK: "s6_bulk" },
 }));
 
 const TEST_SUFFIX = Date.now().toString(36) + "-recovery-unit";
+
+/**
+ * Create a mock SQL object that supports sql.begin() for transaction tests.
+ * S25: markBulkOperationFailed now uses sql.begin() for atomic DLQ write.
+ */
+function createMockSqlWithBegin(txResult: unknown) {
+  const mockTx = Object.assign(vi.fn().mockResolvedValue(txResult), {
+    json: vi.fn((v: unknown) => v),
+  });
+  return Object.assign(vi.fn().mockResolvedValue(txResult), {
+    json: vi.fn((v: unknown) => v),
+    begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+      return callback(mockTx);
+    }),
+  });
+}
 
 describe("bulk-op-recovery", () => {
   beforeEach(() => {
@@ -59,7 +76,8 @@ describe("bulk-op-recovery", () => {
 
   describe("markBulkOperationFailed", () => {
     it("sets failure_count to 5 for open operations", async () => {
-      const mockSql = vi.fn().mockResolvedValue({ count: 1 });
+      // S25: Use mock with begin() for transaction support
+      const mockSql = createMockSqlWithBegin(Object.assign([{ bulk_operation_id: "test", bulk_type: "companies" }], { count: 1 }));
 
       const { markBulkOperationFailed } = await import("../bulk-op-recovery.server");
       const result = await markBulkOperationFailed(
@@ -69,11 +87,12 @@ describe("bulk-op-recovery", () => {
       );
 
       expect(result).toBe(true);
-      expect(mockSql).toHaveBeenCalled();
+      expect(mockSql.begin).toHaveBeenCalled();
     });
 
     it("returns false when operation already completed", async () => {
-      const mockSql = vi.fn().mockResolvedValue({ count: 0 });
+      // S25: Use mock with begin() for transaction support
+      const mockSql = createMockSqlWithBegin(Object.assign([], { count: 0 }));
 
       const { markBulkOperationFailed } = await import("../bulk-op-recovery.server");
       const result = await markBulkOperationFailed(
@@ -172,12 +191,25 @@ describe("bulk-op-recovery", () => {
         },
       ];
 
+      // S25: Use mock with begin() for transaction support
+      const mockTx = vi.fn().mockResolvedValue(Object.assign([{ bulk_operation_id: "test", bulk_type: "orders" }], { count: 1 }));
+      Object.assign(mockTx, { json: vi.fn((v: unknown) => v) });
+
       let callCount = 0;
-      const mockSql = vi.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return Promise.resolve(findStaleResult);
-        return Promise.resolve({ count: 1 });
-      });
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation(() => {
+          callCount++;
+          // First call: findStaleBulkOperations; second call: findLeaseExpiredBulkOperations; third call: findStrandedBulkOperations
+          if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps must be array
+          if (callCount === 3) return Promise.resolve([]); // strandedOps must be array
+          return Promise.resolve({ count: 1 });
+        }),
+        {
+          json: vi.fn((v: unknown) => v),
+          begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => callback(mockTx)),
+        }
+      );
 
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
@@ -208,12 +240,24 @@ describe("bulk-op-recovery", () => {
         },
       ];
 
+      // S25: Use mock with begin() for transaction support
+      const mockTx = vi.fn().mockResolvedValue(Object.assign([{ bulk_operation_id: "test", bulk_type: "orders" }], { count: 1 }));
+      Object.assign(mockTx, { json: vi.fn((v: unknown) => v) });
+
       let callCount = 0;
-      const mockSql = vi.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return Promise.resolve(findStaleResult);
-        return Promise.resolve({ count: 1 });
-      });
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps
+          if (callCount === 3) return Promise.resolve([]); // strandedOps
+          return Promise.resolve({ count: 1 });
+        }),
+        {
+          json: vi.fn((v: unknown) => v),
+          begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => callback(mockTx)),
+        }
+      );
 
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
@@ -242,12 +286,24 @@ describe("bulk-op-recovery", () => {
         },
       ];
 
+      // S25: Use mock with begin() for transaction support
+      const mockTx = vi.fn().mockResolvedValue(Object.assign([{ bulk_operation_id: "test", bulk_type: "orders" }], { count: 1 }));
+      Object.assign(mockTx, { json: vi.fn((v: unknown) => v) });
+
       let callCount = 0;
-      const mockSql = vi.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return Promise.resolve(findStaleResult);
-        return Promise.resolve({ count: 1 });
-      });
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps
+          if (callCount === 3) return Promise.resolve([]); // strandedOps
+          return Promise.resolve({ count: 1 });
+        }),
+        {
+          json: vi.fn((v: unknown) => v),
+          begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => callback(mockTx)),
+        }
+      );
 
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
@@ -274,12 +330,24 @@ describe("bulk-op-recovery", () => {
         },
       ];
 
+      // S25: Use mock with begin() for transaction support
+      const mockTx = vi.fn().mockResolvedValue(Object.assign([{ bulk_operation_id: "test", bulk_type: "companies" }], { count: 1 }));
+      Object.assign(mockTx, { json: vi.fn((v: unknown) => v) });
+
       let callCount = 0;
-      const mockSql = vi.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return Promise.resolve(findStaleResult);
-        return Promise.resolve({ count: 1 });
-      });
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps
+          if (callCount === 3) return Promise.resolve([]); // strandedOps
+          return Promise.resolve({ count: 1 });
+        }),
+        {
+          json: vi.fn((v: unknown) => v),
+          begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => callback(mockTx)),
+        }
+      );
 
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperations(mockSql as unknown as Parameters<typeof recoverStaleBulkOperations>[0], 60);
@@ -459,12 +527,22 @@ describe("bulk-op-recovery", () => {
         },
       ];
 
+      // S25: Use mock with begin() for transaction support
+      const mockTx = vi.fn().mockResolvedValue(Object.assign([{ bulk_operation_id: "test", bulk_type: "companies" }], { count: 1 }));
+      Object.assign(mockTx, { json: vi.fn((v: unknown) => v) });
+
       let callCount = 0;
-      const mockSql = vi.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return Promise.resolve(findStaleResult);
-        return Promise.resolve({ count: 1 });
-      });
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) return Promise.resolve(findStaleResult);
+          return Promise.resolve({ count: 1 });
+        }),
+        {
+          json: vi.fn((v: unknown) => v),
+          begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => callback(mockTx)),
+        }
+      );
 
       const { recoverStaleBulkOperationsForShop } = await import("../bulk-op-recovery.server");
       const result = await recoverStaleBulkOperationsForShop(

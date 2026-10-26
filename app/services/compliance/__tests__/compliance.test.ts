@@ -65,27 +65,29 @@ describe("compliance.server", () => {
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
       // 3. DELETE s6_bulk_operations
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 4. DELETE order_outstanding_missing
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 5. DELETE s10b_customer_pii_fallback
+      // 4. DELETE s6_reconcile_stage_claims
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 6. DELETE pgmq.q_s6_sync
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 6 }));
-      // 7. DELETE pgmq.q_s6_bulk
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 7 }));
-      // 8. DELETE pgmq.a_s6_sync
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 8 }));
-      // 9. DELETE pgmq.a_s6_bulk
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 9 }));
-      // 10. DELETE s6_dead_letter
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-      // 11. DELETE s6_processed_webhooks (reconcile prefix)
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 12. DELETE s6_processed_webhooks (receipts join)
+      // 5. DELETE order_outstanding_missing
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 13. DELETE webhook_receipts
+      // 6. DELETE s10b_customer_pii_fallback
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 7. DELETE pgmq.q_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 6 }));
+      // 8. DELETE pgmq.q_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 7 }));
+      // 9. DELETE pgmq.a_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 8 }));
+      // 10. DELETE pgmq.a_s6_bulk
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 9 }));
+      // 11. DELETE s6_dead_letter
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
+      // 12. DELETE s6_processed_webhooks (reconcile prefix)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 13. DELETE s6_processed_webhooks (receipts join)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 14. DELETE webhook_receipts
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 10 }));
-      // 14. DELETE Shop
+      // 15. DELETE Shop
       mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
 
       const result = await deleteShop(mockSql, "test-shop.myshopify.com");
@@ -97,6 +99,7 @@ describe("compliance.server", () => {
         sessionsDeleted: 2,
         refetchNullPurged: 5,
         bulkOperationsPurged: 2,
+        reconcileClaimsPurged: 1,
         orderGapPurged: 3,
         piiFallbackPurged: 1,
         pgmqSyncQueuePurged: 6,
@@ -120,27 +123,29 @@ describe("compliance.server", () => {
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
       // 3. DELETE s6_bulk_operations
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. DELETE order_outstanding_missing
+      // 4. DELETE s6_reconcile_stage_claims
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 5. DELETE s10b_customer_pii_fallback
+      // 5. DELETE order_outstanding_missing
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 6. DELETE pgmq.q_s6_sync
+      // 6. DELETE s10b_customer_pii_fallback
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 7. DELETE pgmq.q_s6_bulk
+      // 7. DELETE pgmq.q_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 8. DELETE pgmq.a_s6_sync
+      // 8. DELETE pgmq.q_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 9. DELETE pgmq.a_s6_bulk
+      // 9. DELETE pgmq.a_s6_sync
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 10. DELETE s6_dead_letter
+      // 10. DELETE pgmq.a_s6_bulk
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 11. DELETE s6_processed_webhooks (reconcile prefix)
+      // 11. DELETE s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 12. DELETE s6_processed_webhooks (receipts join)
+      // 12. DELETE s6_processed_webhooks (reconcile prefix)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 13. DELETE webhook_receipts
+      // 13. DELETE s6_processed_webhooks (receipts join)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 14. DELETE Shop (no rows)
+      // 14. DELETE webhook_receipts
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 15. DELETE Shop (no rows)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await deleteShop(mockSql, "test-nonexistent.myshopify.com");
@@ -152,6 +157,7 @@ describe("compliance.server", () => {
         sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
+        reconcileClaimsPurged: 0,
         orderGapPurged: 0,
         piiFallbackPurged: 0,
         pgmqSyncQueuePurged: 0,
@@ -179,6 +185,7 @@ describe("compliance.server", () => {
         sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
+        reconcileClaimsPurged: 0,
         orderGapPurged: 0,
         piiFallbackPurged: 0,
         pgmqSyncQueuePurged: 0,
@@ -1026,7 +1033,7 @@ describe("compliance.server", () => {
     it("sends email without link when APP_HANDLE is missing", async () => {
       (process.env as Record<string, string | undefined>).APP_HANDLE = undefined;
       process.env.RESEND_API_KEY = "re_test_key";
-      process.env.RESEND_FROM = "noreply@example.com";
+      (process.env as Record<string, string | undefined>).RESEND_FROM = "noreply@example.com";
       vi.stubEnv("RESEND_TEST_RECIPIENTS", "owner@shop.com");
       const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 

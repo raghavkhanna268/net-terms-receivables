@@ -15,7 +15,7 @@ This section maps public privacy policy data categories to internal database tab
 | s8_tagged_customers | Customer GID, tags, tag_active, email*, displayName* | 2.3 Tagged Customer Data |
 | s8_draft_orders | Draft order GID, buyer account ref, total, status | 2.3 Tagged Customer Data |
 
-*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Protected Customer Data (PCD) approval. Level 1 + Name and Email fields have been requested in the Partner Dashboard; the fields remain NULL until approval is granted and the flag is enabled.
+*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Protected Customer Data (PCD) approval. Level 2 (protected customer fields: Name, Email only): request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing. As of 26 Oct. The fields remain NULL until approval and the flag is enabled.
 
 **PII Minimisation (S22):** When a tagged customer becomes `tag_active=false` and has no open invoices, their email and displayName are automatically nulled.
 
@@ -265,7 +265,7 @@ The app performs nightly reconciliation to ensure local ledger consistency with 
 
 When enabled:
 - `s8_tagged_customers.email` and `s8_tagged_customers.displayName` are populated from Shopify
-- Requires Shopify PCD approval (Level 1 + Name and Email fields)
+- Requires Shopify PCD approval, Level 2 (protected customer fields: Name, Email only)
 
 When disabled or unset:
 - Email and displayName fields remain NULL
@@ -277,10 +277,10 @@ When disabled or unset:
 
 ### Pre-Launch
 
-- [ ] Complete Shopify Protected Customer Data (PCD) approval form
-- [ ] Fill in `[TBD: ...]` sections in `docs/privacy.md` with actual company details
+- [x] PCD request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing (Level 2: Name and Email only)
+- [x] Fill in `[TBD: ...]` sections in `docs/privacy.md` with actual company details (#313, #357)
 - [ ] Set up DPAs with Cloudflare and Supabase
-- [ ] Accept [Resend DPA](https://resend.com/legal/dpa) before enabling email notifications
+- [x] Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard (product-owner ruling, 2026-10-26).
 - [ ] Configure data retention policies for audit events
 - [ ] Decide on email delivery for data requests (currently in-admin only)
 - [ ] Verify CUSTOMER_PII_FIELDS flag is off in production until PCD approval

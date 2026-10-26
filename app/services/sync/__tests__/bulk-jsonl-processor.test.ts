@@ -435,6 +435,261 @@ describe("Bulk JSONL Processor", () => {
     });
   });
 
+  describe("fetchJsonlChunk EOF detection fix", () => {
+    it("1. numeric total with short chunk: not EOF, continues", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunk = '{"id":"1"}\n{"id":"2"}\n';
+      const mockResponse = new Response(shortChunk, {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-21/3000" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(false);
+      expect(result.totalSize).toBe(3000);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toBe('{"id":"1"}');
+      expect(lines[1]).toBe('{"id":"2"}');
+    });
+
+    it("2. numeric total on the last chunk: EOF", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const lastChunk = '{"id":"3"}\n';
+      const mockResponse = new Response(lastChunk, {
+        status: 206,
+        headers: { "Content-Range": "bytes 90-100/101" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        90,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBe(101);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe('{"id":"3"}');
+    });
+
+    it("3. no Content-Range header with short chunk: EOF via heuristic, last line kept", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines, decodeTailAsLine } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunkNoNewline = '{"id":"1"}\n{"id":"2"}';
+      const mockResponse = new Response(shortChunkNoNewline, {
+        status: 206,
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines, tailBytes } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe('{"id":"1"}');
+      const tail = decodeTailAsLine(tailBytes, decoder);
+      expect(tail).toBe('{"id":"2"}');
+    });
+
+    it("4. * total with last line no trailing newline: last line kept, EOF, no 8 MiB growth", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines, decodeTailAsLine, DEFAULT_CHUNK_SIZE } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunkNoNewline = '{"id":"final"}';
+      const mockResponse = new Response(shortChunkNoNewline, {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-13/*" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        DEFAULT_CHUNK_SIZE
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      expect((bytes as Uint8Array).length).toBe(14);
+      expect((bytes as Uint8Array).length).toBeLessThan(8 * 1024 * 1024);
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines, tailBytes } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(0);
+      const tail = decodeTailAsLine(tailBytes, decoder);
+      expect(tail).toBe('{"id":"final"}');
+    });
+
+    it("5. malformed Content-Range header: same as *, last line kept, EOF", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines, decodeTailAsLine } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunkNoNewline = '{"id":"last"}';
+      const mockResponse = new Response(shortChunkNoNewline, {
+        status: 206,
+        headers: { "Content-Range": "malformed-header-value" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines, tailBytes } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(0);
+      const tail = decodeTailAsLine(tailBytes, decoder);
+      expect(tail).toBe('{"id":"last"}');
+    });
+
+    it("6. 200 full body: EOF, complete file", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const fullBody = '{"id":"1"}\n{"id":"2"}\n{"id":"3"}\n';
+      const mockResponse = new Response(fullBody, {
+        status: 200,
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBe(fullBody.length);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(3);
+      expect(lines[0]).toBe('{"id":"1"}');
+      expect(lines[1]).toBe('{"id":"2"}');
+      expect(lines[2]).toBe('{"id":"3"}');
+    });
+
+    it("7. 416 Range Not Satisfiable: EOF, empty bytes", async () => {
+      const { fetchJsonlChunk } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const mockResponse = new Response("", { status: 416 });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        5000,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      expect((bytes as Uint8Array).length).toBe(0);
+    });
+
+    it("8. numeric-total boundary: rangeEnd === totalSize - 2, not EOF", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const line1 = '{"id":"1"}\n';
+      const line2 = '{"id":"2"}\n';
+      const line3 = '{"id":"3"}\n';
+      const line4 = '{"id":"4"}\n';
+      const line5 = '{"id":"5"}\n';
+      const line6 = '{"id":"6"}\n';
+      const line7 = '{"id":"7"}\n';
+      const line8 = '{"id":"8"}\n';
+      const line9 = '{"id":"9x"}';
+      const bodyLines = line1 + line2 + line3 + line4 + line5 + line6 + line7 + line8 + line9;
+      expect(bodyLines.length).toBe(99);
+
+      const mockResponse = new Response(bodyLines, {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-98/100" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(false);
+      expect(result.totalSize).toBe(100);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      expect((bytes as Uint8Array).length).toBe(99);
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(8);
+      expect(lines[0]).toBe('{"id":"1"}');
+      expect(lines[7]).toBe('{"id":"8"}');
+    });
+  });
+
   describe("resume from saved offset", () => {
     it("loads existing progress including chunkSize and failureCount", async () => {
       const { loadBulkOperationProgress } = await import(
@@ -502,7 +757,7 @@ describe("Bulk JSONL Processor", () => {
         mockSql as never,
         "gid://shopify/BulkOperation/123",
         1024,
-        null,
+        "test-lease-token",
         2097152 // 2MB chunk size
       );
 
@@ -525,9 +780,14 @@ describe("getNextStage", () => {
     expect(getNextStage("customers")).toBe("orders");
   });
 
-  it("returns undefined after orders (final stage)", async () => {
+  it("returns draft_orders after orders", async () => {
     const { getNextStage } = await import("../bulk-jsonl-processor.server");
-    expect(getNextStage("orders")).toBeUndefined();
+    expect(getNextStage("orders")).toBe("draft_orders");
+  });
+
+  it("returns undefined after draft_orders (final stage)", async () => {
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+    expect(getNextStage("draft_orders")).toBeUndefined();
   });
 
   it("returns undefined for null stage", async () => {
@@ -605,6 +865,66 @@ describe("Reconcile chaining", () => {
     expect(metadata!.origin).toBe("reconcile");
     expect(metadata!.reconcileStage).toBe("customers");
     expect(getNextStage(metadata!.reconcileStage)).toBe("orders");
+  });
+
+  it("orders reconcile sets nextStage=draft_orders when origin=reconcile and stage=orders", async () => {
+    const { getBulkOperationMetadata } = await import(
+      "../bulk-operations.server"
+    );
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+
+    const mockSql = vi.fn().mockImplementation(() =>
+      Promise.resolve([
+        {
+          shop: "test-s8b-drafts.myshopify.com",
+          bulk_type: "orders",
+          origin: "reconcile",
+          reconcile_stage: "orders",
+          failure_count: 0,
+          chunk_size: 524288,
+        },
+      ])
+    );
+
+    const metadata = await getBulkOperationMetadata(
+      mockSql as never,
+      "gid://shopify/BulkOperation/789"
+    );
+
+    expect(metadata).not.toBeNull();
+    expect(metadata!.origin).toBe("reconcile");
+    expect(metadata!.reconcileStage).toBe("orders");
+    expect(getNextStage(metadata!.reconcileStage)).toBe("draft_orders");
+  });
+
+  it("draft_orders reconcile has no nextStage (final stage)", async () => {
+    const { getBulkOperationMetadata } = await import(
+      "../bulk-operations.server"
+    );
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+
+    const mockSql = vi.fn().mockImplementation(() =>
+      Promise.resolve([
+        {
+          shop: "test-s8b-drafts.myshopify.com",
+          bulk_type: "draft_orders",
+          origin: "reconcile",
+          reconcile_stage: "draft_orders",
+          failure_count: 0,
+          chunk_size: 524288,
+        },
+      ])
+    );
+
+    const metadata = await getBulkOperationMetadata(
+      mockSql as never,
+      "gid://shopify/BulkOperation/999"
+    );
+
+    expect(metadata).not.toBeNull();
+    expect(metadata!.origin).toBe("reconcile");
+    expect(metadata!.reconcileStage).toBe("draft_orders");
+    expect(getNextStage(metadata!.reconcileStage)).toBeUndefined();
   });
 });
 

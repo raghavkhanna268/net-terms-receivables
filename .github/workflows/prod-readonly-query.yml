@@ -21,12 +21,17 @@ on:
         type: choice
         options:
           - canary-orders-backstop
+          - dlq-classify-bulk
+          - g3-noninr-is-dev-store
           - g3-shop-config-currency-counts
           - hold-audit-s12
           - offline-session-preflight
+          - pgmq-archive-age
           - post-drain-aggregates
           - redriven-webhook-receipts
           - s12-hold-coverage
+          - s18-reminder-rule-dupes
+          - s18-reminders-due-7d
           - s22-retention-purge-preview
       msg_ids:
         description: "Comma-separated pgmq msg_ids (e.g. 162,163); used by canary-orders-backstop and redriven-webhook-receipts"
@@ -90,9 +95,25 @@ jobs:
           MSG_IDS: ${{ inputs.msg_ids }}
           SINCE: ${{ inputs.since }}
           LOCATION_ID: ${{ inputs.location_id }}
+          # Secret, so the env header prints ***. Used only as the psql
+          # variable :allowed (g3-noninr-is-dev-store); never printed.
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
+          ALLOWED="${ALLOWED_DEV_STORE:-}"
+          if [ -n "$ALLOWED" ]; then
+            # Validate before masking so a multi-line value cannot slip past ::add-mask::.
+            if [[ ! "$ALLOWED" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              ALLOWED=""
+            else
+              echo "::add-mask::$ALLOWED"
+            fi
+          fi
+          if [ "$QUERY_NAME" = "g3-noninr-is-dev-store" ] && [ -z "$ALLOWED" ]; then
+            echo "::error::ALLOWED_DEV_STORE secret is unset or invalid (required by g3-noninr-is-dev-store)"
+            exit 1
+          fi
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
             exit 1
@@ -107,4 +128,4 @@ jobs:
             sudo apt-get install -y -qq postgresql-client
           fi
           source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
-          psql -X -q -v ON_ERROR_STOP=1 -v "msg_ids=${MSG_IDS}" -v "since=${SINCE}" -v "location_id=${LOCATION_ID}" -f "$FILE" "$DATABASE_URL"
+          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${ALLOWED}" -v "msg_ids=${MSG_IDS}" -v "since=${SINCE}" -v "location_id=${LOCATION_ID}" -f "$FILE" "$DATABASE_URL"

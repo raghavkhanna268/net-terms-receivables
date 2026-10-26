@@ -97,7 +97,9 @@ async function checkNoSessionForUninstalledShop(
   `;
 
   if (!shop || shop.uninstalledAt !== null) {
-    // Shop is missing or uninstalled—relabel to shop_not_found for DLQ sanitization.
+    // Shop is missing or uninstalled—relabel to shop_not_found.
+    // For COMPANIES_* and COMPANY_LOCATIONS_*: returned directly → goes to DLQ with sanitization.
+    // For ORDERS_*: caller converts to success:true → ACKed immediately (no DLQ).
     // Omit `retryable` because shop_not_found is non-retryable by definition and the
     // drain uses errorCode (not retryable flag) to decide sanitization eligibility.
     return {
@@ -930,10 +932,30 @@ async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<Sy
   return startReconcileBulkOperation(sql, message.shop, "orders", message.webhookId);
 }
 
+/**
+ * Handler for RECONCILE_DRAFT_ORDERS topic.
+ * Starts a bulk draft orders export for the shop.
+ *
+ * Exports draft orders with status=open or status=invoice_sent for
+ * pending credit exposure tracking.
+ */
+async function handleReconcileDraftOrders(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  return startReconcileBulkOperation(sql, message.shop, "draft_orders", message.webhookId);
+}
+
 // Register RECONCILE_* handlers
 registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
 registerSyncHandler("RECONCILE_CUSTOMERS", handleReconcileCustomers);
 registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
+registerSyncHandler("RECONCILE_DRAFT_ORDERS", handleReconcileDraftOrders);
 
 // =============================================================================
 // CREDIT STATUS RECOMPUTE HANDLER
@@ -1416,9 +1438,19 @@ async function processSyncQueue(
         // Retryable errors use read_ct threshold
         const shouldDlq =
           syncResult.retryable === false || msg.read_ct >= config.maxRetries;
+        const errorCode = syncResult.errorCode ?? toErrorCode(syncResult.error);
+
+        // S25: Log failed sync messages with safe fields
+        const hash = await shopHash(msg.message.shop);
+        safeLog("warn", "sync_message_failed", {
+          topic: msg.message.topic,
+          queue: S6_QUEUES.SYNC,
+          errorCode,
+          shopHash: hash,
+          readCt: msg.read_ct,
+        });
 
         if (shouldDlq) {
-          const errorCode = syncResult.errorCode ?? toErrorCode(syncResult.error);
           const dlqReason = syncResult.retryable === false
             ? `non_retryable:${errorCode}`
             : errorCode;
@@ -1471,6 +1503,17 @@ async function processSyncQueue(
       // Uncaught exceptions are treated as retryable (transient failures)
       // Only DLQ after max retries to avoid losing messages on transient issues
       const errorCode = toErrorCode(err);
+
+      // S25: Log uncaught exceptions with safe fields
+      const hash = await shopHash(msg.message.shop);
+      safeLog("error", "sync_message_exception", {
+        topic: msg.message.topic,
+        queue: S6_QUEUES.SYNC,
+        errorCode,
+        shopHash: hash,
+        readCt: msg.read_ct,
+      });
+
       if (msg.read_ct >= config.maxRetries) {
         // S13: Record backstop.failed for ORDERS_CREATE when DLQ'ing
         if (msg.message.topic === "ORDERS_CREATE") {
@@ -1649,6 +1692,17 @@ async function processBulkQueue(
         const errorType = bulkResult.errorType;
         const errorCode = bulkResult.errorCode ?? toErrorCode(bulkResult.error);
 
+        // S25: Log failed message with safe fields
+        const hash = await shopHash(msg.message.shop);
+        safeLog("warn", "bulk_message_failed", {
+          topic: msg.message.topic,
+          queue: S6_QUEUES.BULK,
+          errorCode,
+          readCt: msg.read_ct,
+          retryable: errorType === "retryable",
+          shopHash: hash,
+        });
+
         if (errorType === "permanent") {
           // Permanent error (4xx, bad data, exhausted retries) - go to DLQ
           const dlqd = await moveToDeadLetter(
@@ -1665,10 +1719,27 @@ async function processBulkQueue(
             result.deadLetterAlreadyGoneCount++;
           }
         } else if (errorType === "retryable") {
-          // Retryable error - leave message in queue for retry via read_ct
-          // The failure_count was already incremented by processBulkOperation
-          // Message will be retried on next read (visibility timeout reset)
-          result.failed++;
+          // S25: Cap lease contention retries at maxRetries - send to DLQ
+          if (errorCode === "bulk_lease_contention" && msg.read_ct >= config.maxRetries) {
+            const dlqd = await moveToDeadLetter(
+              sql,
+              S6_QUEUES.BULK,
+              msg.msg_id,
+              msg.message,
+              errorCode,
+              msg.read_ct
+            );
+            if (dlqd) {
+              result.deadLettered++;
+            } else {
+              result.deadLetterAlreadyGoneCount++;
+            }
+          } else {
+            // Retryable error - leave message in queue for retry via read_ct
+            // The failure_count was already incremented by processBulkOperation
+            // Message will be retried on next read (visibility timeout reset)
+            result.failed++;
+          }
         } else {
           // Unknown error type or legacy path - use read_ct for DLQ
           if (msg.read_ct >= config.maxRetries) {
@@ -1697,6 +1768,17 @@ async function processBulkQueue(
       }
     } catch (err) {
       const errorCode = toErrorCode(err);
+
+      // S25: Log uncaught exceptions with safe fields
+      const hash = await shopHash(msg.message.shop);
+      safeLog("error", "bulk_message_exception", {
+        topic: msg.message.topic,
+        queue: S6_QUEUES.BULK,
+        errorCode,
+        shopHash: hash,
+        readCt: msg.read_ct,
+      });
+
       if (msg.read_ct >= config.maxRetries) {
         const dlqd = await moveToDeadLetter(sql, S6_QUEUES.BULK, msg.msg_id, msg.message, errorCode, msg.read_ct);
         if (dlqd) {

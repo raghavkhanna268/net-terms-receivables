@@ -185,13 +185,18 @@ describe("app home timing instrumentation", () => {
   describe("app_home_timing log lines (one per phase)", () => {
     let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
+    /**
+     * Phases that run in the initial loader response (before streaming).
+     * These are logged immediately and included in Server-Timing header.
+     *
+     * Note: plan_resolve, ledger_rows, ledger_count now run in the deferred
+     * promise (streaming) and are not included in the initial response timing.
+     * This improves LCP by returning a skeleton immediately while data loads.
+     */
     const EXPECTED_PHASES = [
       "auth_index",
       "shop_lookup",
       "onboarding_checks",
-      "plan_resolve",
-      "ledger_rows",
-      "ledger_count",
       "loader_total",
     ];
 
@@ -304,6 +309,14 @@ describe("app home timing instrumentation", () => {
       const { loader: layoutLoader } = await import("../app");
       const { loader: indexLoader } = await import("../app._index");
 
+      // Helper to extract and await deferred dashboardData from index loader result
+      async function awaitDeferredData(result: unknown): Promise<void> {
+        const data = (result as { data?: Record<string, unknown> })?.data;
+        if (data?.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+          await (data.dashboardData as Promise<unknown>);
+        }
+      }
+
       // Create a context factory (one context per request, shared by layout and index)
       const createContext = () => ({
         shopify: {
@@ -326,10 +339,12 @@ describe("app home timing instrumentation", () => {
       const context1 = createContext();
       const request1Layout = new Request("https://example.com/app");
       const request1Index = new Request("https://example.com/app");
-      await Promise.all([
+      const [, indexResult1] = await Promise.all([
         layoutLoader({ request: request1Layout, context: context1, params: {} } as never),
         indexLoader({ request: request1Index, context: context1, params: {} } as never),
       ]);
+
+      await awaitDeferredData(indexResult1);
 
       let allLogs = consoleLogSpy.mock.calls
         .map((c: unknown[]) => c[0])
@@ -346,10 +361,12 @@ describe("app home timing instrumentation", () => {
       const context2 = createContext();
       const request2Layout = new Request("https://example.com/app");
       const request2Index = new Request("https://example.com/app");
-      await Promise.all([
+      const [, indexResult2] = await Promise.all([
         layoutLoader({ request: request2Layout, context: context2, params: {} } as never),
         indexLoader({ request: request2Index, context: context2, params: {} } as never),
       ]);
+
+      await awaitDeferredData(indexResult2);
 
       allLogs = consoleLogSpy.mock.calls
         .map((c: unknown[]) => c[0])
@@ -376,6 +393,64 @@ describe("app home timing instrumentation", () => {
       );
       expect(loaderTotalLogs.length).toBe(1);
     });
+
+    it("P2: deferred phases (plan_resolve, ledger_rows, ledger_count) are logged after promise settles", async () => {
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs());
+
+      const initialLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const initialStages = initialLogs.map((log: { stage: string }) => log.stage.replace(/_cold$/, ""));
+      expect(initialStages).toContain("auth_index");
+      expect(initialStages).toContain("shop_lookup");
+      expect(initialStages).toContain("loader_total");
+      expect(initialStages).not.toContain("plan_resolve");
+      expect(initialStages).not.toContain("ledger_rows");
+
+      consoleLogSpy.mockClear();
+
+      const data = (result as { data: Record<string, unknown> }).data;
+      if (data.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+        await (data.dashboardData as Promise<unknown>);
+      }
+
+      const deferredLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const deferredStages = deferredLogs.map((log: { stage: string }) => log.stage.replace(/_cold$/, ""));
+      expect(deferredStages).toContain("plan_resolve");
+      expect(deferredStages).toContain("ledger_rows");
+    });
+
+    it("loader_total logged exactly once, each deferred phase logged exactly once after await", async () => {
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs());
+
+      const data = (result as { data: Record<string, unknown> }).data;
+      if (data.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+        await (data.dashboardData as Promise<unknown>);
+      }
+
+      const allLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const countByStage = (stage: string) =>
+        allLogs.filter((log: { stage: string }) =>
+          log.stage === stage || log.stage === `${stage}_cold`
+        ).length;
+
+      expect(countByStage("loader_total")).toBe(1);
+      expect(countByStage("plan_resolve")).toBe(1);
+      expect(countByStage("ledger_rows")).toBe(1);
+      expect(countByStage("ledger_count")).toBe(1);
+    });
   });
 
   describe("timing phases", () => {
@@ -397,22 +472,31 @@ describe("app home timing instrumentation", () => {
       expect(serverTiming).toContain("shop_lookup");
     });
 
-    it("times plan_resolve phase", async () => {
+    /**
+     * With streaming/deferred data, plan_resolve runs in the deferred promise
+     * and is NOT included in the Server-Timing header of the initial response.
+     * This is expected behavior for LCP optimization.
+     */
+    it("does NOT include plan_resolve in initial response Server-Timing (runs in deferred promise)", async () => {
       const { loader } = await import("../app._index");
       const result = await loader(createLoaderArgs());
       const headers = extractHeaders(result);
 
       const serverTiming = headers?.get("Server-Timing") ?? "";
-      expect(serverTiming).toContain("plan_resolve");
+      expect(serverTiming).not.toContain("plan_resolve");
     });
 
-    it("times ledger_rows phase", async () => {
+    /**
+     * With streaming/deferred data, ledger_rows runs in the deferred promise
+     * and is NOT included in the Server-Timing header of the initial response.
+     */
+    it("does NOT include ledger_rows in initial response Server-Timing (runs in deferred promise)", async () => {
       const { loader } = await import("../app._index");
       const result = await loader(createLoaderArgs());
       const headers = extractHeaders(result);
 
       const serverTiming = headers?.get("Server-Timing") ?? "";
-      expect(serverTiming).toContain("ledger_rows");
+      expect(serverTiming).not.toContain("ledger_rows");
     });
 
     it("times loader_total phase", async () => {
@@ -616,6 +700,14 @@ describe("cold flag across layout and index", () => {
     const { loader: layoutLoader } = await import("../app");
     const { loader: indexLoader } = await import("../app._index");
 
+    // Helper to extract and await deferred dashboardData from index loader result
+    async function awaitDeferredData(result: unknown): Promise<void> {
+      const data = (result as { data?: Record<string, unknown> })?.data;
+      if (data?.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+        await (data.dashboardData as Promise<unknown>);
+      }
+    }
+
     // Different contexts for A and B (workers/app.ts creates one per fetch)
     const contextA = createContextForColdTest();
     const contextB = createContextForColdTest();
@@ -629,7 +721,10 @@ describe("cold flag across layout and index", () => {
     const promiseA = Promise.all([layoutLoader(argsA), indexLoader(argsA)]);
     const promiseB = Promise.all([layoutLoader(argsB), indexLoader(argsB)]);
 
-    await Promise.all([promiseA, promiseB]);
+    const [[, indexResultA], [, indexResultB]] = await Promise.all([promiseA, promiseB]);
+
+    // Await deferred data to ensure all deferred phases are logged
+    await Promise.all([awaitDeferredData(indexResultA), awaitDeferredData(indexResultB)]);
 
     const allLogs = consoleLogSpy.mock.calls
       .map((c: unknown[]) => c[0])
