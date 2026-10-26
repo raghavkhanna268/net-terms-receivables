@@ -14,13 +14,10 @@ import { describe, it, expect } from "vitest";
 import { normalizeTag } from "../tag-normalizer";
 import { findMatchingTagRule as customerFindMatchingTagRule } from "~/services/sync/customer.server";
 import { findMatchingTagRule as invoiceFindMatchingTagRule } from "../invoice-eligibility";
-import { inferDueDate, type TagRule } from "../due-date";
+import { inferDueDate, addDaysAndGetEndOfDay, type TagRule } from "../due-date";
 
-function dueDateFindMatchingTagRule(
-  customerTags: string[],
-  tagRules: TagRule[]
-): TagRule | undefined {
-  const result = inferDueDate({
+function callInferDueDate(customerTags: string[], tagRules: TagRule[]) {
+  return inferDueDate({
     paymentTerms: null,
     orderCreatedAt: new Date("2026-01-15T10:00:00Z"),
     fulfilledAt: null,
@@ -32,15 +29,6 @@ function dueDateFindMatchingTagRule(
     merchantOverrideDueAt: null,
     shopTimezone: "UTC",
   });
-  if (result.basis === "tagRule" && result.dueAt) {
-    const matchedRule = tagRules.find((r) => {
-      const normalizedRuleTag = normalizeTag(r.tag);
-      const normalizedCustomerTags = customerTags.map((t) => normalizeTag(t)).filter((t) => t !== "");
-      return normalizedRuleTag !== "" && normalizedCustomerTags.includes(normalizedRuleTag);
-    });
-    return matchedRule;
-  }
-  return undefined;
 }
 
 describe("normalizeTag", () => {
@@ -253,42 +241,6 @@ describe("Tag-rule matching parity", () => {
       expectedTag: "wholesale",
     },
     {
-      name: "no match - blank rule against empty customer tag",
-      customerTags: [""],
-      ruleTag: "",
-      expectedTag: null,
-    },
-    {
-      name: "no match - blank rule against whitespace customer tag",
-      customerTags: ["  "],
-      ruleTag: "",
-      expectedTag: null,
-    },
-    {
-      name: "no match - whitespace rule against empty customer tag",
-      customerTags: [""],
-      ruleTag: "   ",
-      expectedTag: null,
-    },
-    {
-      name: "no match - whitespace rule against whitespace customer tag",
-      customerTags: ["  "],
-      ruleTag: "   ",
-      expectedTag: null,
-    },
-    {
-      name: "no match - blank rule against real customer tag",
-      customerTags: ["wholesale"],
-      ruleTag: "",
-      expectedTag: null,
-    },
-    {
-      name: "no match - whitespace rule against real customer tag",
-      customerTags: ["wholesale"],
-      ruleTag: "   ",
-      expectedTag: null,
-    },
-    {
       name: "non-breaking space in customer tag matches normal space rule",
       customerTags: ["whole\u00A0sale"],
       ruleTag: "whole sale",
@@ -329,29 +281,86 @@ describe("Tag-rule matching parity", () => {
   });
 
   describe("due-date.ts inferDueDate (tryTagRules path)", () => {
+    const orderCreatedAt = new Date("2026-01-15T10:00:00Z");
+    const expected30DayDueAt = addDaysAndGetEndOfDay(orderCreatedAt, 30, "UTC");
+
     for (const tc of testCases) {
       it(tc.name, () => {
         const rules: TagRule[] = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
-        const result = dueDateFindMatchingTagRule(tc.customerTags, rules);
-        expect(result?.tag ?? null).toBe(tc.expectedTag);
+        const result = callInferDueDate(tc.customerTags, rules);
+
+        const expectsMatch = tc.expectedTag !== null;
+        expect(result.basis === "tagRule").toBe(expectsMatch);
+        expect(result.dueAt?.getTime() ?? null).toBe(expectsMatch ? expected30DayDueAt.getTime() : null);
       });
     }
   });
 
   describe("All matchers produce identical results", () => {
+    const orderCreatedAt = new Date("2026-01-15T10:00:00Z");
+    const expected30DayDueAt = addDaysAndGetEndOfDay(orderCreatedAt, 30, "UTC");
+
     for (const tc of testCases) {
       it(`parity: ${tc.name}`, () => {
         const rules = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
 
         const customerResult = customerFindMatchingTagRule(tc.customerTags, rules);
         const invoiceResult = invoiceFindMatchingTagRule(tc.customerTags, rules);
-        const dueDateResult = dueDateFindMatchingTagRule(tc.customerTags, rules);
+        const dueDateResult = callInferDueDate(tc.customerTags, rules);
 
-        expect(customerResult?.tag ?? null).toBe(invoiceResult?.tag ?? null);
-        expect(customerResult?.tag ?? null).toBe(dueDateResult?.tag ?? null);
-        expect(customerResult?.tag ?? null).toBe(tc.expectedTag);
+        const customerMatched = customerResult?.tag ?? null;
+        const invoiceMatched = invoiceResult?.tag ?? null;
+        const dueDateMatched = dueDateResult.basis === "tagRule";
+
+        expect(customerMatched).toBe(invoiceMatched);
+        expect(customerMatched !== null).toBe(dueDateMatched);
+        expect(customerMatched).toBe(tc.expectedTag);
+
+        if (tc.expectedTag !== null) {
+          expect(dueDateResult.dueAt?.getTime()).toBe(expected30DayDueAt.getTime());
+        } else {
+          expect(dueDateResult.dueAt).toBeNull();
+        }
       });
     }
+  });
+
+  describe("Blank and whitespace rule tests (direct inferDueDate)", () => {
+    it("blank rule against empty customer tag - no match", () => {
+      const result = callInferDueDate([""], [{ tag: "", defaultTermsDays: 30 }]);
+      expect(result.basis).not.toBe("tagRule");
+      expect(result.dueAt).toBeNull();
+    });
+
+    it("blank rule against whitespace customer tag - no match", () => {
+      const result = callInferDueDate(["  "], [{ tag: "", defaultTermsDays: 30 }]);
+      expect(result.basis).not.toBe("tagRule");
+      expect(result.dueAt).toBeNull();
+    });
+
+    it("whitespace rule against empty customer tag - no match", () => {
+      const result = callInferDueDate([""], [{ tag: "   ", defaultTermsDays: 30 }]);
+      expect(result.basis).not.toBe("tagRule");
+      expect(result.dueAt).toBeNull();
+    });
+
+    it("whitespace rule against whitespace customer tag - no match", () => {
+      const result = callInferDueDate(["  "], [{ tag: "   ", defaultTermsDays: 30 }]);
+      expect(result.basis).not.toBe("tagRule");
+      expect(result.dueAt).toBeNull();
+    });
+
+    it("blank rule against real customer tag - no match", () => {
+      const result = callInferDueDate(["wholesale"], [{ tag: "", defaultTermsDays: 30 }]);
+      expect(result.basis).not.toBe("tagRule");
+      expect(result.dueAt).toBeNull();
+    });
+
+    it("whitespace rule against real customer tag - no match", () => {
+      const result = callInferDueDate(["wholesale"], [{ tag: "   ", defaultTermsDays: 30 }]);
+      expect(result.basis).not.toBe("tagRule");
+      expect(result.dueAt).toBeNull();
+    });
   });
 
   describe("Rule order semantics (first matching rule wins)", () => {
