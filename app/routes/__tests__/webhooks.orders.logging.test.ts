@@ -220,4 +220,37 @@ describe("webhooks.orders logging", () => {
       expect.objectContaining({ webhookId: testWebhookId })
     );
   });
+
+  it("success enqueue path emits webhook_orders_enqueued event with topic but no orderGid", async () => {
+    const testWebhookId = "test-wh-event-check";
+    const testOrderGid = "gid://shopify/Order/12345";
+    mockVerifyWebhook.mockResolvedValue({
+      shop: TEST_SHOP,
+      topic: "orders/create",
+      webhookId: testWebhookId,
+      payload: { admin_graphql_api_id: testOrderGid },
+      apiVersion: "2026-10",
+      rawBody: new ArrayBuffer(0),
+    });
+    mockRecordAndEnqueueSync.mockResolvedValue({ status: "enqueued", msgId: "msg-456" });
+
+    const request = new Request("https://example.com/webhooks/orders", {
+      method: "POST",
+      body: JSON.stringify({ admin_graphql_api_id: testOrderGid }),
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    const allOutput = getAllConsoleOutput();
+    const outputStr = allOutput.join("\n");
+
+    expect(outputStr).toContain("webhook_orders_enqueued");
+    expect(outputStr).toContain("ORDERS_CREATE");
+    expect(outputStr).not.toContain("orderGid");
+    expect(outputStr).not.toContain("gid://shopify/");
+    expect(outputStr).not.toContain(testOrderGid);
+    expect(outputStr).not.toContain(TEST_SHOP);
+  });
 });

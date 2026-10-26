@@ -202,4 +202,96 @@ describe("webhooks.app.subscriptions_update logging", () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     assertNoWebhookIdInLogs(testWebhookId);
   });
+
+  it("plan refresh emits subscriptions_update_plan_refreshed event", async () => {
+    const testWebhookId = "test-wh-plan-event";
+    mockVerifyWebhook.mockResolvedValue({
+      shop: TEST_SHOP,
+      topic: "app_subscriptions/update",
+      webhookId: testWebhookId,
+      payload: {},
+      apiVersion: "2026-10",
+      rawBody: new ArrayBuffer(0),
+    });
+
+    const request = new Request("https://example.com/webhooks/app/subscriptions_update", {
+      method: "POST",
+      body: "{}",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const allOutput = getAllConsoleOutput();
+    const outputStr = allOutput.join("\n");
+
+    expect(outputStr).toContain("subscriptions_update_plan_refreshed");
+    expect(outputStr).not.toContain(TEST_SHOP);
+  });
+
+  it("reactivated accounts emits subscriptions_update_accounts_reactivated with shopId, no raw domain", async () => {
+    const testWebhookId = "test-wh-reactivate-event";
+    mockVerifyWebhook.mockResolvedValue({
+      shop: TEST_SHOP,
+      topic: "app_subscriptions/update",
+      webhookId: testWebhookId,
+      payload: {},
+      apiVersion: "2026-10",
+      rawBody: new ArrayBuffer(0),
+    });
+    mockReactivateGatedAccounts.mockResolvedValue(3);
+
+    const request = new Request("https://example.com/webhooks/app/subscriptions_update", {
+      method: "POST",
+      body: "{}",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const allOutput = getAllConsoleOutput();
+    const outputStr = allOutput.join("\n");
+
+    expect(outputStr).toContain("subscriptions_update_accounts_reactivated");
+    expect(outputStr).toContain("shopId");
+    expect(outputStr).toContain("reactivatedCount");
+    expect(outputStr).not.toContain(TEST_SHOP);
+  });
+
+  it("error path emits subscriptions_update_failed with toErrorCode output, no raw error", async () => {
+    const testWebhookId = "test-wh-error-event";
+    mockVerifyWebhook.mockResolvedValue({
+      shop: TEST_SHOP,
+      topic: "app_subscriptions/update",
+      webhookId: testWebhookId,
+      payload: {},
+      apiVersion: "2026-10",
+      rawBody: new ArrayBuffer(0),
+    });
+    const testError = new Error("Database connection failed");
+    testError.name = "ConnectionError";
+    mockRefreshPlanCache.mockRejectedValue(testError);
+
+    const request = new Request("https://example.com/webhooks/app/subscriptions_update", {
+      method: "POST",
+      body: "{}",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const allOutput = getAllConsoleOutput();
+    const outputStr = allOutput.join("\n");
+
+    expect(outputStr).toContain("subscriptions_update_failed");
+    expect(outputStr).toContain("ConnectionError");
+    expect(outputStr).not.toContain("Database connection failed");
+    expect(outputStr).not.toContain(TEST_SHOP);
+  });
 });

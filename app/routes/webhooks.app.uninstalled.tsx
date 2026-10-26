@@ -9,6 +9,7 @@ import {
   deleteProcessedWebhooksViaReceipts,
 } from "~/services/compliance";
 import { evictShopFromSetupCache } from "~/lib/after-auth.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * App uninstalled webhook handler.
@@ -64,24 +65,26 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   try {
     const { sessionStorage } = context;
     const count = await sessionStorage.deleteAllForShop(shop);
-    console.log(`[uninstalled] sessions_deleted count=${count}`);
+    safeLog("info", "uninstalled_sessions_deleted", { count });
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[uninstalled] sessions_delete_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "uninstalled_sessions_delete_failed", {
+      reason: "db_error",
+      err: toErrorCode(error),
+    });
     return new Response(null, { status: 500 });
   }
 
   try {
     const marked = await markShopUninstalled(sql, shop);
-    if (marked) {
-      console.log(`[uninstalled] shop_marked_uninstalled status=updated`);
-    } else {
-      console.log(`[uninstalled] shop_marked_uninstalled status=not_found`);
-    }
+    safeLog("info", "uninstalled_shop_marked", {
+      status: marked ? "updated" : "not_found",
+    });
     evictShopFromSetupCache(shop);
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[uninstalled] mark_uninstalled_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "uninstalled_mark_failed", {
+      reason: "db_error",
+      err: toErrorCode(error),
+    });
     return new Response(null, { status: 500 });
   }
 
@@ -101,16 +104,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         };
       }
     );
-    console.log(
-      `[uninstalled] processed_webhooks_deleted count=${processedWebhooksDeleted}`
-    );
-    console.log(`[uninstalled] receipts_deleted count=${receiptsDeleted}`);
+    safeLog("info", "uninstalled_webhooks_purged", {
+      processedWebhooksDeletedCount: processedWebhooksDeleted,
+      receiptsDeletedCount: receiptsDeleted,
+    });
   } catch (error) {
-    const errInfo =
-      (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(
-      `[uninstalled] receipts_purge_failed reason=db_error err=${errInfo}`
-    );
+    safeLog("error", "uninstalled_receipts_purge_failed", {
+      reason: "db_error",
+      err: toErrorCode(error),
+    });
   }
 
   return new Response();

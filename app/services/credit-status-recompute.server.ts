@@ -241,9 +241,12 @@ export async function recomputeCreditStatus(
     });
   }
 
-  console.log(
-    `[credit-status-recompute] ${metafieldWritten ? "Updated" : skipMetafieldWrite ? "Backoff-skipped" : "Synced"} ${buyerAccountId}: hold ${previousHold} -> ${finalHold}`,
-  );
+  safeLog("info", "credit_status_recomputed", {
+    buyerAccountId,
+    action: metafieldWritten ? "updated" : skipMetafieldWrite ? "backoff_skipped" : "synced",
+    previousHold,
+    newHold: finalHold,
+  });
 
   return {
     success: true,

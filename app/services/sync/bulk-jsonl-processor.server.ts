@@ -678,7 +678,7 @@ export async function processOrderLines(
   if (needsContext && !eligibilityContext) {
     eligibilityContext = await getEligibilityContext(sql, shopId);
     if (!eligibilityContext) {
-      console.warn(`[bulk-jsonl] No eligibility context for shop ${shopId}`);
+      safeLog("warn", "bulk_no_eligibility_context", { shopId });
     }
   }
 
