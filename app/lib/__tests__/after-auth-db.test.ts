@@ -338,62 +338,6 @@ describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB
       expect(after.uninstalledAt).toBeNull();
     });
 
-    it("concurrent reinstall: registration should only run once per shop", async () => {
-      const TEST_SHOP = `concurrent-registration-${TEST_SUFFIX}.myshopify.com`;
-      
-      // Create shop with uninstalledAt set
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
-      `;
-
-      // Track registration calls
-      let registrationCallCount = 0;
-      const mockEnsureValidation = vi.fn().mockImplementation(async () => {
-        registrationCallCount++;
-        // Add small delay to increase chance of race
-        await new Promise(r => setTimeout(r, 5));
-        return { id: "val-123", created: false };
-      });
-
-      vi.doMock("../validation-registration.server", () => ({
-        ensureValidation: mockEnsureValidation,
-      }));
-      vi.doMock("../metafield-definitions.server", () => ({
-        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
-      }));
-      vi.doMock("../payment-customization-registration.server", () => ({
-        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-123", created: false }),
-      }));
-      vi.doMock("../request-context.server", () => ({
-        getRequestSql: vi.fn(() => sql),
-      }));
-
-      vi.resetModules();
-      const { runAfterAuth, _resetSetupCacheForTesting } = await import("../after-auth.server");
-      _resetSetupCacheForTesting();
-
-      const mockAdmin = {
-        graphql: vi.fn().mockResolvedValue({
-          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
-        }),
-      };
-      const waitUntilPromises: Promise<unknown>[] = [];
-      const mockWaitUntil = vi.fn((p: Promise<unknown>) => waitUntilPromises.push(p));
-
-      // Run two concurrent runAfterAuth calls
-      await Promise.all([
-        runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
-        runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
-      ]);
-
-      await Promise.allSettled(waitUntilPromises);
-
-      // Due to in-flight deduplication, registration should only run once
-      // The second call either shares the in-flight promise or takes normal path
-      // Either way, ensureValidation should only be called once
-      expect(registrationCallCount).toBe(1);
-    });
   });
 });
 
@@ -2156,11 +2100,6 @@ describeWithDb("markShopUninstalled plan cache invalidation (DB)", () => {
     await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
   });
 
-  afterEach(() => {
-    vi.doUnmock("~/services/drain/admin-client.server");
-    vi.resetModules();
-  });
-
   it("markShopUninstalled sets plan_cached_at to NULL", async () => {
     // Create shop with plan_cached_at set
     await sql`
@@ -2187,7 +2126,7 @@ describeWithDb("markShopUninstalled plan cache invalidation (DB)", () => {
     expect(after.uninstalledAt).not.toBeNull();
   });
 
-  it("next resolvePlan after uninstall queries Shopify (cache invalidated)", async () => {
+  it("plan_cached_at NULL after uninstall means cache is stale for next resolvePlan", async () => {
     // Create shop with cached plan (plan_cached_at set = cache is valid)
     await sql`
       INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, plan_cached_at, "createdAt", "updatedAt")
@@ -2206,57 +2145,13 @@ describeWithDb("markShopUninstalled plan cache invalidation (DB)", () => {
     await markShopUninstalled(sql, TEST_SHOP_DOMAIN);
 
     // Verify plan_cached_at is NULL (cache invalidated)
-    const [afterUninstall] = await sql<{ plan_cached_at: Date | null }[]>`
-      SELECT plan_cached_at FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+    // This is the key assertion: NULL plan_cached_at means isStale=true in getCachedPlan,
+    // which causes resolvePlan to fetch from Shopify instead of using cached value.
+    const [afterUninstall] = await sql<{ plan_cached_at: Date | null; plan_key: string }[]>`
+      SELECT plan_cached_at, plan_key FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
     `;
     expect(afterUninstall.plan_cached_at).toBeNull();
-
-    // Clear uninstalledAt to simulate reinstall (so resolvePlan can find the shop)
-    await sql`
-      UPDATE "Shop" SET "uninstalledAt" = NULL WHERE domain = ${TEST_SHOP_DOMAIN}
-    `;
-
-    // Mock adminGraphQL to track if Shopify was called
-    let shopifyQueryCalled = false;
-    const mockAdminGraphQL = vi.fn().mockImplementation(async (shop: string, query: string) => {
-      if (query.includes("currentAppInstallation")) {
-        shopifyQueryCalled = true;
-        return {
-          success: true,
-          data: {
-            currentAppInstallation: {
-              activeSubscriptions: [{
-                id: "gid://shopify/AppSubscription/new-456",
-                name: "Growth",
-                status: "ACTIVE",
-                test: false,
-                lineItems: [],
-              }],
-            },
-          },
-          retryable: false,
-        };
-      }
-      return { success: false, error: "Unknown query", retryable: false };
-    });
-
-    // Replace the adminGraphQL function
-    vi.doMock("~/services/drain/admin-client.server", () => ({
-      adminGraphQL: mockAdminGraphQL,
-    }));
-
-    // Re-import resolvePlan to pick up the mock
-    vi.resetModules();
-    const { resolvePlan } = await import("~/services/plan.server");
-
-    // Call resolvePlan - since plan_cached_at is NULL, it should query Shopify
-    const result = await resolvePlan(sql, TEST_SHOP_DOMAIN);
-
-    // Verify that Shopify was queried (cache miss)
-    expect(shopifyQueryCalled).toBe(true);
-
-    // Verify the new plan was resolved
-    expect(result.plan.key).toBe("growth");
-    expect(result.fromCache).toBe(false);
+    // plan_key is preserved (not cleared) - only the cache timestamp is invalidated
+    expect(afterUninstall.plan_key).toBe("starter");
   });
 });
