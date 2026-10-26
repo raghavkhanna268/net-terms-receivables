@@ -38,8 +38,6 @@ import {
 import { calculateDaysPastDue } from "../../app/lib/aging-dates.server.js";
 import { getBucketForDaysPastDue, type AgingBucketKey } from "../../app/lib/aging.js";
 import { getBuyerLedger } from "../../app/lib/aging-queries.server.js";
-import * as logModule from "../../app/lib/log.server.js";
-import * as sentryModule from "../../app/lib/sentry.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -654,21 +652,37 @@ describeWithDb("Ingestion Paths Integration", () => {
   });
 
   describe("(7) PII logging guards", () => {
-    let safeLogSpy: ReturnType<typeof vi.spyOn>;
-    let captureExceptionSpy: ReturnType<typeof vi.spyOn>;
+    let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+    let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
     const PII_AMOUNT = "99999.99";
 
     beforeEach(() => {
-      safeLogSpy = vi.spyOn(logModule, "safeLog");
-      captureExceptionSpy = vi.spyOn(sentryModule, "captureExceptionWithTags");
+      consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     });
 
     afterEach(() => {
       vi.restoreAllMocks();
     });
 
-    it("order with missing outstanding triggers log without PII amounts", async () => {
+    function getLoggedEvents(spy: ReturnType<typeof vi.spyOn>): string[] {
+      const events: string[] = [];
+      for (const call of spy.mock.calls) {
+        const arg = call[0];
+        if (typeof arg === "string" && arg.startsWith("{")) {
+          try {
+            const parsed = JSON.parse(arg);
+            if (parsed.event) events.push(parsed.event);
+          } catch {
+            // not JSON, skip
+          }
+        }
+      }
+      return events;
+    }
+
+    it("order with missing outstanding triggers order_total_outstanding_missing without PII", async () => {
       const orderId = orderGid(`pii-missing-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-missing-${TEST_SUFFIX}`;
 
@@ -688,23 +702,18 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", order, webhookId);
 
-      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
+      const warnEvents = getLoggedEvents(consoleWarnSpy);
+      expect(warnEvents).toContain("order_total_outstanding_missing");
 
-      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
-      expect(loggedEvents).toContain("order_total_outstanding_missing");
-
-      for (const call of safeLogSpy.mock.calls) {
-        const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_AMOUNT);
-      }
-
-      for (const call of captureExceptionSpy.mock.calls) {
-        const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_AMOUNT);
+      for (const call of consoleWarnSpy.mock.calls) {
+        const output = String(call[0]);
+        expect(output).not.toContain(PII_AMOUNT);
+        expect(output).not.toContain(TEST_SHOP_DOMAIN);
+        expect(output).not.toContain("myshopify.com");
       }
     });
 
-    it("non-INR currency triggers log without shop domain PII", async () => {
+    it("non-INR order triggers drain_skip_non_inr_order without shop domain PII", async () => {
       const orderId = orderGid(`pii-currency-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-currency-${TEST_SUFFIX}`;
 
@@ -724,20 +733,18 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", order, webhookId);
 
-      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
+      const logEvents = getLoggedEvents(consoleLogSpy);
+      expect(logEvents).toContain("drain_skip_non_inr_order");
 
-      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
-      expect(loggedEvents).toContain("drain_skip_non_inr_order");
-
-      for (const call of safeLogSpy.mock.calls) {
-        const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(TEST_SHOP_DOMAIN);
-        expect(allArgs).not.toContain("myshopify.com");
-        expect(allArgs).not.toContain(PII_AMOUNT);
+      for (const call of consoleLogSpy.mock.calls) {
+        const output = String(call[0]);
+        expect(output).not.toContain(TEST_SHOP_DOMAIN);
+        expect(output).not.toContain("myshopify.com");
+        expect(output).not.toContain(PII_AMOUNT);
       }
     });
 
-    it("non-INR draft order triggers log without shop domain PII", async () => {
+    it("non-INR draft order triggers drain_skip_non_inr_draft_order without shop domain PII", async () => {
       const draftId = draftOrderGid(`pii-draft-usd-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-draft-usd-${TEST_SUFFIX}`;
 
@@ -757,16 +764,14 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       await processDraftOrderWebhook(sql, TEST_SHOP_DOMAIN, "DRAFT_ORDERS_CREATE", draft, webhookId);
 
-      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
+      const logEvents = getLoggedEvents(consoleLogSpy);
+      expect(logEvents).toContain("drain_skip_non_inr_draft_order");
 
-      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
-      expect(loggedEvents).toContain("drain_skip_non_inr_draft_order");
-
-      for (const call of safeLogSpy.mock.calls) {
-        const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(TEST_SHOP_DOMAIN);
-        expect(allArgs).not.toContain("myshopify.com");
-        expect(allArgs).not.toContain(PII_AMOUNT);
+      for (const call of consoleLogSpy.mock.calls) {
+        const output = String(call[0]);
+        expect(output).not.toContain(TEST_SHOP_DOMAIN);
+        expect(output).not.toContain("myshopify.com");
+        expect(output).not.toContain(PII_AMOUNT);
       }
     });
   });
