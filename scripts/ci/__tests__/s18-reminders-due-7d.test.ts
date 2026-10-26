@@ -53,15 +53,15 @@ describe("s18-reminders-due-7d.sql", () => {
       { column: "enabled_email_rules", kind: "count", via: "derived" },
       { column: "shop_idx", kind: "id", via: "derived" },
       { column: "recipient_class", kind: "enum", via: "derived" },
-      { column: "due_7d", kind: "count", via: "derived" },
-      { column: "due_today", kind: "count", via: "derived" },
-      { column: "send_gates_ok_7d", kind: "count", via: "derived" },
-      { column: "distinct_recipients_7d", kind: "count", via: "derived" },
-      {
-        column: "distinct_recipients_gates_ok_7d",
-        kind: "count",
-        via: "derived",
-      },
+      { column: "would_fire_7d", kind: "count", via: "derived" },
+      { column: "would_fire_email_7d", kind: "count", via: "derived" },
+      { column: "would_fire_email_today", kind: "count", via: "derived" },
+      { column: "enqueue_gated_email_7d", kind: "count", via: "derived" },
+      { column: "distinct_recipients_email_7d", kind: "count", via: "derived" },
+      { column: "distinct_recipients_gated_7d", kind: "count", via: "derived" },
+      { column: "local_day", kind: "enum", via: "derived" },
+      { column: "would_fire_email", kind: "count", via: "derived" },
+      { column: "over_daily_cap", kind: "boolean", via: "derived" },
     ]);
   });
 
@@ -80,14 +80,50 @@ describe("s18-reminders-due-7d.sql", () => {
     // the address column only feeds the class CASE and COUNT(DISTINCT ...)
     const finalSelect = code.split(/\)\s*SELECT c\.shop_idx/)[1] ?? "";
     expect(finalSelect).not.toBe("");
-    expect(finalSelect).not.toMatch(/c\.rcpt\s*(,|$)/m);
     expect(finalSelect.match(/c\.rcpt/g)).toHaveLength(2);
-    expect(finalSelect).toMatch(
-      /COUNT\(DISTINCT c\.rcpt\) AS distinct_recipients_7d/,
-    );
+    expect(finalSelect.match(/COUNT\(DISTINCT c\.rcpt\)/g)).toHaveLength(2);
+    expect(code).not.toMatch(/AS rcpt\b[\s\S]*SELECT d\.rcpt\s*,?\s*FROM/);
   });
 
-  it("mirrors Part 3 of the latest s18_enqueue_reminders() migration", () => {
+  it("implements the Team Lead would-fire definition", () => {
+    // open + unpaid invoice, buyer not opted out, enabled rule offset in the
+    // next 7 shop-local days, minus existing ReminderLog (rule, invoice).
+    // Each section that counts would-fire carries every predicate.
+    const sections = code.split(/\\echo /).slice(2);
+    expect(sections).toHaveLength(2);
+    for (const sec of sections) {
+      for (const pred of [
+        /i\.status = 'open'/,
+        /i\.outstanding > 0/,
+        /i\."dueAt" IS NOT NULL/,
+        /ba\."reminderOptOutAt" IS NULL/,
+        /ba\."shopId" = i\."shopId"/,
+        /r\.enabled = true/,
+        /i\."dueAt" AT TIME ZONE public\.s18_safe_timezone\(s\.timezone\)\)::DATE \+ r\."offsetDays"\s+BETWEEN \(NOW\(\) AT TIME ZONE public\.s18_safe_timezone\(s\.timezone\)\)::DATE\s+AND \(NOW\(\) AT TIME ZONE public\.s18_safe_timezone\(s\.timezone\)\)::DATE \+ 6/,
+        /NOT EXISTS \(\s*SELECT 1 FROM "ReminderLog" rl\s+WHERE rl\."ruleId" = r\.id AND rl\."invoiceId" = i\.id\s*\)/,
+      ]) {
+        expect(sec).toMatch(pred);
+      }
+    }
+    // the headline count is not narrowed by channel or shop settings
+    const s2 = sections[0];
+    expect(
+      s2.split('FROM "ReminderRule" r')[1].split("classed AS")[0],
+    ).not.toMatch(/WHERE[\s\S]*r\.channel/);
+    expect(s2).toMatch(/COUNT\(\*\) AS would_fire_7d/);
+    expect(s2).toMatch(/LEFT JOIN s18_shop_reminder_settings srs/);
+    // daily cap comparison uses DAILY_SEND_CAP from reminders.server.ts
+    const svc = fs.readFileSync(
+      path.join(root, "app/services/reminders.server.ts"),
+      "utf8",
+    );
+    const cap = svc.match(/export const DAILY_SEND_CAP = (\d+);/)?.[1];
+    expect(cap).toBeDefined();
+    expect(sections[1]).toContain(`COUNT(*) > ${cap} AS over_daily_cap`);
+    expect(sections[1]).toMatch(/r\.channel = 'email'::"ReminderChannel"/);
+  });
+
+  it("gates enqueue_gated_email_7d like Part 3 of the latest s18_enqueue_reminders() migration", () => {
     const latest = latestEnqueueMigration();
     expect(sql).toContain(`prisma/migrations/${latest}/migration.sql`);
     const fn = fs.readFileSync(
@@ -108,15 +144,8 @@ describe("s18-reminders-due-7d.sql", () => {
       expect(part3).toMatch(pred);
     }
     for (const pred of [
-      /r\.enabled = true/,
-      /r\.channel = 'email'::"ReminderChannel"/,
-      /srs\.enabled = true/,
-      /s\."uninstalledAt" IS NULL/,
-      /i\.status = 'open'/,
-      /i\."dueAt" IS NOT NULL/,
-      /ba\."shopId" = i\."shopId"/,
-      /rl\."ruleId" = r\.id AND rl\."invoiceId" = i\.id/,
-      /BETWEEN \(NOW\(\) AT TIME ZONE public\.s18_safe_timezone\(s\.timezone\)\)::DATE\s+AND \(NOW\(\) AT TIME ZONE public\.s18_safe_timezone\(s\.timezone\)\)::DATE \+ 6/,
+      /r\.channel = 'email'::"ReminderChannel" AS is_email/,
+      /COALESCE\(srs\.enabled, false\) AND s\."uninstalledAt" IS NULL/,
       /DENSE_RANK\(\) OVER \(ORDER BY s\.id\) AS shop_idx/,
     ]) {
       expect(code).toMatch(pred);
