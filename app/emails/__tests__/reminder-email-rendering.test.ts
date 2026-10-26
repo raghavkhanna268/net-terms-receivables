@@ -3,14 +3,14 @@
  *
  * Table-driven test suite covering:
  * - All reminder kinds from DEFAULT_RULE_OFFSETS (pre-due, due-today, overdue)
- * - INR amounts with Indian grouping (sub-lakh, lakh, crore values)
- * - Date format (Luxon DATE_FULL)
  * - Absence of 'undefined', 'NaN', '[object', or empty placeholder patterns
  * - Shop name and invoice number presence in output
  * - Footer and opt-out text presence
- * - Subject line validation
  * - Coverage guard ensuring all registry kinds are tested
- * - Recipient allowlist filtering
+ * - Recipient allowlist filtering (parseRecipientAllowlist, filterRecipients, isRecipientAllowed)
+ *
+ * Note: formatAmount and formatDate are private functions in reminders.server.ts
+ * and are not reachable via a public path without source changes.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -27,12 +27,10 @@ import {
   isRecipientAllowed,
   isAllowlistEnforced,
 } from "~/services/recipient-allowlist.server";
-import { DateTime } from "luxon";
 
 const SYNTHETIC_SHOP_NAME = "Test Shop";
 const SYNTHETIC_INVOICE_NUMBER = "INV-TEST-001";
 const SYNTHETIC_BUYER_NAME = "Test Customer";
-const SYNTHETIC_TIMEZONE = "Asia/Kolkata";
 
 interface ReminderKindTestCase {
   offsetDays: number;
@@ -48,30 +46,6 @@ const REMINDER_KIND_TEST_CASES: ReminderKindTestCase[] = [
   { offsetDays: 1, expectedLabel: "Payment 1 day overdue", isOverdue: true, isDueToday: false },
   { offsetDays: 7, expectedLabel: "Payment 7 days overdue", isOverdue: true, isDueToday: false },
 ];
-
-interface INRAmountTestCase {
-  amount: number;
-  expectedFormatted: string;
-  description: string;
-}
-
-const INR_AMOUNT_TEST_CASES: INRAmountTestCase[] = [
-  { amount: 45000, expectedFormatted: "₹45,000.00", description: "sub-lakh value" },
-  { amount: 123456, expectedFormatted: "₹1,23,456.00", description: "lakh value (Indian grouping)" },
-  { amount: 12345678, expectedFormatted: "₹1,23,45,678.00", description: "crore value (Indian grouping)" },
-  { amount: 1000.50, expectedFormatted: "₹1,000.50", description: "sub-lakh with paise" },
-];
-
-function formatINRAmount(amount: number): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-  }).format(amount);
-}
-
-function formatDateFull(date: Date, timezone: string): string {
-  return DateTime.fromJSDate(date, { zone: timezone }).toLocaleString(DateTime.DATE_FULL);
-}
 
 function createSyntheticProps(overrides: Partial<PaymentReminderEmailProps> = {}): PaymentReminderEmailProps {
   return {
@@ -139,61 +113,6 @@ describe("Payment Reminder Email Rendering - Reminder Kinds (Table-Driven)", () 
   );
 });
 
-describe("Payment Reminder Email Rendering - INR Amount Formatting", () => {
-  it.each(INR_AMOUNT_TEST_CASES)(
-    "formats $description ($amount) as $expectedFormatted",
-    ({ amount, expectedFormatted }) => {
-      const formatted = formatINRAmount(amount);
-      expect(formatted).toBe(expectedFormatted);
-
-      const html = renderPaymentReminderEmail(
-        createSyntheticProps({ amount: formatted })
-      );
-
-      expect(html).toContain(formatted);
-    }
-  );
-
-  it("Indian grouping: 123456 renders as ₹1,23,456.00 (not Western ₹123,456.00)", () => {
-    const formatted = formatINRAmount(123456);
-    expect(formatted).toBe("₹1,23,456.00");
-    expect(formatted).not.toBe("₹123,456.00");
-  });
-
-  it("Indian grouping: crore value 12345678 uses lakh/crore separators", () => {
-    const formatted = formatINRAmount(12345678);
-    expect(formatted).toBe("₹1,23,45,678.00");
-    expect(formatted).not.toBe("₹12,345,678.00");
-  });
-});
-
-describe("Payment Reminder Email Rendering - Date Format", () => {
-  const testDate = new Date("2026-10-26T10:00:00+05:30");
-
-  it("formats date in DATE_FULL format (e.g., October 26, 2026)", () => {
-    const formatted = formatDateFull(testDate, SYNTHETIC_TIMEZONE);
-    expect(formatted).toBe("October 26, 2026");
-  });
-
-  it("date appears correctly in rendered email", () => {
-    const formatted = formatDateFull(testDate, SYNTHETIC_TIMEZONE);
-    const html = renderPaymentReminderEmail(
-      createSyntheticProps({ dueDate: formatted })
-    );
-
-    expect(html).toContain("October 26, 2026");
-  });
-
-  it("respects timezone for date formatting", () => {
-    const utcDate = new Date("2026-12-31T23:00:00Z");
-    const kolkataFormatted = formatDateFull(utcDate, "Asia/Kolkata");
-    const utcFormatted = formatDateFull(utcDate, "UTC");
-
-    expect(kolkataFormatted).toBe("January 1, 2027");
-    expect(utcFormatted).toBe("December 31, 2026");
-  });
-});
-
 describe("Payment Reminder Email Rendering - No Invalid Patterns", () => {
   const invalidPatterns = [
     { pattern: "undefined", description: "undefined literal" },
@@ -212,7 +131,7 @@ describe("Payment Reminder Email Rendering - No Invalid Patterns", () => {
           reminderType: reminderLabel,
           invoiceName: SYNTHETIC_INVOICE_NUMBER,
           buyerName: SYNTHETIC_BUYER_NAME,
-          amount: formatINRAmount(123456),
+          amount: "₹1,23,456.00",
           dueDate: "October 26, 2026",
           merchantName: SYNTHETIC_SHOP_NAME,
           storeDisplayName: SYNTHETIC_SHOP_NAME,
@@ -340,43 +259,6 @@ describe("Payment Reminder Email Rendering - Footer Content", () => {
     expect(html).toContain(
       "You're receiving this because you have an open invoice with fallback-handle."
     );
-  });
-});
-
-describe("Payment Reminder Email Rendering - Subject Lines", () => {
-  it.each(REMINDER_KIND_TEST_CASES)(
-    "subject line for $expectedLabel is valid",
-    ({ expectedLabel }) => {
-      const subject = `${expectedLabel} - Invoice ${SYNTHETIC_INVOICE_NUMBER}`;
-
-      expect(subject).toBeTruthy();
-      expect(subject.trim()).toBe(subject);
-      expect(subject.length).toBeLessThanOrEqual(150);
-      expect(subject).toContain(SYNTHETIC_INVOICE_NUMBER);
-      expect(subject).toContain(expectedLabel);
-    }
-  );
-
-  it("subject line is non-empty and trimmed", () => {
-    for (const testCase of REMINDER_KIND_TEST_CASES) {
-      const label = getReminderLabel(testCase.offsetDays);
-      const subject = `${label} - Invoice ${SYNTHETIC_INVOICE_NUMBER}`;
-
-      expect(subject.length).toBeGreaterThan(0);
-      expect(subject).toBe(subject.trim());
-    }
-  });
-
-  it("subject line does not exceed 150 characters", () => {
-    const longInvoiceName = "INV-" + "A".repeat(100);
-    const subject = `${getReminderLabel(7)} - Invoice ${longInvoiceName}`;
-
-    if (subject.length > 150) {
-      expect(subject.length).toBeLessThanOrEqual(150 + 100);
-    }
-
-    const normalSubject = `${getReminderLabel(0)} - Invoice ${SYNTHETIC_INVOICE_NUMBER}`;
-    expect(normalSubject.length).toBeLessThanOrEqual(150);
   });
 });
 
@@ -525,7 +407,7 @@ describe("Recipient Allowlist Filter", () => {
   });
 
   describe("filterRecipients", () => {
-    it("filters to only allowlisted addresses", () => {
+    it("keeps only allowlisted addresses and counts skipped", () => {
       const allowlist = parseRecipientAllowlist("a@example.com,b@example.com");
       const result = filterRecipients(
         ["a@example.com", "c@example.com", "b@example.com", "d@example.com"],
@@ -536,7 +418,7 @@ describe("Recipient Allowlist Filter", () => {
       expect(result.skippedCount).toBe(2);
     });
 
-    it("non-allowlisted 'to' address is dropped", () => {
+    it("returns empty allowed array when address not in allowlist", () => {
       const allowlist = parseRecipientAllowlist("allowed@example.com");
       const result = filterRecipients(["notallowed@example.com"], allowlist);
 
@@ -544,7 +426,7 @@ describe("Recipient Allowlist Filter", () => {
       expect(result.skippedCount).toBe(1);
     });
 
-    it("allowlisted 'to' address is kept", () => {
+    it("keeps allowlisted address with zero skipped", () => {
       const allowlist = parseRecipientAllowlist("allowed@example.com");
       const result = filterRecipients(["allowed@example.com"], allowlist);
 
@@ -552,29 +434,29 @@ describe("Recipient Allowlist Filter", () => {
       expect(result.skippedCount).toBe(0);
     });
 
-    it("non-allowlisted 'cc' addresses are dropped (via separate filter call)", () => {
+    it("filters mixed list keeping only allowlisted addresses", () => {
       const allowlist = parseRecipientAllowlist("allowed@example.com");
-      const ccResult = filterRecipients(
-        ["notallowed-cc@example.com", "allowed@example.com"],
+      const result = filterRecipients(
+        ["notallowed@example.com", "allowed@example.com"],
         allowlist
       );
 
-      expect(ccResult.allowed).toEqual(["allowed@example.com"]);
-      expect(ccResult.skippedCount).toBe(1);
+      expect(result.allowed).toEqual(["allowed@example.com"]);
+      expect(result.skippedCount).toBe(1);
     });
 
-    it("non-allowlisted 'bcc' addresses are dropped (via separate filter call)", () => {
+    it("returns empty when all addresses are not in allowlist", () => {
       const allowlist = parseRecipientAllowlist("allowed@example.com");
-      const bccResult = filterRecipients(
-        ["notallowed-bcc@example.com"],
+      const result = filterRecipients(
+        ["notallowed@example.com"],
         allowlist
       );
 
-      expect(bccResult.allowed).toEqual([]);
-      expect(bccResult.skippedCount).toBe(1);
+      expect(result.allowed).toEqual([]);
+      expect(result.skippedCount).toBe(1);
     });
 
-    it("all addresses pass when enforcement is disabled", () => {
+    it("keeps all addresses when enforcement is disabled", () => {
       const allowlist = parseRecipientAllowlist("allowed@example.com");
       const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" };
       const result = filterRecipients(
@@ -636,26 +518,20 @@ describe("Recipient Allowlist Filter", () => {
 });
 
 describe("Payment Reminder Email Rendering - Complete Template Coverage", () => {
-  it("all combinations of reminder kind and amount tier render without error", () => {
-    const amountTiers = [45000, 123456, 12345678];
-
+  it("all reminder kinds render without error", () => {
     for (const { offsetDays } of REMINDER_KIND_TEST_CASES) {
-      for (const amount of amountTiers) {
-        const reminderLabel = getReminderLabel(offsetDays);
-        const formattedAmount = formatINRAmount(amount);
+      const reminderLabel = getReminderLabel(offsetDays);
 
-        expect(() => {
-          const html = renderPaymentReminderEmail(
-            createSyntheticProps({
-              reminderType: reminderLabel,
-              amount: formattedAmount,
-            })
-          );
+      expect(() => {
+        const html = renderPaymentReminderEmail(
+          createSyntheticProps({
+            reminderType: reminderLabel,
+          })
+        );
 
-          expect(html).toBeTruthy();
-          expect(html.length).toBeGreaterThan(0);
-        }).not.toThrow();
-      }
+        expect(html).toBeTruthy();
+        expect(html.length).toBeGreaterThan(0);
+      }).not.toThrow();
     }
   });
 });
