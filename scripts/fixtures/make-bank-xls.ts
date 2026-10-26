@@ -693,8 +693,6 @@ function buildHdfcSheet(): XLSX.WorkSheet {
   }
   
   // Footer
-  const dataEndRow = rows.length;
-  
   // +0: blank
   rows.push([null, null, null, null, null, null, null]);
   

@@ -18,7 +18,6 @@ import { parseBankStatement } from "../../app/lib/banks/index.js";
 import type { ParseResult, NormalisedTxn } from "../../app/lib/banks/types.js";
 import {
   scoreMultiInvoiceMatch,
-  extractInvoiceRefs,
   CONFIDENCE_THRESHOLD,
   type InvoiceForScoring,
   type PaymentForScoring,
