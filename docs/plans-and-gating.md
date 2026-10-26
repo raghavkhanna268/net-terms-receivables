@@ -366,7 +366,7 @@ T5 adds this column to the `BuyerAccount` table:
 | `locationDeletedAt` | TIMESTAMPTZ(3) | When the company location was deleted in Shopify. NULL for active locations and TAGGED_CUSTOMER kind. Accounts with this set are excluded from active count. |
 
 Migration: `prisma/migrations/20261025000000_s21_plan_cache/migration.sql` (S21)
-Migration: `prisma/migrations/20261118000000_buyer_account_location_deleted_at/migration.sql` (T5)
+Migration: `prisma/migrations/20261120000000_buyer_account_location_deleted_at/migration.sql` (T5)
 
 ## Scopes
 
