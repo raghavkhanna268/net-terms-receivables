@@ -174,7 +174,7 @@ describe("Plan Welcome Service (shared logic)", () => {
       const result = await processPlanWelcome(
         mockSql as never,
         TEST_SHOP,
-        "attacker.myshopify.com",
+        "test-attacker.myshopify.com",
         "growth"
       );
 
@@ -351,7 +351,7 @@ describe("/app/welcome Route", () => {
 
     const { loader } = await import("../app.welcome");
     const request = new Request(
-      "https://example.com/app/welcome?plan_handle=growth&shop=attacker.myshopify.com"
+      "https://example.com/app/welcome?plan_handle=growth&shop=test-attacker.myshopify.com"
     );
     await loader({
       request,
@@ -513,7 +513,7 @@ describe("/app (index) Route with plan_handle", () => {
     const result = await processPlanWelcome(
       mockSql as never,
       TEST_SHOP,
-      "attacker.myshopify.com",
+      "test-attacker.myshopify.com",
       "growth"
     );
 
@@ -561,7 +561,7 @@ describe("/app with charge_id and shop params renders normally", () => {
     const mockSql = vi.fn(async () => []);
 
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-    const result = await processPlanWelcome(mockSql as never, "test.myshopify.com", null, null);
+    const result = await processPlanWelcome(mockSql as never, "test-example.myshopify.com", null, null);
 
     expect(result.skipped).toBe(true);
     expect(result.reason).toBe("invalid_handle");
@@ -571,8 +571,8 @@ describe("/app with charge_id and shop params renders normally", () => {
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
     const result = await processPlanWelcome(
       vi.fn() as never,
-      "session-shop.myshopify.com",
-      "url-shop.myshopify.com",
+      "test-session-shop.myshopify.com",
+      "test-url-shop.myshopify.com",
       "growth"
     );
 
@@ -665,7 +665,7 @@ describe("Mutation guard tests (tests fail if verification/allowlist removed)", 
 
 describe("Logging tests (P7 compliance)", () => {
   it("does not log shop domain in any console output", async () => {
-    const TEST_SHOP = "sensitive-shop.myshopify.com";
+    const TEST_SHOP = "test-sensitive-shop.myshopify.com";
     const TEST_SHOP_ID = "shop-log-789";
 
     const consoleSpy = vi.spyOn(console, "info").mockImplementation(() => {});
