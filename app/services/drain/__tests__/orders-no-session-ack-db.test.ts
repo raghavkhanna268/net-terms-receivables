@@ -10,14 +10,42 @@
  * AND trigger recordBackstopFailure (creates AuditEvent with type='backstop.failed').
  *
  * This test uses the "Sequential DB" project via the *-db.test.ts naming pattern.
+ *
+ * Queue isolation: Before each test, stale messages from other test files are
+ * archived to prevent batch pollution. This ensures runDrain processes only
+ * this test's messages, avoiding flakes from shared queue state.
  */
-import { describe, it, expect, beforeAll, afterAll, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi, afterEach, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 const SUFFIX = Date.now().toString(36) + "-orders-nosession";
+
+/**
+ * Archive all visible messages in q_s6_sync that don't belong to our test shops.
+ * This prevents batch pollution from other test files' leftover messages.
+ */
+async function archiveStaleQueueMessages(
+  sql: ReturnType<typeof postgres>,
+  ourDomains: string[]
+): Promise<number> {
+  const result = await sql<{ msg_id: string }[]>`
+    WITH stale AS (
+      SELECT msg_id FROM pgmq.q_s6_sync
+      WHERE vt <= NOW()
+        AND message->>'shop' NOT IN ${sql(ourDomains)}
+    )
+    SELECT msg_id::text FROM stale
+  `;
+  
+  for (const row of result) {
+    await sql`SELECT pgmq.archive('s6_sync', ${row.msg_id}::bigint)`;
+  }
+  
+  return result.length;
+}
 
 const UNINSTALLED_SHOP = {
   id: `shop-uninstalled-${SUFFIX}`,
@@ -117,6 +145,11 @@ describeWithDb("ORDERS_* no-session ACK behavior (#239 extension)", () => {
     await sqlRef`DELETE FROM "Shop" WHERE id IN ${sqlRef(allShopIds)}`;
 
     await sqlRef.end();
+  });
+
+  beforeEach(async () => {
+    const allDomains = [UNINSTALLED_SHOP.domain, INSTALLED_SHOP.domain];
+    await archiveStaleQueueMessages(sqlRef, allDomains);
   });
 
   afterEach(() => {
