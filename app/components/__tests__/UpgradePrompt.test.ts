@@ -303,7 +303,7 @@ describe("PlanBanner component", () => {
   });
 
   describe("T1: none plan with gating OFF displays correctly", () => {
-    it("shows 'No Plan', no 'Free', no '/ 3', no badges or limit UI", () => {
+    it("hides 'Plan: No Plan' label when gating is OFF", () => {
       const html = renderToString(
         createElement(PlanBanner, {
           planKey: "none",
@@ -315,8 +315,9 @@ describe("PlanBanner component", () => {
           upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
         })
       );
-      // Shows No Plan as plan name
-      expect(html).toContain("No Plan");
+      // Does NOT show 'Plan: No Plan' when gating is off
+      expect(html).not.toContain("Plan:");
+      expect(html).not.toContain("No Plan");
       // No 'Free' anywhere
       expect(html).not.toContain("Free");
       // No '/ 3' limit display (old limit)
@@ -330,6 +331,27 @@ describe("PlanBanner component", () => {
       expect(html).not.toContain("Upgrade to Add More");
       // Shows usage count
       expect(html).toContain("5 buyer accounts");
+      // View Plans link is still present
+      expect(html).toContain("View Plans");
+    });
+
+    it("shows 'Plan: No Plan' label when gating is ON (true)", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "none",
+          planName: "No Plan",
+          isTest: false,
+          companiesUsed: 5,
+          companiesLimit: 0,
+          gatingEnforced: true,
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        })
+      );
+      // Shows 'Plan: No Plan' when gating is ON
+      expect(html).toContain("Plan:");
+      expect(html).toContain("No Plan");
+      // Upgrade CTA is present (shows "Upgrade to Add More" when at limit with gating ON)
+      expect(html).toContain("Upgrade to Add More");
     });
 
     it("starter plan with gating OFF shows correct limit in text when gating is ON", () => {
@@ -348,6 +370,113 @@ describe("PlanBanner component", () => {
       expect(html).toContain("/ 25");
       // No '/ 3' (old free limit)
       expect(html).not.toContain("/ 3");
+    });
+  });
+
+  describe("Plan label visibility based on gatingEnforced", () => {
+    it("shows plan label for non-none plans even when gating is OFF", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "starter",
+          planName: "Starter",
+          isTest: false,
+          companiesUsed: 10,
+          companiesLimit: 25,
+          gatingEnforced: false,
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        })
+      );
+      expect(html).toContain("Plan:");
+      expect(html).toContain("Starter");
+    });
+
+    it("shows plan label for growth plan with gating OFF", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "growth",
+          planName: "Growth",
+          isTest: false,
+          companiesUsed: 50,
+          companiesLimit: 100,
+          gatingEnforced: false,
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        })
+      );
+      expect(html).toContain("Plan:");
+      expect(html).toContain("Growth");
+    });
+
+    it("shows plan label for unlimited plan with gating OFF", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "unlimited",
+          planName: "Unlimited",
+          isTest: false,
+          companiesUsed: 500,
+          companiesLimit: -1,
+          gatingEnforced: false,
+          upgradeUrl: null,
+        })
+      );
+      expect(html).toContain("Plan:");
+      expect(html).toContain("Unlimited");
+    });
+
+    it("View Plans link is present for none plan with gating OFF", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "none",
+          planName: "No Plan",
+          isTest: false,
+          companiesUsed: 5,
+          companiesLimit: 0,
+          gatingEnforced: false,
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        })
+      );
+      // Plan label is hidden but View Plans is still present
+      expect(html).not.toContain("Plan:");
+      expect(html).toContain("View Plans");
+    });
+
+    it("Upgrade CTA is present for none plan with gating ON (at limit shows Upgrade to Add More)", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "none",
+          planName: "No Plan",
+          isTest: false,
+          companiesUsed: 5,
+          companiesLimit: 0,
+          gatingEnforced: true,
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        })
+      );
+      // Plan label is shown and Upgrade CTA is present
+      expect(html).toContain("Plan:");
+      expect(html).toContain("No Plan");
+      // When gating is ON and at/over limit, shows "Upgrade to Add More"
+      expect(html).toContain("Upgrade to Add More");
+    });
+
+    it("View Plans link is present for starter plan with gating ON (not at limit)", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "starter",
+          planName: "Starter",
+          isTest: false,
+          companiesUsed: 10,
+          companiesLimit: 25,
+          gatingEnforced: true,
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        })
+      );
+      // Plan label is shown
+      expect(html).toContain("Plan:");
+      expect(html).toContain("Starter");
+      // When gating is ON but NOT at limit, shows "View Plans"
+      expect(html).toContain("View Plans");
+      // Should not show "Upgrade to Add More" when not at limit
+      expect(html).not.toContain("Upgrade to Add More");
     });
   });
 });

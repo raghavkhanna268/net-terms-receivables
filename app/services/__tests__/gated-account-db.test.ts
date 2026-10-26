@@ -71,7 +71,7 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
   const TEST_NONGATED_COMPANY_LOCATION_ID = `gid://shopify/CompanyLocation/nongated-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
-    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
     // Create test shop

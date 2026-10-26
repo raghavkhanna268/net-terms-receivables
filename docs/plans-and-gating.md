@@ -42,7 +42,7 @@ The app matches subscription names case-insensitively, so "Growth", "growth", "G
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PLAN_GATING_ENFORCED` | `"false"` | Set to `"1"` or `"true"` to enable account limit enforcement |
+| `PLAN_GATING_ENFORCED` | `"false"` | Set to the exact string `"true"` to enable account limit enforcement |
 | `APP_HANDLE` | `"net-terms-receivables-1"` | App handle for upgrade URL (read from `APP_HANDLE` env var; must match Partner Dashboard) |
 
 When `PLAN_GATING_ENFORCED` is OFF (default):
@@ -346,4 +346,4 @@ Migration: `prisma/migrations/20261025000000_s21_plan_cache/migration.sql`
 
 ## Scopes
 
-App Pricing requires no additional OAuth scopes. The 11 production scopes remain unchanged.
+App Pricing requires no additional OAuth scopes. The 9 production scopes remain unchanged.

@@ -9,6 +9,32 @@ import { join } from "path";
 import { parseBankStatement, parseAndFilterStatement } from "../index.js";
 import type { ParseResult } from "../types.js";
 
+describe("bank parser registry", () => {
+  it("exports parsers for all supported banks: HDFC, ICICI, SBI, AXIS", async () => {
+    const parserExports = await import("../parsers/index.js");
+    
+    expect(parserExports.parseHdfcStatement).toBeDefined();
+    expect(parserExports.parseIciciStatement).toBeDefined();
+    expect(parserExports.parseSbiStatement).toBeDefined();
+    expect(parserExports.parseAxisStatement).toBeDefined();
+    
+    expect(typeof parserExports.parseHdfcStatement).toBe("function");
+    expect(typeof parserExports.parseIciciStatement).toBe("function");
+    expect(typeof parserExports.parseSbiStatement).toBe("function");
+    expect(typeof parserExports.parseAxisStatement).toBe("function");
+  });
+
+  it("imports page VALID_BANKS matches registered parsers", async () => {
+    const parserExports = await import("../parsers/index.js");
+    const parserKeys = Object.keys(parserExports)
+      .filter((k) => k.startsWith("parse") && k.endsWith("Statement"))
+      .map((k) => k.replace(/^parse/, "").replace(/Statement$/, "").toUpperCase());
+    
+    const expectedBanks = ["HDFC", "ICICI", "SBI", "AXIS"];
+    expect(parserKeys.sort()).toEqual(expectedBanks.sort());
+  });
+});
+
 const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
 
 describe("bank statement parsing integration", () => {

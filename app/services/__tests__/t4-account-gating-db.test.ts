@@ -42,7 +42,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -255,7 +255,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -391,7 +391,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -569,7 +569,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -699,7 +699,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -942,7 +942,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
     });
 
     it("unlimited plan (-1 limit) never gates accounts", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       const { checkCompanyLimit } = await import("../gating.server");
       const limitCheck = await checkCompanyLimit(sql, SHOP_ID_UNLIMITED);
@@ -1038,7 +1038,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -1211,7 +1211,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -1410,7 +1410,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -1541,7 +1541,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -1646,7 +1646,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
