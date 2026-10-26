@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -214,6 +215,8 @@ describeWithDb("E2E: S14 Import -> S16 Match -> S17 Apply (DB-backed)", () => {
       await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
       await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+
+      await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "e2e-import-match-apply-db.test.ts");
     }
     if (sql) {
       await sql.end();

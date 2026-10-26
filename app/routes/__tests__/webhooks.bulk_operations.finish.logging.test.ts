@@ -240,4 +240,102 @@ describe("webhooks.bulk_operations.finish logging", () => {
       expect.objectContaining({ webhookId: testWebhookId })
     );
   });
+
+  describe("S25 safeLog assertions", () => {
+    it("non-COMPLETED status calls safeLog with bulk_finish_ignored_status (no GID leak)", async () => {
+      const testWebhookId = "test-wh-s25-status";
+      const bulkOpId = "gid://shopify/BulkOperation/s25-running";
+      mockAuthenticateWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "bulk_operations/finish",
+        webhookId: testWebhookId,
+        payload: {
+          admin_graphql_api_id: bulkOpId,
+          status: "RUNNING",
+        },
+      });
+
+      const request = new Request("https://example.com/webhooks/bulk_operations/finish", {
+        method: "POST",
+        body: JSON.stringify({ admin_graphql_api_id: bulkOpId, status: "RUNNING" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+
+      const allOutput = getAllConsoleOutput();
+      const outputStr = allOutput.join("\n");
+
+      expect(outputStr).toContain("bulk_finish_ignored_status");
+      expect(outputStr).toContain("shopHash");
+      expect(outputStr).toContain("status");
+      expect(outputStr).toContain("RUNNING");
+      expect(outputStr).not.toContain(bulkOpId);
+      expect(outputStr).not.toContain("gid://shopify");
+      expect(outputStr).not.toContain(testWebhookId);
+    });
+
+    it("unknown bulk op calls safeLog with bulk_finish_unknown_op (no GID leak)", async () => {
+      const testWebhookId = "test-wh-s25-unknown";
+      const bulkOpId = "gid://shopify/BulkOperation/s25-unknown";
+      mockAuthenticateWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "bulk_operations/finish",
+        webhookId: testWebhookId,
+        payload: {
+          admin_graphql_api_id: bulkOpId,
+          status: "COMPLETED",
+        },
+      });
+      mockSql.mockResolvedValue([]);
+
+      const request = new Request("https://example.com/webhooks/bulk_operations/finish", {
+        method: "POST",
+        body: JSON.stringify({ admin_graphql_api_id: bulkOpId, status: "COMPLETED" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+
+      const allOutput = getAllConsoleOutput();
+      const outputStr = allOutput.join("\n");
+
+      expect(outputStr).toContain("bulk_finish_unknown_op");
+      expect(outputStr).toContain("shopHash");
+      expect(outputStr).not.toContain(bulkOpId);
+      expect(outputStr).not.toContain("gid://shopify");
+      expect(outputStr).not.toContain(testWebhookId);
+    });
+
+    it("non-COMPLETED FAILED status also calls safeLog with bulk_finish_ignored_status", async () => {
+      const testWebhookId = "test-wh-s25-failed";
+      const bulkOpId = "gid://shopify/BulkOperation/s25-failed";
+      mockAuthenticateWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "bulk_operations/finish",
+        webhookId: testWebhookId,
+        payload: {
+          admin_graphql_api_id: bulkOpId,
+          status: "FAILED",
+        },
+      });
+
+      const request = new Request("https://example.com/webhooks/bulk_operations/finish", {
+        method: "POST",
+        body: JSON.stringify({ admin_graphql_api_id: bulkOpId, status: "FAILED" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+
+      const allOutput = getAllConsoleOutput();
+      const outputStr = allOutput.join("\n");
+
+      expect(outputStr).toContain("bulk_finish_ignored_status");
+      expect(outputStr).toContain("FAILED");
+    });
+  });
 });

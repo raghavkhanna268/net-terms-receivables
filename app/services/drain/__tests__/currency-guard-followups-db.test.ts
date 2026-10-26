@@ -12,6 +12,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -62,6 +63,9 @@ describeWithDb("#292 G8 DB: Terminal topics update existing invoices for non-INR
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-g8db-" + TEST_SUFFIX + "%"}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "currency-guard-followups-db.test.ts (G8)");
+
     await sql.end();
   });
 
@@ -241,6 +245,7 @@ describeWithDb("#292 G5 DB: markWebhookProcessed called on non-INR skip", () => 
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-g5db-" + TEST_SUFFIX + "%"}`;
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "currency-guard-followups-db.test.ts (G5)");
     await sql.end();
   });
 
@@ -301,6 +306,7 @@ describeWithDb("#292 G4 DB: Failed currency read sets XXX (no preserve-on-confli
 
   afterEach(async () => {
     await sql`DELETE FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}`;
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "currency-guard-followups-db.test.ts (G4)");
     await sql.end();
   });
 
