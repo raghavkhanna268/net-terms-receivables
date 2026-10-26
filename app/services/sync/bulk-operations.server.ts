@@ -437,17 +437,31 @@ export async function incrementBulkOperationFailureCount(
  * Called on successful progress to give the operation a clean slate.
  *
  * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from resetting failure_count after processor B has taken over the lease.
  */
 export async function resetBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  leaseToken?: string
 ): Promise<void> {
-  await sql`
-    UPDATE s6_bulk_operations
-    SET failure_count = 0
-    WHERE bulk_operation_id = ${bulkOperationId}
-      AND closed_at IS NULL
-  `;
+  if (leaseToken) {
+    await sql`
+      UPDATE s6_bulk_operations
+      SET failure_count = 0
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
+        AND processing_lease_token = ${leaseToken}
+    `;
+  } else {
+    await sql`
+      UPDATE s6_bulk_operations
+      SET failure_count = 0
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
+    `;
+  }
 }
 
 /**

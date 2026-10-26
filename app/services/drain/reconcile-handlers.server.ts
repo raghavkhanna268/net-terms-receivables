@@ -416,7 +416,6 @@ export async function startReconcileBulkOperation(
 
   // Use try/finally to ensure claim is released on retryable error (but NOT if we have an op id)
   let bulkOperationId: string | undefined;
-  let opIdRecorded = false;
   try {
     const result = await adminGraphQL<{
       bulkOperationRunQuery?: {
@@ -457,7 +456,6 @@ export async function startReconcileBulkOperation(
     // "already_running" from claimReconcileStage and skip.
     if (chainKey) {
       await recordClaimBulkOperationId(sql, chainKey, kind, shop, bulkOperationId);
-      opIdRecorded = true;
     }
 
     // Now register the bulk operation. If this fails, we do NOT release the claim
@@ -490,9 +488,10 @@ export async function startReconcileBulkOperation(
       entityId: bulkOperationId,
     };
   } finally {
-    // Release claim only if mutation failed BEFORE we got a bulkOperationId.
-    // Once we have an op id from Shopify, the claim must stay so retries see "already_running".
-    if (!opIdRecorded && chainKey) {
+    // R2: Release claim only if mutation failed BEFORE we got a bulkOperationId.
+    // Key on bulkOperationId being set, NOT on opIdRecorded. If recordClaimBulkOperationId
+    // threw after Shopify returned an op id, we must NOT release (claim already has op id).
+    if (!bulkOperationId && chainKey) {
       await releaseReconcileStageClaim(sql, chainKey, kind, shop);
     }
   }

@@ -100,6 +100,10 @@ export const BULK_ERROR_CODES = {
   PROCESSING_ERROR: "bulk_processing_error",
   LEASE_CONTENTION: "bulk_lease_contention",
   STALE_RECOVERY: "bulk_stale_recovery",
+  /** Auth failure (invalid_grant, no_refresh_token, needs_reauth) - immediate DLQ, no retry */
+  AUTH_NEEDS_REAUTH: "bulk_auth_needs_reauth",
+  /** Non-retryable status fetch failure (not auth) - immediate DLQ */
+  STATUS_FETCH_FAILED: "bulk_status_fetch_failed",
 } as const;
 
 /**
@@ -182,22 +186,52 @@ interface BulkOperationStatus {
 }
 
 /**
+ * Auth error codes that require immediate DLQ without retry.
+ * These come from refreshOfflineTokenIfNeeded via adminGraphQL.
+ */
+const AUTH_ERROR_CODES = new Set([
+  "invalid_grant",
+  "no_refresh_token",
+  "no_session",
+]);
+
+/**
+ * Result of getBulkOperationStatus.
+ * Passes through errorCode and retryable from adminGraphQL for proper auth-failure handling.
+ */
+export interface BulkOperationStatusResult {
+  success: boolean;
+  data?: BulkOperationStatus;
+  error?: string;
+  /** Error code from adminGraphQL (for auth failure detection) */
+  errorCode?: string;
+  /** Whether the error is retryable (false for auth failures) */
+  retryable?: boolean;
+}
+
+/**
  * Get the bulk operation status and result URL from Shopify.
+ * Passes through errorCode and retryable from adminGraphQL for auth-failure handling.
  */
 export async function getBulkOperationStatus(
   shop: string,
   bulkOperationId: string
-): Promise<{ success: boolean; data?: BulkOperationStatus; error?: string }> {
+): Promise<BulkOperationStatusResult> {
   const result = await adminGraphQL<{
     node: BulkOperationStatus | null;
   }>(shop, BULK_OPERATION_STATUS_QUERY, { id: bulkOperationId });
 
   if (!result.success) {
-    return { success: false, error: result.error };
+    return {
+      success: false,
+      error: result.error,
+      errorCode: result.errorCode,
+      retryable: result.retryable,
+    };
   }
 
   if (!result.data?.node) {
-    return { success: false, error: "Bulk operation not found" };
+    return { success: false, error: "Bulk operation not found", retryable: false };
   }
 
   return { success: true, data: result.data.node };
@@ -851,34 +885,59 @@ export async function loadBulkOperationProgress(
  * S25: Progress saves never write completed_at, only advance byte_offset.
  * Only updates if byte_offset < new AND completed_at IS NULL.
  * This prevents reopening a closed/completed row.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from overwriting progress after processor B has taken over the lease.
  */
 export async function saveBulkOperationProgress(
   sql: Sql,
   bulkOperationId: string,
   byteOffset: number,
   _completedAt: Date | null = null,
-  chunkSize?: number
+  chunkSize?: number,
+  leaseToken?: string
 ): Promise<{ rowUpdated: boolean }> {
   let result;
   if (chunkSize !== undefined) {
-    result = await sql`
-      UPDATE s6_bulk_operations
-      SET byte_offset = ${byteOffset},
-          chunk_size = ${chunkSize}
-      WHERE bulk_operation_id = ${bulkOperationId}
-        AND closed_at IS NULL
-        AND completed_at IS NULL
-        AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
-    `;
+    result = leaseToken
+      ? await sql`
+          UPDATE s6_bulk_operations
+          SET byte_offset = ${byteOffset},
+              chunk_size = ${chunkSize}
+          WHERE bulk_operation_id = ${bulkOperationId}
+            AND closed_at IS NULL
+            AND completed_at IS NULL
+            AND processing_lease_token = ${leaseToken}
+            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
+        `
+      : await sql`
+          UPDATE s6_bulk_operations
+          SET byte_offset = ${byteOffset},
+              chunk_size = ${chunkSize}
+          WHERE bulk_operation_id = ${bulkOperationId}
+            AND closed_at IS NULL
+            AND completed_at IS NULL
+            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
+        `;
   } else {
-    result = await sql`
-      UPDATE s6_bulk_operations
-      SET byte_offset = ${byteOffset}
-      WHERE bulk_operation_id = ${bulkOperationId}
-        AND closed_at IS NULL
-        AND completed_at IS NULL
-        AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
-    `;
+    result = leaseToken
+      ? await sql`
+          UPDATE s6_bulk_operations
+          SET byte_offset = ${byteOffset}
+          WHERE bulk_operation_id = ${bulkOperationId}
+            AND closed_at IS NULL
+            AND completed_at IS NULL
+            AND processing_lease_token = ${leaseToken}
+            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
+        `
+      : await sql`
+          UPDATE s6_bulk_operations
+          SET byte_offset = ${byteOffset}
+          WHERE bulk_operation_id = ${bulkOperationId}
+            AND closed_at IS NULL
+            AND completed_at IS NULL
+            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
+        `;
   }
   return { rowUpdated: result.count > 0 };
 }
@@ -889,22 +948,39 @@ export async function saveBulkOperationProgress(
  *
  * S25: This is the ONLY path that writes completed_at.
  *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from claiming completion after processor B has taken over the lease.
+ *
+ * @param leaseToken - Optional lease token for owner check. If provided, only
+ *                     claims if the token matches (prevents stale processor writes).
  * @returns true if this caller won the claim, false otherwise
  */
 export async function claimBulkCompletion(
   sql: Sql,
   bulkOperationId: string,
-  shop: string
+  shop: string,
+  leaseToken?: string
 ): Promise<boolean> {
-  const result = await sql`
-    UPDATE s6_bulk_operations
-    SET completed_at = now()
-    WHERE bulk_operation_id = ${bulkOperationId}
-      AND shop = ${shop}
-      AND completed_at IS NULL
-      AND closed_at IS NULL
-    RETURNING bulk_operation_id
-  `;
+  const result = leaseToken
+    ? await sql`
+        UPDATE s6_bulk_operations
+        SET completed_at = now()
+        WHERE bulk_operation_id = ${bulkOperationId}
+          AND shop = ${shop}
+          AND completed_at IS NULL
+          AND closed_at IS NULL
+          AND processing_lease_token = ${leaseToken}
+        RETURNING bulk_operation_id
+      `
+    : await sql`
+        UPDATE s6_bulk_operations
+        SET completed_at = now()
+        WHERE bulk_operation_id = ${bulkOperationId}
+          AND shop = ${shop}
+          AND completed_at IS NULL
+          AND closed_at IS NULL
+        RETURNING bulk_operation_id
+      `;
   return result.count > 0;
 }
 
@@ -1194,7 +1270,8 @@ export async function processBulkOperation(
     
     if (status === "COMPLETED" && url === null && parsedObjectCount === 0) {
       // Empty result - complete the operation with 0 lines processed
-      const claimed = await claimBulkCompletion(sql, bulkOperationId, shop);
+      // R1: Pass leaseToken for owner-checked completion
+      const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
       await markWebhookProcessed(
         sql,
         webhookId,
@@ -1243,7 +1320,43 @@ export async function processBulkOperation(
   }
 
   if (!statusResult.success || !statusResult.data?.url) {
-    // Increment failure count for retryable API error
+    // Auth-failure path: immediate DLQ without bumping failure_count.
+    // Auth errors mean the shop needs re-authentication - no point retrying.
+    // The shop's needs_reauth flag is already set by refreshOfflineTokenIfNeeded.
+    if (statusResult.errorCode && AUTH_ERROR_CODES.has(statusResult.errorCode)) {
+      safeLog("warn", "bulk_op_auth_failure", {
+        shopId,
+        bulkType,
+        errorCode: statusResult.errorCode,
+      });
+      return {
+        success: false,
+        action: "skipped",
+        error: BULK_ERROR_CODES.AUTH_NEEDS_REAUTH,
+        errorCode: BULK_ERROR_CODES.AUTH_NEEDS_REAUTH,
+        status: "error",
+        errorType: "permanent",
+      };
+    }
+
+    // Other non-retryable failures: immediate DLQ without bumping failure_count.
+    if (statusResult.retryable === false) {
+      safeLog("warn", "bulk_op_status_fetch_failed", {
+        shopId,
+        bulkType,
+        errorCode: statusResult.errorCode ?? "unknown",
+      });
+      return {
+        success: false,
+        action: "skipped",
+        error: BULK_ERROR_CODES.STATUS_FETCH_FAILED,
+        errorCode: BULK_ERROR_CODES.STATUS_FETCH_FAILED,
+        status: "error",
+        errorType: "permanent",
+      };
+    }
+
+    // Retryable failure: increment failure count
     const newFailureCount = await incrementBulkOperationFailureCount(
       sql,
       bulkOperationId
@@ -1309,7 +1422,8 @@ export async function processBulkOperation(
   // Handle empty response at EOF
   if (bytes.length === 0 && chunkResult.isEof) {
     // S25: Use claimBulkCompletion for exactly-once completion
-    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop);
+    // R1: Pass leaseToken for owner-checked completion
+    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1364,11 +1478,25 @@ export async function processBulkOperation(
       };
     }
 
+    // R1: Renew lease BEFORE writing progress to ensure we still own it
+    const renewedForChunk = await renewProcessingLease(sql, bulkOperationId, shop, leaseToken);
+    if (!renewedForChunk) {
+      return {
+        success: false,
+        action: "skipped",
+        error: BULK_ERROR_CODES.LEASE_CONTENTION,
+        errorCode: BULK_ERROR_CODES.LEASE_CONTENTION,
+        status: "error",
+        errorType: "retryable",
+      };
+    }
+
     // Save increased chunk size and retry
     await updateBulkOperationChunkSize(sql, bulkOperationId, newChunkSize);
 
     // Reset failure count on successful progress
-    await resetBulkOperationFailureCount(sql, bulkOperationId);
+    // R1: Pass leaseToken for owner-checked reset
+    await resetBulkOperationFailureCount(sql, bulkOperationId, leaseToken);
 
     console.log(
       `[bulk-jsonl] No newlines in ${currentChunkSize}B chunk, growing to ${newChunkSize}B`
@@ -1467,7 +1595,8 @@ export async function processBulkOperation(
 
   if (isComplete) {
     // S25: Use claimBulkCompletion for exactly-once completion
-    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop);
+    // R1: Pass leaseToken for owner-checked completion
+    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1502,24 +1631,7 @@ export async function processBulkOperation(
     };
   }
 
-  // Save progress for next iteration
-  // Reset chunk size to default if we found lines
-  const nextChunkSize = lines.length > 0 ? DEFAULT_CHUNK_SIZE : currentChunkSize;
-  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, null, nextChunkSize);
-
-  // Reset failure count on successful progress
-  await resetBulkOperationFailureCount(sql, bulkOperationId);
-
-  safeLog("info", "bulk_jsonl_progress", {
-    shopId,
-    bulkType,
-    byteOffset: newByteOffset,
-    lineCount: linesToProcess.length,
-    upsertedCount: totalUpserted,
-  });
-
-  // S25: Renew lease after successful chunk processing to prevent other processors
-  // from taking over while we're making progress. If renewal fails, we've lost the lease.
+  // R1: Renew lease BEFORE writing progress to ensure we still own it.
   // Per Team Lead ruling: If renewal updates 0 rows, stop immediately without writing progress.
   const renewed = await renewProcessingLease(sql, bulkOperationId, shop, leaseToken);
   if (!renewed) {
@@ -1532,6 +1644,24 @@ export async function processBulkOperation(
       errorType: "retryable",
     };
   }
+
+  // Save progress for next iteration
+  // Reset chunk size to default if we found lines
+  // R1: Pass leaseToken for owner-checked write
+  const nextChunkSize = lines.length > 0 ? DEFAULT_CHUNK_SIZE : currentChunkSize;
+  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, null, nextChunkSize, leaseToken);
+
+  // Reset failure count on successful progress
+  // R1: Pass leaseToken for owner-checked reset
+  await resetBulkOperationFailureCount(sql, bulkOperationId, leaseToken);
+
+  safeLog("info", "bulk_jsonl_progress", {
+    shopId,
+    bulkType,
+    byteOffset: newByteOffset,
+    lineCount: linesToProcess.length,
+    upsertedCount: totalUpserted,
+  });
 
   return {
     success: true,
