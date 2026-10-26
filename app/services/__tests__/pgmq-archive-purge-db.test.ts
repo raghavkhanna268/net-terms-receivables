@@ -49,9 +49,9 @@ describeWithDb("pgmq archive 7-day purge (DB)", () => {
     for (const id of ids) {
       await tx.unsafe(
         `INSERT INTO pgmq.${table} (msg_id, read_ct, enqueued_at, archived_at, vt, message)
-         VALUES ($1, 1, now() - make_interval(days => $2), now() - make_interval(days => $2),
-                 now() - make_interval(days => $2), '{"topic":"TEST"}'::jsonb)`,
-        [id, ageDays],
+         VALUES ($1::bigint, 1, now() - make_interval(days => $2::int), now() - make_interval(days => $2::int),
+                 now() - make_interval(days => $2::int), '{"topic":"TEST"}'::jsonb)`,
+        [String(id), String(ageDays)],
       );
     }
   }
@@ -62,8 +62,8 @@ describeWithDb("pgmq archive 7-day purge (DB)", () => {
     ids: number[],
   ): Promise<number[]> {
     const rows = await tx.unsafe(
-      `SELECT msg_id::text AS id FROM pgmq.${table} WHERE msg_id = ANY($1::bigint[]) ORDER BY msg_id`,
-      [ids],
+      `SELECT msg_id::text AS id FROM pgmq.${table} WHERE msg_id = ANY(string_to_array($1::text, ',')::bigint[]) ORDER BY msg_id`,
+      [ids.join(",")],
     );
     return rows.map((r) => Number(r.id));
   }
