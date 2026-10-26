@@ -962,8 +962,8 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
 
     it("percent in message shop: exact match required (catches = to LIKE mutation)", async () => {
       const suffix = testContext.suffix;
-      const existingDomain = `test-pct-${suffix}abc.myshopify.com`;
-      const messageShop = `test-pct-${suffix}%.myshopify.com`;
+      const existingDomain = `test-pctxyz-${suffix}.myshopify.com`;
+      const messageShop = `test-pct%-${suffix}.myshopify.com`;
       const shopId = `shop-pct-${suffix}`;
 
       try {
