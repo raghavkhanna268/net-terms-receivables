@@ -531,7 +531,23 @@ describe("HDFC BIFF8 .xls parsing", () => {
   });
 });
 
+/**
+ * Check if a number has float noise (more precision than 2 decimal places).
+ * Returns true if the value does NOT equal its 2dp representation.
+ */
+function hasFloatNoise(v: number): boolean {
+  return Number(v.toFixed(2)) !== v;
+}
+
 describe("fixture format validation", () => {
+  it("hasFloatNoise helper catches exact float noise", () => {
+    expect(hasFloatNoise(21961.600000000002)).toBe(true);
+    expect(hasFloatNoise(1.005)).toBe(true);
+    
+    expect(hasFloatNoise(21961.6)).toBe(false);
+    expect(hasFloatNoise(5432.10)).toBe(false);
+  });
+
   it("CSV fixtures have amounts with at most 2 decimal places", () => {
     const csvFixtures = ["icici-synthetic.csv", "hdfc-synthetic.csv"];
     
@@ -544,7 +560,8 @@ describe("fixture format validation", () => {
       const badMatches = matches.filter(m => {
         if (/^\d{2}\.\d{4}$/.test(m)) return false;
         if (/^\d+\.2026$/.test(m) || /^\d+\.2030$/.test(m)) return false;
-        return true;
+        const num = parseFloat(m);
+        return hasFloatNoise(num);
       });
       
       expect(badMatches, `${fixture} has float noise: ${badMatches.slice(0, 5).join(", ")}`).toHaveLength(0);
@@ -568,10 +585,8 @@ describe("fixture format validation", () => {
           const cell = sheet[addr];
           
           if (cell && cell.t === "n" && typeof cell.v === "number") {
-            const value = cell.v;
-            const rounded = Math.round(value * 100) / 100;
-            if (Math.abs(value - rounded) > 1e-10) {
-              badCells.push(`${addr}=${value}`);
+            if (hasFloatNoise(cell.v)) {
+              badCells.push(`${addr}=${cell.v}`);
             }
           }
         }
