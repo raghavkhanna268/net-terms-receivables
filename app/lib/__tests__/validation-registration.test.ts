@@ -115,6 +115,9 @@ describe("validation-registration", () => {
       expect(result.errCode).toBeUndefined();
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
 
+      const queryCall = mockAdmin.graphql.mock.calls[0];
+      expect(queryCall[0]).toContain("blockOnFailure");
+
       const updateCall = mockAdmin.graphql.mock.calls[1];
       expect(updateCall[0]).toContain("validationUpdate");
       expect(updateCall[1]).toEqual({
@@ -672,6 +675,9 @@ describe("validation-registration", () => {
         mockAdmin as Parameters<typeof ensureValidation>[0],
       );
 
+      const queryCall = mockAdmin.graphql.mock.calls[0];
+      expect(queryCall[0]).toContain("blockOnFailure");
+
       const updateCall = mockAdmin.graphql.mock.calls[1];
       expect(updateCall[0]).toContain("enable: $enable");
       expect(updateCall[1]).toEqual({
@@ -788,6 +794,7 @@ describe("validation-registration", () => {
       );
 
       const updateCall = mockAdmin.graphql.mock.calls[1];
+      expect(updateCall[0]).toContain("blockOnFailure: $blockOnFailure");
       expect(updateCall[1]).toEqual({
         variables: {
           id: "test-validation-t3",
@@ -897,6 +904,7 @@ describe("validation-registration", () => {
 
       const createCall = mockAdminCreate.graphql.mock.calls[1];
       expect(createCall[0]).toContain("enable: true");
+      expect(createCall[0]).toContain("blockOnFailure: false");
     });
   });
 });
