@@ -181,39 +181,59 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
   // Fallback: regex-based VPA extraction for non-standard formats
   // Handles cases like "PAYMENT UPI-SYNT-9000000000-1@oksynt-DONE" where the
   // narration contains UPI but doesn't start with UPI- or UPI/
+  //
+  // Extension rules for hyphenated VPAs:
+  // - Always take the segment directly before @ (the "at-segment")
+  // - Extend backwards across '-' only when safe:
+  //   1. If earlier segment is all digits: always extend (phone VPAs like 9000000000-1@)
+  //   2. If text is mixed-case AND earlier segment is lowercase alphanumeric/dots/underscores: extend
+  //   3. If text is all-uppercase: only extend across all-digit segments
+  // This avoids swallowing uppercase name segments in all-caps narrations.
+  // Ambiguity: in all-caps text, "SYNT-VENDOR@OKSYNT" extracts as "vendor@oksynt" because
+  // we can't distinguish a hyphenated VPA from a name-VPA boundary.
   if (!result.upiId) {
-    // VPA local parts are lowercase/digits/dots/hyphens, handles are lowercase/digits
-    // We need to find the @ and extract the surrounding VPA, but NOT include
-    // uppercase segments (which are names, not VPA parts)
-    // Strategy: find @ then look backwards for lowercase/digit segments joined by hyphens
     const atIdx = text.indexOf("@");
     if (atIdx > 0) {
-      // Find handle after @
       const afterAt = text.slice(atIdx + 1);
-      const handleMatch = afterAt.match(/^([a-z0-9]+)/i);
+      const handleMatch = afterAt.match(/^([a-zA-Z0-9]+)/);
       if (handleMatch) {
         const handle = handleMatch[1].toLowerCase();
-        // Find local part before @ - work backwards through hyphen-separated segments
-        // Stop at uppercase, space, slash, or start of string
         const beforeAt = text.slice(0, atIdx);
-        // Split into segments and work backwards
-        const segments = beforeAt.split("-");
-        const localParts: string[] = [];
-        for (let i = segments.length - 1; i >= 0; i--) {
-          const seg = segments[i];
-          // Stop if segment has uppercase, space, slash, or is empty
-          if (!seg || /[A-Z\s/]/.test(seg)) {
-            break;
+        
+        // Find hard boundary: last slash or whitespace before @
+        const boundaryMatch = beforeAt.match(/.*[\s/]/);
+        const boundaryIdx = boundaryMatch ? boundaryMatch[0].length : 0;
+        const localPartRaw = beforeAt.slice(boundaryIdx);
+        
+        // Split by '-' and process segments
+        const segments = localPartRaw.split("-");
+        const atSegment = segments[segments.length - 1];
+        
+        // Validate at-segment: must be alphanumeric with dots/underscores
+        if (atSegment && /^[a-zA-Z0-9._]+$/.test(atSegment)) {
+          const localParts: string[] = [atSegment];
+          
+          // Check if narration is all-uppercase (affects extension rules)
+          const isAllCaps = text === text.toUpperCase();
+          
+          // Extend backwards one segment at a time
+          for (let i = segments.length - 2; i >= 0; i--) {
+            const seg = segments[i];
+            if (!seg) break;
+            
+            if (/^\d+$/.test(seg)) {
+              // All-digit segment: always extend (phone VPA prefix)
+              localParts.unshift(seg);
+            } else if (!isAllCaps && /^[a-z0-9._]+$/.test(seg)) {
+              // Mixed-case text and lowercase segment: extend
+              localParts.unshift(seg);
+            } else {
+              // Stop: uppercase segment in all-caps text, or invalid chars
+              break;
+            }
           }
-          // Include if it's lowercase alphanumeric with dots
-          if (/^[a-z0-9.]+$/.test(seg)) {
-            localParts.unshift(seg);
-          } else {
-            break;
-          }
-        }
-        if (localParts.length > 0) {
-          const localPart = localParts.join("-");
+          
+          const localPart = localParts.join("-").toLowerCase();
           result.upiId = `${localPart}@${handle}`;
         }
       }

@@ -509,6 +509,58 @@ describe("narration-parser", () => {
         expect(result.rail).toBe("UPI");
         expect(result.upiId).toBe("synt-pay-01@oksynt");
       });
+
+      // Regression tests for all-caps narrations
+      it("extracts all-caps single-segment VPA", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNTVENDOR@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("syntvendor@oksynt");
+      });
+
+      it("extracts all-caps numeric-dash VPA", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-9000000000-1@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // Digits extend even in all-caps text
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      it("extracts all-caps alpha-hyphen VPA (ambiguous case)", () => {
+        // In all-caps text, we can't tell if SYNT-VENDOR is a name or VPA
+        // We conservatively take only the segment directly before @
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-VENDOR@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("vendor@oksynt");
+      });
+
+      it("extracts VPA with underscore in local part", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-synt_vendor@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt_vendor@oksynt");
+      });
+
+      it("respects slash as boundary before VPA", () => {
+        const result = parseNarration(
+          "UPI/CR/synt@oksynt/SYNT VENDOR"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt@oksynt");
+      });
+
+      it("respects space as boundary before VPA", () => {
+        const result = parseNarration(
+          "UPI SYNT VENDOR synt@oksynt REF123"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt@oksynt");
+      });
     });
   });
 
