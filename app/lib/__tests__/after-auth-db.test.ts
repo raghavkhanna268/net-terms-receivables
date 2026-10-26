@@ -285,6 +285,205 @@ describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB
       expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
     });
   });
+
+  describe("concurrent reinstall atomicity", () => {
+    afterEach(() => {
+      vi.doUnmock("../validation-registration.server");
+      vi.doUnmock("../metafield-definitions.server");
+      vi.doUnmock("../payment-customization-registration.server");
+      vi.doUnmock("../request-context.server");
+      vi.doUnmock("~/services/plan.server");
+      vi.resetModules();
+    });
+
+    it("two concurrent clearUninstalledAtAndMetafieldErrors: exactly one gets RETURNING row", async () => {
+      const TEST_SHOP = `concurrent-atomicity-${TEST_SUFFIX}.myshopify.com`;
+      
+      // Create shop with uninstalledAt set
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
+      `;
+
+      const [before] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(before.uninstalledAt).not.toBeNull();
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+
+      // Run two concurrent clearUninstalledAtAndMetafieldErrors calls with Promise.all
+      // This simulates two isolates receiving the same reinstall simultaneously
+      const [result1, result2] = await Promise.all([
+        _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP),
+        _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP),
+      ]);
+
+      // Count how many calls got the RETURNING row (wasReinstalled=true)
+      const reinstallWinners = [result1, result2].filter(r => r.wasReinstalled);
+      const normalPathTakers = [result1, result2].filter(r => !r.wasReinstalled);
+
+      // EXACTLY ONE call should get the RETURNING row (reinstall path winner)
+      expect(reinstallWinners).toHaveLength(1);
+      // The other call should get empty (normal path - row already cleared)
+      expect(normalPathTakers).toHaveLength(1);
+
+      // Both should have same shop ID (the winner got it, loser has undefined)
+      expect(reinstallWinners[0].shopId).toBeDefined();
+      expect(normalPathTakers[0].shopId).toBeUndefined();
+
+      // Verify the shop is now cleared
+      const [after] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(after.uninstalledAt).toBeNull();
+    });
+
+    it("concurrent reinstall: registration runs exactly once due to inFlightSetups deduplication", async () => {
+      const TEST_SHOP = `concurrent-registration-${TEST_SUFFIX}.myshopify.com`;
+      
+      // Create shop with uninstalledAt set
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
+      `;
+
+      // Track registration calls
+      let registrationCallCount = 0;
+      const mockEnsureValidation = vi.fn().mockImplementation(async () => {
+        registrationCallCount++;
+        // Add delay to increase chance of concurrent execution
+        await new Promise(r => setTimeout(r, 20));
+        return { id: "val-123", created: false };
+      });
+
+      // Mock using relative paths that match after-auth.server.ts imports
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: mockEnsureValidation,
+      }));
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-123", created: false }),
+      }));
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+      vi.doMock("~/services/plan.server", () => ({
+        refreshPlanCache: vi.fn().mockResolvedValue(undefined),
+      }));
+
+      vi.resetModules();
+      const { runAfterAuth, _resetSetupCacheForTesting } = await import("../after-auth.server");
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p: Promise<unknown>) => waitUntilPromises.push(p));
+
+      // Run two concurrent runAfterAuth calls.
+      // With the per-isolate deduplication set BEFORE any DB call:
+      // - First call sets inFlightReinstallHandlers synchronously and does all the work
+      // - Second call finds the existing handler and awaits it (never makes a DB query)
+      await Promise.all([
+        runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
+        runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
+      ]);
+
+      await Promise.allSettled(waitUntilPromises);
+
+      // Result: registration runs exactly ONCE (the second call awaited the first)
+      expect(registrationCallCount).toBe(1);
+    });
+
+    it("concurrent reinstall: loser awaits winner's critical registration before runAfterAuth resolves (Bug B fix)", async () => {
+      const TEST_SHOP = `concurrent-await-${TEST_SUFFIX}.myshopify.com`;
+      
+      // Create shop with uninstalledAt set
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
+      `;
+
+      // Create a deferred that we control to hold the winner's registration
+      let resolveRegistration!: () => void;
+      const registrationDeferred = new Promise<void>((resolve) => {
+        resolveRegistration = resolve;
+      });
+
+      const mockEnsureValidation = vi.fn().mockImplementation(async () => {
+        // Hold here until we release the deferred
+        await registrationDeferred;
+        return { id: "val-123", created: false };
+      });
+
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: mockEnsureValidation,
+      }));
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-123", created: false }),
+      }));
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+      vi.doMock("~/services/plan.server", () => ({
+        refreshPlanCache: vi.fn().mockResolvedValue(undefined),
+      }));
+
+      vi.resetModules();
+      const { runAfterAuth, _resetSetupCacheForTesting } = await import("../after-auth.server");
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p: Promise<unknown>) => waitUntilPromises.push(p));
+
+      // Track whether each runAfterAuth has resolved
+      let call1Resolved = false;
+      let call2Resolved = false;
+
+      // Start two concurrent runAfterAuth calls
+      const call1Promise = runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil)
+        .then(() => { call1Resolved = true; });
+      const call2Promise = runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil)
+        .then(() => { call2Resolved = true; });
+
+      // Wait a tick for both calls to reach the registration wait point
+      await new Promise(r => setTimeout(r, 50));
+
+      // Bug B fix assertion: NEITHER call should have resolved yet because:
+      // - The first call is blocked on registration
+      // - The second call found inFlightReinstallHandlers and AWAITS it
+      // Without the dedupe-before-await fix, the second call could return early,
+      // allowing the Setup Guide to render stale state.
+      expect(call1Resolved).toBe(false);
+      expect(call2Resolved).toBe(false);
+
+      // Release the registration
+      resolveRegistration();
+
+      // Now both should resolve
+      await Promise.all([call1Promise, call2Promise]);
+
+      expect(call1Resolved).toBe(true);
+      expect(call2Resolved).toBe(true);
+
+      // Cleanup: wait for background promises
+      await Promise.allSettled(waitUntilPromises);
+    });
+  });
 });
 
 describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
