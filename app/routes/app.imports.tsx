@@ -28,6 +28,12 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import {
+  formatSupportedBankList,
+  getImportErrorLabel,
+  formatValidationError,
+  pluralize,
+} from "~/lib/copy-helpers";
 
 /**
  * Maximum rows per import request.
@@ -488,42 +494,6 @@ export interface ParseErrorRow {
 }
 
 /**
- * Badge tone for error codes.
- */
-export type ErrorBadgeTone = "warning" | "critical";
-
-/**
- * Get badge tone for error code.
- * NORMALIZE_FAILED gets warning (recoverable), others get critical.
- * Exported for testing.
- */
-export function getErrorBadgeTone(code: string): ErrorBadgeTone {
-  return code === "NORMALIZE_FAILED" ? "warning" : "critical";
-}
-
-/**
- * Fixed error messages for each error code.
- * Raw parser messages are NOT shown to merchants.
- * Exported for testing.
- */
-export const ERROR_CODE_MESSAGES: Record<string, string> = {
-  ROW_PARSE_FAILED: "Could not parse this row",
-  NORMALIZE_FAILED: "Could not normalize transaction data",
-  NO_HEADER_ROW: "Could not find header row in file",
-  COLUMN_MAP_FAILED: "Could not map columns to expected format",
-  UNKNOWN_BANK_FORMAT: "Unrecognized bank statement format",
-};
-
-/**
- * Get fixed display message for an error code.
- * Never returns raw parser error messages.
- * Exported for testing.
- */
-export function getErrorDisplayMessage(code: string): string {
-  return ERROR_CODE_MESSAGES[code] ?? "Unknown error";
-}
-
-/**
  * Format row label for display.
  * Row 0 indicates a file-level error, not a specific row.
  * Exported for testing.
@@ -761,7 +731,7 @@ export default function ImportsPage() {
       <s-section heading="Upload Statement">
         <s-stack>
           <s-paragraph>
-            Upload an HDFC or ICICI bank statement (CSV, XLS, or XLSX). The file
+            Upload a bank statement from {formatSupportedBankList()} (CSV, XLS, or XLSX). The file
             is parsed entirely in your browser — no raw data is sent to our
             servers.
           </s-paragraph>
@@ -801,8 +771,7 @@ export default function ImportsPage() {
             <s-stack>
               {result.bank === "UNKNOWN" ? (
                 <s-banner tone="warning" heading="Unknown bank format">
-                  Could not detect HDFC or ICICI format. Please ensure you are
-                  uploading a standard bank statement export.
+                  We couldn&apos;t recognise this statement. Upload a standard export from {formatSupportedBankList()}.
                 </s-banner>
               ) : (
                 <>
@@ -829,17 +798,14 @@ export default function ImportsPage() {
 
               {result.errors.length > 0 && (() => {
                 const summary = summarizeParseErrors(result.errors);
+                const rowWord = pluralize(summary.totalCount, "row");
                 return (
-                  <s-banner tone="warning" heading={`${summary.totalCount} row(s) could not be parsed`}>
+                  <s-banner tone="warning" heading={`${summary.totalCount} ${rowWord} couldn't be read`}>
                     <s-unordered-list>
                       {summary.initialErrors.map((err, idx) => (
                         <s-list-item key={idx}>
-                          <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
-                          {" "}
-                          <s-badge tone={getErrorBadgeTone(err.code)}>
-                            {err.code}
-                          </s-badge>
-                          {" "}{getErrorDisplayMessage(err.code)}
+                          <s-text type="strong">{formatErrorRowLabel(err.row)}:</s-text>
+                          {" "}{getImportErrorLabel(err.code)}
                         </s-list-item>
                       ))}
                     </s-unordered-list>
@@ -853,12 +819,8 @@ export default function ImportsPage() {
                         <s-unordered-list>
                           {summary.overflowErrors.map((err, idx) => (
                             <s-list-item key={`overflow-${idx}`}>
-                              <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
-                              {" "}
-                              <s-badge tone={getErrorBadgeTone(err.code)}>
-                                {err.code}
-                              </s-badge>
-                              {" "}{getErrorDisplayMessage(err.code)}
+                              <s-text type="strong">{formatErrorRowLabel(err.row)}:</s-text>
+                              {" "}{getImportErrorLabel(err.code)}
                             </s-list-item>
                           ))}
                         </s-unordered-list>
@@ -909,16 +871,25 @@ export default function ImportsPage() {
                 ) : (
                   <s-banner tone="critical" heading="Import failed">
                     {importResult.error}
-                    {importResult.details && importResult.details.length > 0 && (
-                      <s-unordered-list>
-                        {importResult.details.slice(0, 5).map((detail, idx) => (
-                          <s-list-item key={idx}>{detail}</s-list-item>
-                        ))}
-                        {importResult.details.length > 5 && (
-                          <s-list-item>...and {importResult.details.length - 5} more errors</s-list-item>
-                        )}
-                      </s-unordered-list>
-                    )}
+                    {importResult.details && importResult.details.length > 0 && (() => {
+                      const sourceRowLookup = (creditIndex: number) =>
+                        result?.credits[creditIndex]?.sourceRow;
+                      return (
+                        <s-unordered-list>
+                          {importResult.details.slice(0, 5).map((detail, idx) => {
+                            const parts = detail.split(": ");
+                            const path = parts[0] ?? "";
+                            const message = parts.slice(1).join(": ");
+                            return (
+                              <s-list-item key={idx}>{formatValidationError(path, message, sourceRowLookup)}</s-list-item>
+                            );
+                          })}
+                          {importResult.details.length > 5 && (
+                            <s-list-item>...and {importResult.details.length - 5} more errors</s-list-item>
+                          )}
+                        </s-unordered-list>
+                      );
+                    })()}
                   </s-banner>
                 )
               )}
