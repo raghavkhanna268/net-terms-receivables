@@ -474,6 +474,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       buyerLedger: null,
       selectedBuyerInvoices: null,
       dashboardData: null,
+      pendingPlanHandle: null,
     }, { headers });
   }
 
@@ -516,6 +517,22 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     timing,
   );
 
+  let pendingPlanHandle: string | null = null;
+  try {
+    const [planInfo] = await sql<{ plan_key: string | null; plan_pending_handle: string | null }[]>`
+      SELECT plan_key, plan_pending_handle FROM "Shop" WHERE id = ${shop.id}
+    `;
+    if (planInfo) {
+      const pendingHandle = planInfo.plan_pending_handle ?? null;
+      const resolvedPlanKey = resolvePlanKey(planInfo.plan_key);
+      if (pendingHandle !== null && pendingHandle !== resolvedPlanKey) {
+        pendingPlanHandle = pendingHandle;
+      }
+    }
+  } catch {
+    // plan_pending_handle column may not exist yet (pre-migration)
+  }
+
   return data({
     shopName: storeHandle,
     shopDomain,
@@ -530,6 +547,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     onlyOverLimit,
     selectedBuyerId,
     dashboardData,
+    pendingPlanHandle,
   }, { headers });
 };
 
@@ -1118,6 +1136,7 @@ export default function Index() {
     currencySupported,
     currencyFlipBlocked,
     dashboardData,
+    pendingPlanHandle,
   } = useLoaderData<typeof loader>();
 
   if (!currencySupported) {
@@ -1141,6 +1160,17 @@ export default function Index() {
 
   return (
     <s-page heading="Termwise: Net Terms & Credit">
+      {/* Pending plan banner - shows when plan change is being confirmed */}
+      {pendingPlanHandle && (
+        <s-section>
+          <s-banner tone="info" heading="Plan Change Pending">
+            <s-text>
+              Your plan change is being confirmed with Shopify. This page will update automatically.
+            </s-text>
+          </s-banner>
+        </s-section>
+      )}
+
       <Suspense fallback={<DashboardSkeleton />}>
         <Await resolve={dashboardData} errorElement={<DashboardErrorBanner />}>
           {(data) => (

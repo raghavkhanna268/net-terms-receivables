@@ -124,6 +124,11 @@ describe("#292 currency gate on /app loader", () => {
 
       if (query.includes("SELECT id, currency, timezone FROM")) {
         return Promise.resolve([
+          { id: TEST_SHOP_ID, currency: storedCurrency, timezone: "Asia/Kolkata", plan_key: "none", plan_pending_handle: null },
+        ]);
+      }
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([
           { id: TEST_SHOP_ID, currency: storedCurrency, timezone: "Asia/Kolkata" },
         ]);
       }
@@ -242,6 +247,9 @@ describe("#292 currency gate on /app loader", () => {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
 
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([]); // No shop found
+      }
       if (query.includes("SELECT id, currency, timezone FROM")) {
         return Promise.resolve([]); // No shop found
       }
