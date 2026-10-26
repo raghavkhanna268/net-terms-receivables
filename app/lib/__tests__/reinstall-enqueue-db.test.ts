@@ -3,7 +3,7 @@
  *
  * Tests verify:
  * 1. POSITIVE: Reinstall of INR shop enqueues exactly 1 message with correct shape
- * 2. NEGATIVE: Non-INR, XXX/NULL currency, failing setup, and still-uninstalled all get 0
+ * 2. NEGATIVE: Non-INR, XXX currency, failing setup, and still-uninstalled all get 0
  * 3. Eligibility exclusions: no-owner, redacted (but not lookalikes), permanent error
  * 4. Cap enforcement: 500 max and exact-500, HELD-first ordering
  * 5. Enqueue failure doesn't fail auth (try/catch present) with no leaks
@@ -11,7 +11,7 @@
  * 7. 'sync' source is handled by all consumers
  * 8. Message shape matches helper (6 keys, headers NULL, read_ct 0)
  * 9. Helper-direct tests for currency filtering (c-SQL)
- * 10. Late uninstall test (d-JS)
+ * 10. Late uninstall test (SQL filter)
  * 11. Second same-day reinstall produces distinct webhookIds
  * 12. No-owner accounts are excluded
  *
@@ -377,7 +377,7 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       expect(messages[0].count).toBe(0);
     });
 
-    it("setup failure gets 0 messages on reinstall", async () => {
+    it("setup failure gets 0 messages on reinstall (mutation e1: setup error makes currency XXX)", async () => {
       await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${inrShopId}`;
 
       await sql`
@@ -430,7 +430,72 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       expect(messages[0].count).toBe(0);
     });
 
-    it("enqueueReinstallResync returns 0 when shop is uninstalled (shopRow.uninstalledAt check)", async () => {
+    it("setup incomplete blocks enqueue even with INR currency (mutation e2: setupCompletedShops check)", async () => {
+      await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${inrShopId}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/setup-inr', 'gid://shopify/CompanyLocation/setup-inr',
+           'Setup INR Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: vi.fn().mockRejectedValue(new Error("Validation API failed")),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-test", created: false }),
+      }));
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({
+            data: { shop: { id: "gid://shopify/Shop/1", ianaTimezone: "Asia/Kolkata", currencyCode: "INR" } },
+          }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
+
+      runAfterAuth(INR_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+      for (let n = 0; n < waitUntilPromises.length; n++) await waitUntilPromises[n];
+
+      // Verify the shop has INR currency (so the SQL currency filter would pass)
+      const shopCheck = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE id = ${inrShopId}
+      `;
+      expect(shopCheck[0].currency).toBe("INR");
+
+      // Verify setup is NOT complete (ensureValidation failed)
+      expect(_isShopSetupComplete(INR_SHOP)).toBe(false);
+
+      // Verify 0 messages enqueued (the setupCompletedShops check blocked it)
+      const messages = await sql<{ count: number }[]>`
+        SELECT COUNT(*)::int AS count
+        FROM pgmq.q_s6_sync
+        WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'shop' = ${INR_SHOP}
+      `;
+      expect(messages[0].count).toBe(0);
+    });
+
+    it("enqueueReinstallResync returns 0 when shop is uninstalled (SQL uninstalledAt filter)", async () => {
       // The SQL JOIN includes s."uninstalledAt" IS NULL - test it directly
       await sql`
         INSERT INTO "BuyerAccount" (
@@ -586,7 +651,7 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       expect(enqueuedCount).toBe(0);
     });
 
-    it("late uninstall: shop re-uninstalled after clear gets 0 from helper (d-JS test)", async () => {
+    it("late uninstall: shop re-uninstalled after clear gets 0 from helper (SQL filter test)", async () => {
       // This tests the SQL-level guard: if shop.uninstalledAt is set,
       // the SELECT returns no rows even with eligible accounts.
       // In production, a late uninstall (between clear and enqueue) is caught by this guard.
@@ -1225,6 +1290,91 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
         WHERE message->>'buyerAccountId' = ${testBuyerAccountId}
       `;
       expect(messages[0]?.source).toBe("sync");
+    });
+  });
+
+  describe("drain handler integration", () => {
+    it("drain through real handler: HELD account gets hold=true in metafield, syncPending=false, metafieldSyncedAt set", async () => {
+      vi.resetModules();
+
+      const drainAccountId = `drain-held-${TEST_SUFFIX}`;
+      const locationGid = "gid://shopify/CompanyLocation/drain-held-1";
+
+      // Use manualHold=true so the account stays HELD after recompute
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "manualHold", "holdReasonCode", "syncPending", "syncVersion", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${drainAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/drain-held', ${locationGid},
+           'Drain HELD Account', 'HELD', true, 'MANUAL_HOLD', true, 1, NULL, NOW(), NOW())
+      `;
+
+      // Track metafieldsSet call
+      let capturedVariables: Record<string, unknown> | null = null;
+      mockShopifyGraphQLRequest.mockImplementation(async (_shop: string, _query: string, vars?: Record<string, unknown>) => {
+        if (vars?.metafields) {
+          capturedVariables = vars;
+        }
+        return {
+          success: true,
+          data: { metafieldsSet: { metafields: [{ id: "mf-drain" }], userErrors: [] } },
+        };
+      });
+
+      // Enqueue via reinstall helper
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const enqueued = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+      expect(enqueued).toBe(1);
+
+      // Get the message
+      const [msg] = await sql<{ msg_id: string; message: Record<string, unknown> }[]>`
+        SELECT msg_id::text AS msg_id, message
+        FROM pgmq.q_s6_sync
+        WHERE message->>'buyerAccountId' = ${drainAccountId}
+      `;
+      expect(msg).toBeDefined();
+      expect(msg.message.source).toBe("sync");
+
+      // Drain through real handler
+      const { getSyncHandler } = await import("~/services/drain/processor.server");
+      const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+      expect(handler).toBeDefined();
+
+      // Simulate pgmq.read
+      await sql`
+        UPDATE pgmq.q_s6_sync
+        SET read_ct = read_ct + 1, vt = NOW() + INTERVAL '30 seconds'
+        WHERE msg_id = ${msg.msg_id}
+      `;
+      const result = await handler!(sql, msg.message as never);
+      expect(result.success).toBe(true);
+
+      // Archive on success
+      await sql`SELECT pgmq.archive('s6_sync', ${msg.msg_id}::bigint)`;
+
+      // Verify credit_status value in metafieldsSet variables has hold=true
+      expect(capturedVariables).not.toBeNull();
+      const metafields = capturedVariables!.metafields as Array<{ key: string; value: string }>;
+      const creditStatusMetafield = metafields?.find(mf => mf.key === "credit_status");
+      expect(creditStatusMetafield).toBeDefined();
+      const creditStatusValue = JSON.parse(creditStatusMetafield!.value);
+      expect(creditStatusValue.hold).toBe(true);
+
+      // Verify syncPending=false and metafieldSyncedAt is set
+      const [account] = await sql<{ syncPending: boolean; metafieldSyncedAt: Date | null }[]>`
+        SELECT "syncPending", "metafieldSyncedAt"
+        FROM "BuyerAccount"
+        WHERE id = ${drainAccountId}
+      `;
+      expect(account.syncPending).toBe(false);
+      expect(account.metafieldSyncedAt).not.toBeNull();
+
+      // Cleanup
+      await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${inrShopId}`;
     });
   });
 
