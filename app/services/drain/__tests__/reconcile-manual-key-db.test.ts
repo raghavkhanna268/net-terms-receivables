@@ -442,5 +442,53 @@ describeWithDb("reconcile manual key propagation (DB-backed)", () => {
       expect(queuedMsg.message.webhookId).toBe(`reconcile:${TEST_SHOP_DOMAIN}:${manualKey}:orders`);
       expect(queuedMsg.message.manualKey).toBe(manualKey);
     });
+
+    it("manual orders completion enqueues draft_orders with same manual key", async () => {
+      const { getManualKeyForBulkOp, enqueueReconcileStage } = await import(
+        "../reconcile-handlers.server"
+      );
+
+      const manualKey = `manual:${Date.now()}`;
+      const bulkOpId = `gid://shopify/BulkOperation/orders-e2e-${TEST_SUFFIX}-${Date.now()}`;
+      const manualWebhookId = `reconcile:${TEST_SHOP_DOMAIN}:${manualKey}:orders`;
+
+      await sql`
+        INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+        VALUES (${manualWebhookId}, 'RECONCILE_ORDERS', ${bulkOpId}, NOW())
+      `;
+
+      const lookupKey = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(lookupKey).toBe(manualKey);
+
+      await enqueueReconcileStage(sql, TEST_SHOP_DOMAIN, "draft_orders", lookupKey);
+
+      const [queuedMsg] = await sql<{ message: { webhookId: string; manualKey?: string } }[]>`
+        SELECT message FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'RECONCILE_DRAFT_ORDERS'
+        ORDER BY enqueued_at DESC
+        LIMIT 1
+      `;
+
+      expect(queuedMsg).toBeDefined();
+      expect(queuedMsg.message.webhookId).toBe(`reconcile:${TEST_SHOP_DOMAIN}:${manualKey}:draft_orders`);
+      expect(queuedMsg.message.manualKey).toBe(manualKey);
+    });
+
+    it("returns manualKey when bulk op was triggered by manual draft_orders run", async () => {
+      const { getManualKeyForBulkOp } = await import("../reconcile-handlers.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/manual-drafts-${TEST_SUFFIX}`;
+      const manualWebhookId = `reconcile:${TEST_SHOP_DOMAIN}:manual:1729785600000:draft_orders`;
+
+      await sql`
+        INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
+        VALUES (${manualWebhookId}, 'RECONCILE_DRAFT_ORDERS', ${bulkOpId}, NOW())
+      `;
+
+      const result = await getManualKeyForBulkOp(sql, bulkOpId, TEST_SHOP_DOMAIN);
+
+      expect(result).toBe("manual:1729785600000");
+    });
   });
 });
