@@ -527,6 +527,54 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         await cleanupTestData([missingDomain], suffix);
       }
     });
+
+    it("bulk: sanitized message is archived BEFORE guard (catches guard-before-sanitized mutation)", async () => {
+      const suffix = testContext.suffix;
+      const bulkOpId = `bulk-sanitized-${suffix}`;
+
+      try {
+        const message = {
+          topic: "BULK_OPERATIONS_FINISH",
+          bulkOperationId: bulkOpId,
+          bulkType: "orders",
+          enqueuedAt: new Date().toISOString(),
+          sanitized: true,
+        };
+
+        const [sendResult] = await sqlRef<[{ send: string }]>`
+          SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(message)})
+        `;
+        const msgId = sendResult.send;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [archiveCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(archiveCount.count, 10)).toBe(1);
+
+        const [queueCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(queueCount.count, 10)).toBe(0);
+
+        const [dlqCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(dlqCount.count, 10)).toBe(0);
+
+        const skipLog = findLogEntry("drain_skip_sanitized_message");
+        expect(skipLog).not.toBeNull();
+        expect(skipLog!.queue).toBe("s6_bulk");
+      } finally {
+        await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' = ${bulkOpId}`;
+        await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'bulkOperationId' = ${bulkOpId}`;
+      }
+    });
   });
 
   describe("Log field verification", () => {
@@ -707,16 +755,24 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         `;
         expect(parseInt(shopExists.count, 10)).toBe(1);
 
-        const [archivedOrFailed] = await sqlRef<[{ count: string }]>`
-          SELECT COUNT(*)::text as count FROM (
-            SELECT 1 FROM pgmq.a_s6_sync WHERE msg_id = ${msgId}::bigint
-            UNION ALL
-            SELECT 1 FROM pgmq.q_s6_sync WHERE msg_id = ${msgId}::bigint AND read_ct > 0
-            UNION ALL
-            SELECT 1 FROM s6_dead_letter WHERE original_msg_id = ${msgId}
-          ) x
+        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
+          SELECT message, error FROM s6_dead_letter WHERE original_msg_id = ${msgId}
         `;
-        expect(parseInt(archivedOrFailed.count, 10)).toBeGreaterThan(0);
+        expect(dlqRow).toBeDefined();
+        expect(dlqRow!.message.webhookId).toBe(webhookId);
+        expect(dlqRow!.error).toBe("no_buyer_account");
+
+        const [notInQueue] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE msg_id = ${msgId}::bigint
+        `;
+        expect(parseInt(notInQueue.count, 10)).toBe(0);
+
+        const [notArchived] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
+          WHERE msg_id = ${msgId}::bigint
+        `;
+        expect(parseInt(notArchived.count, 10)).toBe(0);
       } finally {
         await cleanupTestData([uninstalledDomain], suffix);
       }
@@ -856,10 +912,10 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
       }
     });
 
-    it("underscore in domain: exact match required (catches = to LIKE mutation)", async () => {
+    it("underscore in message shop: exact match required (catches = to LIKE mutation)", async () => {
       const suffix = testContext.suffix;
-      const existingDomain = `test-under_score-${suffix}.myshopify.com`;
-      const wildcardDomain = `test-underXscore-${suffix}.myshopify.com`;
+      const existingDomain = `test-underXscore-${suffix}.myshopify.com`;
+      const messageShop = `test-under_score-${suffix}.myshopify.com`;
       const shopId = `shop-underscore-${suffix}`;
 
       try {
@@ -876,7 +932,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
 
         const wildcardWebhookId = `wh-wildcard-underscore-${suffix}`;
         const wildcardMessage = {
-          shop: wildcardDomain,
+          shop: messageShop,
           topic: "COMPANIES_DELETE",
           webhookId: wildcardWebhookId,
           resourceGid: `gid://shopify/Company/wildcard-${suffix}`,
@@ -900,15 +956,14 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         `;
         expect(parseInt(wildcardArchive.count, 10)).toBe(0);
       } finally {
-        await cleanupTestData([existingDomain, wildcardDomain], suffix);
+        await cleanupTestData([existingDomain, messageShop], suffix);
       }
     });
 
-    it("percent in domain: exact match required (catches = to LIKE mutation)", async () => {
+    it("percent in message shop: exact match required (catches = to LIKE mutation)", async () => {
       const suffix = testContext.suffix;
-      const existingDomain = `test-pct-${suffix}.myshopify.com`;
-      const pctSuffix = suffix.slice(0, -1);
-      const wildcardDomain = `test-pct-${pctSuffix}.myshopify.com`;
+      const existingDomain = `test-pct-${suffix}abc.myshopify.com`;
+      const messageShop = `test-pct-${suffix}%.myshopify.com`;
       const shopId = `shop-pct-${suffix}`;
 
       try {
@@ -925,7 +980,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
 
         const wildcardWebhookId = `wh-wildcard-pct-${suffix}`;
         const wildcardMessage = {
-          shop: wildcardDomain,
+          shop: messageShop,
           topic: "COMPANIES_DELETE",
           webhookId: wildcardWebhookId,
           resourceGid: `gid://shopify/Company/wildcard-pct-${suffix}`,
@@ -949,7 +1004,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         `;
         expect(parseInt(wildcardArchive.count, 10)).toBe(0);
       } finally {
-        await cleanupTestData([existingDomain, wildcardDomain], suffix);
+        await cleanupTestData([existingDomain, messageShop], suffix);
       }
     });
   });
@@ -969,10 +1024,8 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
           enqueuedAt: new Date().toISOString(),
         };
 
-        await sqlRef`
-          INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-          VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
-        `;
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+        await sqlRef`UPDATE pgmq.q_s6_sync SET vt = NOW() - interval '1 second' WHERE message->>'webhookId' = ${webhookId}`;
 
         let callCount = 0;
         const errorOnce = new Error("Simulated DB error");
@@ -1024,10 +1077,12 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
           enqueuedAt: new Date().toISOString(),
         };
 
-        await sqlRef`
-          INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-          VALUES (NOW() - interval '1 second', 4, NOW(), ${sqlRef.json(message)}::jsonb)
-        `;
+        const [sendResult] = await sqlRef<[{ send: string }]>`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+        const msgId = sendResult.send;
+        for (let i = 0; i < 4; i++) {
+          await sqlRef`SELECT pgmq.read(${S6_QUEUES.SYNC}, 0, 1)`;
+        }
+        await sqlRef`UPDATE pgmq.q_s6_sync SET vt = NOW() - interval '1 second' WHERE msg_id = ${msgId}::bigint`;
 
         const alwaysThrow = new Error("Persistent DB error");
         const proxiedSql = new Proxy(sqlRef, {
@@ -1043,11 +1098,17 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
 
-        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
-          SELECT message FROM s6_dead_letter WHERE message->>'webhookId' = ${webhookId}
+        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
+          SELECT message, error FROM s6_dead_letter WHERE message->>'webhookId' = ${webhookId}
         `;
         expect(dlqRow).toBeDefined();
         expect(dlqRow!.message.webhookId).toBe(webhookId);
+        expect(dlqRow!.error).toMatch(/^permanent:/);
+
+        const errorLog = findLogEntry("sync_message_exception");
+        expect(errorLog).not.toBeNull();
+        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.readCt).toBe(5);
 
         const [notInQueue] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
@@ -1075,10 +1136,8 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
           enqueuedAt: new Date().toISOString(),
         };
 
-        await sqlRef`
-          INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
-          VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
-        `;
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(message)})`;
+        await sqlRef`UPDATE pgmq.q_s6_bulk SET vt = NOW() - interval '1 second' WHERE message->>'bulkOperationId' = ${bulkOpId}`;
 
         let callCount = 0;
         const errorOnce = new Error("Simulated DB error");
@@ -1104,6 +1163,19 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         expect(errorLog!.queue).toBe("s6_bulk");
         expect(errorLog!.errorCode).toBeDefined();
         expect(errorLog!.readCt).toBe(1);
+
+        const [stillInQueue] = await sqlRef<[{ count: string; read_ct: string }?]>`
+          SELECT COUNT(*)::text as count, MAX(read_ct)::text as read_ct FROM pgmq.q_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(stillInQueue!.count, 10)).toBe(1);
+        expect(parseInt(stillInQueue!.read_ct, 10)).toBe(1);
+
+        const [noDlq] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(noDlq.count, 10)).toBe(0);
       } finally {
         await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' LIKE ${`%${suffix}%`}`;
         await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'bulkOperationId' LIKE ${`%${suffix}%`}`;
@@ -1124,10 +1196,12 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
           enqueuedAt: new Date().toISOString(),
         };
 
-        await sqlRef`
-          INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
-          VALUES (NOW() - interval '1 second', 4, NOW(), ${sqlRef.json(message)}::jsonb)
-        `;
+        const [sendResult] = await sqlRef<[{ send: string }]>`SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(message)})`;
+        const msgId = sendResult.send;
+        for (let i = 0; i < 4; i++) {
+          await sqlRef`SELECT pgmq.read(${S6_QUEUES.BULK}, 0, 1)`;
+        }
+        await sqlRef`UPDATE pgmq.q_s6_bulk SET vt = NOW() - interval '1 second' WHERE msg_id = ${msgId}::bigint`;
 
         const alwaysThrow = new Error("Persistent DB error");
         const proxiedSql = new Proxy(sqlRef, {
@@ -1143,11 +1217,17 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
 
-        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
-          SELECT message FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${bulkOpId}
+        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
+          SELECT message, error FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${bulkOpId}
         `;
         expect(dlqRow).toBeDefined();
         expect(dlqRow!.message.bulkOperationId).toBe(bulkOpId);
+        expect(dlqRow!.error).toMatch(/^permanent:/);
+
+        const errorLog = findLogEntry("bulk_message_exception");
+        expect(errorLog).not.toBeNull();
+        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.readCt).toBe(5);
 
         const [notInQueue] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
