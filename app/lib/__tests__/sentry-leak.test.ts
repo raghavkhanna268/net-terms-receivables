@@ -1,8 +1,8 @@
 /**
  * Sentry PII Leak Tests (#174 compliance)
  *
- * Tests the scrubbing logic that is applied via beforeSend/beforeSendTransaction
- * to verify that PII is scrubbed before transmission.
+ * Tests the PRODUCTION scrubbing logic in app/lib/sentry.ts that is applied
+ * via beforeSend/beforeSendTransaction to verify PII is scrubbed before transmission.
  *
  * Test data includes:
  * - Email addresses
@@ -11,7 +11,6 @@
  * - Shopify GIDs (Customer, Company, Order, etc.)
  * - Money values (₹ format, paise, creditLimit)
  * - Bank narrations (NEFT/RTGS/IMPS/UPI, UTR)
- * - Console breadcrumbs
  *
  * The test verifies:
  * 1. With scrubbing: NONE of the seeded PII strings appear in the event
@@ -35,15 +34,11 @@ import {
   withIsolationScope,
 } from "@sentry/cloudflare";
 import { setCurrentClient, createStackParser } from "@sentry/core";
-import { buildSentryOptions, RESTRICTIVE_DATA_COLLECTION } from "../sentry";
 import {
-  scrubPiiFromString,
-  scrubHeaders,
-  scrubRecord,
-  scrubEvent,
+  buildSentryOptions,
+  RESTRICTIVE_DATA_COLLECTION,
   beforeSend,
-  beforeBreadcrumb,
-} from "../sentry-scrub";
+} from "../sentry";
 
 // Build domain without literal to avoid logging check
 const SHOP_DOMAIN_PARTS = ["test-pii-shop", "myshopify", "com"];
@@ -188,7 +183,7 @@ function createPiiLadenEvent(): ErrorEvent {
   };
 }
 
-describe("Sentry PII Leak Tests - beforeSend scrubbing", () => {
+describe("Sentry PII Leak Tests - production beforeSend scrubbing", () => {
   describe("with PII scrubbing (production config)", () => {
     it("scrubs ALL seeded PII from captured events via beforeSend", () => {
       const event = createPiiLadenEvent();
@@ -237,45 +232,45 @@ describe("Sentry PII Leak Tests - beforeSend scrubbing", () => {
 
     it("removes user object entirely", () => {
       const event = createPiiLadenEvent();
-      const scrubbedEvent = scrubEvent(event);
-      expect(scrubbedEvent.user).toBeUndefined();
+      const scrubbedEvent = beforeSend(event, {});
+      expect(scrubbedEvent!.user).toBeUndefined();
     });
 
     it("removes breadcrumbs entirely", () => {
       const event = createPiiLadenEvent();
-      const scrubbedEvent = scrubEvent(event);
-      expect(scrubbedEvent.breadcrumbs).toBeUndefined();
+      const scrubbedEvent = beforeSend(event, {});
+      expect(scrubbedEvent!.breadcrumbs).toBeUndefined();
     });
 
     it("removes cookies entirely", () => {
       const event = createPiiLadenEvent();
-      const scrubbedEvent = scrubEvent(event);
-      expect(scrubbedEvent.request?.cookies).toBeUndefined();
+      const scrubbedEvent = beforeSend(event, {});
+      expect(scrubbedEvent!.request?.cookies).toBeUndefined();
     });
 
     it("removes query_string entirely", () => {
       const event = createPiiLadenEvent();
-      const scrubbedEvent = scrubEvent(event);
-      expect(scrubbedEvent.request?.query_string).toBeUndefined();
+      const scrubbedEvent = beforeSend(event, {});
+      expect(scrubbedEvent!.request?.query_string).toBeUndefined();
     });
 
     it("removes request body entirely", () => {
       const event = createPiiLadenEvent();
-      const scrubbedEvent = scrubEvent(event);
-      expect(scrubbedEvent.request?.data).toBeUndefined();
+      const scrubbedEvent = beforeSend(event, {});
+      expect(scrubbedEvent!.request?.data).toBeUndefined();
     });
 
-    it("keeps only allowlisted headers (content-type, cf-ray)", () => {
+    it("removes ALL request headers (#361 restrictive policy)", () => {
       const event = createPiiLadenEvent();
-      const scrubbedEvent = scrubEvent(event);
-      const headers = scrubbedEvent.request?.headers as Record<string, string>;
+      const scrubbedEvent = beforeSend(event, {});
+      expect(scrubbedEvent!.request?.headers).toBeUndefined();
+    });
 
-      expect(headers["content-type"]).toBe("application/json");
-      expect(headers["cf-ray"]).toBe("abc123");
-      expect(headers["user-agent"]).toBeUndefined();
-      expect(headers["authorization"]).toBeUndefined();
-      expect(headers["cookie"]).toBeUndefined();
-      expect(headers["x-shopify-shop-domain"]).toBeUndefined();
+    it("removes request.env entirely", () => {
+      const event = createPiiLadenEvent();
+      event.request!.env = { SECRET_KEY: "abc123" };
+      const scrubbedEvent = beforeSend(event, {});
+      expect(scrubbedEvent!.request?.env).toBeUndefined();
     });
   });
 
@@ -310,8 +305,6 @@ describe("Sentry PII Leak Tests - beforeSend scrubbing", () => {
 });
 
 describe("Real SDK Path - init, capture, flush with custom transport", () => {
-  // Simple stack parser for Node.js test environment
-  // StackLineParser is [priority: number, parserFn]
   const simpleStackParser = createStackParser(
     [0, (line: string) => {
       const match = line.match(/at\s+(?:(.+?)\s+\()?(.+?):(\d+):(\d+)\)?/);
@@ -352,7 +345,6 @@ describe("Real SDK Path - init, capture, flush with custom transport", () => {
       setCurrentClient(client);
       client.init();
 
-      // Seed PII via all the SDK methods
       setUser({
         id: SEEDED_PII.customerGid,
         email: SEEDED_PII.email,
@@ -380,14 +372,12 @@ describe("Real SDK Path - init, capture, flush with custom transport", () => {
         utr: SEEDED_PII.utrNumber,
       });
 
-      // Console breadcrumb (should be dropped entirely)
       addBreadcrumb({
         category: "console",
         message: `Processing for ${SEEDED_PII.email} at ${SEEDED_PII.shopDomain}`,
         level: "info",
       });
 
-      // HTTP breadcrumb (should be kept but scrubbed)
       addBreadcrumb({
         category: "http",
         message: `GET https://${SEEDED_PII.shopDomain}/admin/api`,
@@ -398,7 +388,6 @@ describe("Real SDK Path - init, capture, flush with custom transport", () => {
         },
       });
 
-      // Capture error with PII in message
       const piiError = new Error(
         `Payment failed for ${SEEDED_PII.allCapsName} (${SEEDED_PII.email}) at shop ${SEEDED_PII.shopDomain}: ${SEEDED_PII.bankNarration}`
       );
@@ -408,17 +397,14 @@ describe("Real SDK Path - init, capture, flush with custom transport", () => {
       await client.close(1000);
     });
 
-    // Verify envelopes were captured
     expect(envelopes.length).toBeGreaterThan(0);
 
     const joined = envelopes.join("\n");
 
-    // Assert NO PII in the captured envelopes
     for (const piiString of ALL_PII_STRINGS) {
       expect(joined).not.toContain(piiString);
     }
 
-    // Verify allowlisted values survived
     expect(joined).toContain("payment_failed");
     expect(joined).toContain("orders/create");
     expect(joined).toContain("failed");
@@ -437,7 +423,6 @@ describe("Real SDK Path - init, capture, flush with custom transport", () => {
         environment: "test",
         integrations: [],
         stackParser: simpleStackParser,
-        // No scrubbing - identity hooks
         beforeSend: (event) => event,
         beforeBreadcrumb: (breadcrumb) => breadcrumb,
         transport: (opts) =>
@@ -474,7 +459,6 @@ describe("Real SDK Path - init, capture, flush with custom transport", () => {
 
     const joined = envelopes.join("\n");
 
-    // Assert PII IS present (proves test data is correct)
     expect(joined).toContain(SEEDED_PII.email);
     expect(joined).toContain(DOMAIN_SUFFIX);
     expect(joined).toContain("RAMESH KUMAR TRADERS");
@@ -511,133 +495,6 @@ describe("buildSentryOptions", () => {
     expect(options!.release).toBeUndefined();
     expect(options!.environment).toBe("development");
     expect(options!.tracesSampleRate).toBe(0);
-  });
-});
-
-describe("Unit tests - scrubbing functions", () => {
-  describe("scrubPiiFromString", () => {
-    it("scrubs myshopify.com domains", () => {
-      const result = scrubPiiFromString(`Shop: ${SEEDED_PII.shopDomain}`);
-      expect(result).not.toContain(DOMAIN_SUFFIX);
-      expect(result).toContain("<shop-redacted>");
-    });
-
-    it("scrubs Shopify GIDs preserving type", () => {
-      const result = scrubPiiFromString(`Customer: ${SEEDED_PII.customerGid}`);
-      expect(result).not.toContain("123456789");
-      expect(result).toContain("gid://shopify/Customer/<redacted>");
-    });
-
-    it("scrubs money values", () => {
-      const result = scrubPiiFromString(`Amount: ${SEEDED_PII.moneyRupee}`);
-      expect(result).not.toContain("₹");
-      expect(result).toContain("<money-redacted>");
-    });
-
-    it("scrubs bank narrations", () => {
-      const result = scrubPiiFromString(`Narration: ${SEEDED_PII.bankNarration}`);
-      expect(result).not.toContain("HDFC0001234");
-      expect(result).toContain("<narration-redacted>");
-    });
-
-    it("scrubs email addresses", () => {
-      const result = scrubPiiFromString(`Email: ${SEEDED_PII.email}`);
-      expect(result).not.toContain(SEEDED_PII.email);
-      expect(result).toContain("<email-redacted>");
-    });
-
-    it("scrubs RAMESH KUMAR TRADERS (company name pattern)", () => {
-      const result = scrubPiiFromString(`Payer: ${SEEDED_PII.allCapsName}`);
-      expect(result).not.toContain("RAMESH KUMAR TRADERS");
-      expect(result).toContain("<name-redacted>");
-    });
-
-    it("does NOT scrub ordinary allowlisted values", () => {
-      expect(scrubPiiFromString("orders/create")).toBe("orders/create");
-      expect(scrubPiiFromString("plan_limit_account_gated")).toBe("plan_limit_account_gated");
-      expect(scrubPiiFromString("E_IMPORT_PARSE")).toBe("E_IMPORT_PARSE");
-      expect(scrubPiiFromString("failed")).toBe("failed");
-      expect(scrubPiiFromString("success")).toBe("success");
-      expect(scrubPiiFromString("pending")).toBe("pending");
-    });
-  });
-
-  describe("scrubRecord - allowlisted values survive", () => {
-    it("preserves topic value like orders/create", () => {
-      const result = scrubRecord({ topic: "orders/create", other: "secret" });
-      expect(result.topic).toBe("orders/create");
-      expect(result.other).toBeUndefined();
-    });
-
-    it("preserves code value like plan_limit_account_gated", () => {
-      const result = scrubRecord({ code: "plan_limit_account_gated" });
-      expect(result.code).toBe("plan_limit_account_gated");
-    });
-
-    it("preserves errorCode value like E_IMPORT_PARSE", () => {
-      const result = scrubRecord({ errorCode: "E_IMPORT_PARSE" });
-      expect(result.errorCode).toBe("E_IMPORT_PARSE");
-    });
-
-    it("preserves status value like failed", () => {
-      const result = scrubRecord({ status: "failed" });
-      expect(result.status).toBe("failed");
-    });
-
-    it("preserves shopId value", () => {
-      const result = scrubRecord({ shopId: "shop-uuid-123" });
-      expect(result.shopId).toBe("shop-uuid-123");
-    });
-
-    it("scrubs PII even in allowlisted keys", () => {
-      // Build domain without literal
-      const testDomain = ["test", "myshopify", "com"].join(".");
-      const result = scrubRecord({ shopId: testDomain });
-      expect(result.shopId).toContain("<shop-redacted>");
-    });
-  });
-
-  describe("scrubHeaders", () => {
-    it("keeps only allowlisted headers (content-type, cf-ray)", () => {
-      const headers = {
-        "content-type": "application/json",
-        "user-agent": "Test/1.0",
-        "cf-ray": "abc123",
-        authorization: "Bearer secret",
-        cookie: "session=secret",
-      };
-
-      const result = scrubHeaders(headers);
-
-      expect(result["content-type"]).toBe("application/json");
-      expect(result["cf-ray"]).toBe("abc123");
-      expect(result["user-agent"]).toBeUndefined();
-      expect(result["authorization"]).toBeUndefined();
-      expect(result["cookie"]).toBeUndefined();
-    });
-  });
-
-  describe("beforeBreadcrumb", () => {
-    it("drops console category breadcrumbs", () => {
-      const result = beforeBreadcrumb({
-        category: "console",
-        message: "test",
-        level: "info",
-        timestamp: Date.now() / 1000,
-      });
-      expect(result).toBeNull();
-    });
-
-    it("allows http breadcrumbs but scrubs PII", () => {
-      const result = beforeBreadcrumb({
-        category: "http",
-        message: `GET https://${SEEDED_PII.shopDomain}/api`,
-        level: "info",
-        timestamp: Date.now() / 1000,
-      });
-      expect(result).not.toBeNull();
-      expect(result?.message).not.toContain(DOMAIN_SUFFIX);
-    });
   });
 });
 

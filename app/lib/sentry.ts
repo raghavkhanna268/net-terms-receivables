@@ -383,8 +383,9 @@ function scrubEvent(event: SentryEvent): SentryEvent {
 
 /**
  * beforeSend hook for scrubbing PII from Sentry events.
+ * Exported for leak testing to verify production scrubbing behavior.
  */
-function beforeSend(event: ErrorEvent, _hint: EventHint): ErrorEvent | null {
+export function beforeSend(event: ErrorEvent, _hint: EventHint): ErrorEvent | null {
   return scrubEvent(event) as ErrorEvent;
 }
 
