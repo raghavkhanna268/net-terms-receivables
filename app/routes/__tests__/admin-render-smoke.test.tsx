@@ -166,7 +166,7 @@ interface RouteTestConfig {
   resourceOnlyReason?: string;
   expectedRedirect?: Partial<Record<ShopState, RedirectExpectation>>;
   expectedError?: Partial<Record<ShopState, ErrorExpectation>>;
-  currencyGateExempt?: boolean;
+  currencyGate?: "gated" | { exempt: string };
   expectsSeededMoney?: boolean;
   seededMoneyValues?: string[];
   seededTextValues?: string[];
@@ -190,6 +190,7 @@ const APP_ROUTES: RouteTestConfig[] = [
     expectedRedirect: {
       fresh: { location: "/app/onboarding" },
     },
+    currencyGate: "gated",
     expectsSeededMoney: true,
     seededMoneyValues: ["₹1,23,456.00"],
     seededTextValues: ["Test Buyer Corp INR"],
@@ -198,6 +199,7 @@ const APP_ROUTES: RouteTestConfig[] = [
     name: "app.onboarding",
     importPath: "../app.onboarding",
     urlPath: "/app/onboarding",
+    currencyGate: "gated",
   },
   {
     name: "app.welcome",
@@ -210,11 +212,13 @@ const APP_ROUTES: RouteTestConfig[] = [
     name: "app.plan",
     importPath: "../app.plan",
     urlPath: "/app/plan",
+    currencyGate: { exempt: "Plan page shows subscription status which is currency-agnostic" },
   },
   {
     name: "app.reconcile",
     importPath: "../app.reconcile",
     urlPath: "/app/reconcile",
+    currencyGate: "gated",
     expectsSeededMoney: true,
     seededMoneyValues: ["₹1,23,456.00"],
   },
@@ -222,28 +226,32 @@ const APP_ROUTES: RouteTestConfig[] = [
     name: "app.imports",
     importPath: "../app.imports",
     urlPath: "/app/imports",
+    currencyGate: "gated",
   },
   {
     name: "app.settings.reminders",
     importPath: "../app.settings.reminders",
     urlPath: "/app/settings/reminders",
+    currencyGate: { exempt: "Reminder settings are configuration-only and do not display monetary amounts" },
   },
   {
     name: "app.tag-rules",
     importPath: "../app.tag-rules",
     urlPath: "/app/tag-rules",
+    currencyGate: { exempt: "Tag rules are configuration-only and do not display monetary amounts" },
   },
   {
     name: "app.data-requests",
     importPath: "../app.data-requests",
     urlPath: "/app/data-requests",
-    currencyGateExempt: true,
+    currencyGate: { exempt: "GDPR/CCPA data requests are compliance-mandated and must remain accessible regardless of currency" },
   },
   {
     name: "app.accounts.$id",
     importPath: "../app.accounts.$id",
     urlPath: "/app/accounts/BUYER_ID",
     hasParams: { id: "BUYER_ID" },
+    currencyGate: "gated",
     expectsSeededMoney: true,
     seededMoneyValues: ["₹1,23,456.00"],
     seededTextValues: ["Test Buyer Corp INR"],
@@ -284,8 +292,11 @@ describeWithDb("Admin Render Smoke Tests", () => {
   const INR_RULE_ID = `rule-inr-${TEST_SUFFIX}`;
   const INR_DATA_REQUEST_ID = `dr-inr-${TEST_SUFFIX}`;
 
+  const USD_BUYER_ID = `buyer-usd-${TEST_SUFFIX}`;
+
   const SEEDED_AMOUNT_RUPEES = 123456;
   const SEEDED_BUYER_NAME = "Test Buyer Corp INR";
+  const USD_BUYER_NAME = "Test Buyer Corp USD";
 
   const mockGraphQL = vi.fn();
 
@@ -368,6 +379,19 @@ describeWithDb("Admin Render Smoke Tests", () => {
     `;
 
     await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "syncPending",
+        "reminderOptOutAt", "reminderOptOutSource",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${USD_BUYER_ID}, ${NON_INR_SHOP_ID}, 'COMPANY', ${"co-usd-" + TEST_SUFFIX}, ${"loc-usd-" + TEST_SUFFIX}, 
+        ${USD_BUYER_NAME}, 50000, 'OK', false, false, NULL, NULL, NOW(), NOW()
+      )
+    `;
+
+    await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", name, "orderId",
         total, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
@@ -434,7 +458,7 @@ describeWithDb("Admin Render Smoke Tests", () => {
     await sql`DELETE FROM "BankImport" WHERE id = ${INR_IMPORT_ID}`;
     await sql`DELETE FROM "ReminderRule" WHERE id = ${INR_RULE_ID}`;
     await sql`DELETE FROM s22_data_requests WHERE id = ${INR_DATA_REQUEST_ID}`;
-    await sql`DELETE FROM "BuyerAccount" WHERE id = ${INR_BUYER_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE id IN (${INR_BUYER_ID}, ${USD_BUYER_ID})`;
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" IN (${FRESH_SHOP_ID}, ${INR_SHOP_ID}, ${NON_INR_SHOP_ID})`;
     await sql`DELETE FROM "Shop" WHERE id IN (${FRESH_SHOP_ID}, ${INR_SHOP_ID}, ${NON_INR_SHOP_ID})`;
     await sql.end();
@@ -513,6 +537,9 @@ describeWithDb("Admin Render Smoke Tests", () => {
             if (state === "inr") {
               urlPath = urlPath.replace("BUYER_ID", INR_BUYER_ID);
               params.id = INR_BUYER_ID;
+            } else if (state === "non_inr") {
+              urlPath = urlPath.replace("BUYER_ID", USD_BUYER_ID);
+              params.id = USD_BUYER_ID;
             } else {
               urlPath = urlPath.replace("BUYER_ID", "nonexistent-buyer-" + TEST_SUFFIX);
               params.id = "nonexistent-buyer-" + TEST_SUFFIX;
@@ -582,6 +609,11 @@ describeWithDb("Admin Render Smoke Tests", () => {
             } else {
               expect(errorField).toMatch(expectedError.error);
             }
+          } else if ("error" in data && data.error) {
+            throw new Error(
+              `${route.name} returned unexpected error in state ${state}: "${data.error}". ` +
+                `Add expectedError.${state} = { error: "${data.error}" } to the route config if this is expected.`
+            );
           }
 
           mockUseLoaderData.mockReturnValue(data);
@@ -606,27 +638,11 @@ describeWithDb("Admin Render Smoke Tests", () => {
           ).toBe(true);
 
           if (state === "non_inr") {
-            if (route.currencyGateExempt) {
-              expect(
-                html.includes(CURRENCY_NOT_SUPPORTED_BANNER_COPY),
-                `${route.name} is currency-gate exempt but showed the banner`
-              ).toBe(false);
-            } else if (
-              route.name === "app._index" ||
-              route.name === "app.accounts.$id" ||
-              route.name === "app.reconcile" ||
-              route.name === "app.imports"
-            ) {
+            if (route.currencyGate === "gated") {
               if (!route.expectedError?.[state]) {
                 expect(
-                  html.includes("Currency Not Supported") ||
-                    html.includes("currently supports INR only"),
+                  html.includes(CURRENCY_NOT_SUPPORTED_BANNER_COPY),
                   `${route.name} should show currency banner in non-INR state`
-                ).toBe(true);
-
-                expect(
-                  html.includes("Shopify admin → Settings → General → Store defaults"),
-                  `${route.name} should include switch steps in currency banner`
                 ).toBe(true);
 
                 expect(
@@ -634,6 +650,16 @@ describeWithDb("Admin Render Smoke Tests", () => {
                   `${route.name} should NOT show ₹ symbol on currency-gated page in non-INR state`
                 ).toBe(false);
               }
+            } else if (typeof route.currencyGate === "object" && route.currencyGate.exempt) {
+              expect(
+                html.includes(CURRENCY_NOT_SUPPORTED_BANNER_COPY),
+                `${route.name} is currency-gate exempt (${route.currencyGate.exempt}) but showed the banner`
+              ).toBe(false);
+
+              expect(
+                hasRupeeSymbol(html),
+                `${route.name} (exempt: ${route.currencyGate.exempt}) should NOT show ₹ symbol in non-INR state`
+              ).toBe(false);
             }
           }
 
