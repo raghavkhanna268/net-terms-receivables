@@ -1633,14 +1633,14 @@ export function test(wh: string) { safeLog("info", "event", { webhookId: wh }); 
       expect(output).toContain("banned-log-key");
     });
 
-    it("fails for console.error with wh= template", () => {
+    it("fails for console.error with wh=${webhookId} template (webhookId identifier)", () => {
       fs.writeFileSync(
         path.join(appDir, "test.ts"),
         "export function test(webhookId: string) { console.error(`Processing wh=${webhookId}`); }"
       );
       const { exitCode, output } = runGuard();
       expect(exitCode).not.toBe(0);
-      expect(output).toContain("banned-wh-prefix");
+      expect(output).toContain("banned-log-key");
     });
 
     it("fails for Sentry.setExtra with webhookId key", () => {
@@ -1685,14 +1685,13 @@ export function test(webhookId: string) { Sentry.setContext("hook", { webhookId 
       expect(output).toContain("banned-log-key");
     });
 
-    it("fails for string literal with wh= prefix", () => {
+    it("passes for string literal with wh= prefix but no webhookId (public-logs ruling)", () => {
       fs.writeFileSync(
         path.join(appDir, "test.ts"),
         `export function test() { console.log("wh=abc123"); }`
       );
-      const { exitCode, output } = runGuard();
-      expect(exitCode).not.toBe(0);
-      expect(output).toContain("banned-wh-prefix");
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
     });
 
     it("passes for destructuring webhookId (not a log context)", () => {
@@ -1806,25 +1805,24 @@ export function test(msg: { webhookId: string }) { safeLog("info", "event", { ho
       });
     });
 
-    describe("string concatenation with wh=", () => {
-      it("fails for \"wh=\" + webhookId", () => {
+    describe("string concatenation with webhookId", () => {
+      it("fails for \"wh=\" + webhookId (webhookId identifier banned)", () => {
         fs.writeFileSync(
           path.join(appDir, "test.ts"),
           `export function test(webhookId: string) { console.log("wh=" + webhookId); }`
         );
         const { exitCode, output } = runGuard();
         expect(exitCode).not.toBe(0);
-        expect(output).toContain("banned");
+        expect(output).toContain("banned-log-key");
       });
 
-      it("fails for wh= fragment in concatenation", () => {
+      it("passes for \"wh=\" + id (id is not webhookId, public-logs ruling)", () => {
         fs.writeFileSync(
           path.join(appDir, "test.ts"),
           `export function test(id: string) { console.log("prefix wh=" + id + " suffix"); }`
         );
-        const { exitCode, output } = runGuard();
-        expect(exitCode).not.toBe(0);
-        expect(output).toContain("banned-wh-prefix");
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
       });
 
       it("fails for m.webhookId in concatenation", () => {
@@ -1922,27 +1920,55 @@ export function test(msg: { webhookId: string }) { safeLog("info", "event", { ho
       });
     });
 
-    describe("Sentry captureMessage with wh=", () => {
-      it("fails for captureMessage with wh= in string", () => {
+    describe("wh= label allowed without webhookId (public-logs ruling)", () => {
+      it("passes for captureMessage with wh= + id (id is not webhookId)", () => {
         fs.writeFileSync(
           path.join(appDir, "test.ts"),
           `import { captureMessage } from "./sentry";
 export function test(id: string) { captureMessage("Error wh=" + id); }`
         );
-        const { exitCode, output } = runGuard();
-        expect(exitCode).not.toBe(0);
-        expect(output).toContain("banned-wh-prefix");
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
       });
 
-      it("fails for Sentry.captureMessage with wh= template", () => {
+      it("passes for Sentry.captureMessage with wh=${id} (id is not webhookId)", () => {
         fs.writeFileSync(
           path.join(appDir, "test.ts"),
           `import * as Sentry from "@sentry/cloudflare";
 export function test(id: string) { Sentry.captureMessage(\`Error wh=\${id}\`); }`
         );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("fails for captureMessage with wh=${webhookId} (webhookId identifier)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test(webhookId: string) { Sentry.captureMessage(\`Error wh=\${webhookId}\`); }`
+        );
         const { exitCode, output } = runGuard();
         expect(exitCode).not.toBe(0);
-        expect(output).toContain("banned-wh-prefix");
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("passes for safeLog with { msg: \"wh=abc\" } (no webhookId identifier)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import { safeLog } from "~/lib/log.server";
+export function test() { safeLog("info", "test", { msg: "wh=abc" }); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("passes for console.log with wh=${count} (count is not webhookId)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(count: number) { console.log(\`wh=\${count}\`); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
       });
     });
 
