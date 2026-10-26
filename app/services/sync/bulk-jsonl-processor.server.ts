@@ -341,8 +341,10 @@ export async function fetchJsonlChunk(
       totalSize = bytes.length;
     }
 
-    // Smaller-than-requested response also indicates EOF
-    if (bytes.length < chunkSize && !isEof) {
+    // Smaller-than-requested response indicates EOF only when total is unknown
+    // (no header, `*` total, or malformed header). When we have a numeric total,
+    // the Content-Range parsing above already set isEof correctly.
+    if (bytes.length < chunkSize && !isEof && totalSize === undefined) {
       isEof = true;
     }
 
