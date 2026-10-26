@@ -221,7 +221,7 @@ BEGIN
                     = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
           )
         -- Order by oldest reminder date first within each batch
-        ORDER BY reminder_date ASC, i.outstanding DESC, rl."invoiceId" ASC, rl."ruleId" ASC
+        ORDER BY reminder_date ASC, i.outstanding DESC, rl."invoiceId" ASC
     LOOP
         PERFORM pgmq.send(
             's6_sync'::TEXT,
