@@ -541,10 +541,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
           sanitized: true,
         };
 
-        const [sendResult] = await sqlRef<[{ send: string }]>`
-          SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(message)})
-        `;
-        const msgId = sendResult.send;
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(message)})`;
 
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
