@@ -136,7 +136,7 @@ interface PaymentCustomizationUpdateResult {
       }>;
     };
   };
-  errors?: Array<{ message: string }>;
+  errors?: Array<{ message: string; extensions?: { code?: string } }>;
 }
 
 export type TitleUpdateOutcome = "updated" | "skipped" | "failed";
@@ -164,10 +164,10 @@ async function tryUpdateTitle(
     const updateData = (await updateResult.json()) as PaymentCustomizationUpdateResult;
 
     if (updateData.errors?.length) {
-      errCode = toErrorCode({ message: updateData.errors[0].message });
+      errCode = toErrorCode({ code: updateData.errors[0].extensions?.code });
     } else if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
       errCode = toErrorCode({
-        message: updateData.data.paymentCustomizationUpdate.userErrors[0].message,
+        code: updateData.data.paymentCustomizationUpdate.userErrors[0].code,
       });
     } else if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
       return { outcome: "updated" };
