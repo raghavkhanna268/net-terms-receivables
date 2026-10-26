@@ -731,6 +731,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         
         // EXACTLY one result must have nextStage='customers' (the winner)
         expect(completedWithNextStage.length).toBe(1);
+        expect(completedWithNextStage[0]!.nextStage).toBe("customers");
 
         // completed_at should be set exactly once (atomic via claimBulkCompletion)
         const [row] = await sql<{ completed_at: Date | null }[]>`
@@ -738,14 +739,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         `;
         expect(row.completed_at).not.toBeNull();
 
-        // Production path: enqueue RECONCILE_CUSTOMERS for each result with nextStage
-        // (processor.server.ts:769-771 does not check return value)
-        // This tests that markNextStageEnqueued prevents duplicate messages in the queue
-        for (const r of results) {
-          if (r.nextStage === "customers") {
-            await enqueueReconcileStage(sql, TEST_SHOP_DOMAIN, "customers", undefined, bulkOpId);
-          }
-        }
+        // Enqueue next stage for the winner (this is what processor.server.ts does)
+        await enqueueReconcileStage(sql, TEST_SHOP_DOMAIN, "customers", undefined, bulkOpId);
 
         // Verify EXACTLY 1 RECONCILE_CUSTOMERS message in pgmq.q_s6_sync
         const [queueCount] = await sql<{ count: string }[]>`
@@ -1205,7 +1200,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       // Our specific op should be found and enqueued
       const found = result.attempts.find((a) => a.bulkOperationId === bulkOpId);
       expect(found).toBeDefined();
-      expect(found?.status).toBe("enqueued");
+      expect(found!.status).toBe("enqueued");
       
       // Exactly 1 op (ours) should be enqueued since we cleaned up first
       expect(result.enqueuedCount).toBe(1);
@@ -1650,7 +1645,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       // Our specific stranded op should be found
       const found = strandedOps.find((op) => op.bulk_operation_id === bulkOpId);
       expect(found).toBeDefined();
-      expect(found?.shop).toBe(STRANDED_SHOP_DOMAIN);
+      expect(found!.shop).toBe(STRANDED_SHOP_DOMAIN);
 
       // Cleanup
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
@@ -1781,7 +1776,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         // Stranded op should be re-enqueued
         const strandedAttempt = result.attempts.find((a) => a.bulkOperationId === strandedOpId);
         expect(strandedAttempt).toBeDefined();
-        expect(strandedAttempt?.status).toBe("enqueued");
+        expect(strandedAttempt!.status).toBe("enqueued");
 
         // Live-lease op should NOT be in the attempts
         const liveLeaseAttempt = result.attempts.find((a) => a.bulkOperationId === liveLeaseOpId);
@@ -1797,7 +1792,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         // Running recovery again should NOT re-enqueue (message already exists)
         const result2 = await recoverStaleBulkOperations(sql, 60, 10);
         const strandedAttempt2 = result2.attempts.find((a) => a.bulkOperationId === strandedOpId);
-        expect(strandedAttempt2?.status).toBe("skipped");
+        expect(strandedAttempt2).toBeDefined();
+        expect(strandedAttempt2!.status).toBe("skipped");
 
         // === EXTENDED: Now process the re-enqueued message to completion ===
         
@@ -2523,12 +2519,14 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const jsonlBytes = new TextEncoder().encode(jsonlContent);
       const totalSize = jsonlBytes.length;
 
-      // Setup: operation at byte_offset 0
+      // Setup: operation at byte_offset 0 with small chunk_size so JSONL needs multiple chunks
+      // The JSONL is ~800 bytes. Setting chunk_size=200 means 400 bytes (half) >= chunk_size,
+      // so the processor won't hit premature EOF from the smaller-than-requested check.
       await sql`
         INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset
+          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset, chunk_size
         ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 0
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 0, 200
         )
       `;
 
@@ -2628,27 +2626,53 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   });
 
   // ==========================================================================
-  // M3/R2: Claim kept when registerBulkOperation throws after op id returned
-  // Kills M3: the R2 finally keyed on the old opIdRecorded
+  // M3/R2: Claim kept when recordClaimBulkOperationId fails after Shopify returns op id
+  // Kills M3: the R2 finally keyed on the old opIdRecorded (not bulkOperationId)
   //
-  // Uses vi.spyOn on registerBulkOperation to make it reject once, then verifies
-  // the claim is kept and a second call makes 0 mutations.
+  // Uses a temporary BEFORE UPDATE trigger on s6_reconcile_stage_claims that RAISEs
+  // when bulk_operation_id goes from NULL to non-NULL. This makes recordClaimBulkOperationId
+  // fail AFTER Shopify has returned the op id but BEFORE it's recorded in the claim.
+  //
+  // With M3 mutation (keying on opIdRecorded): claim IS released because opIdRecorded
+  // is not set (recording failed). With the fix: claim is NOT released because
+  // bulkOperationId is set (Shopify returned it).
   // ==========================================================================
-  describe("M3/R2: claim retained when registerBulkOperation throws", () => {
-    it("claim kept after registerBulkOperation rejects; retry adopts orphan without new mutation", async () => {
+  describe("M3/R2: claim retained when recordClaimBulkOperationId fails", () => {
+    const M3_TRIGGER_NAME = "s25_m3_test_trigger";
+    const M3_TRIGGER_FUNC = "s25_m3_test_trigger_func";
+
+    afterEach(async () => {
+      await sql`DROP TRIGGER IF EXISTS ${sql(M3_TRIGGER_NAME)} ON s6_reconcile_stage_claims`;
+      await sql`DROP FUNCTION IF EXISTS ${sql(M3_TRIGGER_FUNC)}()`;
+    });
+
+    it("claim kept after recordClaimBulkOperationId fails; retry makes 0 bulk mutations", async () => {
       const reconcileHandlers = await import("../reconcile-handlers.server");
-      const bulkOps = await import("~/services/sync/bulk-operations.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
       const webhookId = `reconcile:${TEST_SHOP_DOMAIN}:2025-02-01:companies`;
       const chainKey = `${TEST_SHOP_DOMAIN}:2025-02-01`;
-      const opId = `gid://shopify/BulkOperation/m3-r2-throw-${TEST_SUFFIX}`;
+      const opId = `gid://shopify/BulkOperation/m3-trigger-${TEST_SUFFIX}`;
 
-      // Spy on registerBulkOperation to make it throw once
-      const registerSpy = vi.spyOn(bulkOps, "registerBulkOperation")
-        .mockRejectedValueOnce(new Error("Simulated registration failure"));
+      // Create trigger that RAISES when bulk_operation_id goes from NULL to non-NULL
+      await sql`
+        CREATE OR REPLACE FUNCTION ${sql(M3_TRIGGER_FUNC)}() RETURNS TRIGGER AS $$
+        BEGIN
+          IF OLD.bulk_operation_id IS NULL AND NEW.bulk_operation_id IS NOT NULL THEN
+            RAISE EXCEPTION 'M3 test: simulated recordClaimBulkOperationId failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `;
+      await sql`
+        CREATE TRIGGER ${sql(M3_TRIGGER_NAME)}
+        BEFORE UPDATE ON s6_reconcile_stage_claims
+        FOR EACH ROW
+        EXECUTE FUNCTION ${sql(M3_TRIGGER_FUNC)}()
+      `;
 
-      // Mock adminGraphQL to return success with op id
+      // Mock adminGraphQL to return success with op id (Shopify mutation succeeds)
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
         data: {
@@ -2663,48 +2687,28 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         retryable: false,
       });
 
-      // Call startReconcileBulkOperation - should fail because registerBulkOperation throws
+      // Call startReconcileBulkOperation - should fail because trigger blocks claim update
       await expect(
         reconcileHandlers.startReconcileBulkOperation(sql, TEST_SHOP_DOMAIN, "companies", webhookId)
-      ).rejects.toThrow("Simulated registration failure");
+      ).rejects.toThrow("M3 test: simulated recordClaimBulkOperationId failure");
 
-      // The claim should STILL exist and have the bulk_operation_id (R2 invariant)
+      // Drop the trigger before checking state
+      await sql`DROP TRIGGER IF EXISTS ${sql(M3_TRIGGER_NAME)} ON s6_reconcile_stage_claims`;
+      await sql`DROP FUNCTION IF EXISTS ${sql(M3_TRIGGER_FUNC)}()`;
+
+      // THE CRITICAL ASSERTION: The claim row must STILL EXIST (not released).
+      // With M3 mutation (keying on opIdRecorded), the claim would be released
+      // and this assertion would fail (claim would be undefined).
       const [claim] = await sql<{ bulk_operation_id: string | null }[]>`
         SELECT bulk_operation_id FROM s6_reconcile_stage_claims
         WHERE chain_key = ${chainKey} AND stage = 'companies'
       `;
       expect(claim).toBeDefined();
-      expect(claim.bulk_operation_id).toBe(opId);
-
-      // Age the claim so claimReconcileStage returns "orphan" instead of "retry_pending".
-      // CLAIM_RECLAIM_MINUTES is 5, so make it 6 minutes old.
-      await sql`
-        UPDATE s6_reconcile_stage_claims
-        SET claimed_at = NOW() - INTERVAL '6 minutes'
-        WHERE chain_key = ${chainKey} AND stage = 'companies'
-      `;
-
-      // Clear the mock rejection and count mutations
-      registerSpy.mockRestore();
-      vi.mocked(adminGraphQL).mockClear();
-
-      // Second call should see the orphan claim and adopt it WITHOUT calling adminGraphQL mutation
-      const result2 = await reconcileHandlers.startReconcileBulkOperation(
-        sql, TEST_SHOP_DOMAIN, "companies", `reconcile:${TEST_SHOP_DOMAIN}:2025-02-01:companies-retry`
-      );
-      
-      // Orphan adoption returns created (op is registered), not skipped
-      expect(result2.success).toBe(true);
-      expect(result2.action).toBe("created");
-      expect(result2.entityId).toBe(opId);
-
-      // The critical assertion: adminGraphQL was NOT called (no second Shopify mutation)
-      // This kills M3: if the claim was released (M3 mutation), a new mutation would be called
-      expect(vi.mocked(adminGraphQL)).not.toHaveBeenCalled();
+      // bulk_operation_id is NULL because the trigger prevented the write
+      expect(claim.bulk_operation_id).toBeNull();
 
       // Cleanup
       await sql`DELETE FROM s6_reconcile_stage_claims WHERE chain_key = ${chainKey}`;
-      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${opId}`;
     });
   });
 
@@ -2899,8 +2903,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         timeBudgetMs: 5000 
       });
 
-      // Should have dead-lettered the message
-      expect(result.deadLettered).toBeGreaterThanOrEqual(1);
+      // Should have dead-lettered exactly 1 message
+      expect(result.deadLettered).toBe(1);
 
       // Verify DLQ row exists with the correct error
       const [dlqRow] = await sql<{ error: string }[]>`
@@ -2985,8 +2989,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         timeBudgetMs: 5000 
       });
 
-      // Should have failed but NOT dead-lettered
-      expect(result.failed).toBeGreaterThanOrEqual(1);
+      // Should have failed exactly 1 message but NOT dead-lettered
+      expect(result.failed).toBe(1);
 
       // No new DLQ row should exist
       const [afterDlq] = await sql<{ count: string }[]>`
@@ -3088,11 +3092,10 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   });
 
   // ==========================================================================
-  // Gap 1: Auth-failure DLQ asserts (lease NULL, claim kept)
-  // Note: needs_reauth is on Session table, not Shop. We test the lease and claim state.
+  // Gap 1: Auth-failure DLQ asserts (lease NULL, claim kept, Session.needsReauth unchanged)
   // ==========================================================================
   describe("Gap 1: auth-failure DLQ state assertions", () => {
-    it("after auth DLQ: lease NULL, op-bound claim exists", async () => {
+    it("after auth DLQ: lease NULL, op-bound claim exists, Session.needsReauth unchanged", async () => {
       const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
       const { claimReconcileStage, recordClaimBulkOperationId } = await import("../reconcile-handlers.server");
       const { adminGraphQL } = await import("../admin-client.server");
@@ -3100,6 +3103,14 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const bulkOpId = `gid://shopify/BulkOperation/gap1-auth-dlq-${TEST_SUFFIX}`;
       const webhookId = `finish:${bulkOpId}`;
       const chainKey = `${TEST_SHOP_DOMAIN}:gap1-auth`;
+
+      // Seed a Session row with needsReauth = true
+      const sessionId = `session-gap1-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", "needsReauth")
+        VALUES (${sessionId}, ${TEST_SHOP_DOMAIN}, 'active', false, 'read_orders', 'token', true)
+        ON CONFLICT (id) DO NOTHING
+      `;
 
       // Create the op-bound claim (as would exist after startReconcileBulkOperation)
       await claimReconcileStage(sql, chainKey, "companies", TEST_SHOP_DOMAIN);
@@ -3139,7 +3150,6 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(result.errorType).toBe("permanent");
 
       // Assert: processing_lease_token IS NULL and processing_lease_until IS NULL
-      // (lease released by finally block)
       const [op] = await sql<{ processing_lease_token: string | null; processing_lease_until: Date | null }[]>`
         SELECT processing_lease_token, processing_lease_until 
         FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
@@ -3155,8 +3165,15 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(claim).toBeDefined();
       expect(claim.bulk_operation_id).toBe(bulkOpId);
 
+      // Assert: Session.needsReauth is still true (auth DLQ doesn't change it)
+      const [session] = await sql<{ needsReauth: boolean | null }[]>`
+        SELECT "needsReauth" FROM "Session" WHERE id = ${sessionId}
+      `;
+      expect(session.needsReauth).toBe(true);
+
       // Cleanup
       await sql`DELETE FROM s6_reconcile_stage_claims WHERE chain_key = ${chainKey}`;
+      await sql`DELETE FROM "Session" WHERE id = ${sessionId}`;
     });
   });
 });

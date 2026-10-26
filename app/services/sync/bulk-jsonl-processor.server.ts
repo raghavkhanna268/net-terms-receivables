@@ -341,11 +341,8 @@ export async function fetchJsonlChunk(
       totalSize = bytes.length;
     }
 
-    // Smaller-than-requested response indicates EOF, but ONLY if Content-Range
-    // didn't already tell us we're not at EOF. When Content-Range is present and
-    // says there's more data (rangeEnd < totalSize - 1), trust it over the
-    // "smaller-than-requested" heuristic. This handles small files correctly.
-    if (bytes.length < chunkSize && !isEof && !contentRange) {
+    // Smaller-than-requested response also indicates EOF
+    if (bytes.length < chunkSize && !isEof) {
       isEof = true;
     }
 
@@ -1099,7 +1096,8 @@ async function processLines(
  * @param maxLines - Max lines to process per invocation (default 100)
  * @returns Sync result with status field
  */
-export interface ProcessBulkOperationHooks {
+/** @internal Test-only hooks for mutation testing. */
+interface ProcessBulkOperationHooks {
   /** Called right before renewal check (for testing M2/M5 mutations) */
   beforeRenewal?: () => Promise<void>;
 }
