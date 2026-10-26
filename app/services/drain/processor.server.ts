@@ -1191,7 +1191,7 @@ async function archiveMessage(sql: Sql, queue: string, msgId: string): Promise<v
  * Extend visibility timeout for a message (e.g., no handler available).
  */
 async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds: number): Promise<void> {
-  await sql`SELECT pgmq.set_vt(${queue}, ${msgId}::bigint, ${seconds})`;
+  await sql`SELECT pgmq.set_vt(${queue}, ${msgId}::bigint, ${seconds}::integer)`;
 }
 
 /**
@@ -1748,12 +1748,19 @@ async function processBulkQueue(
     // Skip bulk operations already handled this tick (prevents re-polling continuations)
     const bulkOpId = msg.message.bulkOperationId;
     if (bulkOpId && handledBulkOpIds.has(bulkOpId)) {
-      // Replace the message atomically to reset read_ct and preserve retry budget.
-      // pgmq.read() already incremented read_ct, so we delete + re-send to reset it.
-      await sql.begin(async (tx) => {
-        await tx`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
-        await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)})`;
-      });
+      // Replace message atomically with delay to prevent re-read in same tick.
+      // Only reset read_ct when this is the first read (read_ct === 1) to preserve
+      // retry budget for continuations that failed in prior ticks.
+      if (msg.read_ct === 1) {
+        // First read: delete + resend with delay resets read_ct to 0
+        await sql.begin(async (tx) => {
+          await tx`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+          await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)}, ${config.visibilityTimeoutSec}::integer)`;
+        });
+      } else {
+        // Prior failed reads: extend VT to defer without resetting read_ct
+        await extendVisibility(sql, S6_QUEUES.BULK, msg.msg_id, config.visibilityTimeoutSec);
+      }
       result.skipped++;
       continue;
     }
@@ -1942,13 +1949,12 @@ async function processBulkQueue(
 }
 
 /**
- * Count total messages touched in a drain result.
- * Used to determine if any messages were processed in a pass.
+ * Count messages that did real work in a pass.
+ * Excludes skips so that skipped continuations don't prevent early stop.
  */
-function countMessagesTouched(result: DrainResult): number {
+function countMessagesWorked(result: DrainResult): number {
   return (
     result.processed +
-    result.skipped +
     result.noHandler +
     result.failed +
     result.deadLettered +
@@ -2033,8 +2039,8 @@ export async function runDrain(
       break;
     }
 
-    const passMessagesTouched = countMessagesTouched(passResult);
-    if (passMessagesTouched === 0) {
+    const passMessagesWorked = countMessagesWorked(passResult);
+    if (passMessagesWorked === 0) {
       break;
     }
   }

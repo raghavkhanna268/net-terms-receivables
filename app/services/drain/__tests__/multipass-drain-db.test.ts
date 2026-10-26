@@ -468,6 +468,13 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
       `;
       expect(Number(pendingAfterTick1.count)).toBe(1);
 
+      // Reset VT to make continuation visible for tick 2 (simulates time passing)
+      await sqlRef`
+        UPDATE pgmq.q_s6_bulk
+        SET vt = NOW() - interval '1 second'
+        WHERE (message->>'bulkOperationId')::text = ${bulkOpId}
+      `;
+
       // Tick 2: continuation is processed
       const result2 = await runDrain(sqlRef, { batchSize: 5, timeBudgetMs: 15000, maxPasses });
 
@@ -484,7 +491,7 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
       expect(Number(pendingAfterTick2.count)).toBe(0);
     }, 60000);
 
-    it("skipped continuation preserves read_ct (delete+resend resets to 0)", async () => {
+    it("skipped continuation: first read resets read_ct to 0 with VT delay", async () => {
       const { registerBulkHandler, runDrain } = await import("../processor.server");
 
       const testSuffix = `bulk-readct-${TEST_ID}-${maxPasses}-${Date.now()}`;
@@ -519,15 +526,138 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
       // Handler called once (continuation skipped, not re-processed)
       expect(handlerCallCount).toBe(1);
 
-      // Check read_ct of the continuation message - should be 0 (reset by delete+resend)
-      const [queuedMsg] = await sqlRef<{ read_ct: number }[]>`
-        SELECT read_ct FROM pgmq.q_s6_bulk
+      // Check read_ct and vt of the continuation message
+      const [queuedMsg] = await sqlRef<{ read_ct: number; vt: Date }[]>`
+        SELECT read_ct, vt FROM pgmq.q_s6_bulk
         WHERE (message->>'shop')::text = ${TEST_SHOP}
         AND (message->>'bulkOperationId')::text = ${bulkOpId}
       `;
       expect(queuedMsg).toBeDefined();
-      // read_ct should be 0 because we delete+resend the skipped message
+      // read_ct should be 0 because we delete+resend the skipped message (first read)
       expect(queuedMsg.read_ct).toBe(0);
+      // vt should be in the future (delay was applied)
+      expect(queuedMsg.vt.getTime()).toBeGreaterThan(Date.now());
+    }, 60000);
+
+    it("passes stop early when only skips happen (skips excluded from work count)", async () => {
+      const { registerBulkHandler, runDrain } = await import("../processor.server");
+
+      const testSuffix = `bulk-earlystop-${TEST_ID}-${maxPasses}-${Date.now()}`;
+      const bulkOpId = `gid://shopify/BulkOperation/${testSuffix}`;
+      let handlerCallCount = 0;
+
+      // Handler returns progress to create continuation
+      registerBulkHandler(`TEST_BULK_EARLYSTOP_${maxPasses}`, async () => {
+        handlerCallCount++;
+        return {
+          success: true,
+          action: "updated",
+          entityId: `entity-${testSuffix}`,
+          status: "progress",
+        };
+      });
+
+      const bulkMessage: BulkMessage = {
+        topic: `TEST_BULK_EARLYSTOP_${maxPasses}`,
+        shop: TEST_SHOP,
+        webhookId: `wh-${testSuffix}`,
+        bulkOperationId: bulkOpId,
+        bulkType: "companies",
+        enqueuedAt: new Date().toISOString(),
+      };
+      await sqlRef`SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(bulkMessage)})`;
+
+      // Run drain - pass 1 processes, pass 2+ should stop early (only skips)
+      const result = await runDrain(sqlRef, { batchSize: 5, timeBudgetMs: 60000, maxPasses });
+
+      // Handler called exactly once (pass 1), not maxPasses times
+      expect(handlerCallCount).toBe(1);
+      // Should not burn all passes on skips
+      expect(result.processed).toBe(1);
+      // Skips should be counted but not prevent early stop
+      expect(result.skipped).toBeGreaterThanOrEqual(0);
+      // Should NOT have reached maxPasses (stopped early)
+      expect(result.timedOut).toBe(false);
+    }, 60000);
+  });
+
+  describe("continuation with prior failures still reaches DLQ", () => {
+    it.each([2, 4])("at maxPasses=%i: continuation with read_ct >= 2 preserves retry budget when skipped", async (mp) => {
+      const { registerBulkHandler, runDrain } = await import("../processor.server");
+
+      const testSuffix = `bulk-dlq-${TEST_ID}-${mp}-${Date.now()}`;
+      const bulkOpId = `gid://shopify/BulkOperation/${testSuffix}`;
+      let handlerCallCount = 0;
+
+      // Handler returns progress to create continuation
+      registerBulkHandler(`TEST_BULK_DLQ_${mp}`, async () => {
+        handlerCallCount++;
+        return {
+          success: true,
+          action: "updated",
+          entityId: `entity-${testSuffix}`,
+          status: "progress",
+        };
+      });
+
+      // Create two messages with the same bulkOpId:
+      // 1. An "original" message that will be processed first
+      // 2. A "continuation" with high read_ct that should be skipped but preserve read_ct
+
+      // First, enqueue the original
+      const bulkMessage1: BulkMessage = {
+        topic: `TEST_BULK_DLQ_${mp}`,
+        shop: TEST_SHOP,
+        webhookId: `wh-${testSuffix}-1`,
+        bulkOperationId: bulkOpId,
+        bulkType: "companies",
+        enqueuedAt: new Date().toISOString(),
+      };
+      const [send1] = await sqlRef<[{ send: string }]>`
+        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(bulkMessage1)}) as send
+      `;
+      const msg1Id = send1.send;
+
+      // Then enqueue a "continuation" - same bulkOpId, different webhookId
+      const bulkMessage2: BulkMessage = {
+        topic: `TEST_BULK_DLQ_${mp}`,
+        shop: TEST_SHOP,
+        webhookId: `wh-${testSuffix}-2`,
+        bulkOperationId: bulkOpId,
+        bulkType: "companies",
+        enqueuedAt: new Date().toISOString(),
+      };
+      const [send2] = await sqlRef<[{ send: string }]>`
+        SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(bulkMessage2)}) as send
+      `;
+      const msg2Id = send2.send;
+
+      // Set high read_ct on the second message to simulate prior failed reads
+      const priorReadCt = 3;
+      await sqlRef`
+        UPDATE pgmq.q_s6_bulk
+        SET read_ct = ${priorReadCt}
+        WHERE msg_id = ${msg2Id}::bigint
+      `;
+
+      // Run drain - msg1 is processed first (adds bulkOpId to handledBulkOpIds)
+      // msg2 is skipped (same bulkOpId), but since read_ct > 1, uses extendVisibility
+      await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 15000, maxPasses: mp });
+
+      // Handler should be called once (for msg1)
+      expect(handlerCallCount).toBe(1);
+
+      // Check that msg2's read_ct was preserved (not reset to 0)
+      // The read incremented it by 1, then extendVisibility was called (not delete+resend)
+      const [msg2] = await sqlRef<{ read_ct: number; vt: Date }[]>`
+        SELECT read_ct, vt FROM pgmq.q_s6_bulk
+        WHERE msg_id = ${msg2Id}::bigint
+      `;
+      expect(msg2).toBeDefined();
+      // read_ct should be priorReadCt + 1 (pgmq.read incremented it)
+      expect(msg2.read_ct).toBe(priorReadCt + 1);
+      // VT should be extended (in the future)
+      expect(msg2.vt.getTime()).toBeGreaterThan(Date.now());
     }, 60000);
   });
 
@@ -623,6 +753,46 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
 
       // Message should be handled exactly once (VT prevents re-read)
       expect(handledWebhookIds.get(webhookId)).toBe(1);
+    }, 30000);
+
+    it("message never handled twice across overlapping concurrent ticks", async () => {
+      const { registerBulkHandler, runDrain } = await import("../processor.server");
+
+      const testSuffix = `concurrent-${TEST_ID}-${Date.now()}`;
+      const bulkOpId = `gid://shopify/BulkOperation/${testSuffix}`;
+      const handlerCalls: string[] = [];
+
+      // Handler tracks each call with timestamp
+      registerBulkHandler(`TEST_BULK_CONCURRENT`, async () => {
+        handlerCalls.push(`${bulkOpId}-${Date.now()}`);
+        // Small delay to increase overlap chance
+        await new Promise(r => setTimeout(r, 10));
+        return {
+          success: true,
+          action: "updated",
+          entityId: `entity-${testSuffix}`,
+          status: "complete",
+        };
+      });
+
+      const bulkMessage: BulkMessage = {
+        topic: `TEST_BULK_CONCURRENT`,
+        shop: TEST_SHOP,
+        webhookId: `wh-${testSuffix}`,
+        bulkOperationId: bulkOpId,
+        bulkType: "companies",
+        enqueuedAt: new Date().toISOString(),
+      };
+      await sqlRef`SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(bulkMessage)})`;
+
+      // Run two drain calls concurrently
+      await Promise.all([
+        runDrain(sqlRef, { batchSize: 5, timeBudgetMs: 15000, maxPasses: 2 }),
+        runDrain(sqlRef, { batchSize: 5, timeBudgetMs: 15000, maxPasses: 2 }),
+      ]);
+
+      // Handler should be called exactly once (pgmq.read() uses VT to prevent double-read)
+      expect(handlerCalls.length).toBe(1);
     }, 30000);
   });
 });
