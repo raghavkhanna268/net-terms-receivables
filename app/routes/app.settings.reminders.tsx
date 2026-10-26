@@ -141,7 +141,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         if (enabled && !providerConfigured) {
           return {
             success: false,
-            error: "Email reminders will be available once the email provider is configured",
+            error: "Email reminders are not available yet",
           };
         }
         await updateShopReminderSettings(sql, shop.id, enabled);
@@ -401,10 +401,9 @@ export default function RemindersSettingsPage() {
       {/* Provider Status Banner */}
       {!providerConfigured && (
         <s-section>
-          <s-banner tone="warning" heading="Email sending not configured yet">
+          <s-banner tone="warning" heading="Email reminders coming soon">
             <s-text>
-              Payment reminder emails are not yet enabled. This feature will be
-              available once the email provider is configured. You can still
+              Payment reminder emails are not yet available. You can still
               configure your reminder settings below.
             </s-text>
           </s-banner>

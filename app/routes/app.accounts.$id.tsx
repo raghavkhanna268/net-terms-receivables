@@ -680,7 +680,7 @@ export default function AccountPage() {
   if (loaderData.notSupported) {
     return (
       <s-page heading="Account">
-        <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
+        <s-link href="/app" slot="breadcrumb-actions">Back to Dashboard</s-link>
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
@@ -706,7 +706,7 @@ export default function AccountPage() {
 
   return (
     <s-page heading={account.name}>
-      <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
+      <s-link href="/app" slot="breadcrumb-actions">Back to Dashboard</s-link>
 
       {/* T4: New accounts paused banner */}
       {newAccountsPausedBanner.show && (
@@ -856,7 +856,7 @@ export default function AccountPage() {
               ) : creditStatus.holdState === "NEAR_LIMIT" ? (
                 <s-badge tone="warning">Near Limit</s-badge>
               ) : creditStatus.holdState === "BYPASS" ? (
-                <s-badge tone="info">Bypass Active</s-badge>
+                <s-badge tone="info">Credit check paused</s-badge>
               ) : (
                 <s-badge>OK</s-badge>
               )}

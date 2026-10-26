@@ -1642,7 +1642,7 @@ describe("S23-04: initial sync", () => {
       expect(result).not.toBeInstanceOf(Response);
       const data = result as { success: boolean; error: string };
       expect(data.success).toBe(false);
-      expect(data.error).toContain("already queued");
+      expect(data.error).toBe("A sync is already running. Refresh the page to check progress.");
       expect(enqueueCount).toBe(0);
     });
 
@@ -1842,9 +1842,9 @@ describe("P6: error logging uses safeLog JSON (no raw errors)", () => {
     const { action } = await import("../app.onboarding");
 
     const currentStatus = {
-      validation: { name: "Validation Function", status: "missing" },
-      paymentCustomization: { name: "Payment Customization", status: "ok" },
-      metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+      validation: { name: "Checkout credit check", status: "missing" },
+      paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+      metafieldDefinitions: { name: "Store data fields", status: "ok" },
     };
 
     const formData = new FormData();
@@ -2936,9 +2936,9 @@ describe("Button loading state isolation", () => {
             dismissedAt: null,
           },
           registrationStatus: {
-            validation: { name: "Validation Function", status: "missing" },
-            paymentCustomization: { name: "Payment Customization", status: "ok" },
-            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+            validation: { name: "Checkout credit check", status: "missing" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
           },
           initialSyncState: { status: "not_started" },
           newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
@@ -2984,9 +2984,9 @@ describe("Button loading state isolation", () => {
             dismissedAt: null,
           },
           registrationStatus: {
-            validation: { name: "Validation Function", status: "missing" },
-            paymentCustomization: { name: "Payment Customization", status: "ok" },
-            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+            validation: { name: "Checkout credit check", status: "missing" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
           },
           initialSyncState: { status: "not_started" },
           newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },

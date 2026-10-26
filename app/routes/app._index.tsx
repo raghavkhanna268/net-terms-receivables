@@ -720,7 +720,7 @@ export function BuyerLedgerTable({
                   ) : row.hold_state === "NEAR_LIMIT" ? (
                     <s-badge tone="warning">Near Limit</s-badge>
                   ) : row.hold_state === "BYPASS" ? (
-                    <s-badge tone="info">Bypass</s-badge>
+                    <s-badge tone="info">Credit check paused</s-badge>
                   ) : (
                     <s-badge>OK</s-badge>
                   )}

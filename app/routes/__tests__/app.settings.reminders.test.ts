@@ -367,7 +367,7 @@ describe("Reminder Settings Route", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("email provider is configured");
+      expect(result.error).toContain("Email reminders are not available yet");
     });
 
     it("blocks enabling when only RESEND_FROM is set (real isReminderSendingEnabled)", async () => {
@@ -401,7 +401,7 @@ describe("Reminder Settings Route", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("email provider is configured");
+      expect(result.error).toContain("Email reminders are not available yet");
     });
 
     it("allows disabling even when provider is not configured", async () => {
