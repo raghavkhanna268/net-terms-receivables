@@ -151,6 +151,7 @@ describeWithDb("S18 reminder status queries (DB)", () => {
         sent: 0,
         delayed: 0,
         skippedDailyLimit: 0,
+        skippedOptedOut: 0,
       });
     });
 
@@ -216,6 +217,89 @@ describeWithDb("S18 reminder status queries (DB)", () => {
       expect(counts.sent).toBe(0);
       expect(counts.delayed).toBe(0);
       expect(counts.skippedDailyLimit).toBe(0);
+      expect(counts.skippedOptedOut).toBe(0);
+    });
+
+    it("counts skippedOptedOut status correctly", async () => {
+      const { getReminderStatusCounts } = await import("../reminder-status.server");
+
+      // Create invoices for opted-out status
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES 
+          (${`inv-opted-out-1-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/optedout1-${TEST_SUFFIX}`},
+           '#OPTED-OUT-1', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
+          (${`inv-opted-out-2-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/optedout2-${TEST_SUFFIX}`},
+           '#OPTED-OUT-2', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
+          (${`inv-sent-mix-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/sentmix-${TEST_SUFFIX}`},
+           '#SENT-MIX', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
+      `;
+
+      // Create reminder logs with mixed statuses including skipped_opted_out
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
+        VALUES 
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-opted-out-1-${TEST_SUFFIX}`}, 'skipped_opted_out'::"ReminderLogStatus", NULL),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-opted-out-2-${TEST_SUFFIX}`}, 'skipped_opted_out'::"ReminderLogStatus", NULL),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-sent-mix-${TEST_SUFFIX}`}, 'sent'::"ReminderLogStatus", NOW())
+      `;
+
+      const counts = await getReminderStatusCounts(sql, TEST_SHOP_ID);
+
+      expect(counts.sent).toBe(1);
+      expect(counts.skippedOptedOut).toBe(2);
+    });
+
+    it("skippedOptedOut: shop isolation - another shop's opted-out rows aren't counted", async () => {
+      const { getReminderStatusCounts } = await import("../reminder-status.server");
+
+      // Create opted-out rows for the OTHER shop
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES 
+          (${`inv-other-optedout-1-${TEST_SUFFIX}`}, ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, ${`gid://shopify/Order/other-optedout1-${TEST_SUFFIX}`},
+           '#OTHER-OPTED-OUT-1', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW()),
+          (${`inv-other-optedout-2-${TEST_SUFFIX}`}, ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, ${`gid://shopify/Order/other-optedout2-${TEST_SUFFIX}`},
+           '#OTHER-OPTED-OUT-2', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
+        VALUES 
+          (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, ${`inv-other-optedout-1-${TEST_SUFFIX}`}, 'skipped_opted_out'::"ReminderLogStatus", NULL),
+          (gen_random_uuid()::TEXT, ${OTHER_SHOP_ID}, ${OTHER_RULE_ID}, ${`inv-other-optedout-2-${TEST_SUFFIX}`}, 'skipped_opted_out'::"ReminderLogStatus", NULL)
+      `;
+
+      // Create one opted-out row for the MAIN shop
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (${`inv-main-optedout-${TEST_SUFFIX}`}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${`gid://shopify/Order/main-optedout-${TEST_SUFFIX}`},
+                '#MAIN-OPTED-OUT', 10000.00, 10000.00, 'open', NOW(), NOW(), NOW(), NOW())
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
+        VALUES (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_0}, ${`inv-main-optedout-${TEST_SUFFIX}`}, 'skipped_opted_out'::"ReminderLogStatus", NULL)
+      `;
+
+      // Query main shop - should only see main shop's opted-out row (1), not other shop's (2)
+      const counts = await getReminderStatusCounts(sql, TEST_SHOP_ID);
+
+      expect(counts.skippedOptedOut).toBe(1);
+
+      // Query other shop - should only see other shop's opted-out rows (2)
+      const otherCounts = await getReminderStatusCounts(sql, OTHER_SHOP_ID);
+
+      expect(otherCounts.skippedOptedOut).toBe(2);
     });
   });
 

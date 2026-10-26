@@ -3,6 +3,7 @@ import { useLoaderData, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { getPendingDataRequests, purgeExpiredDataRequests } from "~/services/compliance";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { useState } from "react";
 
 /**
@@ -26,7 +27,7 @@ import { useState } from "react";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
 
   const sql = getRequestSql();
 
@@ -42,10 +43,21 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
+  // #292: GDPR data-request list is EXEMPT from currency gating.
+  // This is a compliance view for customers/data_request webhooks.
+
   // Purge expired data requests on access (in-app purge for databases without pg_cron)
   await purgeExpiredDataRequests(sql, shop.id);
 
   const dataRequests = await getPendingDataRequests(sql, shop.id);
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSessionToken(sessionToken, session),
+    action: "data_requests_list",
+    recordType: "DataRequest",
+    count: dataRequests.length,
+  });
 
   return {
     dataRequests: dataRequests.map((dr) => ({

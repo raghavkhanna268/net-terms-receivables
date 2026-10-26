@@ -16,13 +16,45 @@ import { createElement } from "react";
  * 7. S23-02: safeLog with no PII
  */
 
+/**
+ * Helper to extract loader data from data() result.
+ * Handles both data() wrapper and plain objects.
+ */
+function extractLoaderData<T>(result: unknown): T {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: T }).data;
+  }
+  return result as T;
+}
+
 const mockSql = Object.assign(vi.fn(), {
   unsafe: vi.fn((s) => s),
   json: vi.fn((obj) => JSON.stringify(obj)),
 });
 
+// #292: Helper to wrap mockImplementation with default currency check for INR shops
+function wrapWithCurrencyCheck(
+  handler: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>
+) {
+  return (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const query = strings.join("?");
+    // Handle currency query from enqueueInitialSync
+    if (query.includes("currency") && query.includes("Shop") && query.includes("SELECT") && !query.includes("timezone")) {
+      return Promise.resolve([{ currency: "INR" }]);
+    }
+    return handler(strings, ...values);
+  };
+}
+
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 const mockEnsureValidation = vi.fn();
@@ -53,12 +85,20 @@ vi.mock("~/services/plan.server", () => ({
   }),
 }));
 
+const mockGetUsageStats = vi.fn().mockResolvedValue({
+  companies: { current: 0, limit: 25 },
+  importsThisMonth: { current: 0, limit: -1 },
+});
+const mockIsGatingEnforced = vi.fn().mockReturnValue(false);
+
 vi.mock("~/services/gating.server", () => ({
-  getUsageStats: vi.fn().mockResolvedValue({
-    companies: { current: 0, limit: 25 },
-    importsThisMonth: { current: 0, limit: -1 },
-  }),
-  isGatingEnforced: vi.fn().mockReturnValue(false),
+  getUsageStats: mockGetUsageStats,
+  isGatingEnforced: mockIsGatingEnforced,
+}));
+
+vi.mock("~/lib/plan-url", () => ({
+  getAppHandle: vi.fn().mockReturnValue("net-terms-receivables"),
+  buildPlanSelectionUrl: vi.fn().mockReturnValue("https://admin.shopify.com/plans"),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
@@ -87,6 +127,11 @@ describe("app.onboarding", () => {
     mockEnsureValidation.mockReset();
     mockEnsurePaymentCustomization.mockReset();
     mockEnsureMetafieldDefinitions.mockReset();
+    mockIsGatingEnforced.mockReturnValue(false);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 0, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
   });
 
   describe("action - dismiss", () => {
@@ -283,55 +328,76 @@ describe("app.onboarding", () => {
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              validations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/Validation/123",
-                    shopifyFunction: { handle: "credit-check-validation" },
-                    title: "Net Terms Credit Check",
-                    enabled: true,
-                  },
-                }],
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              paymentCustomizations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/PaymentCustomization/456",
-                    shopifyFunction: { handle: "hide-terms-payment" },
-                    title: "Net Terms Payment Hide",
-                    enabled: true,
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return {
+            json: async () => ({
+              data: {
+                validations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/Validation/123",
+                      shopifyFunction: { handle: "credit-check-validation" },
+                      title: "Termwise Credit Check",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({
-            data: {
-              metafieldDefinitions: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/MetafieldDefinition/789",
-                    namespace: "$app",
-                    key: "credit_status",
-                    ownerType: "COMPANY_LOCATION",
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return {
+            json: async () => ({
+              data: {
+                paymentCustomizations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/PaymentCustomization/456",
+                      shopifyFunction: { handle: "hide-terms-payment" },
+                      title: "Termwise Payment Hide",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        });
+            }),
+          };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return {
+            json: async () => ({
+              data: {
+                metafieldDefinitions: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/MetafieldDefinition/789",
+                      namespace: "$app",
+                      key: "credit_status",
+                      ownerType: "COMPANY_LOCATION",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -413,61 +479,85 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "1" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              validations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/Validation/123",
-                    shopifyFunction: { handle: "credit-check-validation" },
-                    title: "Test",
-                    enabled: true,
-                  },
-                }],
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              paymentCustomizations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/PaymentCustomization/456",
-                    shopifyFunction: { handle: "hide-terms-payment" },
-                    title: "Test",
-                    enabled: true,
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return {
+            json: async () => ({
+              data: {
+                validations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/Validation/123",
+                      shopifyFunction: { handle: "credit-check-validation" },
+                      title: "Test",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({
-            data: {
-              metafieldDefinitions: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/MetafieldDefinition/789",
-                    namespace: "$app",
-                    key: "credit_status",
-                    ownerType: "COMPANY_LOCATION",
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return {
+            json: async () => ({
+              data: {
+                paymentCustomizations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/PaymentCustomization/456",
+                      shopifyFunction: { handle: "hide-terms-payment" },
+                      title: "Test",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        });
+            }),
+          };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return {
+            json: async () => ({
+              data: {
+                metafieldDefinitions: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/MetafieldDefinition/789",
+                      namespace: "$app",
+                      key: "credit_status",
+                      ownerType: "COMPANY_LOCATION",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -502,35 +592,55 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "1" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { paymentCustomizations: { edges: [] } } }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({
-            data: {
-              metafieldDefinitions: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/MetafieldDefinition/789",
-                    namespace: "app--123",
-                    key: "credit_status",
-                    ownerType: "COMPANY_LOCATION",
-                  },
-                }],
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
               },
-            },
-          }),
-        });
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return { json: async () => ({ data: { validations: { edges: [] } } }) };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return { json: async () => ({ data: { paymentCustomizations: { edges: [] } } }) };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return {
+            json: async () => ({
+              data: {
+                metafieldDefinitions: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/MetafieldDefinition/789",
+                      namespace: "app--123",
+                      key: "credit_status",
+                      ownerType: "COMPANY_LOCATION",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -605,22 +715,40 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "0" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ errors: [{ message: "Validation access denied" }] }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { paymentCustomizations: { edges: [] } } }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }),
-        });
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
+              },
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return { json: async () => ({ errors: [{ message: "Validation access denied" }] }) };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return { json: async () => ({ data: { paymentCustomizations: { edges: [] } } }) };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return { json: async () => ({ data: { metafieldDefinitions: { edges: [] } } }) };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -652,22 +780,40 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "0" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ errors: [{ message: "Payment access denied" }] }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }),
-        });
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
+              },
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return { json: async () => ({ data: { validations: { edges: [] } } }) };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return { json: async () => ({ errors: [{ message: "Payment access denied" }] }) };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return { json: async () => ({ data: { metafieldDefinitions: { edges: [] } } }) };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -1232,7 +1378,7 @@ describe("S23-04: initial sync", () => {
   describe("action start_sync", () => {
     it("enqueues sync when status is not_started", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1254,7 +1400,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1287,7 +1433,7 @@ describe("S23-04: initial sync", () => {
 
     it("enqueues sync when status is failed", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1311,7 +1457,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1344,7 +1490,7 @@ describe("S23-04: initial sync", () => {
 
     it("does not enqueue when status is in_progress", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1362,7 +1508,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1395,7 +1541,7 @@ describe("S23-04: initial sync", () => {
 
     it("does not enqueue when status is done", async () => {
       let enqueued = false;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1414,7 +1560,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1447,7 +1593,7 @@ describe("S23-04: initial sync", () => {
 
     it("does not duplicate enqueue when already queued", async () => {
       let enqueueCount = 0;
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1469,7 +1615,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1569,7 +1715,7 @@ describe("S23-04: initial sync", () => {
     it("start_sync logs use shopHash, not raw domain or ids", async () => {
       const consoleInfoSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("SELECT id FROM")) {
           return Promise.resolve([{ id: TEST_SHOP_ID }]);
@@ -1590,7 +1736,7 @@ describe("S23-04: initial sync", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { action } = await import("../app.onboarding");
 
@@ -1769,7 +1915,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app?skipOnboarding=true"),
       context: {
         shopify: {
@@ -1786,6 +1932,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = extractLoaderData<{ shopDomain: string }>(response);
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 
@@ -1857,7 +2004,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app"),
       context: {
         shopify: {
@@ -1874,6 +2021,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = extractLoaderData<{ shopDomain: string }>(response);
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 
@@ -1899,7 +2047,7 @@ describe("app._index redirect", () => {
 
     const { loader } = await import("../app._index");
 
-    const result = await loader({
+    const response = await loader({
       request: new Request("https://example.com/app"),
       context: {
         shopify: {
@@ -1916,6 +2064,7 @@ describe("app._index redirect", () => {
       params: {},
     } as unknown as LoaderFunctionArgs);
 
+    const result = extractLoaderData<{ shopDomain: string }>(response);
     expect(result.shopDomain).toBe(TEST_SHOP);
   });
 });
@@ -1964,6 +2113,7 @@ describe("S23-03: tag-rules link in buyer-setup step", () => {
           },
           registrationStatus: null,
           initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle", formData: null }),
@@ -2004,6 +2154,7 @@ describe("S23-03: tag-rules link in buyer-setup step", () => {
           },
           registrationStatus: null,
           initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle", formData: null }),
@@ -2171,5 +2322,234 @@ describe("S23-22: ErrorBoundary", () => {
     expect(html).not.toContain("Sensitive error");
     expect(html).not.toContain("test-shop.myshopify.com");
     expect(html).toContain("An unexpected error occurred");
+  });
+});
+
+describe("T4: newAccountsPausedBanner", () => {
+  const TEST_SHOP = "test-shop.myshopify.com";
+  const TEST_SHOP_ID = "shop-123";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsGatingEnforced.mockReturnValue(false);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 0, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("loader returns newAccountsPausedBanner.show=false when gating is off", async () => {
+    mockIsGatingEnforced.mockReturnValue(false);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+      }
+      if (query.includes("COUNT(*)")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const mockGraphql = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ data: {} }),
+    });
+
+    const { loader } = await import("../app.onboarding");
+
+    const result = await loader({
+      request: new Request("https://example.com/app/onboarding"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs);
+
+    expect(result.newAccountsPausedBanner).toBeDefined();
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(mockGetUsageStats).not.toHaveBeenCalled();
+  });
+
+  it("loader returns newAccountsPausedBanner.show=true when gating on and at limit", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 25, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+      }
+      if (query.includes("COUNT(*)")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const mockGraphql = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ data: {} }),
+    });
+
+    const { loader } = await import("../app.onboarding");
+
+    const result = await loader({
+      request: new Request("https://example.com/app/onboarding"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs);
+
+    expect(result.newAccountsPausedBanner).toBeDefined();
+    expect(result.newAccountsPausedBanner.show).toBe(true);
+    expect(result.newAccountsPausedBanner.heading).toBe("25 of 25 buyer accounts");
+    expect(result.newAccountsPausedBanner.upgradeUrl).toBeDefined();
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+  });
+
+  it("loader returns newAccountsPausedBanner.show=false when gating on but under limit", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 10, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+      }
+      if (query.includes("COUNT(*)")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const mockGraphql = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ data: {} }),
+    });
+
+    const { loader } = await import("../app.onboarding");
+
+    const result = await loader({
+      request: new Request("https://example.com/app/onboarding"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs);
+
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+  });
+
+  it("renders banner when newAccountsPausedBanner.show is true", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: {
+            show: true,
+            heading: "25 of 25 buyer accounts",
+            bodyText: "New accounts can't be added or imported over your plan limit.",
+            upgradeUrl: "https://admin.shopify.com/plans",
+          },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("25 of 25 buyer accounts");
+    expect(html).toContain("Upgrade your plan");
+    expect(html).toContain("https://admin.shopify.com/plans");
+  });
+
+  it("does not render banner when newAccountsPausedBanner.show is false", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: {
+            show: false,
+            heading: "",
+            bodyText: "",
+            upgradeUrl: null,
+          },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).not.toContain("Account limit reached");
+    expect(html).not.toContain("Upgrade your plan");
   });
 });

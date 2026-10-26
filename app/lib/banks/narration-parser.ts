@@ -49,6 +49,8 @@ export function parseNarration(narration: string, bank?: BankId): ParsedNarratio
       return parseImps(text, textUpper, bank);
     case "ACH":
       return parseAch(text, textUpper, bank);
+    case "CMS":
+      return parseCms(text, textUpper, bank);
     case "CHEQUE":
       return parseCheque(text, textUpper, bank);
     default:
@@ -81,6 +83,11 @@ function detectRail(textUpper: string): PaymentRail {
   ) {
     return "ACH";
   }
+  // CMS (Cash Management Service) - corporate collection credits
+  // ICICI format: "CMS/ <ref tokens>/<PAYER COMPANY NAME>"
+  if (textUpper.startsWith("CMS/") || textUpper.startsWith("CMS ")) {
+    return "CMS";
+  }
   if (
     textUpper.includes("CHQ") ||
     textUpper.includes("CHEQUE") ||
@@ -98,18 +105,51 @@ function detectRail(textUpper: string): PaymentRail {
  * - "UPI-SWIGGY-SWIGGY@ICICI-ICIC0DC0099-123456789012-UPI"
  * - "UPI/CR/123456789012/sender@bank/SENDER NAME"
  * - "UPI/123456789012/sender@okaxis/SENDER NAME"
+ * - ICICI: VPA may be without '@' (alphanumeric/dotted id of 10+ chars)
+ * - HDFC: VPA may have hyphenated local part (e.g., 9000000000-1@okaxis)
  */
-function parseUpi(text: string, textUpper: string, _bank?: BankId): ParsedNarration {
+function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "UPI" };
 
-  // Extract UPI ID (VPA) - pattern: word@word, must be standalone
-  const vpaMatch = text.match(/\b([a-zA-Z0-9._]+@[a-zA-Z0-9]+)\b/);
-  if (vpaMatch) {
-    result.upiId = vpaMatch[1].toLowerCase();
-    // Extract bank from VPA
-    const vpaParts = result.upiId.split("@");
-    if (vpaParts.length === 2) {
-      result.payerBank = vpaParts[1].toUpperCase();
+  // First, try to find VPA in the entire text (handles hyphenated VPAs)
+  // Pattern: alphanumeric/dots/hyphens @ alphanumeric handle
+  // Must be bounded by non-VPA-like characters (allow hyphen as delimiter for HDFC dash-format)
+  const fullVpaMatch = text.match(/(?:^|[^a-zA-Z0-9._])([a-zA-Z0-9._]+(?:-\d+)?@[a-zA-Z0-9]+)(?:[^a-zA-Z0-9]|$)/);
+  if (fullVpaMatch) {
+    result.upiId = fullVpaMatch[1].toLowerCase();
+  }
+  
+  // Split by separators for further analysis
+  const parts = text.split(/[/-]/);
+  
+  // If no VPA found, try to find segment containing @ (simpler VPAs)
+  if (!result.upiId) {
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (trimmed.includes("@")) {
+        const vpaMatch = trimmed.match(/^([a-zA-Z0-9._]+@[a-zA-Z0-9]+)$/);
+        if (vpaMatch) {
+          result.upiId = vpaMatch[1].toLowerCase();
+          break;
+        }
+      }
+    }
+  }
+  
+  // ICICI: VPA may be without '@' - check segment index 2 only
+  // Format: UPI/CR/vpa-id/SENDER NAME/BANK NAME (index 2 = VPA ID, index 4 = bank)
+  if (!result.upiId && bank === "ICICI" && parts.length > 2) {
+    const candidate = parts[2].trim();
+    // Must be 10+ chars, alphanumeric with optional dots, not a pure number,
+    // and not a code-shaped ref (3-6 letters + digits like SYNT000001)
+    if (
+      candidate.length >= 10 &&
+      /^[a-zA-Z0-9.]+$/.test(candidate) &&
+      !/^\d+$/.test(candidate) &&
+      !/^[A-Z]{3,6}\d+$/i.test(candidate) &&
+      !candidate.includes("@")
+    ) {
+      result.upiId = candidate.toLowerCase();
     }
   }
 
@@ -117,6 +157,46 @@ function parseUpi(text: string, textUpper: string, _bank?: BankId): ParsedNarrat
   const rrnMatch = textUpper.match(RRN_PATTERN);
   if (rrnMatch) {
     result.utr = rrnMatch[1];
+  }
+
+  // Extract payer bank from IFSC segment first (takes precedence over VPA handle)
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.match(/^[A-Z]{4}0[A-Z0-9]{6}$/)) {
+      result.payerBank = trimmed;
+      break;
+    }
+  }
+  
+  // If no IFSC found, get bank from VPA handle
+  if (!result.payerBank && result.upiId) {
+    const vpaParts = result.upiId.split("@");
+    if (vpaParts.length === 2) {
+      result.payerBank = vpaParts[1].toUpperCase();
+    }
+  }
+
+  // For ICICI, try to extract payer bank from narration (bank name segment)
+  // Only if we don't already have a bank from IFSC
+  // Prefer segment index 4 (typical ICICI format: UPI/CR/RRN/VPA/BANK NAME)
+  if (bank === "ICICI" && !result.payerBank) {
+    // Check index 4 first
+    if (parts.length > 4) {
+      const candidate = parts[4].trim().toUpperCase();
+      if (candidate.includes("BANK") && candidate !== "UPI") {
+        result.payerBank = candidate;
+      }
+    }
+    // Fallback to any segment with "BANK"
+    if (!result.payerBank) {
+      for (const part of parts) {
+        const trimmed = part.trim().toUpperCase();
+        if (trimmed.includes("BANK") && trimmed !== "UPI") {
+          result.payerBank = trimmed;
+          break;
+        }
+      }
+    }
   }
 
   // Extract payer name - typically after VPA or between separators
@@ -128,7 +208,6 @@ function parseUpi(text: string, textUpper: string, _bank?: BankId): ParsedNarrat
 
   // Generic format: after RRN and VPA
   if (!result.payerName) {
-    const parts = text.split(/[/-]/);
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i].trim();
       // Skip common non-name parts
@@ -142,7 +221,10 @@ function parseUpi(text: string, textUpper: string, _bank?: BankId): ParsedNarrat
       }
       // Skip IFSC codes
       if (part.match(/^[A-Z]{4}0[A-Z0-9]{6}$/)) {
-        result.payerBank = part;
+        continue;
+      }
+      // Skip VPA-like strings without @
+      if (result.upiId && part.toLowerCase() === result.upiId) {
         continue;
       }
       // This might be the name
@@ -308,6 +390,54 @@ function parseAch(text: string, _textUpper: string, _bank?: BankId): ParsedNarra
 
   // Reference number is kept in refNo field, NOT in parsed.utr
   // The caller should use the row's refNo column for this
+
+  return result;
+}
+
+/**
+ * Parse CMS (Cash Management Service) narration.
+ * ICICI format: "CMS/ <ref tokens with digits>/<PAYER COMPANY NAME words>"
+ * e.g., "CMS/ SYNT123 45/<SYNT TEST TRADERS>"
+ *
+ * CMS credits are corporate collection payments (receivables).
+ * NOTE: CMS reference numbers are NOT UTRs - they are internal refs.
+ * We do NOT store them in result.utr; leave utr empty.
+ */
+function parseCms(text: string, _textUpper: string, _bank?: BankId): ParsedNarration {
+  const result: ParsedNarration = { rail: "CMS" };
+
+  // Split by '/' to extract segments
+  const parts = text.split("/");
+  if (parts.length < 2) {
+    return result;
+  }
+
+  // First segment is "CMS" or "CMS " - skip it
+  // Second segment (and possibly more) may contain reference tokens
+  // Last non-empty segment is typically the payer name
+  const nonEmptyParts = parts.slice(1).filter((p) => p.trim().length > 0);
+
+  if (nonEmptyParts.length === 0) {
+    return result;
+  }
+
+  // NOTE: CMS refs are internal, NOT UTRs. Do not store in result.utr.
+  const refPart = nonEmptyParts[0].trim();
+
+  // The payer name is typically the last segment
+  if (nonEmptyParts.length > 1) {
+    const payerPart = nonEmptyParts[nonEmptyParts.length - 1].trim();
+    if (payerPart && payerPart.length > 2 && !/^\d+$/.test(payerPart)) {
+      result.payerName = cleanPayerName(payerPart);
+    }
+  } else if (nonEmptyParts.length === 1 && !/^\d+$/.test(refPart)) {
+    // Single segment after CMS/ could be the payer name if it's not purely numeric
+    const words = refPart.split(/\s+/);
+    const alphaWords = words.filter((w) => /[A-Za-z]{2,}/.test(w));
+    if (alphaWords.length > 0) {
+      result.payerName = cleanPayerName(alphaWords.join(" "));
+    }
+  }
 
   return result;
 }

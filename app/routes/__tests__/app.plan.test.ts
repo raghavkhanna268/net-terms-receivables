@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 
 /**
  * Tests for plan page loader (S21).
@@ -124,10 +126,7 @@ describe("Plan Page Loader", () => {
     });
 
     expect(result.plan).toBeNull();
-    expect(result.usage).toEqual({
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
-    });
+    expect(result.usage).toBeNull();
     expect(result.gatedCount).toBe(0);
     expect(result.error).toBeNull();
   });
@@ -216,16 +215,16 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-      plan: { key: "none", limits: { companies: 0, importsPerMonth: -1 } },
-      subscriptionId: null,
-      subscriptionName: null,
+      plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
+      subscriptionId: "sub-123",
+      subscriptionName: "Starter",
       isTest: false,
       fromCache: false,
     });
 
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
+      companies: { current: 15, limit: 25 },
+      importsThisMonth: { current: 3, limit: -1 },
     });
 
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(2);
@@ -241,7 +240,56 @@ describe("Plan Page Loader", () => {
     });
 
     expect(result.gatingEnforced).toBe(false);
-    expect(result.gatedCount).toBe(2);
+    // getUsageStats is always called - usage is shown regardless of flag
+    expect(getUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toEqual({
+      companies: { current: 15, limit: 25 },
+      importsThisMonth: { current: 3, limit: -1 },
+    });
+    // When flag is off, gatedCount is 0 (no query made)
+    expect(result.gatedCount).toBe(0);
+    // getGatedAccountCount should not be called when flag is off
+    expect(getGatedAccountCount).not.toHaveBeenCalled();
+  });
+
+  it("returns null usage and no banner when getUsageStats fails", async () => {
+    const { resolvePlan } = await import("~/services/plan.server");
+    const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
+      "~/services/gating.server"
+    );
+    const { getRequestSql } = await import("~/lib/request-context.server");
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
+      subscriptionId: "sub-123",
+      subscriptionName: "Starter",
+      isTest: false,
+      fromCache: false,
+    });
+
+    (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Database connection failed")
+    );
+
+    (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    const { loader } = await import("../app.plan");
+    const result = await loader({
+      request: mockRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    expect(getUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toBeNull();
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(result.newAccountsPausedBanner.heading).toBe("");
   });
 
   it("does not include subscriptionId or fromCache in returned plan", async () => {
@@ -309,166 +357,13 @@ describe("Plan Page Component Logic", () => {
     expect(bannerTone).toBe("warning");
   });
 
-  it("shows no Usage Note banner when gating is OFF (T1: removed)", () => {
-    // The Usage Note banner was removed in T1 - when gating is OFF,
-    // no limit-related banners are shown at all
+  it("shows no limit-related banners when gating is OFF (T1: Usage Note removed)", () => {
+    // When gating is off, no limit-related banners are shown at all
+    // (Usage Note banner was removed in T1)
     const gatingEnforced = false;
     const hasLimitReached = true;
-    // With gating off, neither warning nor info banner is shown
     const showBanner = hasLimitReached && gatingEnforced;
     expect(showBanner).toBe(false);
-  });
-});
-
-/**
- * Tests for FeatureComparisonTable logic (S21).
- *
- * The FeatureComparisonTable component in app.plan.tsx iterates over
- * ALL_PLAN_KEYS and ALL_FEATURE_KEYS, calling planHasFeature() to
- * determine whether to show ✓ or — for each cell.
- *
- * These tests verify the pure logic that the table uses, especially
- * that credit_holds shows as included (✓) for ALL four plan tiers.
- */
-describe("FeatureComparisonTable logic", () => {
-  it("credit_holds shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    const creditHoldsRow = ALL_PLAN_KEYS.map((planKey) => {
-      const plan = getPlanConfig(planKey);
-      return { planKey, hasFeature: planHasFeature(plan, "credit_holds") };
-    });
-
-    expect(creditHoldsRow).toEqual([
-      { planKey: "none", hasFeature: true },
-      { planKey: "starter", hasFeature: true },
-      { planKey: "growth", hasFeature: true },
-      { planKey: "unlimited", hasFeature: true },
-    ]);
-  });
-
-  it("aging_dashboard shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    for (const planKey of ALL_PLAN_KEYS) {
-      const plan = getPlanConfig(planKey);
-      expect(planHasFeature(plan, "aging_dashboard")).toBe(true);
-    }
-  });
-
-  it("matching shows as included for all four tiers", async () => {
-    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import(
-      "~/lib/entitlements"
-    );
-
-    const matchingRow = ALL_PLAN_KEYS.map((planKey) => {
-      const plan = getPlanConfig(planKey);
-      return { planKey, hasFeature: planHasFeature(plan, "matching") };
-    });
-
-    expect(matchingRow).toEqual([
-      { planKey: "none", hasFeature: true },
-      { planKey: "starter", hasFeature: true },
-      { planKey: "growth", hasFeature: true },
-      { planKey: "unlimited", hasFeature: true },
-    ]);
-  });
-
-  it("reminders shows as included for all four tiers (all features on all plans)", async () => {
-    const { getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
-
-    // All features are now on all plans
-    expect(planHasFeature(getPlanConfig("none"), "reminders")).toBe(true);
-    expect(planHasFeature(getPlanConfig("starter"), "reminders")).toBe(true);
-    expect(planHasFeature(getPlanConfig("growth"), "reminders")).toBe(true);
-    expect(planHasFeature(getPlanConfig("unlimited"), "reminders")).toBe(true);
-  });
-
-  it("generates correct table data for all features (all true on all plans)", async () => {
-    const { ALL_PLAN_KEYS, ALL_FEATURE_KEYS, getPlanConfig, planHasFeature } =
-      await import("~/lib/entitlements");
-
-    const tableRows = ALL_FEATURE_KEYS.map((feature) => {
-      const cells = ALL_PLAN_KEYS.map((planKey) => {
-        const plan = getPlanConfig(planKey);
-        return planHasFeature(plan, feature);
-      });
-      return { feature, cells };
-    });
-
-    // All features are true on all plans (5 features now, not 8)
-    const creditHoldsRowData = tableRows.find((row) => row.feature === "credit_holds");
-    expect(creditHoldsRowData?.cells).toEqual([true, true, true, true]);
-
-    const agingRowData = tableRows.find((row) => row.feature === "aging_dashboard");
-    expect(agingRowData?.cells).toEqual([true, true, true, true]);
-
-    const matchingRowData = tableRows.find((row) => row.feature === "matching");
-    expect(matchingRowData?.cells).toEqual([true, true, true, true]);
-
-    const remindersRowData = tableRows.find((row) => row.feature === "reminders");
-    expect(remindersRowData?.cells).toEqual([true, true, true, true]);
-  });
-});
-
-/**
- * Issue #286: Hidden features must not appear in plan page (App Store rule 1.1.4).
- * pdf_statements, payer_memory, audit_export are not built and must not be listed.
- */
-describe("Issue #286: Hidden features not displayed", () => {
-  it("FEATURE_DESCRIPTIONS does not contain PDF statements", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
-    
-    expect(allDescriptions).not.toContain("PDF");
-    expect(allDescriptions).not.toContain("pdf");
-    expect(allDescriptions).not.toContain("Statements");
-  });
-
-  it("FEATURE_DESCRIPTIONS does not contain payer memory", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
-    
-    expect(allDescriptions.toLowerCase()).not.toContain("payer");
-    expect(allDescriptions.toLowerCase()).not.toContain("memory");
-  });
-
-  it("FEATURE_DESCRIPTIONS does not contain audit export", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    const allDescriptions = Object.values(FEATURE_DISPLAY_NAMES).join(" ");
-    
-    expect(allDescriptions.toLowerCase()).not.toContain("audit");
-    expect(allDescriptions.toLowerCase()).not.toContain("export");
-  });
-
-  it("ALL_FEATURE_KEYS does not include hidden features", async () => {
-    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
-    
-    expect(ALL_FEATURE_KEYS).not.toContain("pdf_statements");
-    expect(ALL_FEATURE_KEYS).not.toContain("payer_memory");
-    expect(ALL_FEATURE_KEYS).not.toContain("audit_export");
-  });
-
-  it("plan page feature list excludes hidden features", async () => {
-    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    
-    // Verify that ALL_FEATURE_KEYS used for rendering only has visible features
-    expect(ALL_FEATURE_KEYS).toHaveLength(5);
-    expect(ALL_FEATURE_KEYS).toEqual([
-      "aging_dashboard",
-      "unlimited_imports",
-      "matching",
-      "reminders",
-      "credit_holds",
-    ]);
-    
-    // Verify FEATURE_DISPLAY_NAMES only has entries for visible features
-    expect(Object.keys(FEATURE_DISPLAY_NAMES)).toHaveLength(5);
   });
 });
 
@@ -530,7 +425,7 @@ describe("S21 Account page banner using buildAccountOverLimitBannerState helper"
     const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildAccountOverLimitBannerState(true, true);
     expect(state.show).toBe(true);
-    expect(state.heading).toBe("This account is over your plan limit");
+    expect(state.heading).toBe("This account was added after you reached your plan limit");
   });
 
   it("hides banner when isGated is false", async () => {
@@ -557,19 +452,6 @@ describe("S21 No price strings in plan output", () => {
     const { PLAN_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
     
     const allNames = Object.values(PLAN_DISPLAY_NAMES).join("");
-    
-    expect(allNames).not.toContain("$");
-    expect(allNames).not.toContain("₹");
-    expect(allNames).not.toContain("€");
-    expect(allNames).not.toContain("£");
-    expect(allNames).not.toContain("¥");
-    expect(allNames).not.toMatch(/\d+\.\d{2}/);
-  });
-
-  it("FEATURE_DISPLAY_NAMES contains no currency symbols", async () => {
-    const { FEATURE_DISPLAY_NAMES } = await import("~/components/UpgradePrompt");
-    
-    const allNames = Object.values(FEATURE_DISPLAY_NAMES).join("");
     
     expect(allNames).not.toContain("$");
     expect(allNames).not.toContain("₹");
@@ -738,5 +620,265 @@ describe("UsageDisplay component render tests", () => {
 
     expect(html).toContain(">10<");
     expect(html).not.toContain("/ 25");
+  });
+});
+
+/**
+ * Credit-hold and credit-status feature availability tests (T1/T5).
+ *
+ * Verifies that credit_holds feature is available on ALL plans regardless
+ * of gating status. Plan-limit gating only affects the "at limit" badges
+ * and "Upgrade to Add More" CTAs, not feature availability or credit-status UI.
+ *
+ * T5 removed the feature comparison table and FEATURE_DISPLAY_NAMES,
+ * so these tests only verify entitlements-level feature availability.
+ */
+describe("credit-hold feature availability (unaffected by plan gating)", () => {
+  it("credit_holds feature is available on all plans including none", async () => {
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+  });
+
+  it("credit_holds is in ALL_FEATURE_KEYS", async () => {
+    const { ALL_FEATURE_KEYS } = await import("~/lib/entitlements");
+    expect(ALL_FEATURE_KEYS).toContain("credit_holds");
+  });
+
+  it("banner-state builder: no over-limit banner when gating off, credit_holds on all plans", async () => {
+    const { buildAccountOverLimitBannerState } = await import("~/lib/over-limit-banner");
+    
+    // Over-limit banner hidden when gating is off (plan-limit gating)
+    const overLimitState = buildAccountOverLimitBannerState(true, false);
+    expect(overLimitState.show).toBe(false);
+    
+    // Credit-hold feature still available on all plans - verified by entitlements
+    const { ALL_PLAN_KEYS, getPlanConfig, planHasFeature } = await import("~/lib/entitlements");
+    for (const planKey of ALL_PLAN_KEYS) {
+      const plan = getPlanConfig(planKey);
+      // Credit holds feature is available on ALL plans including over-limit shops
+      // This means credit-status badges (OK/Near Limit/Held) and manual hold controls render
+      expect(planHasFeature(plan, "credit_holds")).toBe(true);
+    }
+  });
+});
+
+/**
+ * Render tests for UsageDisplay component (T1 plan-limit gating).
+ *
+ * Real renderToString tests verifying that usage badges only show
+ * when gating is enforced.
+ */
+describe("UsageDisplay render tests (T1)", () => {
+  it("gating OFF at-limit: does NOT show At Limit, Near Limit, or Usage Note", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("gating OFF near-limit: does NOT show At Limit, Near Limit, or Usage Note", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 22,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+    expect(html).not.toContain("Usage Note");
+  });
+
+  it("gating ON at-limit: shows At Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 25,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("gating ON over-limit: shows At Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 30,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("gating ON near-limit: shows Near Limit badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 22,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("Near Limit");
+    expect(html).not.toContain("At Limit");
+  });
+
+  it("gating ON below near-limit threshold: shows neither badge", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+
+  it("unlimited plan: shows neither badge regardless of gating", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 100,
+        limit: -1,
+        label: "Buyer accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).not.toContain("At Limit");
+    expect(html).not.toContain("Near Limit");
+  });
+});
+
+/**
+ * T4 Render Tests: PlanPage wiring with null usage.
+ * Verifies Usage section is absent when usage is null.
+ *
+ * Tests the conditional rendering pattern by inspecting the component source
+ * for the {usage && ...} guard around the Usage section.
+ */
+describe("T4 PlanPage component wiring with usage null", () => {
+  it("PlanPage source: Usage section guarded by {usage && ...} conditional", async () => {
+    const { readFileSync } = await import("fs");
+    const planSource = readFileSync("app/routes/app.plan.tsx", "utf-8");
+
+    expect(planSource).toContain("{usage && (");
+    expect(planSource).toContain("<s-section heading=\"Usage\">");
+    
+    const usageGuardMatch = planSource.match(/\{usage\s*&&\s*\(\s*<s-section\s+heading="Usage">/);
+    expect(usageGuardMatch).not.toBeNull();
+  });
+
+  it("UsageDisplay renders Buyer Accounts label (proving Usage section content)", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("Buyer Accounts");
+    expect(html).toContain("10 / 25");
+  });
+});
+
+/**
+ * T4 Render Tests: Over-limit banner shows even when usage is null.
+ * This verifies the banner was moved outside the {usage && ...} block.
+ */
+describe("T4 Over-limit banner renders when usage is null", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("renders over-limit banner when usage is null but gatedCount > 0", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: null,
+          gatedCount: 3,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    // Over-limit banner should show even when usage is null
+    expect(html).toContain("3 accounts over your plan limit");
+    expect(html).toContain("s-banner");
+  });
+
+  it("does not render over-limit banner when gatedCount is 0 and usage is null", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: null,
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    // No over-limit banner when gatedCount is 0
+    expect(html).not.toContain("accounts over your plan limit");
   });
 });

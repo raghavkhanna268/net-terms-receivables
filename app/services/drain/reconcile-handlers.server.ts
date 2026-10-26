@@ -31,12 +31,12 @@ import { markWebhookProcessed } from "~/services/sync/company.server";
 import { safeLog, shopHash } from "~/lib/log.server";
 import { adminGraphQL } from "./admin-client.server";
 import {
-  BULK_COMPANIES_QUERY,
+  getBulkCompaniesQuery,
   BULK_ORDERS_QUERY,
   parseBulkOperationResult,
   registerBulkOperation,
 } from "~/services/sync/bulk-operations.server";
-import { getBulkCustomersQuery } from "~/services/sync/customer-fields.server";
+import { getBulkCustomersQuery, validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getTagRules } from "~/services/sync/customer.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 
@@ -106,8 +106,12 @@ async function buildReconcileMutation(
   shop: string,
   kind: ReconcileStage
 ): Promise<string | null> {
+  const env = getRequestEnv() ?? {};
+
   if (kind === "companies") {
-    return BULK_COMPANIES_QUERY;
+    const query = getBulkCompaniesQuery(env);
+    validateCustomerQuery(query, env);
+    return query;
   }
 
   if (kind === "orders") {
@@ -127,7 +131,6 @@ async function buildReconcileMutation(
       return null;
     }
 
-    const env = getRequestEnv() ?? {};
     return getBulkCustomersQuery(tagRules, env);
   }
 
@@ -239,17 +242,24 @@ export async function startReconcileBulkOperation(
  * Guard: Does not enqueue if Shop no longer exists or is uninstalled (#239).
  * FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row.
  *
+ * #293: Also checks that the previous stage's bulk operation is not closed.
+ * If prevBulkOperationId is provided and that row is closed, the stage is not
+ * enqueued (the reset already closed the pipeline). This serializes with the
+ * reinstall reset's UPDATE lock on the bulk operation row.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
  * @param stage - Stage to enqueue (customers or orders)
  * @param manualKey - Optional manual key base from previous stage
- * @returns Whether the message was enqueued (false if shop doesn't exist or uninstalled)
+ * @param prevBulkOperationId - Optional bulk operation ID of the previous stage
+ * @returns Whether the message was enqueued (false if shop doesn't exist, uninstalled, or prev op closed)
  */
 export async function enqueueReconcileStage(
   sql: Sql,
   shop: string,
   stage: "customers" | "orders",
-  manualKey?: string
+  manualKey?: string,
+  prevBulkOperationId?: string
 ): Promise<boolean> {
   let webhookId: string;
   if (manualKey) {
@@ -271,8 +281,9 @@ export async function enqueueReconcileStage(
     message.manualKey = manualKey;
   }
 
-  // Guard: check and send in one transaction with FOR SHARE (#239).
-  // FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row.
+  // Guard: check and send in one transaction with FOR SHARE (#239, #293).
+  // FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row
+  // and with reinstall reset's UPDATE lock on the bulk operation row.
   const enqueued = await sql.begin(async (tx) => {
     const [shopRow] = await tx<[{ id: string }?]>`
       SELECT id FROM "Shop"
@@ -283,6 +294,20 @@ export async function enqueueReconcileStage(
     if (!shopRow) {
       return false;
     }
+
+    // #293: Check that the previous stage's bulk operation is not closed
+    if (prevBulkOperationId) {
+      const [prevOp] = await tx<[{ bulk_operation_id: string }?]>`
+        SELECT bulk_operation_id FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${prevBulkOperationId}
+          AND closed_at IS NULL
+        FOR SHARE
+      `;
+      if (!prevOp) {
+        return false;
+      }
+    }
+
     await tx`SELECT pgmq.send('s6_sync', ${tx.json(message)})`;
     return true;
   });

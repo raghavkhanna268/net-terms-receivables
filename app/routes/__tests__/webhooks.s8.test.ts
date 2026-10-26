@@ -484,12 +484,95 @@ describe("S8 Webhook Handlers", () => {
       expect(mockSendSyncMessage).not.toHaveBeenCalled();
     });
 
-    it("returns 200 without enqueue when missing GID", async () => {
+    it("returns 200 without enqueue when missing both GID and id", async () => {
       const { action } = await import("../webhooks.draft_orders");
       const request = createMockRequest(
         "https://example.com/webhooks/draft_orders",
-        {}, // Missing admin_graphql_api_id
+        {}, // Missing admin_graphql_api_id and id
         "draft_orders/create"
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    });
+
+    it("builds GID from numeric id when admin_graphql_api_id is missing (#272)", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createMockRequest(
+        "https://example.com/webhooks/draft_orders",
+        { id: 789123456 }, // Only numeric id, no admin_graphql_api_id
+        "draft_orders/delete"
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          topic: "DRAFT_ORDERS_DELETE",
+          shop: TEST_SHOP,
+          webhookId: TEST_WEBHOOK_ID,
+          resourceGid: "gid://shopify/DraftOrder/789123456",
+        })
+      );
+    });
+
+    it("uses admin_graphql_api_id when both GID and id are present (regression)", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createMockRequest(
+        "https://example.com/webhooks/draft_orders",
+        { admin_graphql_api_id: TEST_DRAFT_ORDER_GID, id: 999 },
+        "draft_orders/delete"
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          resourceGid: TEST_DRAFT_ORDER_GID,
+        })
+      );
+    });
+
+    it("returns 200 without enqueue when id is non-numeric string", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createMockRequest(
+        "https://example.com/webhooks/draft_orders",
+        { id: "not-a-number" },
+        "draft_orders/delete"
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    });
+
+    it("returns 200 without enqueue when id is zero", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createMockRequest(
+        "https://example.com/webhooks/draft_orders",
+        { id: 0 },
+        "draft_orders/delete"
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    });
+
+    it("returns 200 without enqueue when id is negative", async () => {
+      const { action } = await import("../webhooks.draft_orders");
+      const request = createMockRequest(
+        "https://example.com/webhooks/draft_orders",
+        { id: -5 },
+        "draft_orders/delete"
       );
 
       const response = await action(createActionArgs(request));
@@ -515,5 +598,77 @@ describe("S8 Webhook Handlers", () => {
         "enqueue_failed"
       );
     });
+  });
+});
+
+describe("buildDraftOrderGid", () => {
+  it("builds GID from positive integer", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(123456789)).toBe("gid://shopify/DraftOrder/123456789");
+  });
+
+  it("builds GID from numeric string", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid("987654321")).toBe("gid://shopify/DraftOrder/987654321");
+  });
+
+  it("returns null for zero", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(0)).toBeNull();
+  });
+
+  it("returns null for negative number", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(-1)).toBeNull();
+    expect(buildDraftOrderGid(-999)).toBeNull();
+  });
+
+  it("returns null for non-integer number", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(123.456)).toBeNull();
+    expect(buildDraftOrderGid(1.0000001)).toBeNull();
+  });
+
+  it("returns null for non-numeric string", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid("abc")).toBeNull();
+    expect(buildDraftOrderGid("12abc")).toBeNull();
+    expect(buildDraftOrderGid("gid://shopify/DraftOrder/123")).toBeNull();
+  });
+
+  it("returns null for string with leading zeros", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid("0123")).toBeNull();
+  });
+
+  it("returns null for string with spaces", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(" 123")).toBeNull();
+    expect(buildDraftOrderGid("123 ")).toBeNull();
+  });
+
+  it("returns null for undefined/null", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(undefined)).toBeNull();
+    expect(buildDraftOrderGid(null)).toBeNull();
+  });
+
+  it("returns null for object/array", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid({ id: 123 })).toBeNull();
+    expect(buildDraftOrderGid([123])).toBeNull();
+  });
+
+  it("returns null for boolean", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(true)).toBeNull();
+    expect(buildDraftOrderGid(false)).toBeNull();
+  });
+
+  it("returns null for NaN and Infinity", async () => {
+    const { buildDraftOrderGid } = await import("../webhooks.draft_orders");
+    expect(buildDraftOrderGid(NaN)).toBeNull();
+    expect(buildDraftOrderGid(Infinity)).toBeNull();
+    expect(buildDraftOrderGid(-Infinity)).toBeNull();
   });
 });

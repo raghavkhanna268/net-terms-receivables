@@ -1,20 +1,40 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError } from "react-router";
+import { Outlet, useLoaderData, useRouteError, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
 import { useEffect } from "react";
+import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  // Read cold once for this request - index will get same value with same context object
+  const cold = readColdOnce(context);
+  const timing = new ServerTiming(cold);
+
   // Session storage is injected per-request via loadContext in workers/app.ts
   const { shopify, cloudflare } = context;
 
+  timing.startPhase("auth_layout");
   const { admin, session } = await shopify.authenticate.admin(request);
+  timing.endPhase("auth_layout");
 
   // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
   runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
 
-  return { apiKey: process.env.SHOPIFY_API_KEY || "" };
+  // Log auth_layout timing
+  timing.logAllPhases();
+
+  const serverTiming = timing.toHeaderValue();
+  const responseData = {
+    apiKey: process.env.SHOPIFY_API_KEY || "",
+  };
+
+  const headers: HeadersInit = {};
+  if (serverTiming) {
+    headers["Server-Timing"] = serverTiming;
+  }
+
+  return data(responseData, { headers });
 };
 
 export default function App() {
@@ -37,10 +57,13 @@ export default function App() {
   return (
     <AppProvider apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app">Dashboard</s-link>
+        {/* @ts-expect-error rel="home" is valid per Shopify App Bridge docs but not in @shopify/polaris-types */}
+        <s-link href="/app" rel="home">Home</s-link>
         <s-link href="/app/reconcile">Reconcile</s-link>
-        <s-link href="/app/plan">Plan</s-link>
+        <s-link href="/app/imports">Imports</s-link>
+        <s-link href="/app/settings/reminders">Reminders</s-link>
         <s-link href="/app/tag-rules">Tag Rules</s-link>
+        <s-link href="/app/plan">Plan</s-link>
         <s-link href="/app/onboarding">Setup Guide</s-link>
         {/* Future navigation items for B2B features */}
         {/* <s-link href="/app/buyers">Buyers</s-link> */}
@@ -57,5 +80,14 @@ export function ErrorBoundary() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
+  const boundaryHeaders = boundary.headers(headersArgs);
+  const resultHeaders = new Headers(boundaryHeaders);
+
+  // Merge Server-Timing from layout loader
+  const layoutTiming = headersArgs.loaderHeaders?.get("Server-Timing");
+  if (layoutTiming) {
+    resultHeaders.set("Server-Timing", layoutTiming);
+  }
+
+  return resultHeaders;
 };

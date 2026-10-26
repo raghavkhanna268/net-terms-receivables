@@ -68,19 +68,19 @@ async function fetchShopOwnerEmail(shop: string): Promise<string | null> {
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
  */
-export const action = async ({ request, context }: ActionFunctionArgs) => {
+export const action = async ({ request }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[Compliance] SHOPIFY_API_SECRET not configured");
     return new Response(null, { status: 500 });
   }
 
-  const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret, {
+  const { shop, topic, payload } = await verifyWebhook(request, apiSecret, {
     requireValidJson: true,
   });
   const normalizedTopic = normalizeWebhookTopic(topic);
 
-  console.log(`[Compliance] Received ${normalizedTopic} wh=${webhookId}`);
+  console.log(`[Compliance] Received ${normalizedTopic}`);
 
   const sql = getRequestSql();
 
@@ -95,14 +95,14 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       if (!typedPayload.customer?.id) {
         console.log(
-          `[Compliance] customers/data_request: No customer ID in payload wh=${webhookId}`
+          "[Compliance] customers/data_request: No customer ID in payload"
         );
         break;
       }
 
       if (!typedPayload.data_request?.id) {
         console.log(
-          `[Compliance] customers/data_request: No data_request.id in payload wh=${webhookId}`
+          "[Compliance] customers/data_request: No data_request.id in payload"
         );
         break;
       }
@@ -112,9 +112,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       `;
 
       if (!shopRecord) {
-        console.log(
-          `[Compliance] customers/data_request: Shop not found wh=${webhookId}`
-        );
+        console.log("[Compliance] customers/data_request: Shop not found");
         break;
       }
 
@@ -141,7 +139,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       console.log(
         `[Compliance] customers/data_request: ${alreadyExists ? "Duplicate" : "Created"} ` +
-          `data request id=${id} wh=${webhookId}`
+          `data request id=${id}`
       );
 
       // Send email notification to shop owner (gated on RESEND_API_KEY)
@@ -156,17 +154,17 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         );
         if (emailResult.sent) {
           console.log(
-            `[Compliance] customers/data_request: Email notification sent wh=${webhookId}`
+            "[Compliance] customers/data_request: Email notification sent"
           );
         } else if (emailResult.error) {
           console.log(
-            `[Compliance] customers/data_request: Email notification failed wh=${webhookId} error=email_send_failed`
+            "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
           );
         }
         // Note: skipped emails are logged inside sendDataRequestNotification
       } else {
         console.log(
-          `data_request_email_skipped wh=${webhookId} request_id=${requestId} reason=no_shop_email`
+          `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
         );
       }
       break;
@@ -181,7 +179,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
       if (!typedPayload.customer?.id) {
         console.log(
-          `[Compliance] customers/redact: No customer ID in payload wh=${webhookId}`
+          "[Compliance] customers/redact: No customer ID in payload"
         );
         break;
       }
@@ -198,12 +196,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
             `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted} ` +
             `payer_aliases=${counts.payerAliasesDeleted}, ` +
             `anonymized account=${counts.buyerAccountAnonymized}, ` +
-            `redacted payments=${counts.paymentsRedacted} shop_id=${shopRecord.id} wh=${webhookId}`
+            `redacted payments=${counts.paymentsRedacted} shop_id=${shopRecord.id}`
         );
       } else {
-        console.log(
-          `[Compliance] customers/redact: Shop not found wh=${webhookId}`
-        );
+        console.log("[Compliance] customers/redact: Shop not found");
       }
       break;
     }
@@ -211,26 +207,27 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     case "SHOP_REDACT": {
       const payloadShop = verifyPayloadShopMatch(shop, payload);
 
-      const { sessionStorage } = context;
-      const sessionCount = await sessionStorage.deleteAllForShop(payloadShop);
-      console.log(
-        `[Compliance] shop/redact: Deleted ${sessionCount} session(s) wh=${webhookId}`
-      );
-
       const pgmqResult = await purgePgmqMessages(sql, payloadShop);
       console.log(
         `[Compliance] shop/redact: pgmq purge - ${pgmqResult.reason}`
       );
 
-      // deleteShop now handles webhook_receipts and s6_processed_webhooks internally
-      // to ensure proper ordering (join delete before receipts delete)
+      // deleteShop handles sessions, webhook_receipts, and s6_processed_webhooks
+      // internally within its transaction. Sessions are only deleted when the
+      // shop is actually being erased (not skipped by reinstall guard). See #291.
       const result = await deleteShop(sql, payloadShop);
       const hash = await shopHash(payloadShop);
 
-      if (result.deleted) {
+      if (result.skippedReinstalled) {
+        // Shop reinstalled within the 48h window before shop/redact arrived (#291).
+        // Skip deletion to preserve the reinstalled shop's data.
+        safeLog("info", "shop_redact_skipped_reinstalled", {
+          shopHash: hash,
+        });
+      } else if (result.deleted) {
         safeLog("info", "shop_redact_deleted", {
           shopHash: hash,
-          webhookId,
+          sessionsDeleted: result.sessionsDeleted,
           refetchNullPurged: result.refetchNullPurged,
           bulkOperationsPurged: result.bulkOperationsPurged,
           orderGapPurged: result.orderGapPurged,
@@ -246,7 +243,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       } else {
         safeLog("info", "shop_redact_not_found", {
           shopHash: hash,
-          webhookId,
         });
       }
       break;

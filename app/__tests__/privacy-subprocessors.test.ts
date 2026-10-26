@@ -60,4 +60,64 @@ describe("Privacy Policy Subprocessor Table", () => {
       expect(hasSubprocessor).toBe(true);
     });
   }
+
+  it("lists Resend with Tokyo, Japan location in privacy.md", () => {
+    const section5Match = privacyContent.match(
+      /## 5\. Subprocessors[\s\S]*?(?=## 6\.|$)/
+    );
+    expect(section5Match).not.toBeNull();
+    const section5 = section5Match![0];
+
+    const resendLine = section5
+      .split("\n")
+      .find(
+        (line) =>
+          line.startsWith("|") && line.toLowerCase().includes("resend")
+      );
+    expect(resendLine).toBeDefined();
+    expect(resendLine).toMatch(/tokyo.*japan|japan.*tokyo/i);
+    expect(resendLine).toContain("ap-northeast-1");
+    expect(resendLine).not.toMatch(/\bUS\b/i);
+    expect(resendLine).not.toMatch(/united states/i);
+  });
+
+  it("lists Resend with Tokyo, Japan location in merchant-terms.md", () => {
+    const merchantTermsPath = join(
+      process.cwd(),
+      "docs",
+      "legal",
+      "merchant-terms.md"
+    );
+    const merchantTermsContent = readFileSync(merchantTermsPath, "utf-8");
+
+    const resendLine = merchantTermsContent
+      .split("\n")
+      .find(
+        (line) =>
+          line.startsWith("|") && line.toLowerCase().includes("resend")
+      );
+    expect(resendLine).toBeDefined();
+    expect(resendLine).toMatch(/tokyo.*japan|japan.*tokyo/i);
+    expect(resendLine).toContain("ap-northeast-1");
+    expect(resendLine).not.toMatch(/\bUS\b/i);
+    expect(resendLine).not.toMatch(/united states/i);
+  });
+
+  it("lists Japan for Resend in cross-border transfers in merchant-terms.md", () => {
+    const merchantTermsPath = join(
+      process.cwd(),
+      "docs",
+      "legal",
+      "merchant-terms.md"
+    );
+    const merchantTermsContent = readFileSync(merchantTermsPath, "utf-8");
+
+    const transferMatch = merchantTermsContent.match(
+      /Cross-Border Transfers[\s\S]*?(?=### \d|## |$)/i
+    );
+    expect(transferMatch).not.toBeNull();
+    const transferSection = transferMatch![0];
+
+    expect(transferSection).toMatch(/japan.*resend|resend.*japan/i);
+  });
 });
