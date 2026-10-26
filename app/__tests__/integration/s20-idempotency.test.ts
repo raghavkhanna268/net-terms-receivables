@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { requestContext } from "~/lib/request-context.server";
+import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
 
 /**
  * S20 Idempotency Integration Tests
@@ -228,6 +229,9 @@ describeWithDb("S20 Idempotency: recordAndEnqueueSync atomicity", () => {
     vi.restoreAllMocks();
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP}`;
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP}`.catch(() => {});
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP], "s20-idempotency.test.ts (atomicity)");
+
     await sql.end();
   });
 
@@ -441,6 +445,9 @@ describeWithDb("S20 Idempotency: Full webhook route with HMAC-signed request", (
     vi.restoreAllMocks();
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP}`;
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP}`.catch(() => {});
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP], "s20-idempotency.test.ts (route)");
+
     await sql.end();
   });
 

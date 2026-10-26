@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
 import { S6_QUEUES, type BulkMessage } from "~/lib/pgmq.server";
 import {
   runDrain,
@@ -61,6 +62,8 @@ describeWithDb("S10b processBulkQueue Integration", () => {
 
     // Clean up test Shop row
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP], "s10b-bulk-queue.test.ts");
 
     await sql.end();
   });

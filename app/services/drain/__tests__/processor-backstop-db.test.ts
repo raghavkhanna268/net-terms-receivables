@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../../test/helpers/queue-leftovers";
 
 // Mock admin client for GraphQL calls
 vi.mock("../admin-client.server", () => ({
@@ -80,6 +81,9 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`proc-${TEST_SUFFIX}%`}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "processor-backstop-db.test.ts");
+
     await sql.end();
   });
 

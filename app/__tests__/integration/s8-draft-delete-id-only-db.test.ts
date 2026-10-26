@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { requestContext } from "~/lib/request-context.server";
+import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
 
 /**
  * S8 Draft Order Delete with id-only payload - DB Integration Tests (#272)
@@ -104,6 +105,9 @@ describeWithDb("S8 Draft Order Delete: id-only payload (#272)", () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`.catch(() => {});
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "s8-draft-delete-id-only-db.test.ts");
+
     await sql.end();
   });
 

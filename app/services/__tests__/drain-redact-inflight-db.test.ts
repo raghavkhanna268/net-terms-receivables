@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -119,6 +120,8 @@ describeWithDb("drain: in-flight message for a redacted shop (#239)", () => {
     await sqlRef`DELETE FROM webhook_receipts WHERE shop IN ${sqlRef(allDomains)}`;
     await sqlRef`DELETE FROM "Session" WHERE shop IN ${sqlRef(allDomains)}`;
     await sqlRef`DELETE FROM "Shop" WHERE id IN (${A.id}, ${B.id}, ${C.id})`;
+
+    await assertNoQueueLeftovers(sqlRef, allDomains, "drain-redact-inflight-db.test.ts (main)");
 
     await sqlRef.end();
   });
@@ -327,6 +330,9 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
     await sql`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' IN ${sql(allDomains)}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${GUARD_SUFFIX}%`}`;
     await sql`DELETE FROM "Shop" WHERE id IN (${LIVE_SHOP_ID}, ${UNINSTALLED_SHOP_ID})`;
+
+    await assertNoQueueLeftovers(sql, allDomains, "drain-redact-inflight-db.test.ts (guards)");
+
     await sql.end();
   });
 
@@ -535,6 +541,9 @@ describeWithDb("drain guards: interleaving with deleteShop (#239)", () => {
     await sql1`DELETE FROM order_outstanding_missing WHERE shop = ${SHOP_A_DOMAIN}`;
     await sql1`DELETE FROM s10b_customer_pii_fallback WHERE shop = ${SHOP_A_DOMAIN}`;
     await sql1`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID}`;
+
+    await assertNoQueueLeftovers(sql1, [SHOP_A_DOMAIN], "drain-redact-inflight-db.test.ts (interleave)");
+
     await sql1.end();
     await sql2.end();
   });

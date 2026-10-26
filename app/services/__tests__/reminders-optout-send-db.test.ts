@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -115,6 +116,12 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
       DELETE FROM s18_global_sends 
       WHERE send_key = 'global' AND send_month = ${FIXED_MONTH_STR}
     `;
+
+    const allDomains = [TEST_SHOP_DOMAIN, OTHER_SHOP_DOMAIN];
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN ${sql(allDomains)}`;
+
+    await assertNoQueueLeftovers(sql, allDomains, "reminders-optout-send-db.test.ts");
+
     await sql.end();
   });
 

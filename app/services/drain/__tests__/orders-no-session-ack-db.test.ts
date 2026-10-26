@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi, afterEach, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../../test/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -145,6 +146,8 @@ describeWithDb("ORDERS_* no-session ACK behavior (#239 extension)", () => {
     await sqlRef`DELETE FROM "Invoice" WHERE id IN ${sqlRef(allInvoiceIds)}`;
     await sqlRef`DELETE FROM "BuyerAccount" WHERE id IN ${sqlRef(allBuyerAccountIds)}`;
     await sqlRef`DELETE FROM "Shop" WHERE id IN ${sqlRef(allShopIds)}`;
+
+    await assertNoQueueLeftovers(sqlRef, allDomains, "orders-no-session-ack-db.test.ts");
 
     await sqlRef.end();
   });
