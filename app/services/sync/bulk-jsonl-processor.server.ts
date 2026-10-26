@@ -893,12 +893,14 @@ export async function saveBulkOperationProgress(
  */
 export async function claimBulkCompletion(
   sql: Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  shop: string
 ): Promise<boolean> {
   const result = await sql`
     UPDATE s6_bulk_operations
     SET completed_at = now()
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND shop = ${shop}
       AND completed_at IS NULL
       AND closed_at IS NULL
     RETURNING bulk_operation_id
@@ -908,39 +910,86 @@ export async function claimBulkCompletion(
 
 /**
  * Acquire processing lease atomically.
- * Returns true if lease acquired, false if another processor holds the lease.
+ * Returns the lease token if acquired, null if another processor holds the lease.
  *
  * S25: Processing lease prevents concurrent processing of the same bulk op.
  * Losing the lease is retryable WITHOUT bumping failure_count.
+ * The returned token MUST be passed to renewProcessingLease and releaseProcessingLease
+ * to ensure only the lease owner can renew/release it.
+ *
+ * Token-based ownership (Team Lead ruling):
+ * - Each run generates a unique token via crypto.randomUUID()
+ * - Only the token owner can renew or release the lease
+ * - Legacy rows with NULL token and non-null lease: claimable only after lease expires
  */
 export async function acquireProcessingLease(
   sql: Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  shop: string
+): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const result = await sql<{ processing_lease_token: string }[]>`
+    UPDATE s6_bulk_operations
+    SET processing_lease_until = now() + make_interval(secs => ${PROCESSING_LEASE_SECONDS}),
+        processing_lease_token = ${token}
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND shop = ${shop}
+      AND closed_at IS NULL
+      AND (processing_lease_until IS NULL OR processing_lease_until < now())
+    RETURNING processing_lease_token
+  `;
+  return result.length > 0 ? result[0].processing_lease_token : null;
+}
+
+/**
+ * Release processing lease (e.g., on completion or when giving up).
+ * Only releases if the current token matches (owner-checked).
+ * Clears BOTH processing_lease_until AND processing_lease_token atomically.
+ *
+ * @param token - The token returned by acquireProcessingLease.
+ *                If null, no-op (caller never held a lease).
+ */
+export async function releaseProcessingLease(
+  sql: Sql,
+  bulkOperationId: string,
+  shop: string,
+  token: string | null
+): Promise<void> {
+  if (!token) return;
+  await sql`
+    UPDATE s6_bulk_operations
+    SET processing_lease_until = NULL,
+        processing_lease_token = NULL
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND shop = ${shop}
+      AND processing_lease_token = ${token}
+      AND closed_at IS NULL
+  `;
+}
+
+/**
+ * Renew processing lease per chunk.
+ * Only renews if the current token matches (owner-checked).
+ * Returns true if renewed, false if renewal failed (lost lease).
+ *
+ * If renewal fails (0 rows updated), the processor must stop immediately
+ * without writing progress.
+ */
+export async function renewProcessingLease(
+  sql: Sql,
+  bulkOperationId: string,
+  shop: string,
+  token: string
 ): Promise<boolean> {
   const result = await sql`
     UPDATE s6_bulk_operations
     SET processing_lease_until = now() + make_interval(secs => ${PROCESSING_LEASE_SECONDS})
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND shop = ${shop}
+      AND processing_lease_token = ${token}
       AND closed_at IS NULL
-      AND (processing_lease_until IS NULL OR processing_lease_until < now())
-    RETURNING bulk_operation_id
   `;
   return result.count > 0;
-}
-
-/**
- * Release processing lease (e.g., on completion or when giving up).
- */
-export async function releaseProcessingLease(
-  sql: Sql,
-  bulkOperationId: string
-): Promise<void> {
-  await sql`
-    UPDATE s6_bulk_operations
-    SET processing_lease_until = NULL
-    WHERE bulk_operation_id = ${bulkOperationId}
-      AND closed_at IS NULL
-  `;
 }
 
 /**
@@ -949,12 +998,14 @@ export async function releaseProcessingLease(
  */
 export async function markNextStageEnqueued(
   sql: Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  shop: string
 ): Promise<boolean> {
   const result = await sql`
     UPDATE s6_bulk_operations
     SET next_stage_enqueued_at = now()
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND shop = ${shop}
       AND next_stage_enqueued_at IS NULL
       AND closed_at IS NULL
     RETURNING bulk_operation_id
@@ -1065,8 +1116,8 @@ export async function processBulkOperation(
   }
 
   // S25: Acquire processing lease to prevent concurrent processing
-  const leaseAcquired = await acquireProcessingLease(sql, bulkOperationId);
-  if (!leaseAcquired) {
+  const leaseToken = await acquireProcessingLease(sql, bulkOperationId, shop);
+  if (!leaseToken) {
     // Losing the lease is retryable WITHOUT bumping failure_count
     return {
       success: false,
@@ -1143,7 +1194,7 @@ export async function processBulkOperation(
     
     if (status === "COMPLETED" && url === null && parsedObjectCount === 0) {
       // Empty result - complete the operation with 0 lines processed
-      const claimed = await claimBulkCompletion(sql, bulkOperationId);
+      const claimed = await claimBulkCompletion(sql, bulkOperationId, shop);
       await markWebhookProcessed(
         sql,
         webhookId,
@@ -1258,7 +1309,7 @@ export async function processBulkOperation(
   // Handle empty response at EOF
   if (bytes.length === 0 && chunkResult.isEof) {
     // S25: Use claimBulkCompletion for exactly-once completion
-    const claimed = await claimBulkCompletion(sql, bulkOperationId);
+    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1416,7 +1467,7 @@ export async function processBulkOperation(
 
   if (isComplete) {
     // S25: Use claimBulkCompletion for exactly-once completion
-    const claimed = await claimBulkCompletion(sql, bulkOperationId);
+    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1467,6 +1518,21 @@ export async function processBulkOperation(
     upsertedCount: totalUpserted,
   });
 
+  // S25: Renew lease after successful chunk processing to prevent other processors
+  // from taking over while we're making progress. If renewal fails, we've lost the lease.
+  // Per Team Lead ruling: If renewal updates 0 rows, stop immediately without writing progress.
+  const renewed = await renewProcessingLease(sql, bulkOperationId, shop, leaseToken);
+  if (!renewed) {
+    return {
+      success: false,
+      action: "skipped",
+      error: BULK_ERROR_CODES.LEASE_CONTENTION,
+      errorCode: BULK_ERROR_CODES.LEASE_CONTENTION,
+      status: "error",
+      errorType: "retryable",
+    };
+  }
+
   return {
     success: true,
     action: "updated",
@@ -1474,7 +1540,7 @@ export async function processBulkOperation(
     status: "progress",
   };
   } finally {
-    // S25: Always release processing lease on any exit path
-    await releaseProcessingLease(sql, bulkOperationId);
+    // S25: Always release processing lease on any exit path (owner-checked)
+    await releaseProcessingLease(sql, bulkOperationId, shop, leaseToken);
   }
 }

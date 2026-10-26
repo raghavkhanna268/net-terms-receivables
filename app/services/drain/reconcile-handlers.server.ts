@@ -83,10 +83,11 @@ export function extractChainKey(webhookId: string): string | undefined {
 /**
  * Result of claimReconcileStage.
  * - claimed: Successfully claimed the stage
- * - already_running: Another processor has claimed with a bulk_operation_id (skip)
+ * - already_running: Another processor has claimed with a bulk_operation_id and the op row exists (skip)
  * - retry_pending: A claim exists with NULL bulk_operation_id and is younger than threshold (retryable)
+ * - { orphan: bulkOperationId }: Claim has bulk_operation_id but no op row exists (adopt/register it)
  */
-export type ClaimResult = "claimed" | "already_running" | "retry_pending";
+export type ClaimResult = "claimed" | "already_running" | "retry_pending" | { orphan: string };
 
 /**
  * Claim a reconcile stage for exactly-once stage starts.
@@ -137,9 +138,7 @@ export async function claimReconcileStage(
   `;
   
   if (existingClaim?.bulk_operation_id) {
-    // S25: Verify the op row actually exists. If claim has op id but no row exists
-    // (due to partial failure before atomic fix), treat as re-claimable by clearing
-    // the broken claim and returning retry_pending.
+    // S25: Verify the op row actually exists.
     const [opExists] = await sql<{ bulk_operation_id: string }[]>`
       SELECT bulk_operation_id FROM s6_bulk_operations
       WHERE bulk_operation_id = ${existingClaim.bulk_operation_id}
@@ -149,13 +148,10 @@ export async function claimReconcileStage(
       return "already_running";
     }
     
-    // Op row doesn't exist - clear the orphan claim so it can be re-claimed
-    await sql`
-      UPDATE s6_reconcile_stage_claims
-      SET bulk_operation_id = NULL, claimed_at = now() - make_interval(mins => ${CLAIM_RECLAIM_MINUTES + 1})
-      WHERE chain_key = ${chainKey} AND stage = ${stage}
-    `;
-    return "retry_pending";
+    // Op row doesn't exist - this is an orphan claim (op created on Shopify but
+    // registration failed). Per Team Lead ruling #2: return the orphan op id so
+    // the caller can register/adopt it without starting a new Shopify op.
+    return { orphan: existingClaim.bulk_operation_id };
   }
   
   // Claim exists with NULL bulk_operation_id but is younger than threshold - retry later
@@ -358,6 +354,32 @@ export async function startReconcileBulkOperation(
         retryable: true,
       };
     }
+    // S25: Handle orphan claim - op was created on Shopify but registration failed.
+    // Per Team Lead ruling #2: adopt the existing op id without starting a new Shopify op.
+    if (typeof claimResult === "object" && "orphan" in claimResult) {
+      const orphanOpId = claimResult.orphan;
+      safeLog("info", "reconcile_adopting_orphan_op", {
+        shopHash: await shopHash(shop),
+        stage: kind,
+        operationId: orphanOpId,
+      });
+
+      // Register the orphan operation (it already exists on Shopify)
+      await registerBulkOperation(sql, orphanOpId, shop, kind, "reconcile", kind);
+
+      await markWebhookProcessed(
+        sql,
+        webhookId,
+        `RECONCILE_${kind.toUpperCase()}`,
+        orphanOpId
+      );
+
+      return {
+        success: true,
+        action: "created",
+        entityId: orphanOpId,
+      };
+    }
   }
 
   const mutation = await buildReconcileMutation(sql, shop, kind);
@@ -381,9 +403,9 @@ export async function startReconcileBulkOperation(
     };
   }
 
-  // Use try/finally to ensure claim is released on any retryable error
-  let mutationSucceeded = false;
+  // Use try/finally to ensure claim is released on retryable error (but NOT if we have an op id)
   let bulkOperationId: string | undefined;
+  let opIdRecorded = false;
   try {
     const result = await adminGraphQL<{
       bulkOperationRunQuery?: {
@@ -418,26 +440,25 @@ export async function startReconcileBulkOperation(
 
     bulkOperationId = parsed.bulkOperationId;
 
-    // S25: Record bulk_operation_id on the claim AND register the op atomically.
-    // If either fails, both are rolled back. This prevents the case where:
-    // - recordClaimBulkOperationId succeeds
-    // - registerBulkOperation fails
-    // - retry returns "already_running" (claim has op id)
-    // - but no s6_bulk_operations row exists, causing bulk_finish_unknown_op
-    await sql.begin(async (tx) => {
-      if (chainKey) {
-        await recordClaimBulkOperationId(tx, chainKey, kind, shop, bulkOperationId!);
-      }
-      await registerBulkOperation(
-        tx,
-        bulkOperationId!,
-        shop,
-        kind,
-        "reconcile",
-        kind
-      );
-    });
-    mutationSucceeded = true;
+    // S25: Once we have bulkOperationId from Shopify, record it on the claim FIRST.
+    // This ensures that if registerBulkOperation fails, the claim still has the op id,
+    // preventing a retry from starting a SECOND Shopify op. The retry will see
+    // "already_running" from claimReconcileStage and skip.
+    if (chainKey) {
+      await recordClaimBulkOperationId(sql, chainKey, kind, shop, bulkOperationId);
+      opIdRecorded = true;
+    }
+
+    // Now register the bulk operation. If this fails, we do NOT release the claim
+    // because it has the op id and Shopify already started the operation.
+    await registerBulkOperation(
+      sql,
+      bulkOperationId,
+      shop,
+      kind,
+      "reconcile",
+      kind
+    );
 
     await markWebhookProcessed(
       sql,
@@ -458,8 +479,9 @@ export async function startReconcileBulkOperation(
       entityId: bulkOperationId,
     };
   } finally {
-    // Release claim if mutation failed (allows immediate retry)
-    if (!mutationSucceeded && chainKey) {
+    // Release claim only if mutation failed BEFORE we got a bulkOperationId.
+    // Once we have an op id from Shopify, the claim must stay so retries see "already_running".
+    if (!opIdRecorded && chainKey) {
       await releaseReconcileStageClaim(sql, chainKey, kind, shop);
     }
   }
@@ -524,7 +546,7 @@ export async function enqueueReconcileStage(
   const enqueued = await sql.begin(async (tx) => {
     // S25: Atomically check if next stage was already enqueued
     if (prevBulkOperationId) {
-      const markedEnqueued = await markNextStageEnqueued(tx, prevBulkOperationId);
+      const markedEnqueued = await markNextStageEnqueued(tx, prevBulkOperationId, shop);
       if (!markedEnqueued) {
         // Already enqueued by another processor
         return false;

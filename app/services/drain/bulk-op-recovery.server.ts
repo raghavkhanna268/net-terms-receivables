@@ -452,9 +452,7 @@ export async function recoverStaleBulkOperations(
   const leaseExpiredOps = await findLeaseExpiredBulkOperations(sql, leaseExpiryThresholdMinutes);
 
   const seenIds = new Set(staleOps.map((op) => op.bulk_operation_id));
-  // Handle case where leaseExpiredOps might not be an array in unit tests with mocked SQL
-  const leaseExpiredOpsArray = Array.isArray(leaseExpiredOps) ? leaseExpiredOps : [];
-  const uniqueLeaseExpiredOps = leaseExpiredOpsArray.filter(
+  const uniqueLeaseExpiredOps = leaseExpiredOps.filter(
     (op) => !seenIds.has(op.bulk_operation_id)
   );
   const allOps = [...staleOps, ...uniqueLeaseExpiredOps];

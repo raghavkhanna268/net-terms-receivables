@@ -476,6 +476,48 @@ describeWithDb("CompanyLocation Sync", () => {
         }
       }
     });
+
+    it("bulk with bad row rejects when flag off (main behavior)", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      
+      try {
+        const goodLocId1 = `gid://shopify/CompanyLocation/good1-${Date.now()}`;
+        const badLocId = `gid://shopify/CompanyLocation/bad-${Date.now()}`;
+        
+        // Non-existent shop - FK violation
+        const badShopId = `shop-nonexistent-${Date.now()}`;
+        
+        const accounts = [
+          mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+            id: goodLocId1,
+            name: "Good Account 1",
+            company: { id: `gid://shopify/Company/good1-${Date.now()}` },
+          }, {}),
+          mapCompanyLocationToBuyerAccount(badShopId, { // Non-existent shop - FK violation
+            id: badLocId,
+            name: "Bad Account",
+            company: { id: `gid://shopify/Company/bad-${Date.now()}` },
+          }, {}),
+        ];
+
+        // Flag off: errors propagate like main, so the call rejects on the bad row
+        await expect(bulkUpsertBuyerAccounts(sql, accounts)).rejects.toThrow();
+        
+        // The good account before the bad row was inserted (row-by-row processing)
+        const [good1] = await sql`
+          SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${goodLocId1}
+        `;
+        expect(good1).toBeDefined();
+        expect(good1.name).toBe("Good Account 1");
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
   });
 
   describe("B2B main contact PII handling", () => {

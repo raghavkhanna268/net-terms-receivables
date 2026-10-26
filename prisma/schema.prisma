@@ -694,6 +694,8 @@ model S6BulkOperation {
   finishReceivedAt DateTime? @map("finish_received_at") @db.Timestamptz(6)
   /// Processing lease expiry. A processor must acquire the lease before processing.
   processingLeaseUntil DateTime? @map("processing_lease_until") @db.Timestamptz(6)
+  /// Processing lease owner token. A per-run UUID to ensure only the lease owner can renew/release.
+  processingLeaseToken String?   @map("processing_lease_token")
   /// When the next stage was enqueued. Prevents duplicate nextStage enqueues.
   nextStageEnqueuedAt DateTime? @map("next_stage_enqueued_at") @db.Timestamptz(6)
 

@@ -199,7 +199,9 @@ describe("bulk-op-recovery", () => {
       const mockSql = Object.assign(
         vi.fn().mockImplementation(() => {
           callCount++;
+          // First call: findStaleBulkOperations; second call: findLeaseExpiredBulkOperations
           if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps must be array
           return Promise.resolve({ count: 1 });
         }),
         {
@@ -246,6 +248,7 @@ describe("bulk-op-recovery", () => {
         vi.fn().mockImplementation(() => {
           callCount++;
           if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]);
           return Promise.resolve({ count: 1 });
         }),
         {
@@ -290,6 +293,7 @@ describe("bulk-op-recovery", () => {
         vi.fn().mockImplementation(() => {
           callCount++;
           if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]);
           return Promise.resolve({ count: 1 });
         }),
         {
@@ -332,6 +336,7 @@ describe("bulk-op-recovery", () => {
         vi.fn().mockImplementation(() => {
           callCount++;
           if (callCount === 1) return Promise.resolve(findStaleResult);
+          if (callCount === 2) return Promise.resolve([]);
           return Promise.resolve({ count: 1 });
         }),
         {

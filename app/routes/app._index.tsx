@@ -22,7 +22,7 @@ import {
 } from "~/lib/aging";
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
-import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
@@ -282,9 +282,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       };
 
       // Run all main queries in parallel with timing
+      // Always call getUsageStats for usage display. Only skip gatedAccountCount and paused banner when flag off.
       const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
         timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
-        getUsageStats(sql, shop.id),
+        getUsageStats(sql, shop.id).catch((err) => {
+          safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+          return null;
+        }),
         getShopAgingTotals(sql, shop.id, asOf),
         timing.time("ledger_rows", () =>
           onlyOverLimit
@@ -379,10 +383,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           isTest: planData.isTest,
         }
       : null,
-    usage: usage ?? {
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
-    },
+    usage,
     upgradeUrl: (() => {
       const handle = getAppHandle();
       if (handle === null) {
@@ -406,6 +407,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     onlyOverLimit,
     overLimitCount,
     error,
+    newAccountsPausedBanner: (gatingEnforced && usage)
+      ? buildNewAccountsPausedBannerState(
+          usage.companies.current,
+          usage.companies.limit,
+          gatingEnforced,
+          (() => {
+            const handle = getAppHandle();
+            if (handle === null) return null;
+            return buildPlanSelectionUrl(shopDomain, handle);
+          })()
+        )
+      : { show: false, heading: "", bodyText: "", upgradeUrl: null },
   };
 
   const headers: HeadersInit = {};
@@ -717,6 +730,7 @@ export default function Index() {
     onlyOverLimit,
     overLimitCount,
     error,
+    newAccountsPausedBanner,
     currencySupported,
   } = useLoaderData<typeof loader>();
 
@@ -724,8 +738,9 @@ export default function Index() {
   const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
 
-  const companiesUsed = usage.companies.current;
-  const companiesLimit = usage.companies.limit;
+  const usageUnavailable = usage === null;
+  const companiesUsed = usage?.companies.current ?? 0;
+  const companiesLimit = usage?.companies.limit ?? -1;
 
   const hasInvoices =
     agingTotals && Object.keys(agingTotals.totalByCurrency).length > 0;
@@ -746,6 +761,23 @@ export default function Index() {
         </s-section>
       )}
 
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
+
       {/* S21: Plan Banner */}
       <s-section heading="Your Plan">
         <PlanBanner
@@ -756,6 +788,7 @@ export default function Index() {
           companiesLimit={companiesLimit}
           gatingEnforced={gatingEnforced}
           upgradeUrl={upgradeUrl}
+          usageUnavailable={usageUnavailable}
         />
       </s-section>
 

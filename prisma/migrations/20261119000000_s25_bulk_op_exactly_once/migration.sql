@@ -5,6 +5,7 @@
 ALTER TABLE s6_bulk_operations
   ADD COLUMN IF NOT EXISTS finish_received_at TIMESTAMPTZ(6),
   ADD COLUMN IF NOT EXISTS processing_lease_until TIMESTAMPTZ(6),
+  ADD COLUMN IF NOT EXISTS processing_lease_token TEXT,
   ADD COLUMN IF NOT EXISTS next_stage_enqueued_at TIMESTAMPTZ(6);
 
 CREATE TABLE IF NOT EXISTS s6_reconcile_stage_claims (
