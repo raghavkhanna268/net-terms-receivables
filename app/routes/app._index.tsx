@@ -23,8 +23,9 @@ import {
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
-import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
+import { NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
+import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
@@ -247,6 +248,43 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shopCurrency = currencyResult.currency;
   const currencyFlipBlocked = currencyResult.flipBlocked;
 
+  // #292: Check currency gate BEFORE money queries - if not supported, return minimal payload with no amounts
+  const currencySupported = isCurrencyGateOpen(shopCurrency);
+  if (!currencySupported) {
+    timing.endPhase("loader_total");
+    timing.logAllPhases();
+    const serverTiming = timing.toHeaderValue();
+    const headers: HeadersInit = {};
+    if (serverTiming) {
+      headers["Server-Timing"] = serverTiming;
+    }
+    const notSupportedStoreHandle = shopDomain.replace(".myshopify.com", "");
+    return data({
+      notSupported: true,
+      shopName: notSupportedStoreHandle,
+      shopDomain,
+      storeHandle: notSupportedStoreHandle,
+      shopCurrency: getEffectiveCurrency(shopCurrency),
+      currencySupported: false,
+      currencyFlipBlocked,
+      plan: null,
+      usage: { companies: { current: 0, limit: 0 }, importsThisMonth: { current: 0, limit: -1 } },
+      upgradeUrl: null,
+      gatingEnforced: false,
+      agingTotals: null,
+      buyerLedger: null,
+      selectedBuyerInvoices: null,
+      selectedBuyerId: null,
+      pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
+      sortBy: "outstanding" as SortBy,
+      sortOrder: "desc" as SortOrder,
+      onlyOverLimit: false,
+      overLimitCount: 0,
+      error: null,
+      newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+    }, { headers });
+  }
+
   // Time onboarding_checks phase
   if (shop && !skipOnboarding) {
     timing.startPhase("onboarding_checks");
@@ -347,10 +385,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
 
-  // #292: Check if shop currency is supported (INR-only in v1)
-  // Uses shopCurrency which may have been retried if it was 'XXX'
-  const currencySupported = isShopCurrencySupported(shopCurrency);
-
   if (shop && !error) {
     const accessParams: Parameters<typeof recordAccess>[1] = {
       shopId: shop.id,
@@ -378,7 +412,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopDomain,
     storeHandle,
     shopCurrency,
-    currencySupported,
+    currencySupported: true as const,
     currencyFlipBlocked,
     plan: planData
       ? {
@@ -739,6 +773,27 @@ export default function Index() {
     currencyFlipBlocked,
   } = useLoaderData<typeof loader>();
 
+  // #292: When currency not supported, show the appropriate banner
+  // If flip was blocked, show the flip blocked banner; otherwise show the not supported banner
+  if (!currencySupported) {
+    return (
+      <s-page heading="Net Terms Receivables">
+        <s-section>
+          {currencyFlipBlocked ? (
+            <s-banner tone="critical" heading="Currency Conversion Not Available">
+              {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
+              Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
+            </s-banner>
+          ) : (
+            <s-banner tone="critical" heading="Currency Not Supported">
+              {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+            </s-banner>
+          )}
+        </s-section>
+      </s-page>
+    );
+  }
+
   const planKey = (plan?.key ?? "none") as PlanKey;
   const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
@@ -757,25 +812,6 @@ export default function Index() {
 
   return (
     <s-page heading="Net Terms Receivables">
-      {/* #292: Currency Flip Blocked Banner (non-INR→INR with existing data) */}
-      {currencyFlipBlocked && (
-        <s-section>
-          <s-banner tone="critical" heading="Currency Conversion Not Available">
-            {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
-            Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
-          </s-banner>
-        </s-section>
-      )}
-
-      {/* #292: Currency Not Supported Banner (non-INR shop without blocked flip) */}
-      {!currencySupported && !currencyFlipBlocked && (
-        <s-section>
-          <s-banner tone="critical" heading="Currency Not Supported">
-            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
-          </s-banner>
-        </s-section>
-      )}
-
       {/* T4: New accounts paused banner */}
       {newAccountsPausedBanner.show && (
         <s-section>

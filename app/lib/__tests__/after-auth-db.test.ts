@@ -600,7 +600,7 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
     vi.resetModules();
   });
 
-  it("runAfterAuth clears uninstalledAt and preserves other columns when shop is cached", async () => {
+  it("runAfterAuth clears uninstalledAt, preserves plan columns, writes XXX on failed currency read (fail-closed, G4)", async () => {
     const TEST_SHOP = `cached-runafterauth-${TEST_SUFFIX}.myshopify.com`;
 
     await sql`
@@ -616,11 +616,10 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
 
     const [beforeSetup] = await sql<{
       timezone: string;
-      currency: string;
       plan_key: string;
       defaultTermsDays: number | null;
     }[]>`
-      SELECT timezone, currency, plan_key, "defaultTermsDays"
+      SELECT timezone, plan_key, "defaultTermsDays"
       FROM "Shop" WHERE domain = ${TEST_SHOP}
     `;
 
@@ -687,7 +686,7 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
 
     expect(afterReinstall.uninstalledAt).toBeNull();
     expect(afterReinstall.timezone).toBe(beforeSetup.timezone);
-    expect(afterReinstall.currency).toBe(beforeSetup.currency);
+    expect(afterReinstall.currency).toBe("XXX");
     expect(afterReinstall.plan_key).toBe(beforeSetup.plan_key);
     expect(afterReinstall.defaultTermsDays).toBe(beforeSetup.defaultTermsDays);
   });
@@ -1775,9 +1774,9 @@ describeWithDb("#292: currency handling in upsertShopOnAuth (DB)", () => {
     });
   });
 
-  describe("existing currency preserved on conflict when new value is 'XXX'", () => {
-    it("re-auth with 'XXX' preserves existing 'USD' currency", async () => {
-      const TEST_SHOP = `preserve-usd-${TEST_SUFFIX}.myshopify.com`;
+  describe("fail-closed: 'XXX' currency written on failed read (G4)", () => {
+    it("re-auth with 'XXX' overwrites existing 'USD' currency (fail-closed)", async () => {
+      const TEST_SHOP = `failclosed-usd-${TEST_SUFFIX}.myshopify.com`;
       const { upsertShopOnAuth } = await import("../after-auth.server");
 
       await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "USD");
@@ -1792,11 +1791,11 @@ describeWithDb("#292: currency handling in upsertShopOnAuth (DB)", () => {
       const [after] = await sql<{ currency: string }[]>`
         SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
       `;
-      expect(after.currency).toBe("USD");
+      expect(after.currency).toBe("XXX");
     });
 
-    it("re-auth with 'XXX' preserves existing 'INR' currency", async () => {
-      const TEST_SHOP = `preserve-inr-${TEST_SUFFIX}.myshopify.com`;
+    it("re-auth with 'XXX' overwrites existing 'INR' currency (fail-closed)", async () => {
+      const TEST_SHOP = `failclosed-inr-${TEST_SUFFIX}.myshopify.com`;
       const { upsertShopOnAuth } = await import("../after-auth.server");
 
       await upsertShopOnAuth(sql, TEST_SHOP, "Asia/Kolkata", "INR");
@@ -1811,7 +1810,7 @@ describeWithDb("#292: currency handling in upsertShopOnAuth (DB)", () => {
       const [after] = await sql<{ currency: string }[]>`
         SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
       `;
-      expect(after.currency).toBe("INR");
+      expect(after.currency).toBe("XXX");
     });
 
     it("re-auth with valid currency updates existing currency", async () => {
@@ -1835,7 +1834,7 @@ describeWithDb("#292: currency handling in upsertShopOnAuth (DB)", () => {
   });
 
   describe("reinstall currency handling", () => {
-    it("reinstall with 'XXX' preserves existing currency", async () => {
+    it("reinstall with 'XXX' overwrites existing currency (fail-closed, G4)", async () => {
       const TEST_SHOP = `reinstall-xxx-${TEST_SUFFIX}.myshopify.com`;
       const { upsertShopOnAuth } = await import("../after-auth.server");
 
@@ -1856,7 +1855,7 @@ describeWithDb("#292: currency handling in upsertShopOnAuth (DB)", () => {
       const [afterReinstall] = await sql<{ currency: string; uninstalledAt: Date | null }[]>`
         SELECT currency, "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
       `;
-      expect(afterReinstall.currency).toBe("INR");
+      expect(afterReinstall.currency).toBe("XXX");
       expect(afterReinstall.uninstalledAt).toBeNull();
     });
 

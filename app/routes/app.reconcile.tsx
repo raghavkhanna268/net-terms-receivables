@@ -37,6 +37,8 @@ import { applyMatch, unmatchMatch, RECONCILE_HUMAN_MESSAGES } from "~/services/a
 import { formatPaiseAmount } from "~/lib/aging";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
+import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 const PAGE_SIZE = 20;
 
@@ -122,7 +124,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const selectedPaymentId = url.searchParams.get("payment") ?? null;
 
   // Get shop ID
-  const [shop] = await sql<{ id: string; currency: string }[]>`
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
@@ -136,6 +138,22 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Shop not found",
       tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
+      notSupported: false,
+    };
+  }
+
+  // #292: Check currency gate - if not supported, return minimal payload with no amounts
+  if (!isCurrencyGateOpen(shop.currency)) {
+    return {
+      shopCurrency: getEffectiveCurrency(shop.currency),
+      payments: [],
+      matches: [],
+      selectedPayment: null,
+      pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
+      view,
+      error: null,
+      tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
+      notSupported: true,
     };
   }
 
@@ -307,7 +325,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       err: toErrorCode(err),
     });
     return {
-      shopCurrency: shop.currency,
+      shopCurrency: getEffectiveCurrency(shop.currency),
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -315,6 +333,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: "Failed to load reconciliation data",
       tabCounts,
+      notSupported: false,
     };
   }
 
@@ -327,7 +346,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   });
 
   return {
-    shopCurrency: shop.currency,
+    shopCurrency: getEffectiveCurrency(shop.currency),
     payments,
     matches,
     selectedPayment,
@@ -335,6 +354,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     view,
     error: null,
     tabCounts,
+    notSupported: false,
   };
 };
 
@@ -347,13 +367,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
-  // Get shop ID
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  // Get shop ID and currency
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
     return { success: false, error: "Shop not found" };
+  }
+
+  // #292/G7: Currency guard - refuse all reconcile actions for non-INR or unknown shops
+  if (!isCurrencyGateOpen(shop.currency)) {
+    return { success: false, error: "Currency not supported" };
   }
 
   const userId = session.onlineAccessInfo?.associatedUser?.id?.toString() ?? "system";
@@ -480,13 +505,13 @@ function PaymentDetailView({
   payment,
   matches,
   currency,
+  actionsDisabled,
 }: {
   payment: { id: string; amountPaise: string; narration: string; payerText: string | null; utr: string | null; rail: string | null; valueDate: string; importFileName: string };
   matches: MatchSummary[];
   currency: string;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
 
   return (
     <s-section heading="Payment Details">
@@ -574,7 +599,7 @@ function PaymentDetailView({
                           <s-button
                             variant="primary"
                             type="submit"
-                            disabled={isSubmitting}
+                            disabled={actionsDisabled}
                           >
                             Confirm
                           </s-button>
@@ -586,7 +611,7 @@ function PaymentDetailView({
                             variant="secondary"
                             tone="critical"
                             type="submit"
-                            disabled={isSubmitting}
+                            disabled={actionsDisabled}
                           >
                             Reject
                           </s-button>
@@ -706,15 +731,15 @@ function SuggestedMatchesView({
   page,
   totalCount,
   pageSize,
+  actionsDisabled,
 }: {
   matches: MatchSummary[];
   currency: string;
   page: number;
   totalCount: number;
   pageSize: number;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
   const totalPages = Math.ceil(totalCount / pageSize);
 
   if (matches.length === 0) {
@@ -760,7 +785,7 @@ function SuggestedMatchesView({
                     <s-button
                       variant="primary"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Confirm
                     </s-button>
@@ -772,7 +797,7 @@ function SuggestedMatchesView({
                       variant="secondary"
                       tone="critical"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Reject
                     </s-button>
@@ -814,15 +839,15 @@ function ConfirmedMatchesView({
   page,
   totalCount,
   pageSize,
+  actionsDisabled,
 }: {
   matches: MatchSummary[];
   currency: string;
   page: number;
   totalCount: number;
   pageSize: number;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
   const totalPages = Math.ceil(totalCount / pageSize);
 
   if (matches.length === 0) {
@@ -861,7 +886,7 @@ function ConfirmedMatchesView({
                     <s-button
                       variant="primary"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Apply
                     </s-button>
@@ -873,7 +898,7 @@ function ConfirmedMatchesView({
                       variant="secondary"
                       tone="critical"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Unmatch
                     </s-button>
@@ -916,15 +941,15 @@ function PushingMatchesView({
   page,
   totalCount,
   pageSize,
+  actionsDisabled,
 }: {
   matches: MatchSummary[];
   currency: string;
   page: number;
   totalCount: number;
   pageSize: number;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
   const totalPages = Math.ceil(totalCount / pageSize);
 
   if (matches.length === 0) {
@@ -971,7 +996,7 @@ function PushingMatchesView({
                   <s-button
                     variant="primary"
                     type="submit"
-                    disabled={isSubmitting}
+                    disabled={actionsDisabled}
                   >
                     Retry
                   </s-button>
@@ -1004,6 +1029,7 @@ function PushingMatchesView({
 }
 
 export default function ReconcilePage() {
+  const loaderData = useLoaderData<typeof loader>();
   const {
     shopCurrency,
     payments,
@@ -1013,9 +1039,23 @@ export default function ReconcilePage() {
     view,
     error,
     tabCounts,
-  } = useLoaderData<typeof loader>();
+  } = loaderData;
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+  const actionsDisabled = isSubmitting;
+
+  // #292: When currency not supported, show only the banner
+  if ("notSupported" in loaderData && loaderData.notSupported) {
+    return (
+      <s-page heading="Payment Reconciliation">
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
 
   return (
     <s-page heading="Payment Reconciliation">
@@ -1032,7 +1072,7 @@ export default function ReconcilePage() {
         <s-stack direction="inline">
           <Form method="post">
             <input type="hidden" name="intent" value="run_matcher" />
-            <s-button variant="primary" type="submit" disabled={isSubmitting}>
+            <s-button variant="primary" type="submit" disabled={actionsDisabled}>
               {isSubmitting ? "Running…" : "Run Matcher"}
             </s-button>
           </Form>
@@ -1071,6 +1111,7 @@ export default function ReconcilePage() {
           payment={selectedPayment.payment}
           matches={selectedPayment.matches}
           currency={shopCurrency}
+          actionsDisabled={actionsDisabled}
         />
       ) : view === "unmatched" ? (
         <s-section heading="Unmatched Payments">
@@ -1090,6 +1131,7 @@ export default function ReconcilePage() {
             page={pagination.page}
             totalCount={pagination.totalCount}
             pageSize={pagination.pageSize}
+            actionsDisabled={actionsDisabled}
           />
         </s-section>
       ) : view === "pushing" ? (
@@ -1100,6 +1142,7 @@ export default function ReconcilePage() {
             page={pagination.page}
             totalCount={pagination.totalCount}
             pageSize={pagination.pageSize}
+            actionsDisabled={actionsDisabled}
           />
         </s-section>
       ) : (
@@ -1110,6 +1153,7 @@ export default function ReconcilePage() {
             page={pagination.page}
             totalCount={pagination.totalCount}
             pageSize={pagination.pageSize}
+            actionsDisabled={actionsDisabled}
           />
         </s-section>
       )}

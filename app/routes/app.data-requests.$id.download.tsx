@@ -46,6 +46,10 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
     });
   }
 
+  // #292: GDPR data-request export is EXEMPT from currency gating.
+  // This is a compliance export of stored rows for customers/data_request webhooks.
+  // It must return whatever data exists regardless of shop currency.
+
   const exportData = await getDataRequestExport(sql, shop.id, requestId);
 
   if (!exportData) {
