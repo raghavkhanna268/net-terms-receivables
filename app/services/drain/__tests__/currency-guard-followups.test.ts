@@ -145,7 +145,7 @@ describe("#292 G8: Terminal topics pass through drain for non-INR shops", () => 
 
     let pgmqReadCalls = 0;
     const createMockSql = () => {
-      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         // Handle sql(array) calls for IN clauses - return the array for interpolation
         if (Array.isArray(strings) && !('raw' in strings)) {
           return strings;
@@ -223,7 +223,7 @@ describe("#292 G8: Terminal topics pass through drain for non-INR shops", () => 
 
     let pgmqReadCalls = 0;
     const createMockSql = () => {
-      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         if (Array.isArray(strings) && !('raw' in strings)) {
           return strings;
         }
@@ -280,7 +280,7 @@ describe("#292 G8: Terminal topics pass through drain for non-INR shops", () => 
 
     let pgmqReadCalls = 0;
     const createMockSql = () => {
-      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         if (Array.isArray(strings) && !('raw' in strings)) {
           return strings;
         }
@@ -336,7 +336,7 @@ describe("#292 G8: Terminal topics pass through drain for non-INR shops", () => 
 
     let pgmqReadCalls = 0;
     const createMockSql = () => {
-      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         if (Array.isArray(strings) && !('raw' in strings)) {
           return strings;
         }
@@ -401,7 +401,7 @@ describe("#292 G4: NULL currency in drain fails closed", () => {
 
     let pgmqReadCalls = 0;
     const createMockSql = () => {
-      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         if (Array.isArray(strings) && !('raw' in strings)) {
           return strings;
         }
@@ -469,7 +469,7 @@ describe("#292 G4: NULL currency in drain fails closed", () => {
 
     let pgmqReadCalls = 0;
     const createMockSql = () => {
-      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const fn = vi.fn().mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         if (Array.isArray(strings) && !('raw' in strings)) {
           return strings;
         }
