@@ -330,6 +330,11 @@ describeWithDb("bulk empty-result handling (DB-backed)", () => {
       expect(result.success).toBe(false);
       expect(result.errorType).toBe("permanent");
       expect(result.errorCode).toBe("bulk_no_result_url");
+
+      const [row] = await sql<{ failure_count: number }[]>`
+        SELECT failure_count FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row.failure_count).toBe(5);
     });
 
     it("(4b) COMPLETED, objectCount '5', url null: NO_RESULT_URL permanent", async () => {
@@ -412,6 +417,11 @@ describeWithDb("bulk empty-result handling (DB-backed)", () => {
       expect(result.success).toBe(false);
       expect(result.errorType).toBe("permanent");
       expect(result.errorCode).toBe("bulk_no_result_url");
+
+      const [row] = await sql<{ failure_count: number }[]>`
+        SELECT failure_count FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row.failure_count).toBe(5);
     });
 
     it("(5b) COMPLETED, objectCount '0', url null, partialDataUrl set: NO_RESULT_URL permanent", async () => {
