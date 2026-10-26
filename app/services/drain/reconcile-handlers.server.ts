@@ -132,8 +132,8 @@ export async function claimReconcileStage(
   }
   
   // Check if there's an existing claim with bulk_operation_id set (another op running)
-  const [existingClaim] = await sql<{ bulk_operation_id: string | null }[]>`
-    SELECT bulk_operation_id FROM s6_reconcile_stage_claims
+  const [existingClaim] = await sql<{ bulk_operation_id: string | null; claimed_at: Date }[]>`
+    SELECT bulk_operation_id, claimed_at FROM s6_reconcile_stage_claims
     WHERE chain_key = ${chainKey} AND stage = ${stage}
   `;
   
@@ -148,9 +148,20 @@ export async function claimReconcileStage(
       return "already_running";
     }
     
-    // Op row doesn't exist - this is an orphan claim (op created on Shopify but
-    // registration failed). Per Team Lead ruling #2: return the orphan op id so
-    // the caller can register/adopt it without starting a new Shopify op.
+    // Op row doesn't exist. Check if the claim is old enough to be considered orphan.
+    // If claimed_at is recent (within CLAIM_RECLAIM_MINUTES), the registration might
+    // still be in progress. Return retry_pending in that case.
+    const claimAgeMs = Date.now() - existingClaim.claimed_at.getTime();
+    const claimAgeMinutes = claimAgeMs / (60 * 1000);
+    
+    if (claimAgeMinutes < CLAIM_RECLAIM_MINUTES) {
+      // Claim is recent - registration might be in progress, retry later
+      return "retry_pending";
+    }
+    
+    // Op row doesn't exist and claim is old - this is an orphan claim (op created on
+    // Shopify but registration failed). Per Team Lead ruling #2: return the orphan op
+    // id so the caller can register/adopt it without starting a new Shopify op.
     return { orphan: existingClaim.bulk_operation_id };
   }
   

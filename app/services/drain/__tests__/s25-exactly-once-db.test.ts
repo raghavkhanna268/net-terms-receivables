@@ -874,22 +874,25 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { startReconcileBulkOperation, claimReconcileStage } = await import("../reconcile-handlers.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
-      const webhookId = `reconcile:${TEST_SHOP_DOMAIN}:2025-01-17-regfail:orders`;
-      const chainKey = `${TEST_SHOP_DOMAIN}:2025-01-17-regfail`;
+      // Use valid webhookId format: reconcile:<shop>:<YYYY-MM-DD>:<stage>
+      const webhookId = `reconcile:${TEST_SHOP_DOMAIN}:2025-01-19:orders`;
+      const chainKey = `${TEST_SHOP_DOMAIN}:2025-01-19`;
       const opId = `gid://shopify/BulkOperation/regfail-c4-${TEST_SUFFIX}`;
 
       // Simulate the scenario where:
       // 1. Mutation succeeded (returned op id)
       // 2. recordClaimBulkOperationId was called
       // 3. registerBulkOperation failed/threw
+      // 4. Time passed (claim is now old enough to be considered orphan)
 
-      // First, insert claim manually (simulating step 1-2 completed, step 3 failed)
+      // Insert claim with OLD claimed_at (6 minutes ago) to simulate orphan
+      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
       await sql`
         INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, bulk_operation_id, claimed_at)
-        VALUES (${chainKey}, 'orders', ${TEST_SHOP_DOMAIN}, ${opId}, NOW())
+        VALUES (${chainKey}, 'orders', ${TEST_SHOP_DOMAIN}, ${opId}, ${sixMinutesAgo})
       `;
 
-      // Verify claim has op id but no op row exists
+      // Verify claim has op id but no op row exists -> orphan
       const claimResult = await claimReconcileStage(sql, chainKey, "orders", TEST_SHOP_DOMAIN);
       expect(claimResult).toEqual({ orphan: opId });
 
@@ -1318,16 +1321,17 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // QA #5: Orphan-claim path test (Team Lead ruling #2)
   // ==========================================================================
   describe("QA #5: orphan-claim path", () => {
-    it("claimReconcileStage returns orphan op id when claim has op id but no op row", async () => {
+    it("claimReconcileStage returns orphan op id when claim has op id but no op row (and claim is old)", async () => {
       const { claimReconcileStage } = await import("../reconcile-handlers.server");
 
       const chainKey = `${TEST_SHOP_DOMAIN}:2025-orphan-claim`;
       const orphanOpId = `gid://shopify/BulkOperation/orphan-${TEST_SUFFIX}`;
 
-      // Insert claim with a bulk_operation_id
+      // Insert claim with OLD claimed_at (6 minutes ago) to be considered orphan
+      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
       await sql`
         INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, bulk_operation_id, claimed_at)
-        VALUES (${chainKey}, 'companies', ${TEST_SHOP_DOMAIN}, ${orphanOpId}, NOW() - interval '1 minute')
+        VALUES (${chainKey}, 'companies', ${TEST_SHOP_DOMAIN}, ${orphanOpId}, ${sixMinutesAgo})
       `;
 
       // But DON'T create the corresponding op row (simulating partial failure)
@@ -1350,6 +1354,26 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       await sql`DELETE FROM s6_reconcile_stage_claims WHERE chain_key = ${chainKey}`;
     });
 
+    it("claimReconcileStage returns retry_pending when claim is young (registration in progress)", async () => {
+      const { claimReconcileStage } = await import("../reconcile-handlers.server");
+
+      const chainKey = `${TEST_SHOP_DOMAIN}:2025-young-orphan-claim`;
+      const opId = `gid://shopify/BulkOperation/young-orphan-${TEST_SUFFIX}`;
+
+      // Insert claim with RECENT claimed_at (1 minute ago) - might still be registering
+      await sql`
+        INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, bulk_operation_id, claimed_at)
+        VALUES (${chainKey}, 'companies', ${TEST_SHOP_DOMAIN}, ${opId}, NOW() - interval '1 minute')
+      `;
+
+      // No op row exists, but claim is young - should return retry_pending
+      const result = await claimReconcileStage(sql, chainKey, "companies", TEST_SHOP_DOMAIN);
+      expect(result).toBe("retry_pending");
+
+      // Cleanup
+      await sql`DELETE FROM s6_reconcile_stage_claims WHERE chain_key = ${chainKey}`;
+    });
+
     it("startReconcileBulkOperation adopts orphan op without calling mutation", async () => {
       const { startReconcileBulkOperation } = await import("../reconcile-handlers.server");
       const { adminGraphQL } = await import("../admin-client.server");
@@ -1358,11 +1382,15 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const webhookId = `reconcile:${TEST_SHOP_DOMAIN}:2025-01-25:orders`;
       const chainKey = `${TEST_SHOP_DOMAIN}:2025-01-25`;
 
-      // Insert orphan claim (has op id but no op row)
+      // Insert orphan claim with OLD claimed_at (6 minutes ago)
+      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
       await sql`
         INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, bulk_operation_id, claimed_at)
-        VALUES (${chainKey}, 'orders', ${TEST_SHOP_DOMAIN}, ${orphanOpId}, NOW() - interval '1 minute')
+        VALUES (${chainKey}, 'orders', ${TEST_SHOP_DOMAIN}, ${orphanOpId}, ${sixMinutesAgo})
       `;
+
+      // Clear any previous mocks
+      vi.mocked(adminGraphQL).mockClear();
 
       // Call startReconcileBulkOperation - it should adopt the orphan
       const result = await startReconcileBulkOperation(sql, TEST_SHOP_DOMAIN, "orders", webhookId);
