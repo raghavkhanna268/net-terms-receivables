@@ -354,14 +354,9 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
       const importPayload = makeImportPayload();
 
       const response = await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
-      const data = (await response.json()) as ImportResult;
-      
-      // Debug: print error details if not 200
-      if (response.status !== 200) {
-        console.log("DEBUG 400 error:", JSON.stringify({ error: data.error, details: data.details, payload: importPayload }, null, 2));
-      }
-      
       expect(response.status).toBe(200);
+
+      const data = (await response.json()) as ImportResult;
       expect(data.success).toBe(true);
       expect(data.counts?.inserted).toBe(3);
       expect(data.counts?.duplicates).toBe(0);
