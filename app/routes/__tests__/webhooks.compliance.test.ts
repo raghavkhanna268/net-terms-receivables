@@ -609,10 +609,10 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
       expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("data_request_email_skipped")
+        expect.stringContaining("compliance_data_request_email_skipped")
       );
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("reason=no_shop_email")
+        expect.stringContaining("no_shop_email")
       );
       consoleSpy.mockRestore();
     });

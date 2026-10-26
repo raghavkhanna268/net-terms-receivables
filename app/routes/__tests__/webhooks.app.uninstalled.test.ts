@@ -222,9 +222,10 @@ describe("webhooks.app.uninstalled", () => {
     expect(response.status).toBe(200);
     expect(consoleSpy).toHaveBeenCalled();
     const errorCall = consoleSpy.mock.calls[0][0] as string;
-    expect(errorCall).toContain("receipts_purge_failed");
-    expect(errorCall).toContain("reason=db_error");
-    expect(errorCall).toContain("err=");
+    expect(errorCall).toContain("uninstalled_receipts_purge_failed");
+    expect(errorCall).toContain("reason");
+    expect(errorCall).toContain("db_error");
+    expect(errorCall).toContain("err");
     expect(errorCall).not.toContain(".myshopify.com");
     expect(errorCall).not.toContain(TEST_SHOP);
     consoleSpy.mockRestore();

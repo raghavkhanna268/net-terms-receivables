@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.server";
+import { safeLog } from "~/lib/log.server";
 
 /**
  * Webhook handler for order lifecycle events.
@@ -93,7 +94,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     throw new Error(result.code);
   }
 
-  console.log(`[webhooks.orders] Enqueued ${normalizedTopic}: ${resourceGid}`);
+  safeLog("info", "webhook_orders_enqueued", {
+    topic: normalizedTopic,
+    orderGid: resourceGid,
+  });
 
   return new Response(null, { status: 200 });
 };

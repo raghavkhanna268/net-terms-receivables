@@ -517,8 +517,34 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
 
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("customers/redact");
-    expect(outputStr).toContain("tagged=");
+    expect(outputStr).toContain("compliance_customer_redacted");
+    expect(outputStr).toContain("shopId");
+    expect(outputStr).toContain("taggedCustomersDeletedCount");
+    expect(outputStr).not.toContain(TEST_SHOP);
     assertNoWebhookIdInLogs(testWebhookId);
+  });
+
+  it("customers/data_request email skipped emits compliance_data_request_email_skipped event", async () => {
+    const testWebhookId = "test-data-request-email-skip-event-wh";
+    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
+    mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
+    mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
+    mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
+    const noEmailAdmin = { graphql: vi.fn().mockResolvedValue({ json: async () => ({ data: { shop: {} } }) }) };
+    mockGetOfflineAdminContext.mockResolvedValueOnce({ success: true, admin: noEmailAdmin, retryable: false });
+
+    const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
+    const body = JSON.stringify(payload);
+    const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    const allOutput = getAllConsoleOutput();
+    const outputStr = allOutput.join("\n");
+    expect(outputStr).toContain("compliance_data_request_email_skipped");
+    expect(outputStr).toContain("requestId");
+    expect(outputStr).toContain("reason");
+    expect(outputStr).not.toContain(TEST_SHOP);
   });
 });

@@ -178,9 +178,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
         // Note: skipped emails are logged inside sendDataRequestNotification
       } else {
-        console.log(
-          `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
-        );
+        safeLog("info", "compliance_data_request_email_skipped", {
+          requestId,
+          reason: "no_shop_email",
+        });
       }
       break;
     }
@@ -206,13 +207,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (shopRecord) {
         const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
         const counts = await redactCustomer(sql, shopRecord.id, customerGid);
-        console.log(
-          `[Compliance] customers/redact: Deleted tagged=${counts.taggedCustomersDeleted} ` +
-            `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted} ` +
-            `payer_aliases=${counts.payerAliasesDeleted}, ` +
-            `anonymized account=${counts.buyerAccountAnonymized}, ` +
-            `redacted payments=${counts.paymentsRedacted} shop_id=${shopRecord.id}`
-        );
+        safeLog("info", "compliance_customer_redacted", {
+          shopId: shopRecord.id,
+          taggedCustomersDeletedCount: counts.taggedCustomersDeleted,
+          draftOrdersDeletedCount: counts.draftOrdersDeleted,
+          dataRequestsDeletedCount: counts.dataRequestsDeleted,
+          payerAliasesDeletedCount: counts.payerAliasesDeleted,
+          accountAnonymizedCount: counts.buyerAccountAnonymized ? 1 : 0,
+          paymentsRedactedCount: counts.paymentsRedacted,
+        });
       } else {
         console.log("[Compliance] customers/redact: Shop not found");
       }

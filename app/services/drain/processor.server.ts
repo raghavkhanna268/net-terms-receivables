@@ -409,7 +409,6 @@ async function executeBackstop(
   isRedelivery: boolean
 ): Promise<SyncResult | null> {
   const { applyBackstop, RetryableBackstopError } = await import("~/services/backstop.server");
-  const context = isRedelivery ? "Redelivery" : "First-attempt";
 
   try {
     const backstopResult = await applyBackstop(sql, {
@@ -421,9 +420,10 @@ async function executeBackstop(
     });
 
     if (backstopResult.applied) {
-      console.log(
-        `[backstop] Applied (${context.toLowerCase()}) to ${orderGid}: ${backstopResult.fulfillmentOrdersHeld} FOs held`
-      );
+      safeLog("info", "backstop_applied", {
+        orderGid,
+        fulfillmentOrdersHeldCount: backstopResult.fulfillmentOrdersHeld,
+      });
     }
 
     // Only return a result for redelivery path; first-attempt returns orderResult
@@ -472,11 +472,10 @@ async function runBackstopOnly(sql: Sql, message: SyncMessage): Promise<SyncResu
   const invoiceInfo = await resolveInvoiceForOrder(sql, message.shop, message.resourceGid);
 
   if (!invoiceInfo) {
-    // No invoice found - this order may not be a net-terms order
-    // Return success to avoid infinite retries for non-net-terms orders
-    console.log(
-      `[backstop] Redelivery skipped - no invoice found for ${message.resourceGid} (not a net-terms order?)`
-    );
+    safeLog("info", "backstop_redelivery_skipped", {
+      orderGid: message.resourceGid,
+      reason: "no_invoice",
+    });
     return {
       success: true,
       action: "skipped",

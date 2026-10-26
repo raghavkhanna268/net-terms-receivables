@@ -235,7 +235,7 @@ describe("after-auth", () => {
 
       await vi.waitFor(() => {
         expect(consoleSpy).toHaveBeenCalledWith(
-          expect.stringContaining("[afterAuth] validation_registration_failed"),
+          expect.stringContaining("after_auth_validation_failed"),
         );
       });
 
@@ -630,7 +630,7 @@ describe("after-auth", () => {
       });
 
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[afterAuth] clear_uninstalled_at_failed"),
+        expect.stringContaining("after_auth_clear_uninstalled_failed"),
       );
 
       consoleSpy.mockRestore();
@@ -669,7 +669,7 @@ describe("after-auth", () => {
       });
 
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[afterAuth] clear_uninstalled_at_failed reason=no_request_context"),
+        expect.stringContaining("after_auth_clear_uninstalled_failed"),
       );
 
       consoleSpy.mockRestore();

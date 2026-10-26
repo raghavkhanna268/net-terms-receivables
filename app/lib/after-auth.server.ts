@@ -91,8 +91,10 @@ export function runAfterAuth(
   try {
     sql = getRequestSql();
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] clear_uninstalled_at_failed reason=no_request_context err=${errInfo}`);
+    safeLog("error", "after_auth_clear_uninstalled_failed", {
+      reason: "no_request_context",
+      err: toErrorCode(error),
+    });
   }
 
   if (sql) {
@@ -260,8 +262,10 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
     }
     return { wasReinstalled: false };
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "after_auth_clear_uninstalled_failed", {
+      reason: "db_error",
+      err: toErrorCode(error),
+    });
     return { wasReinstalled: false };
   }
 }
@@ -336,8 +340,10 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
       console.warn(`[afterAuth] shop_auth_info_query_failed reason=invalid_currency`);
     }
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.warn(`[afterAuth] shop_auth_info_query_failed reason=exception err=${errInfo}`);
+    safeLog("warn", "after_auth_shop_info_failed", {
+      reason: "exception",
+      err: toErrorCode(error),
+    });
   }
 
   return result;
@@ -412,8 +418,10 @@ async function syncShopInfo(
   try {
     await upsertShopOnAuth(sql, shop, authInfo.timezone, effectiveCurrency);
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "after_auth_upsert_shop_failed", {
+      reason: "db_error",
+      err: toErrorCode(error),
+    });
     throw error;
   }
 }
@@ -436,8 +444,10 @@ async function runSetup(
     await ensureValidation(admin);
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] validation_registration_failed reason=exception err=${errInfo}`);
+    safeLog("error", "after_auth_validation_failed", {
+      reason: "exception",
+      err: toErrorCode(error),
+    });
   }
   
   // S13: Payment customization for hiding net-terms payment methods.
@@ -449,8 +459,10 @@ async function runSetup(
     }
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
+    safeLog("error", "after_auth_payment_customization_failed", {
+      reason: "exception",
+      err: toErrorCode(error),
+    });
   }
   
   // Shop info sync runs even if earlier steps fail - it's independent.
@@ -459,8 +471,10 @@ async function runSetup(
     await syncShopInfo(shop, admin);
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] sync_shop_info_failed reason=exception err=${errInfo}`);
+    safeLog("error", "after_auth_sync_shop_info_failed", {
+      reason: "exception",
+      err: toErrorCode(error),
+    });
   }
   
   // Only mark complete if all steps succeeded.
@@ -604,7 +618,7 @@ export async function upsertShopOnAuth(
   const shopId = result[0]?.id ?? 'unknown';
   const closedCount = result[0]?.closed_count ?? 0;
   const deletedClaimsCount = result[0]?.deleted_claims_count ?? 0;
-  console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
+  safeLog("info", "after_auth_shop_upserted", { shopId });
   if (closedCount > 0 || deletedClaimsCount > 0) {
     safeLog("info", "reinstall_initial_sync_reset", {
       shopHash: await shopHash(shopDomain),

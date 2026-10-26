@@ -327,7 +327,10 @@ describe("webhooks.app.subscriptions_update", () => {
 
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
       expect(consoleSpy.log).toHaveBeenCalledWith(
-        expect.stringContaining("shop_id=shop-456")
+        expect.stringContaining("shopId")
+      );
+      expect(consoleSpy.log).toHaveBeenCalledWith(
+        expect.stringContaining("shop-456")
       );
     });
 
@@ -362,13 +365,15 @@ describe("webhooks.app.subscriptions_update", () => {
 
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
 
-      // Verify error code is logged, not the full error message
+      // Verify error code is logged via safeLog JSON, not the full error message
       expect(consoleSpy.error).toHaveBeenCalledWith(
-        expect.stringContaining("err=Error")
+        expect.stringContaining("subscriptions_update_failed")
+      );
+      expect(consoleSpy.error).toHaveBeenCalledWith(
+        expect.stringContaining("err")
       );
       expect(consoleSpy.error).not.toHaveBeenCalledWith(
-        expect.anything(),
-        expect.any(Error)
+        expect.stringContaining("DB connection failed")
       );
     });
   });

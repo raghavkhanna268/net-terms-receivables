@@ -126,7 +126,7 @@ describe("after-auth with payment customization (S13)", () => {
     }
 
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[afterAuth] payment_customization_failed reason=exception err=")
+      expect.stringContaining("after_auth_payment_customization_failed")
     );
 
     expect(_isShopSetupComplete("s13-test-failing-shop.myshopify.com")).toBe(false);
@@ -154,11 +154,11 @@ describe("after-auth with payment customization (S13)", () => {
     }
 
     const pcFailedCall = consoleSpy.mock.calls.find(
-      (call) => call[0]?.includes?.("[afterAuth] payment_customization_failed")
+      (call) => call[0]?.includes?.("after_auth_payment_customization_failed")
     );
     expect(pcFailedCall).toBeDefined();
     expect(pcFailedCall).toHaveLength(1);
-    expect(pcFailedCall![0]).toContain("err=TestError");
+    expect(pcFailedCall![0]).toContain("TestError");
     expect(pcFailedCall![0]).not.toContain("[object");
 
     consoleSpy.mockRestore();

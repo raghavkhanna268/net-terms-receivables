@@ -4,7 +4,7 @@ import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.serve
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
 import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "~/lib/shop-currency.server";
-import { safeLog, shopHash } from "~/lib/log.server";
+import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "~/lib/shop-currency-guard.server";
 import type { Sql } from "~/lib/db-light.server";
 
@@ -196,10 +196,9 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       await processShopUpdate(sql, shop);
     } catch (error) {
       const hash = await shopHash(shop);
-      const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name ?? "unknown";
       safeLog("error", "shop_update_webhook_exception", {
         shopHash: hash,
-        err: errInfo,
+        err: toErrorCode(error),
       });
     }
   })();

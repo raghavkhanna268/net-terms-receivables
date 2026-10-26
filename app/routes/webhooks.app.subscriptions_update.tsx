@@ -3,6 +3,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { refreshPlanCache } from "~/services/plan.server";
 import { reactivateGatedAccounts } from "~/services/gating.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 
 /**
  * Webhook handler for APP_SUBSCRIPTIONS_UPDATE.
@@ -60,11 +61,9 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   const processPromise = (async () => {
     try {
-      // Refresh the plan cache
       await refreshPlanCache(sql, shop);
-      console.log("[webhooks.app.subscriptions_update] Refreshed plan");
+      safeLog("info", "subscriptions_update_plan_refreshed", {});
 
-      // Reactivate gated accounts if upgraded (reads plan from DB)
       const [shopRow] = await sql<{ id: string }[]>`
         SELECT id FROM "Shop" WHERE domain = ${shop}
       `;
@@ -72,16 +71,16 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       if (shopRow) {
         const reactivated = await reactivateGatedAccounts(sql, shopRow.id);
         if (reactivated > 0) {
-          console.log(
-            `[webhooks.app.subscriptions_update] Reactivated ${reactivated} gated accounts shop_id=${shopRow.id}`
-          );
+          safeLog("info", "subscriptions_update_accounts_reactivated", {
+            shopId: shopRow.id,
+            reactivatedCount: reactivated,
+          });
         }
       }
     } catch (error) {
-      const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name ?? "unknown";
-      console.error(
-        `[webhooks.app.subscriptions_update] Error processing err=${errInfo}`
-      );
+      safeLog("error", "subscriptions_update_failed", {
+        err: toErrorCode(error),
+      });
     }
   })();
 
