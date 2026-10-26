@@ -31,10 +31,14 @@ const INSTALLED_SHOP = {
 
 const BUYER_ACCOUNT_UNINSTALLED = {
   id: `ba-uninstalled-${SUFFIX}`,
+  companyId: `gid://shopify/Company/test-uninstalled-${SUFFIX}`,
+  companyLocationId: `gid://shopify/CompanyLocation/test-uninstalled-${SUFFIX}`,
 };
 
 const BUYER_ACCOUNT_INSTALLED = {
   id: `ba-installed-${SUFFIX}`,
+  companyId: `gid://shopify/Company/test-installed-${SUFFIX}`,
+  companyLocationId: `gid://shopify/CompanyLocation/test-installed-${SUFFIX}`,
 };
 
 const INVOICE_UNINSTALLED = {
@@ -130,9 +134,19 @@ describeWithDb("ORDERS_* no-session ACK behavior (#239 extension)", () => {
     `;
 
     // Create BuyerAccount so resolveInvoiceForOrder can find the invoice
+    // kind='COMPANY' requires companyId AND companyLocationId per BuyerAccount_kind_consistency
     await sqlRef`
-      INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
-      VALUES (${BUYER_ACCOUNT_UNINSTALLED.id}, ${UNINSTALLED_SHOP.id}, 'COMPANY', 'Test Buyer', ${now}, ${now})
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+      VALUES (
+        ${BUYER_ACCOUNT_UNINSTALLED.id},
+        ${UNINSTALLED_SHOP.id},
+        'COMPANY',
+        ${BUYER_ACCOUNT_UNINSTALLED.companyId},
+        ${BUYER_ACCOUNT_UNINSTALLED.companyLocationId},
+        'Test Buyer',
+        ${now},
+        ${now}
+      )
     `;
 
     // Create Invoice linked to the order so resolveInvoiceForOrder returns a result
@@ -202,9 +216,19 @@ describeWithDb("ORDERS_* no-session ACK behavior (#239 extension)", () => {
     `;
 
     // Create BuyerAccount so resolveInvoiceForOrder can find the invoice
+    // kind='COMPANY' requires companyId AND companyLocationId per BuyerAccount_kind_consistency
     await sqlRef`
-      INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
-      VALUES (${BUYER_ACCOUNT_INSTALLED.id}, ${INSTALLED_SHOP.id}, 'COMPANY', 'Test Buyer Installed', ${now}, ${now})
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+      VALUES (
+        ${BUYER_ACCOUNT_INSTALLED.id},
+        ${INSTALLED_SHOP.id},
+        'COMPANY',
+        ${BUYER_ACCOUNT_INSTALLED.companyId},
+        ${BUYER_ACCOUNT_INSTALLED.companyLocationId},
+        'Test Buyer Installed',
+        ${now},
+        ${now}
+      )
     `;
 
     // Create Invoice linked to the order so resolveInvoiceForOrder returns a result
