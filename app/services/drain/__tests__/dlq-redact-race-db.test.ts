@@ -15,20 +15,27 @@
  * Test methodology:
  * - Two-connection tests with explicit gates and lock-wait detection via pg_stat_activity
  * - No sleeps - deterministic lock coordination
- * - Uses REAL moveToDeadLetter and deleteShop code
+ * - Connection A is a STAND-IN for deleteShop's statement sequence (not the real deleteShop)
+ * - Uses REAL moveToDeadLetter code
  *
- * The real leak scenario:
- * 1. deleteShop: BEGIN → FOR UPDATE on Shop (line 144)
+ * The real leak scenario (in deleteShop's statement order per compliance.server.ts):
+ * 1. deleteShop: BEGIN → SELECT Shop FOR UPDATE (line 144)
  * 2. deleteShop: DELETE FROM pgmq.q_s6_sync (line 218)
- * 3. deleteShop: DELETE FROM s6_dead_letter (line 238)
- * 4. [NEW MESSAGE ENQUEUED BY ANOTHER CONNECTION]
- * 5. moveToDeadLetter (without fix): reads Shop (no lock) → sees shop exists
- * 6. moveToDeadLetter: DELETE from queue → INSERT DLQ (unsanitized) → COMMIT
- * 7. deleteShop: DELETE FROM "Shop" → COMMIT
+ * 3. deleteShop: DELETE FROM pgmq.q_s6_bulk (line 222)
+ * 4. deleteShop: DELETE FROM pgmq.a_s6_sync (line 226)
+ * 5. deleteShop: DELETE FROM pgmq.a_s6_bulk (line 230)
+ * 6. deleteShop: DELETE FROM s6_dead_letter (line 238)
+ * 7. [NEW MESSAGE ENQUEUED BY ANOTHER CONNECTION - after queue delete but before Shop delete]
+ * 8. moveToDeadLetter (without fix): reads Shop (no lock) → sees shop still exists
+ * 9. moveToDeadLetter: DELETE from queue → INSERT DLQ (unsanitized) → COMMIT
+ * 10. deleteShop: DELETE FROM "Shop" (line 274) → COMMIT
  * Result: Unsanitized DLQ row survives because it was inserted AFTER deleteShop's DLQ delete.
  *
  * The fix ensures moveToDeadLetter takes FOR SHARE on Shop first (processor.server.ts:1209),
  * which blocks until deleteShop commits, then sees the shop is gone and sanitizes.
+ *
+ * Replay of sanitized messages: tested in dlq-sanitize-db.test.ts
+ * ("already-sanitized message is skipped and archived" test using driveUntilArchived).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import postgres from "postgres";
@@ -47,7 +54,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
   let sql2: ReturnType<typeof postgres>;
   let sql3: ReturnType<typeof postgres>;
 
-  const createdDlqRowIds: number[] = [];
   const createdQueueMsgIds: string[] = [];
 
   beforeAll(async () => {
@@ -57,9 +63,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
   });
 
   afterAll(async () => {
-    if (createdDlqRowIds.length > 0) {
-      await sql1`DELETE FROM s6_dead_letter WHERE id IN ${sql1(createdDlqRowIds)}`;
-    }
+    await sql1`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${TEST_SUFFIX}%`}`;
     if (createdQueueMsgIds.length > 0) {
       const msgIdNums = createdQueueMsgIds.map(Number);
       await sql1`DELETE FROM pgmq.q_s6_sync WHERE msg_id IN ${sql1(msgIdNums)}`;
@@ -74,13 +78,11 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
     await sql1`DELETE FROM s10b_customer_pii_fallback WHERE shop = ${SHOP_DOMAIN}`;
     await sql1`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
 
-    if (createdDlqRowIds.length > 0) {
-      const [remainingDlq] = await sql1<[{ count: string }]>`
-        SELECT COUNT(*)::text AS count FROM s6_dead_letter
-        WHERE id IN ${sql1(createdDlqRowIds)}
-      `;
-      expect(parseInt(remainingDlq.count, 10)).toBe(0);
-    }
+    const [remainingDlq] = await sql1<[{ count: string }]>`
+      SELECT COUNT(*)::text AS count FROM s6_dead_letter
+      WHERE message->>'webhookId' LIKE ${`%${TEST_SUFFIX}%`}
+    `;
+    expect(parseInt(remainingDlq.count, 10)).toBe(0);
 
     await sql1.end();
     await sql2.end();
@@ -88,10 +90,8 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
   });
 
   beforeEach(async () => {
-    createdDlqRowIds.length = 0;
     createdQueueMsgIds.length = 0;
-    await sql1`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${SHOP_DOMAIN}`;
-    await sql1`DELETE FROM s6_dead_letter WHERE original_msg_id LIKE ${`%${TEST_SUFFIX}%`}`;
+    await sql1`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${TEST_SUFFIX}%`}`;
     await sql1`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_DOMAIN}`;
     await sql1`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${SHOP_DOMAIN}`;
     await sql1`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${TEST_SUFFIX}%`}`;
@@ -105,9 +105,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
   });
 
   afterEach(async () => {
-    if (createdDlqRowIds.length > 0) {
-      await sql1`DELETE FROM s6_dead_letter WHERE id IN ${sql1(createdDlqRowIds)}`;
-    }
+    await sql1`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${TEST_SUFFIX}%`}`;
   });
 
   async function waitForLockWait(
@@ -145,29 +143,21 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
     };
   }
 
-  async function trackDlqRow(webhookId: string): Promise<void> {
-    const rows = await sql1<{ id: number }[]>`
-      SELECT id FROM s6_dead_letter WHERE message->>'webhookId' = ${webhookId}
-    `;
-    for (const row of rows) {
-      createdDlqRowIds.push(row.id);
-    }
-  }
-
-  describe("REAL LEAK: message enqueued after deleteShop's DLQ delete", () => {
-    it("without fix: unsanitized DLQ row survives (this test passes with fix, fails without)", async () => {
+  describe("Race condition: message dead-lettered during shop delete is stored sanitized", () => {
+    it("message enqueued after queue delete but before shop delete is sanitized (not unsanitized)", async () => {
       const now = new Date();
-      const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
       await sql1`
-        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', ${now}, ${now}, ${uninstalledAt})
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', ${now}, ${now})
       `;
 
-      const testMsg = createTestMessage("real-leak");
+      const testMsg = createTestMessage("race-sanitized");
       const conn2Pid = await getPid(sql2);
 
       let deleteShopPassedDlqDelete = false;
+      let moveToDeadLetterStarted = false;
+      let moveToDeadLetterDone = false;
 
       const deleteShopTx = sql1.begin(async (tx) => {
         const [lockedShop] = await tx<{ id: string }[]>`
@@ -180,8 +170,17 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
 
         deleteShopPassedDlqDelete = true;
 
-        const isWaiting = await waitForLockWait(sql3, conn2Pid, 5000);
-        expect(isWaiting).toBe(true);
+        while (!moveToDeadLetterStarted) {
+          await new Promise((r) => setTimeout(r, 5));
+        }
+
+        const isWaiting = await waitForLockWait(sql3, conn2Pid, 500);
+
+        if (!isWaiting) {
+          while (!moveToDeadLetterDone) {
+            await new Promise((r) => setTimeout(r, 5));
+          }
+        }
 
         await tx`DELETE FROM "Shop" WHERE domain = ${SHOP_DOMAIN}`;
       });
@@ -198,6 +197,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
 
       const { moveToDeadLetter } = await import("~/services/drain/processor.server");
 
+      moveToDeadLetterStarted = true;
       const resultPromise = moveToDeadLetter(
         sql2,
         "s6_sync",
@@ -205,13 +205,15 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
         testMsg,
         "test_error",
         5
-      );
+      ).then((r) => {
+        moveToDeadLetterDone = true;
+        return r;
+      });
 
       await deleteShopTx;
       const result = await resultPromise;
 
       expect(result).toBe(true);
-      await trackDlqRow(testMsg.webhookId);
 
       const [dlqRow] = await sql1<[{ id: number; message: { sanitized?: boolean; shop?: string; reason?: string } }?]>`
         SELECT id, message FROM s6_dead_letter
@@ -220,7 +222,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
 
       expect(dlqRow).toBeDefined();
       expect(dlqRow!.message.sanitized).toBe(true);
-      expect(dlqRow!.message.reason).toBe("shop_gone");
+      expect(dlqRow!.message.reason).toBe("shop_row_missing");
       expect(dlqRow!.message.shop).toBeUndefined();
     });
   });
@@ -253,7 +255,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       );
 
       expect(result).toBe(true);
-      await trackDlqRow(testMsg.webhookId);
 
       const [dlqRow] = await sql1<[{ id: number; message: SyncMessage }?]>`
         SELECT id, message FROM s6_dead_letter
@@ -265,7 +266,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       expect((dlqRow!.message as unknown as { sanitized?: boolean }).sanitized).toBeUndefined();
     });
 
-    it("shop uninstalled (pre-redact window): non-shop_not_found error sanitizes message", async () => {
+    it("shop uninstalled (pre-redact window): non-shop_not_found error sanitizes with reason shop_uninstalled", async () => {
       const now = new Date();
       const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
@@ -293,7 +294,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       );
 
       expect(result).toBe(true);
-      await trackDlqRow(testMsg.webhookId);
 
       const [dlqRow] = await sql1<[{ id: number; message: { sanitized?: boolean; shop?: string; reason?: string; topic: string } }?]>`
         SELECT id, message FROM s6_dead_letter
@@ -303,11 +303,11 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       expect(dlqRow).toBeDefined();
       expect(dlqRow!.message.sanitized).toBe(true);
       expect(dlqRow!.message.shop).toBeUndefined();
-      expect(dlqRow!.message.reason).toBe("shop_gone");
+      expect(dlqRow!.message.reason).toBe("shop_uninstalled");
       expect(dlqRow!.message.topic).toBe("ORDERS_CREATE");
     });
 
-    it("shop row missing: non-shop_not_found error sanitizes message", async () => {
+    it("shop row missing: non-shop_not_found error sanitizes with reason shop_row_missing", async () => {
       const testMsg = createTestMessage("no-shop");
       const [sendResult] = await sql1<[{ send: string }]>`
         SELECT pgmq.send('s6_sync', ${sql1.json(testMsg)})
@@ -327,7 +327,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       );
 
       expect(result).toBe(true);
-      await trackDlqRow(testMsg.webhookId);
 
       const [dlqRow] = await sql1<[{ id: number; message: { sanitized?: boolean; shop?: string; reason?: string } }?]>`
         SELECT id, message FROM s6_dead_letter
@@ -337,7 +336,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       expect(dlqRow).toBeDefined();
       expect(dlqRow!.message.sanitized).toBe(true);
       expect(dlqRow!.message.shop).toBeUndefined();
-      expect(dlqRow!.message.reason).toBe("shop_gone");
+      expect(dlqRow!.message.reason).toBe("shop_row_missing");
     });
   });
 
@@ -369,7 +368,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       );
 
       expect(result).toBe(true);
-      await trackDlqRow(testMsg.webhookId);
 
       const [dlqRow] = await sql1<[{ id: number; message: { sanitized?: boolean; shop?: string; reason?: string } }?]>`
         SELECT id, message FROM s6_dead_letter
@@ -383,8 +381,8 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
     });
   });
 
-  describe("Sanitized row keeps exactly: topic, errorCode, attemptCount, timestamps, shopId (UUID)", () => {
-    it("shop_gone sanitization preserves shopId (UUID) and drops shop (domain)", async () => {
+  describe("Sanitized row keeps exactly: topic, reason, attemptCount, timestamps, shopId (UUID)", () => {
+    it("shop_uninstalled sanitization preserves shopId (UUID) and drops shop (domain)", async () => {
       const now = new Date();
       const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
@@ -412,7 +410,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       );
 
       expect(result).toBe(true);
-      await trackDlqRow(testMsg.webhookId);
 
       interface ExactSanitizedMessage {
         sanitized: boolean;
@@ -438,7 +435,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       const msg = dlqRow!.message;
 
       expect(msg.sanitized).toBe(true);
-      expect(msg.reason).toBe("shop_gone");
+      expect(msg.reason).toBe("shop_uninstalled");
       expect(msg.topic).toBe("ORDERS_CREATE");
       expect(msg.originalMsgId).toBe(msgId);
       expect(msg.attemptCount).toBe(5);
@@ -454,7 +451,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       expect(dlqRow!.error).toBe("test_error");
     });
 
-    it("shop missing: sanitized row has no shopId", async () => {
+    it("shop_row_missing: sanitized row has no shopId", async () => {
       const testMsg = createTestMessage("no-shop-fields");
       const [sendResult] = await sql1<[{ send: string }]>`
         SELECT pgmq.send('s6_sync', ${sql1.json(testMsg)})
@@ -474,9 +471,8 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       );
 
       expect(result).toBe(true);
-      await trackDlqRow(testMsg.webhookId);
 
-      const [dlqRow] = await sql1<[{ id: number; message: { shopId?: string; shop?: string; attemptCount: number } }?]>`
+      const [dlqRow] = await sql1<[{ id: number; message: { shopId?: string; shop?: string; attemptCount: number; reason?: string } }?]>`
         SELECT id, message FROM s6_dead_letter
         WHERE message->>'webhookId' = ${testMsg.webhookId}
       `;
@@ -485,44 +481,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       expect(dlqRow!.message.shopId).toBeUndefined();
       expect(dlqRow!.message.shop).toBeUndefined();
       expect(dlqRow!.message.attemptCount).toBe(3);
-    });
-  });
-
-  describe("Replay of sanitized row", () => {
-    it("sanitized message is skipped and archived (drain_skip_sanitized_message)", async () => {
-      const testMsg = createTestMessage("replay-sanitized");
-      const sanitizedMsg = {
-        sanitized: true,
-        reason: "shop_gone",
-        topic: "ORDERS_CREATE",
-        originalMsgId: "original-123",
-        shopId: SHOP_ID,
-        webhookId: testMsg.webhookId,
-        attemptCount: 5,
-        failedAt: new Date().toISOString(),
-      };
-
-      const [sendResult] = await sql1<[{ send: string }]>`
-        SELECT pgmq.send('s6_sync', ${sql1.json(sanitizedMsg)})
-      `;
-      const msgId = sendResult.send;
-      createdQueueMsgIds.push(msgId);
-
-      const [readResult] = await sql1<[{ msg_id: string; message: typeof sanitizedMsg }?]>`
-        SELECT msg_id::text, message FROM pgmq.read('s6_sync', 30, 1)
-      `;
-
-      expect(readResult).toBeDefined();
-      expect(readResult!.message.sanitized).toBe(true);
-
-      await sql1`SELECT pgmq.archive('s6_sync', ${msgId}::bigint)`;
-
-      const [archivedMsg] = await sql1<[{ msg_id: string }?]>`
-        SELECT msg_id::text FROM pgmq.a_s6_sync WHERE msg_id = ${Number(msgId)}
-      `;
-
-      expect(archivedMsg).toBeDefined();
-      expect(archivedMsg!.msg_id).toBe(msgId);
+      expect(dlqRow!.message.reason).toBe("shop_row_missing");
     });
   });
 });

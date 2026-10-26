@@ -52,11 +52,12 @@ const COVERED_SYNC_TOPICS = new Set([
 const COVERED_BULK_TYPES = new Set(["companies", "orders"]);
 
 /**
- * Reason for DLQ sanitization.
+ * Reason for DLQ sanitization (closed enum).
  * - shop_not_found: Handler returned shop_not_found error (shop already gone)
- * - shop_gone: Shop row is missing or uninstalledAt is set (48h pre-redact window)
+ * - shop_row_missing: No Shop row exists in the database
+ * - shop_uninstalled: Shop row exists but uninstalledAt is set (48h pre-redact window)
  */
-export type SanitizationReason = "shop_not_found" | "shop_gone";
+export type SanitizationReason = "shop_not_found" | "shop_row_missing" | "shop_uninstalled";
 
 /**
  * Sanitized dead letter message structure.

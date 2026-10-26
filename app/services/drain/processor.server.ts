@@ -66,6 +66,7 @@ import {
   sanitizeSyncMessage,
   sanitizeBulkMessage,
   type SanitizedDeadLetterMessage,
+  type SanitizationReason,
 } from "./dead-letter-sanitize.server";
 
 /**
@@ -1212,36 +1213,27 @@ export async function moveToDeadLetter(
       FOR SHARE
     `;
 
-    const shopGone = !shopRow || shopRow.uninstalledAt !== null;
+    const shopRowMissing = !shopRow;
+    const shopUninstalled = shopRow !== undefined && shopRow.uninstalledAt !== null;
+    const shopGone = shopRowMissing || shopUninstalled;
     const shopId = shopRow?.id;
+    let sanitizationReason: SanitizationReason | null = null;
 
     if (shopGone && !preSanitized) {
+      const reason: SanitizationReason = shopRowMissing ? "shop_row_missing" : "shop_uninstalled";
       if (queue === S6_QUEUES.SYNC) {
-        const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt, "shop_gone", shopId);
+        const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt, reason, shopId);
         if (sanitized) {
           messageToStore = sanitized;
-          safeLog("info", "dlq_sanitized_shop_gone", {
-            topic: message.topic,
-            originalMsgId: msgId,
-          });
+          sanitizationReason = reason;
         }
       } else if (queue === S6_QUEUES.BULK) {
-        const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt, "shop_gone", shopId);
+        const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt, reason, shopId);
         if (sanitized) {
           messageToStore = sanitized;
-          safeLog("info", "dlq_sanitized_shop_gone", {
-            topic: message.topic,
-            bulkType: (message as BulkMessage).bulkType,
-            originalMsgId: msgId,
-          });
+          sanitizationReason = reason;
         }
       }
-    } else if (preSanitized) {
-      safeLog("info", "dlq_sanitized_shop_not_found", {
-        topic: message.topic,
-        originalMsgId: msgId,
-        ...(queue === S6_QUEUES.BULK && { bulkType: (message as BulkMessage).bulkType }),
-      });
     }
 
     const [result] = await tx<[{ delete: boolean }]>`
@@ -1250,6 +1242,22 @@ export async function moveToDeadLetter(
 
     if (!result.delete) {
       return false;
+    }
+
+    if (sanitizationReason) {
+      safeLog("info", "dlq_sanitized_shop_not_found", {
+        topic: message.topic,
+        originalMsgId: msgId,
+        reason: sanitizationReason,
+        ...(queue === S6_QUEUES.BULK && { bulkType: (message as BulkMessage).bulkType }),
+      });
+    } else if (preSanitized) {
+      safeLog("info", "dlq_sanitized_shop_not_found", {
+        topic: message.topic,
+        originalMsgId: msgId,
+        reason: "shop_not_found" as SanitizationReason,
+        ...(queue === S6_QUEUES.BULK && { bulkType: (message as BulkMessage).bulkType }),
+      });
     }
 
     await tx`
