@@ -33,8 +33,10 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (branch head 2026-10-16)
         with:
+          # Pinned by SHA, so name the toolchain explicitly (same as the @stable default).
+          toolchain: stable
           targets: wasm32-unknown-unknown
 
       - name: Cache Cargo (registry, git deps, target)
