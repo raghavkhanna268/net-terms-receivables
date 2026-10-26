@@ -1005,7 +1005,7 @@ export default function OnboardingPage() {
         <s-stack gap="base">
           <s-paragraph>
             Complete these steps to set up net terms management for your store.
-            Each step checks your actual configuration - nothing is hardcoded.
+            Each step reflects your store&apos;s actual settings.
           </s-paragraph>
 
           <OnboardingChecklist
@@ -1072,8 +1072,8 @@ export default function OnboardingPage() {
 
       <s-section slot="aside" heading="Need help?">
         <s-paragraph>
-          Check the documentation in this repository for detailed setup
-          instructions and troubleshooting.
+          <s-link href={SUPPORT_EMAIL_MAILTO}>Contact support</s-link> for setup
+          assistance and troubleshooting.
         </s-paragraph>
       </s-section>
     </s-page>
