@@ -3628,7 +3628,7 @@ async function seedReviewerDemoOrders(state: SeedState): Promise<void> {
     // Check if order already exists (idempotency)
     const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
-      console.log(`  ✅ Order ${orderSpec.orderKey} already exists (${existingOrder.name})`);
+      console.log(`  ✅ Order ${orderSpec.orderKey} already exists`);
       state.unchangedCount.orders++;
       continue;
     }
@@ -3670,9 +3670,17 @@ async function seedReviewerDemoOrders(state: SeedState): Promise<void> {
       continue;
     }
 
-    // Log the assigned name (should match orderSpec.orderName if API accepted it)
+    // Verify API accepted the requested order name
+    const nameMatches = order.name === orderSpec.orderName;
+    if (!nameMatches) {
+      state.failedCount.orders++;
+      state.errors.push(`Order name mismatch for ${orderSpec.orderKey}: expected ${orderSpec.orderName}, nameMatches=${nameMatches}`);
+      continue;
+    }
+
     console.log(
-      `  ✅ Created reviewer demo order: id=${order.id}, name=${order.name}, ` +
+      `  ✅ Created reviewer demo order ${orderSpec.orderKey}: ` +
+      `nameMatches=${nameMatches}, ` +
       formatCurrency(orderSpec.amountInr, state.currencyCode)
     );
     state.createdCount.orders++;

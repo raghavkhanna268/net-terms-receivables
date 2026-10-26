@@ -247,11 +247,11 @@ describe("HDFC reviewer CSV v3: Scorer unit test (hypothetical candidates)", () 
     /**
      * SCORER TEST RESULTS (all invoices passed directly):
      *
-     * | Row | Amount   | PayerText        | Top Candidate           | Score | Band   | Breakdown                                     |
-     * |-----|----------|------------------|-------------------------|-------|--------|-----------------------------------------------|
-     * | 1   | ₹10,000  | SYNT0001 TEST... | invoice-reviewer-demo-1 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
-     * | 2   | ₹5,000   | TEST BUYER CO    | invoice-reviewer-demo-2 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
-     * | 3   | ₹2,500   | SYNT0003 TEST... | invoice-reviewer-demo-2 | 48    | low    | invoice_ref(+30), amount_partial(+10), payer_name(+8) |
+     * | Row | Amount   | PayerText (parsed)           | Top Candidate           | Score | Band   | Breakdown                                     |
+     * |-----|----------|------------------------------|-------------------------|-------|--------|-----------------------------------------------|
+     * | 1   | ₹10,000  | SYNT0001 TEST BUYER CO #1001 | invoice-reviewer-demo-1 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
+     * | 2   | ₹5,000   | TEST BUYER CO                | invoice-reviewer-demo-2 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
+     * | 3   | ₹2,500   | TEST BUYER CO                | invoice-reviewer-demo-2 | 48    | low    | invoice_ref(+30), amount_partial(+10), payer_name(+8) |
      *
      * High (80) requires a confirmed payer alias; without one the best is Medium (58).
      */

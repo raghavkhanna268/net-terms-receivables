@@ -9,11 +9,7 @@
  * All data is FICTIONAL - no real company names, domains, or identifiers.
  * The buyer name "Test Buyer Co" matches the payer text in the review CSV.
  *
- * NOTE ON ORDER NAMES: The CSV narration contains "#1001" and "#1002", but
- * Shopify assigns order names sequentially. The seeded orders may not actually
- * be #1001/#1002. These fixtures use hypothetical order names for scoring unit
- * tests only. The DB integration test (review-csv-matcher-db.test.ts) pins real
- * behavior with whatever names the seeded invoices actually have.
+ * Order names #1001 and #1002 are set explicitly via OrderCreateOrderInput.name.
  *
  * Amount window for candidate filtering in the app:
  * - MIN_FACTOR = 0.5x payment amount
@@ -70,11 +66,10 @@ export function buildReviewerDemoBuyer(withAliases = false): BuyerForScoring {
 }
 
 /**
- * Build hypothetical invoices for scoring tests.
- * Uses placeholder order names since Shopify assigns names sequentially.
+ * Build invoices for scoring tests.
  *
  * @param buyerId - Buyer account ID to associate with invoices
- * @param orderNames - Optional order names (default: hypothetical #1001/#1002)
+ * @param orderNames - Optional order names (default: #1001/#1002)
  */
 export function buildReviewerDemoInvoices(
   buyerId: string,
