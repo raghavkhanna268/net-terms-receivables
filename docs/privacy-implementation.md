@@ -201,7 +201,7 @@ Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafi
 
 ### Sentry Error Events — Data Scrubbing
 
-When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry.ts:388-396`) before transmission:
+When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry.ts:388-397`) before transmission:
 
 **Removed entirely:**
 - `event.user` (`sentry.ts:272`)
@@ -218,7 +218,7 @@ When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSen
 **Scrubbed to allowlist:**
 - `event.extra`, `event.tags`, `event.contexts` — only keys in `ALLOWED_SENTRY_KEYS` (`sentry.ts:54-62`) are retained: `shopId`, `code`, `requestId`, `jobId`, `topic`, `status`, `errorCode`
 
-**Disabled via `RESTRICTIVE_DATA_COLLECTION` config (`sentry.ts:19-32`):**
+**Disabled via `RESTRICTIVE_DATA_COLLECTION` config (`sentry.ts:19-31`):**
 - `userInfo`, `cookies`, `httpHeaders`, `httpBodies`, `urlQueryParams`, `graphQL`, `genAI`, `databaseQueryData`, `queues`, `stackFrameVariables`, `frameContextLines`
 
 ---
