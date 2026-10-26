@@ -6,7 +6,10 @@
  * write_payment_customizations scope is already granted.
  *
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentCustomizationCreate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentCustomizationUpdate
  */
+
+import { toErrorCode } from "./log.server";
 
 /**
  * Minimal type for the admin GraphQL client.
@@ -103,17 +106,52 @@ const PAYMENT_CUSTOMIZATION_CREATE_MUTATION = `#graphql
   }
 `;
 
+const PAYMENT_CUSTOMIZATION_UPDATE_MUTATION = `#graphql
+  mutation PaymentCustomizationUpdate($id: ID!, $title: String!) {
+    paymentCustomizationUpdate(id: $id, paymentCustomization: { title: $title }) {
+      paymentCustomization {
+        id
+        title
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
+interface PaymentCustomizationUpdateResult {
+  data?: {
+    paymentCustomizationUpdate?: {
+      paymentCustomization?: {
+        id: string;
+        title: string;
+      };
+      userErrors?: Array<{
+        field?: string[];
+        message: string;
+        code?: string;
+      }>;
+    };
+  };
+  errors?: Array<{ message: string }>;
+}
+
 /**
  * Ensures the hide-terms-payment function is registered for the shop.
  * This is idempotent - if the customization already exists (matched by handle), it returns the existing one.
+ * If an existing customization has a different title, updates only the title (does not change enabled state
+ * or metafields). Update failures are logged but do not block the ensure flow.
  *
  * @param admin - The Shopify Admin API context
- * @returns The payment customization ID (existing or newly created)
- * @throws Error if registration fails
+ * @returns The payment customization ID (existing or newly created), creation flag, and title update count
+ * @throws Error if registration fails (query or create errors)
  */
 export async function ensurePaymentCustomization(
   admin: AdminGraphqlClient,
-): Promise<{ id: string; created: boolean }> {
+): Promise<{ id: string; created: boolean; titleUpdateCount: number }> {
   const existingResult = await admin.graphql(PAYMENT_CUSTOMIZATIONS_QUERY);
   const existingData = (await existingResult.json()) as PaymentCustomizationsQueryResult;
 
@@ -128,7 +166,30 @@ export async function ensurePaymentCustomization(
   );
 
   if (existingCustomization) {
-    return { id: existingCustomization.node.id, created: false };
+    const node = existingCustomization.node;
+    if (node.title === PAYMENT_CUSTOMIZATION_TITLE) {
+      return { id: node.id, created: false, titleUpdateCount: 0 };
+    }
+
+    let titleUpdateCount = 0;
+    try {
+      const updateResult = await admin.graphql(PAYMENT_CUSTOMIZATION_UPDATE_MUTATION, {
+        variables: { id: node.id, title: PAYMENT_CUSTOMIZATION_TITLE },
+      });
+      const updateData = (await updateResult.json()) as PaymentCustomizationUpdateResult;
+
+      if (updateData.errors?.length) {
+        console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.errors[0].message })}`);
+      } else if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
+        console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.data.paymentCustomizationUpdate.userErrors[0].message })}`);
+      } else if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
+        titleUpdateCount = 1;
+      }
+    } catch (error) {
+      console.warn(`[payment_customization] title_update err=${toErrorCode(error)}`);
+    }
+
+    return { id: node.id, created: false, titleUpdateCount };
   }
 
   const createResult = await admin.graphql(PAYMENT_CUSTOMIZATION_CREATE_MUTATION, {
@@ -148,17 +209,38 @@ export async function ensurePaymentCustomization(
 
   const userErrors = createData.data?.paymentCustomizationCreate?.userErrors;
   if (userErrors?.length) {
-    // Check for TAKEN error (already exists)
     const takenError = userErrors.find((e) => e.code === "TAKEN");
     if (takenError) {
-      // Re-query to get the existing one
       const reQueryResult = await admin.graphql(PAYMENT_CUSTOMIZATIONS_QUERY);
       const reQueryData = (await reQueryResult.json()) as PaymentCustomizationsQueryResult;
       const existing = reQueryData.data?.paymentCustomizations?.edges.find(
         (edge) => edge.node.shopifyFunction.handle === PAYMENT_CUSTOMIZATION_FUNCTION_HANDLE,
       );
       if (existing) {
-        return { id: existing.node.id, created: false };
+        const node = existing.node;
+        if (node.title === PAYMENT_CUSTOMIZATION_TITLE) {
+          return { id: node.id, created: false, titleUpdateCount: 0 };
+        }
+
+        let titleUpdateCount = 0;
+        try {
+          const updateResult = await admin.graphql(PAYMENT_CUSTOMIZATION_UPDATE_MUTATION, {
+            variables: { id: node.id, title: PAYMENT_CUSTOMIZATION_TITLE },
+          });
+          const updateData = (await updateResult.json()) as PaymentCustomizationUpdateResult;
+
+          if (updateData.errors?.length) {
+            console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.errors[0].message })}`);
+          } else if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
+            console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.data.paymentCustomizationUpdate.userErrors[0].message })}`);
+          } else if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
+            titleUpdateCount = 1;
+          }
+        } catch (error) {
+          console.warn(`[payment_customization] title_update err=${toErrorCode(error)}`);
+        }
+
+        return { id: node.id, created: false, titleUpdateCount };
       }
     }
 
@@ -172,5 +254,5 @@ export async function ensurePaymentCustomization(
     throw new Error("Payment customization creation returned no customization object");
   }
 
-  return { id: customization.id, created: true };
+  return { id: customization.id, created: true, titleUpdateCount: 0 };
 }

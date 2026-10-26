@@ -7,7 +7,10 @@
  * write_validations scope is already granted.
  *
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationCreate
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationUpdate
  */
+
+import { toErrorCode } from "./log.server";
 
 /**
  * Minimal type for the admin GraphQL client.
@@ -105,17 +108,50 @@ const VALIDATION_CREATE_MUTATION = `#graphql
   }
 `;
 
+const VALIDATION_UPDATE_MUTATION = `#graphql
+  mutation ValidationUpdate($id: ID!, $title: String!) {
+    validationUpdate(id: $id, validation: { title: $title }) {
+      validation {
+        id
+        title
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+interface ValidationUpdateResult {
+  data?: {
+    validationUpdate?: {
+      validation?: {
+        id: string;
+        title: string;
+      };
+      userErrors?: Array<{
+        field?: string[];
+        message: string;
+      }>;
+    };
+  };
+  errors?: Array<{ message: string }>;
+}
+
 /**
  * Ensures the credit check validation function is registered for the shop.
  * This is idempotent - if the validation already exists (matched by handle), it returns the existing one.
+ * If an existing validation has a different title, updates only the title (does not change enabled state,
+ * blockOnFailure, or metafields). Update failures are logged but do not block the ensure flow.
  *
  * @param admin - The Shopify Admin API context
- * @returns The validation ID (existing or newly created)
- * @throws Error if registration fails
+ * @returns The validation ID (existing or newly created), creation flag, and title update count
+ * @throws Error if registration fails (query or create errors)
  */
 export async function ensureValidation(
   admin: AdminGraphqlClient,
-): Promise<{ id: string; created: boolean }> {
+): Promise<{ id: string; created: boolean; titleUpdateCount: number }> {
   const existingResult = await admin.graphql(VALIDATIONS_QUERY);
   const existingData = (await existingResult.json()) as ValidationsQueryResult;
 
@@ -130,7 +166,30 @@ export async function ensureValidation(
   );
 
   if (existingValidation) {
-    return { id: existingValidation.node.id, created: false };
+    const node = existingValidation.node;
+    if (node.title === VALIDATION_TITLE) {
+      return { id: node.id, created: false, titleUpdateCount: 0 };
+    }
+
+    let titleUpdateCount = 0;
+    try {
+      const updateResult = await admin.graphql(VALIDATION_UPDATE_MUTATION, {
+        variables: { id: node.id, title: VALIDATION_TITLE },
+      });
+      const updateData = (await updateResult.json()) as ValidationUpdateResult;
+
+      if (updateData.errors?.length) {
+        console.warn(`[validation] title_update err=${toErrorCode({ message: updateData.errors[0].message })}`);
+      } else if (updateData.data?.validationUpdate?.userErrors?.length) {
+        console.warn(`[validation] title_update err=${toErrorCode({ message: updateData.data.validationUpdate.userErrors[0].message })}`);
+      } else if (updateData.data?.validationUpdate?.validation) {
+        titleUpdateCount = 1;
+      }
+    } catch (error) {
+      console.warn(`[validation] title_update err=${toErrorCode(error)}`);
+    }
+
+    return { id: node.id, created: false, titleUpdateCount };
   }
 
   const createResult = await admin.graphql(VALIDATION_CREATE_MUTATION, {
@@ -160,5 +219,5 @@ export async function ensureValidation(
     throw new Error("Validation creation returned no validation object");
   }
 
-  return { id: validation.id, created: true };
+  return { id: validation.id, created: true, titleUpdateCount: 0 };
 }
