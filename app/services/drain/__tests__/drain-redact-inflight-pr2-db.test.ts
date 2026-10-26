@@ -243,7 +243,7 @@ describeWithDb("PR2: in-flight residual guards (#239)", () => {
     it("n <= 0 returns false without write (no-op)", async () => {
       const { incrementOrderOutstandingMissing } = await import("../reconcile-handlers.server");
 
-      const result = await incrementOrderOutstandingMissing(sql, "nonexistent.myshopify.com", 0);
+      const result = await incrementOrderOutstandingMissing(sql, "test-nonexistent-shop.myshopify.com", 0);
       expect(result).toBe(false);
     });
   });
