@@ -17,8 +17,15 @@ import { syncClockToDb } from "../../../tests/helpers/db-clock";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 import { findMatchingTagRule as findMatchingTagRuleSync } from "../sync/customer.server";
 
-const { mockShopifyGraphQLRequest } = vi.hoisted(() => {
-  const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async () => {
+import { recomputeCreditStatus } from "../credit-status-recompute.server";
+import { hasOverdueInvoices } from "../overdue.server";
+import type { CreditStatus } from "~/lib/metafields-contract";
+
+let lastMetafieldVariables: { metafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> } | null = null;
+
+const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async (_shop: string, query: string, variables: unknown) => {
+  if (query.includes("metafieldsSet")) {
+    lastMetafieldVariables = variables as typeof lastMetafieldVariables;
     return {
       success: true,
       data: {
@@ -28,8 +35,8 @@ const { mockShopifyGraphQLRequest } = vi.hoisted(() => {
         },
       },
     };
-  });
-  return { mockShopifyGraphQLRequest };
+  }
+  return { success: true, data: {} };
 });
 
 vi.mock("../shopify-client.server", async (importOriginal) => {
@@ -40,10 +47,6 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
   };
 });
 
-import { recomputeCreditStatus } from "../credit-status-recompute.server";
-import { hasOverdueInvoices } from "../overdue.server";
-import type { CreditStatus } from "~/lib/metafields-contract";
-
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -51,11 +54,8 @@ let sql: ReturnType<typeof postgres>;
 const allShopDomains: string[] = [];
 
 function getLastMetafieldJson(): CreditStatus | null {
-  const lastCall = mockShopifyGraphQLRequest.mock.calls.at(-1);
-  if (!lastCall) return null;
-  const variables = lastCall[1] as { metafields?: Array<{ value: string }> } | undefined;
-  if (!variables?.metafields?.[0]?.value) return null;
-  return JSON.parse(variables.metafields[0].value) as CreditStatus;
+  if (!lastMetafieldVariables?.metafields?.[0]?.value) return null;
+  return JSON.parse(lastMetafieldVariables.metafields[0].value) as CreditStatus;
 }
 
 function lettersOnlyId(len: number): string {
@@ -141,6 +141,7 @@ describeWithDb("eligibility-checkout-db", () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       await syncClockToDb(sql);
       mockShopifyGraphQLRequest.mockClear();
+      lastMetafieldVariables = null;
 
       const { shopId, accountId, suffix, cleanup } = await setupTestShop();
 
