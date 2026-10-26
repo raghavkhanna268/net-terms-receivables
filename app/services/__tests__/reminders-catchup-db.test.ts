@@ -1538,17 +1538,19 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   });
 
   describe("amount tiebreak ordering (#230)", () => {
-    it("enqueues catch-up messages by oldest-first then larger-amount, NULL outstanding last", async () => {
+    it("enqueues catch-up messages by oldest-first then larger-amount (DESC order)", async () => {
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       // 3 invoices with same reminder date but different outstanding amounts
       const invoiceIdSmall = `inv-amount-small-${TEST_SUFFIX}`;
       const invoiceIdLarge = `inv-amount-large-${TEST_SUFFIX}`;
-      const invoiceIdNull = `inv-amount-null-${TEST_SUFFIX}`;
+      const invoiceIdZero = `inv-amount-zero-${TEST_SUFFIX}`;
       const orderIdSmall = `gid://shopify/Order/amount-small-${TEST_SUFFIX}`;
       const orderIdLarge = `gid://shopify/Order/amount-large-${TEST_SUFFIX}`;
-      const orderIdNull = `gid://shopify/Order/amount-null-${TEST_SUFFIX}`;
+      const orderIdZero = `gid://shopify/Order/amount-zero-${TEST_SUFFIX}`;
 
       // All invoices due 2 days ago (so reminder date = dueAt + 0 = 2 days ago, within D+1..D+3)
+      // Note: outstanding is NOT NULL in schema, so we use 0.01 for smallest amount
+      // (0 would be skipped by TS re-check as "fully paid")
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -1561,8 +1563,8 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           (${invoiceIdLarge}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdLarge},
            '#AMOUNT-LARGE', 10000.00, 9000.00, 'open',
            ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
-          (${invoiceIdNull}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdNull},
-           '#AMOUNT-NULL', 10000.00, NULL, 'open',
+          (${invoiceIdZero}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdZero},
+           '#AMOUNT-ZERO', 10000.00, 0.01, 'open',
            ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow})
       `;
 
@@ -1572,14 +1574,14 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES 
           (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdSmall}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
           (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdLarge}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdNull}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdZero}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
       `;
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
 
       await sql`SELECT public.s18_enqueue_reminders()`;
 
-      const messages = await sql<{ invoiceId: string; outstanding: string | null }[]>`
+      const messages = await sql<{ invoiceId: string }[]>`
         SELECT message->>'invoiceId' AS "invoiceId"
         FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
@@ -1588,10 +1590,10 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       `;
 
       expect(messages.length).toBe(3);
-      // Order: largest outstanding first, then smaller, then NULL last
+      // Order: largest outstanding first (DESC), then smaller, then smallest
       expect(messages[0].invoiceId).toBe(invoiceIdLarge);  // 9000
       expect(messages[1].invoiceId).toBe(invoiceIdSmall);  // 1000
-      expect(messages[2].invoiceId).toBe(invoiceIdNull);   // NULL
+      expect(messages[2].invoiceId).toBe(invoiceIdZero);   // 0.01
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     });
