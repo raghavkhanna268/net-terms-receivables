@@ -44,12 +44,12 @@
 
 ### App Listing
 
-- [ ] **⚠️ App name and tagline finalized** — See `listing/app-store-listing.md`
-- [ ] **⚠️ App description written** — Feature bullets, use cases
-- [ ] **TBD** Screenshots (minimum 3)
-- [ ] **TBD** Demo video (recommended)
-- [ ] **TBD** App icon (square, meets Shopify requirements)
-- [ ] **TBD** Support contact email
+- [x] **⚠️ App name and tagline finalized** — "Termwise: Net Terms & Credit" (`shopify.app.toml:4`)
+- [ ] **⚠️ App description written** — Feature bullets, use cases — Why open: not in Partner Dashboard
+- [ ] **TBD** Screenshots (minimum 3) — Why open: not created
+- [ ] **TBD** Demo video (recommended) — Why open: not created
+- [ ] **TBD** App icon (square, meets Shopify requirements) — Why open: `listing/icon.png` is draft, pending Raghav's approval
+- [x] **Support contact email**: set in the privacy policy (`docs/privacy.md:15`, #313)
 
 ### Scopes and Permissions
 
@@ -79,11 +79,11 @@ Write scopes include read access to the same resource type. See [Access scopes](
 
 ### Privacy Policy
 
-- [ ] **⚠️ Privacy policy URL hosted and accessible**
+- [x] **⚠️ Privacy policy URL hosted and accessible** (#162, #313, #357 merged)
   - Draft: `docs/privacy.md`
-  - [ ] **TBD:** Host on public URL (e.g., /privacy route in app, or external URL)
-  - [ ] **Raghav: fill privacy.md TBDs** (legal entity, contact email, DPO, effective date, DPA links for Cloudflare and Supabase, Sentry data region)
-  - [ ] Legal review of privacy policy
+  - [x] **Host on public URL** — `/privacy` route renders `docs/privacy.md` (`app/routes/privacy.tsx`, #162)
+  - [x] **Raghav: fill privacy.md TBDs** — legal entity, contact email, effective date, DPA links, Sentry data region filled (#313, #357)
+  - [ ] Legal review of privacy policy — Why open: no legal review conducted
 
 ### GDPR Webhooks
 
@@ -120,9 +120,9 @@ Write scopes include read access to the same resource type. See [Access scopes](
 ### Billing (if paid app)
 
 - [x] **Billing mechanism is correct:** Uses Shopify Managed App Pricing (reads `currentAppInstallation.activeSubscriptions`, links to Shopify's hosted pricing page for upgrades). No custom charge flow or hardcoded prices in code.
-- [ ] **TBD: Awaiting Raghav's decision** on final prices and tier limits (see `docs/plans-and-gating.md`)
-- [ ] **⚠️ Create plans in Partner Dashboard** with names matching `docs/plans-and-gating.md:22-29` (free, starter, growth, scale)
-- [ ] **TBD** Test billing flow in dev store after plans are created
+- [x] **Pricing decided** (product-owner ruling): Starter $9/mo or $90/yr, Growth $19/mo or $190/yr, Unlimited $29/mo or $290/yr; 30-day free trial; all features on every plan (`listing/app-store-listing.md:45-49`, `app/lib/entitlements.ts`).
+- [ ] **Plans created in Partner Dashboard** — Why open: Plans reported configured in Partner Dashboard (Starter, Growth, Unlimited; no Scale); to be confirmed by the QA billing test.
+- [ ] **QA billing test** — Why open: QA billing test pending
 - **Reference:** [Shopify App Pricing](https://shopify.dev/docs/apps/launch/billing)
 
 ---
@@ -139,7 +139,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] **⚠️ Payment reminders (S18): Resend prerequisites before any shop enables reminders**
   - [ ] Resend Data Processing Agreement (DPA) accepted by Raghav (first)
   - [ ] Then `RESEND_API_KEY` set as a Worker secret (names only in tickets and logs; never paste values)
-  - [ ] Then `RESEND_FROM` set as a Worker secret
+  - [ ] `RESEND_FROM` set as a plain (non-secret) var in `wrangler.jsonc`: `reminders@mail.termwiseapp.com`
   - **Owner:** Raghav (DPA, values via secure secret request), then DevOps sets the secrets
   - **Why:** without both secrets reminder sends are acked as "disabled" (safe no-op); once set, real emails go to buyers of any shop with reminders enabled, so the DPA must be in place first
 
@@ -147,13 +147,14 @@ Write scopes include read access to the same resource type. See [Access scopes](
 
 ## Error Monitoring
 
-- [ ] **⚠️ Wire Sentry error monitoring**
+- [ ] **⚠️ Wire Sentry error monitoring** — Why open: Worker-side capture pending
   - Package installed: `@sentry/cloudflare`
   - Wrapper implemented: `app/lib/sentry.ts`
-  - [ ] Create Sentry project (Raghav), DSN provided through a secure secret request
-  - [ ] Set `SENTRY_DSN` secret in Cloudflare Workers (DevOps)
+  - [x] Create Sentry project (Raghav), DSN provided through a secure secret request (#390)
+  - [x] Set `SENTRY_DSN` secret in Cloudflare Workers (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST)
   - **Steps:** [docs/launch-checklist/sentry-setup.md](../docs/launch-checklist/sentry-setup.md)
-  - [ ] Verify errors are captured in dev store testing
+  - [x] Sentry ingest accepted a synthetic event (HTTP 200 + event id) in the manual sentry-smoke.yml run on main, 26 Oct (#390); arrival not confirmed via Sentry API
+  - [ ] Release tags and source maps — Why open: in open PR #323
 
 ---
 
@@ -192,7 +193,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] App tested on dev store with real Shopify data
 - [ ] GDPR webhooks tested with Shopify's test tool
 - [ ] Lighthouse audit passing
-- [ ] Sentry wired and receiving errors
+- [ ] Sentry wired and receiving errors — Why open: Sentry wired in code (`workers/app.ts`, `app/lib/sentry.ts`); ingest smoke passed (#390); Worker-side capture pending
 - [ ] CI/CD pipeline green
 - [ ] PCD request is reviewed with the listing; confirm the selected fields are Name and Email only before submitting (no changes allowed during review).
 
