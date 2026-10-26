@@ -336,6 +336,24 @@ describe("onboarding-steps", () => {
   });
 
   describe("step actionUrls resolve to existing routes", () => {
+    /**
+     * Check if a route file exists for a given path.
+     * Handles React Router flat-route file forms:
+     * - <path>.tsx
+     * - <path>.ts
+     * - <path>/route.tsx
+     * - <path>._index.tsx
+     */
+    function routeFileExists(routesDir: string, routePath: string): boolean {
+      const candidates = [
+        join(routesDir, `${routePath}.tsx`),
+        join(routesDir, `${routePath}.ts`),
+        join(routesDir, routePath, "route.tsx"),
+        join(routesDir, `${routePath}._index.tsx`),
+      ];
+      return candidates.some((candidate) => existsSync(candidate));
+    }
+
     it("all internal actionUrls have corresponding route files", () => {
       const inputs: OnboardingStepInputs = {
         shopId: "shop-123",
@@ -351,18 +369,30 @@ describe("onboarding-steps", () => {
       const state = computeOnboardingState(inputs);
       const routesDir = join(process.cwd(), "app/routes");
 
+      let checkedCount = 0;
+
       for (const step of state.steps) {
         if (step.actionUrl && step.actionUrl.startsWith("/app/")) {
-          const routePath = step.actionUrl
+          // Strip query string and hash before resolving
+          const cleanUrl = step.actionUrl.split("?")[0].split("#")[0];
+          const routePath = cleanUrl
             .replace(/^\/app/, "app")
             .replace(/\//g, ".");
-          const routeFile = join(routesDir, `${routePath}.tsx`);
+          
           expect(
-            existsSync(routeFile),
-            `Step '${step.id}' actionUrl '${step.actionUrl}' should resolve to route file '${routeFile}'`
+            routeFileExists(routesDir, routePath),
+            `Step '${step.id}' actionUrl '${step.actionUrl}' should resolve to a route file (tried ${routePath}.tsx, ${routePath}.ts, ${routePath}/route.tsx, ${routePath}._index.tsx)`
           ).toBe(true);
+
+          checkedCount++;
         }
       }
+
+      // Fail if zero steps were checked to prevent vacuously passing test
+      expect(
+        checkedCount,
+        "At least one step with internal actionUrl should be checked"
+      ).toBeGreaterThan(0);
     });
   });
 });
