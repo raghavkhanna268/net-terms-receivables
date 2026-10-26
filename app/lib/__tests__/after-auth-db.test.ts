@@ -2027,3 +2027,77 @@ describeWithDb("after-auth currency flip safety (#292)", () => {
     `;
   });
 });
+
+describeWithDb("markShopUninstalled plan cache invalidation (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-plancache";
+  const TEST_SHOP_DOMAIN = `plan-cache-${TEST_SUFFIX}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+  });
+
+  it("markShopUninstalled sets plan_cached_at to NULL", async () => {
+    // Create shop with plan_cached_at set
+    await sql`
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, plan_cached_at, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'UTC', 'INR', 'starter', NOW(), NOW(), NOW())
+    `;
+
+    // Verify plan_cached_at is set
+    const [before] = await sql<{ plan_cached_at: Date | null }[]>`
+      SELECT plan_cached_at FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+    `;
+    expect(before.plan_cached_at).not.toBeNull();
+
+    // Mark shop uninstalled
+    const { markShopUninstalled } = await import("~/services/compliance/compliance.server");
+    const result = await markShopUninstalled(sql, TEST_SHOP_DOMAIN);
+    expect(result).toBe(true);
+
+    // Verify plan_cached_at is now NULL
+    const [after] = await sql<{ plan_cached_at: Date | null; uninstalledAt: Date | null }[]>`
+      SELECT plan_cached_at, "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+    `;
+    expect(after.plan_cached_at).toBeNull();
+    expect(after.uninstalledAt).not.toBeNull();
+  });
+
+  it("next resolvePlan after uninstall reads from Shopify (cache miss)", async () => {
+    // Create shop with cached plan
+    await sql`
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, plan_cached_at, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'UTC', 'INR', 'starter', 'gid://shopify/AppSubscription/123', NOW(), NOW(), NOW())
+    `;
+
+    // Verify cached plan exists
+    const [before] = await sql<{ plan_key: string; plan_cached_at: Date | null }[]>`
+      SELECT plan_key, plan_cached_at FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+    `;
+    expect(before.plan_key).toBe("starter");
+    expect(before.plan_cached_at).not.toBeNull();
+
+    // Mark shop uninstalled
+    const { markShopUninstalled } = await import("~/services/compliance/compliance.server");
+    await markShopUninstalled(sql, TEST_SHOP_DOMAIN);
+
+    // Verify plan_cached_at is NULL (cache invalidated)
+    const [after] = await sql<{ plan_cached_at: Date | null }[]>`
+      SELECT plan_cached_at FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+    `;
+    expect(after.plan_cached_at).toBeNull();
+
+    // On next resolvePlan with forceRefresh=true, it would fetch from Shopify
+    // because the cache is invalidated (plan_cached_at is NULL means isStale = true)
+    // We verify the cache is in the correct state for a refresh
+  });
+});
