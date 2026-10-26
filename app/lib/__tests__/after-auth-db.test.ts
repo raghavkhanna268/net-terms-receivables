@@ -995,12 +995,92 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
         expect(account.metafieldSyncErrorAt).toBeNull();
       }
     });
+
+    // The no-owner exclusion is defensive; BuyerAccount_kind_consistency (20261022000001)
+    // makes such rows impossible. Kept identical to enqueue_credit_status_recomputes Part 3.
+    // Only the redacted exclusion can be DB-tested.
+    it("clearUninstalledAtAndMetafieldErrors excludes redacted accounts but resets look-alikes (#294 item 8)", async () => {
+      const TEST_SHOP = `test-exclusions-main-${TEST_SUFFIX}.myshopify.com`;
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      const beforeUpdate = new Date();
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", "customerId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          -- Redacted account (has _redacted_ with underscores) - should NOT be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/123_redacted_1698765432',
+           'Redacted Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Look-alike (no underscores around redacted) - SHOULD be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/9redacted9',
+           'Look-alike Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Eligible COMPANY account - should be reset
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/eligible', 'gid://shopify/CompanyLocation/eligible',
+           NULL,
+           'Eligible Account', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate})
+      `;
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
+        await import("../after-auth.server");
+
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
+      expect(result.wasReinstalled).toBe(true);
+
+      const accounts = await sql<{
+        name: string;
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
+        updatedAt: Date;
+      }[]>`
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending", "updatedAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
+      `;
+
+      expect(accounts).toHaveLength(3);
+
+      // Eligible account and look-alike should be reset
+      for (const name of ["Eligible Account", "Look-alike Customer"]) {
+        const account = accounts.find(a => a.name === name)!;
+        expect(account.metafieldSyncErrorCode).toBeNull();
+        expect(account.metafieldSyncErrorAt).toBeNull();
+        expect(account.metafieldSyncedAt).toBeNull();
+        expect(account.syncPending).toBe(true);
+      }
+
+      // Redacted account should be unchanged
+      const redacted = accounts.find(a => a.name === "Redacted Customer")!;
+      expect(redacted.metafieldSyncErrorCode).toBe("no_session");
+      expect(redacted.metafieldSyncErrorAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.syncPending).toBe(false);
+      expect(redacted.updatedAt.getTime()).toBe(beforeUpdate.getTime());
+    });
   });
 
   describe("normal re-auth preserves error fields", () => {
-    it("clearUninstalledAtAndMetafieldErrors is no-op when uninstalledAt is NULL, preserving error fields", async () => {
+    it("clearUninstalledAtAndMetafieldErrors is no-op when uninstalledAt is NULL, preserving error fields and sync markers", async () => {
       const TEST_SHOP = `test-reauth-preserve-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
 
       const [{ id: shopId }] = await sql<{ id: string }[]>`
         INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
@@ -1012,12 +1092,14 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
         INSERT INTO "BuyerAccount" (
           "shopId", kind, "companyId", "companyLocationId", name,
           "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
           "createdAt", "updatedAt"
         )
         VALUES (
           ${shopId}, 'COMPANY'::"AccountKind",
           'gid://shopify/Company/test-preserve', 'gid://shopify/CompanyLocation/test-preserve',
           'Test Account', 'OK', 'no_session', ${errorDate},
+          ${syncedAt}, false,
           NOW(), NOW()
         )
       `;
@@ -1031,12 +1113,16 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
       const [afterReauth] = await sql<{
         metafieldSyncErrorCode: string | null;
         metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
       }[]>`
-        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
         FROM "BuyerAccount" WHERE "shopId" = ${shopId}
       `;
       expect(afterReauth.metafieldSyncErrorCode).toBe("no_session");
       expect(afterReauth.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+      expect(afterReauth.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(afterReauth.syncPending).toBe(false);
     });
   });
 
@@ -1045,6 +1131,7 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
       const TEST_SHOP_A = `test-shop-a-${TEST_SUFFIX}.myshopify.com`;
       const TEST_SHOP_B = `test-shop-b-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
 
       const [{ id: shopAId }] = await sql<{ id: string }[]>`
         INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
@@ -1062,15 +1149,18 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
         INSERT INTO "BuyerAccount" (
           "shopId", kind, "companyId", "companyLocationId", name,
           "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
           "createdAt", "updatedAt"
         )
         VALUES
           (${shopAId}, 'COMPANY'::"AccountKind",
            'gid://shopify/Company/shop-a', 'gid://shopify/CompanyLocation/shop-a',
-           'Shop A Account', 'OK', 'no_session', ${errorDate}, NOW(), NOW()),
+           'Shop A Account', 'OK', 'no_session', ${errorDate},
+           ${syncedAt}, false, NOW(), NOW()),
           (${shopBId}, 'COMPANY'::"AccountKind",
            'gid://shopify/Company/shop-b', 'gid://shopify/CompanyLocation/shop-b',
-           'Shop B Account', 'OK', 'access_denied', ${errorDate}, NOW(), NOW())
+           'Shop B Account', 'OK', 'access_denied', ${errorDate},
+           ${syncedAt}, false, NOW(), NOW())
       `;
 
       const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
@@ -1082,28 +1172,36 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
       const [shopAAccount] = await sql<{
         metafieldSyncErrorCode: string | null;
         metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
       }[]>`
-        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
         FROM "BuyerAccount" WHERE "shopId" = ${shopAId}
       `;
       expect(shopAAccount.metafieldSyncErrorCode).toBeNull();
       expect(shopAAccount.metafieldSyncErrorAt).toBeNull();
+      expect(shopAAccount.metafieldSyncedAt).toBeNull();
+      expect(shopAAccount.syncPending).toBe(true);
 
       const [shopBAccount] = await sql<{
         metafieldSyncErrorCode: string | null;
         metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
       }[]>`
-        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
         FROM "BuyerAccount" WHERE "shopId" = ${shopBId}
       `;
       expect(shopBAccount.metafieldSyncErrorCode).toBe("access_denied");
       expect(shopBAccount.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+      expect(shopBAccount.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(shopBAccount.syncPending).toBe(false);
     });
   });
 
-  describe("preserves other BuyerAccount columns", () => {
-    it("clearUninstalledAtAndMetafieldErrors only clears error fields, preserves all other columns", async () => {
-      const TEST_SHOP = `test-preserve-cols-${TEST_SUFFIX}.myshopify.com`;
+  describe("reinstall clears metafieldSyncedAt and sets syncPending (#294)", () => {
+    it("clearUninstalledAtAndMetafieldErrors sets metafieldSyncedAt=NULL and syncPending=true, preserves other columns", async () => {
+      const TEST_SHOP = `test-reinstall-synced-cols-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
       const syncedAt = new Date("2026-10-14T10:00:00Z");
 
@@ -1121,17 +1219,22 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
           "metafieldSyncedAt", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
           "createdAt", "updatedAt"
         )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/test-cols', 'gid://shopify/CompanyLocation/test-cols',
-          'Preserve Columns Account', 50000.00, 45, 'HELD', 'MANUAL_HOLD',
-          true, true, true, 5,
-          ${syncedAt}, 'no_session', ${errorDate},
-          NOW(), NOW()
-        )
+        VALUES
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-cols-1', 'gid://shopify/CompanyLocation/test-cols-1',
+           'Account With SyncPending True', 50000.00, 45, 'HELD', 'MANUAL_HOLD',
+           true, true, true, 5,
+           ${syncedAt}, 'no_session', ${errorDate},
+           NOW(), NOW()),
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-cols-2', 'gid://shopify/CompanyLocation/test-cols-2',
+           'Account With SyncPending False', 25000.00, 30, 'OK', NULL,
+           false, false, false, 3,
+           ${syncedAt}, NULL, NULL,
+           NOW(), NOW())
       `;
 
-      const [before] = await sql<{
+      const before = await sql<{
         name: string;
         creditLimit: string | null;
         defaultTermsDays: number | null;
@@ -1146,14 +1249,18 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
         SELECT name, "creditLimit", "defaultTermsDays", "holdState", "holdReasonCode",
                bypass, "manualHold", "syncPending", "syncVersion", "metafieldSyncedAt"
         FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
       `;
+
+      expect(before[0].syncPending).toBe(false);
+      expect(before[1].syncPending).toBe(true);
 
       const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
         await import("../after-auth.server");
 
       await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
 
-      const [after] = await sql<{
+      const after = await sql<{
         name: string;
         creditLimit: string | null;
         defaultTermsDays: number | null;
@@ -1171,21 +1278,24 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
                bypass, "manualHold", "syncPending", "syncVersion", "metafieldSyncedAt",
                "metafieldSyncErrorCode", "metafieldSyncErrorAt"
         FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
       `;
 
-      expect(after.metafieldSyncErrorCode).toBeNull();
-      expect(after.metafieldSyncErrorAt).toBeNull();
+      for (let i = 0; i < 2; i++) {
+        expect(after[i].metafieldSyncErrorCode).toBeNull();
+        expect(after[i].metafieldSyncErrorAt).toBeNull();
+        expect(after[i].metafieldSyncedAt).toBeNull();
+        expect(after[i].syncPending).toBe(true);
 
-      expect(after.name).toBe(before.name);
-      expect(after.creditLimit).toBe(before.creditLimit);
-      expect(after.defaultTermsDays).toBe(before.defaultTermsDays);
-      expect(after.holdState).toBe(before.holdState);
-      expect(after.holdReasonCode).toBe(before.holdReasonCode);
-      expect(after.bypass).toBe(before.bypass);
-      expect(after.manualHold).toBe(before.manualHold);
-      expect(after.syncPending).toBe(before.syncPending);
-      expect(after.syncVersion).toBe(before.syncVersion);
-      expect(after.metafieldSyncedAt?.getTime()).toBe(before.metafieldSyncedAt?.getTime());
+        expect(after[i].name).toBe(before[i].name);
+        expect(after[i].creditLimit).toBe(before[i].creditLimit);
+        expect(after[i].defaultTermsDays).toBe(before[i].defaultTermsDays);
+        expect(after[i].holdState).toBe(before[i].holdState);
+        expect(after[i].holdReasonCode).toBe(before[i].holdReasonCode);
+        expect(after[i].bypass).toBe(before[i].bypass);
+        expect(after[i].manualHold).toBe(before[i].manualHold);
+        expect(after[i].syncVersion).toBe(before[i].syncVersion);
+      }
     });
   });
 
@@ -1223,10 +1333,11 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
     await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
   });
 
-  describe("reinstall via upsertShopOnAuth clears metafield errors", () => {
-    it("upsertShopOnAuth clears metafield sync errors when uninstalledAt was set (reinstall)", async () => {
+  describe("reinstall via upsertShopOnAuth clears metafield errors and sync markers (#294)", () => {
+    it("upsertShopOnAuth clears metafield errors and sets syncPending when uninstalledAt was set (reinstall)", async () => {
       const TEST_SHOP = `test-upsert-reinstall-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
 
       const [{ id: shopId }] = await sql<{ id: string }[]>`
         INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
@@ -1238,43 +1349,60 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
         INSERT INTO "BuyerAccount" (
           "shopId", kind, "companyId", "companyLocationId", name,
           "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
           "createdAt", "updatedAt"
         )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/test-upsert', 'gid://shopify/CompanyLocation/test-upsert',
-          'Test Account', 'OK', 'no_session', ${errorDate},
-          NOW(), NOW()
-        )
+        VALUES
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-upsert-1', 'gid://shopify/CompanyLocation/test-upsert-1',
+           'Account With Error', 'OK', 'no_session', ${errorDate},
+           ${syncedAt}, true, NOW(), NOW()),
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/test-upsert-2', 'gid://shopify/CompanyLocation/test-upsert-2',
+           'Account Without Error', 'OK', NULL, NULL,
+           ${syncedAt}, false, NOW(), NOW())
       `;
 
-      const [beforeReinstall] = await sql<{
+      const beforeReinstall = await sql<{
+        name: string;
         metafieldSyncErrorCode: string | null;
         metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
       }[]>`
-        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
-        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId} ORDER BY name
       `;
-      expect(beforeReinstall.metafieldSyncErrorCode).toBe("no_session");
-      expect(beforeReinstall.metafieldSyncErrorAt).not.toBeNull();
+      expect(beforeReinstall[0].metafieldSyncErrorCode).toBe("no_session");
+      expect(beforeReinstall[0].syncPending).toBe(true);
+      expect(beforeReinstall[1].syncPending).toBe(false);
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
       await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "INR");
 
-      const [afterReinstall] = await sql<{
+      const afterReinstall = await sql<{
+        name: string;
         metafieldSyncErrorCode: string | null;
         metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
       }[]>`
-        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
-        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId} ORDER BY name
       `;
-      expect(afterReinstall.metafieldSyncErrorCode).toBeNull();
-      expect(afterReinstall.metafieldSyncErrorAt).toBeNull();
+      expect(afterReinstall).toHaveLength(2);
+      for (const account of afterReinstall) {
+        expect(account.metafieldSyncErrorCode).toBeNull();
+        expect(account.metafieldSyncErrorAt).toBeNull();
+        expect(account.metafieldSyncedAt).toBeNull();
+        expect(account.syncPending).toBe(true);
+      }
     });
 
-    it("upsertShopOnAuth preserves metafield sync errors on normal re-auth (uninstalledAt was NULL)", async () => {
+    it("upsertShopOnAuth preserves metafield sync markers on normal re-auth (uninstalledAt was NULL)", async () => {
       const TEST_SHOP = `test-upsert-reauth-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
 
       const [{ id: shopId }] = await sql<{ id: string }[]>`
         INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
@@ -1286,12 +1414,14 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
         INSERT INTO "BuyerAccount" (
           "shopId", kind, "companyId", "companyLocationId", name,
           "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
           "createdAt", "updatedAt"
         )
         VALUES (
           ${shopId}, 'COMPANY'::"AccountKind",
           'gid://shopify/Company/test-upsert-reauth', 'gid://shopify/CompanyLocation/test-upsert-reauth',
           'Test Account', 'OK', 'no_session', ${errorDate},
+          ${syncedAt}, false,
           NOW(), NOW()
         )
       `;
@@ -1302,18 +1432,23 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
       const [afterReauth] = await sql<{
         metafieldSyncErrorCode: string | null;
         metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
       }[]>`
-        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
         FROM "BuyerAccount" WHERE "shopId" = ${shopId}
       `;
       expect(afterReauth.metafieldSyncErrorCode).toBe("no_session");
       expect(afterReauth.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+      expect(afterReauth.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(afterReauth.syncPending).toBe(false);
     });
 
     it("upsertShopOnAuth on fresh install does not affect other shops' accounts", async () => {
       const TEST_SHOP_NEW = `test-fresh-install-${TEST_SUFFIX}.myshopify.com`;
       const TEST_SHOP_EXISTING = `test-existing-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
 
       const [{ id: existingShopId }] = await sql<{ id: string }[]>`
         INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
@@ -1325,12 +1460,14 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
         INSERT INTO "BuyerAccount" (
           "shopId", kind, "companyId", "companyLocationId", name,
           "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
           "createdAt", "updatedAt"
         )
         VALUES (
           ${existingShopId}, 'COMPANY'::"AccountKind",
           'gid://shopify/Company/test-existing', 'gid://shopify/CompanyLocation/test-existing',
           'Existing Account', 'OK', 'no_session', ${errorDate},
+          ${syncedAt}, false,
           NOW(), NOW()
         )
       `;
@@ -1341,12 +1478,135 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
       const [existingAccount] = await sql<{
         metafieldSyncErrorCode: string | null;
         metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
       }[]>`
-        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt"
+        SELECT "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
         FROM "BuyerAccount" WHERE "shopId" = ${existingShopId}
       `;
       expect(existingAccount.metafieldSyncErrorCode).toBe("no_session");
       expect(existingAccount.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
+      expect(existingAccount.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(existingAccount.syncPending).toBe(false);
+    });
+
+    it("upsertShopOnAuth reinstall leaves another installed shop's accounts unchanged", async () => {
+      const TEST_SHOP_REINSTALL = `test-reinstall-scope-${TEST_SUFFIX}.myshopify.com`;
+      const TEST_SHOP_OTHER = `test-other-scope-${TEST_SUFFIX}.myshopify.com`;
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
+
+      const [{ id: reinstallShopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_REINSTALL}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      const [{ id: otherShopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_OTHER}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${reinstallShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/reinstall-scope', 'gid://shopify/CompanyLocation/reinstall-scope',
+           'Reinstall Shop Account', 'OK', false, ${syncedAt}, NOW(), NOW()),
+          (${otherShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/other-scope', 'gid://shopify/CompanyLocation/other-scope',
+           'Other Shop Account', 'OK', false, ${syncedAt}, NOW(), NOW())
+      `;
+
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP_REINSTALL, 'America/New_York', 'INR');
+
+      const [otherShopAccount] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${otherShopId}
+      `;
+
+      expect(otherShopAccount.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(otherShopAccount.syncPending).toBe(false);
+    });
+
+    // The no-owner exclusion is defensive; BuyerAccount_kind_consistency (20261022000001)
+    // makes such rows impossible. Kept identical to enqueue_credit_status_recomputes Part 3.
+    // Only the redacted exclusion can be DB-tested.
+    it("upsertShopOnAuth reinstall excludes redacted accounts but resets look-alikes (#294 item 8)", async () => {
+      const TEST_SHOP = `test-exclusions-upsert-${TEST_SUFFIX}.myshopify.com`;
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
+
+      const [{ id: shopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      const beforeUpdate = new Date();
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", "customerId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          -- Redacted account (has _redacted_ with underscores) - should NOT be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/456_redacted_1698765432',
+           'Redacted Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Look-alike (no underscores around redacted) - SHOULD be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/Xredacted-1',
+           'Look-alike Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Eligible COMPANY account - should be reset
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/eligible-upsert', 'gid://shopify/CompanyLocation/eligible-upsert',
+           NULL,
+           'Eligible Account', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate})
+      `;
+
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "INR");
+
+      const accounts = await sql<{
+        name: string;
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
+        updatedAt: Date;
+      }[]>`
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending", "updatedAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
+      `;
+
+      expect(accounts).toHaveLength(3);
+
+      // Eligible account and look-alike should be reset
+      for (const name of ["Eligible Account", "Look-alike Customer"]) {
+        const account = accounts.find(a => a.name === name)!;
+        expect(account.metafieldSyncErrorCode).toBeNull();
+        expect(account.metafieldSyncErrorAt).toBeNull();
+        expect(account.metafieldSyncedAt).toBeNull();
+        expect(account.syncPending).toBe(true);
+      }
+
+      // Redacted account should be unchanged
+      const redacted = accounts.find(a => a.name === "Redacted Customer")!;
+      expect(redacted.metafieldSyncErrorCode).toBe("no_session");
+      expect(redacted.metafieldSyncErrorAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.syncPending).toBe(false);
+      expect(redacted.updatedAt.getTime()).toBe(beforeUpdate.getTime());
     });
   });
 });
@@ -2027,3 +2287,335 @@ describeWithDb("after-auth currency flip safety (#292)", () => {
     `;
   });
 });
+
+/**
+ * #294: End-to-end test for reinstall reset → daily sweep → recompute.
+ *
+ * Verifies the full flow:
+ * 1. Reinstall reset clears metafieldSyncedAt and sets syncPending=true
+ * 2. Daily sweep (Part 3) enqueues CREDIT_STATUS_RECOMPUTE for the account
+ * 3. Recompute handler processes the message and writes the metafield
+ * 4. Account ends up with metafieldSyncedAt set and syncPending=false
+ */
+describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-294e2e";
+  const TEST_SHOP_DOMAIN = `test-reinstall-synced-e2e-${TEST_SUFFIX}.myshopify.com`;
+  const CONTROL_SHOP_DOMAIN = `test-reinstall-synced-ctl-${TEST_SUFFIX}.myshopify.com`;
+
+  let testShopId: string;
+  let controlShopId: string;
+  let testAccountId: string;
+  let testAccountManualHoldId: string;
+  let controlAccountId: string;
+
+  let metafieldWriteCount = 0;
+  let mockShopifyGraphQLRequest: ReturnType<typeof vi.fn>;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop (uninstalled)
+    const [{ id: shopId }] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shopId;
+
+    // Create control shop (NOT uninstalled)
+    const [{ id: ctlShopId }] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+      VALUES (${CONTROL_SHOP_DOMAIN}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+      RETURNING id
+    `;
+    controlShopId = ctlShopId;
+
+    // Create test accounts with recent metafieldSyncedAt (Part 3 would NOT select without syncPending)
+    const recentSyncedAt = new Date(Date.now() - 60 * 60 * 1000);
+    const [{ id: accId }] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        "shopId", kind, "companyId", "companyLocationId", name,
+        "holdState", "creditLimit", "syncPending", "metafieldSyncedAt",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${testShopId}, 'COMPANY'::"AccountKind",
+        'gid://shopify/Company/e2e-1', 'gid://shopify/CompanyLocation/e2e-1',
+        'E2E Test Account', 'OK', 50000.00, false, ${recentSyncedAt},
+        NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testAccountId = accId;
+
+    // Manual-HELD account (should also be re-pushed)
+    const [{ id: manualAccId }] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        "shopId", kind, "companyId", "companyLocationId", name,
+        "holdState", "holdReasonCode", "manualHold", "creditLimit",
+        "syncPending", "metafieldSyncedAt",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${testShopId}, 'COMPANY'::"AccountKind",
+        'gid://shopify/Company/e2e-manual', 'gid://shopify/CompanyLocation/e2e-manual',
+        'E2E Manual Hold Account', 'HELD', 'MANUAL_HOLD', true, 50000.00,
+        false, ${recentSyncedAt},
+        NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    testAccountManualHoldId = manualAccId;
+
+    // Control account (should NOT be touched)
+    const [{ id: ctlAccId }] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        "shopId", kind, "companyId", "companyLocationId", name,
+        "holdState", "creditLimit", "syncPending", "metafieldSyncedAt",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${controlShopId}, 'COMPANY'::"AccountKind",
+        'gid://shopify/Company/ctl-1', 'gid://shopify/CompanyLocation/ctl-1',
+        'Control Account', 'OK', 50000.00, false, ${recentSyncedAt},
+        NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    controlAccountId = ctlAccId;
+  });
+
+  afterAll(async () => {
+    // Clean up queue/archive/DLQ
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${TEST_SHOP_DOMAIN}, ${CONTROL_SHOP_DOMAIN})`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' IN (${TEST_SHOP_DOMAIN}, ${CONTROL_SHOP_DOMAIN})`;
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' IN (${TEST_SHOP_DOMAIN}, ${CONTROL_SHOP_DOMAIN})`;
+    // Clean up processed webhooks
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + testAccountId + '%'}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + testAccountManualHoldId + '%'}`;
+    // Clean up test data
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${testShopId}, ${controlShopId})`;
+    await sql`DELETE FROM "Shop" WHERE id IN (${testShopId}, ${controlShopId})`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    metafieldWriteCount = 0;
+    // Reset vi mocks
+    vi.resetModules();
+    // Mock shopify-client.server
+    mockShopifyGraphQLRequest = vi.fn().mockImplementation(async () => {
+      metafieldWriteCount++;
+      return {
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
+            userErrors: [],
+          },
+        },
+      };
+    });
+    vi.doMock("../../services/shopify-client.server", async (importOriginal) => {
+      const actual = await importOriginal() as Record<string, unknown>;
+      return {
+        ...actual,
+        shopifyGraphQLRequest: mockShopifyGraphQLRequest,
+      };
+    });
+    // Clean queue for this shop
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${TEST_SHOP_DOMAIN}, ${CONTROL_SHOP_DOMAIN})`;
+    // Scope dedupe key cleanup to this test's own account IDs (shared DB)
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + testAccountId + '%'}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + testAccountManualHoldId + '%'}`;
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("end-to-end: reinstall reset → Part 3 sweep → recompute → metafield written", async () => {
+    // Self-contained: ensure shop is uninstalled with accounts that have metafieldSyncedAt set
+    const recentSyncedAt = new Date(Date.now() - 60 * 60 * 1000);
+    await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${testShopId}`;
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncedAt" = ${recentSyncedAt}, "syncPending" = false
+      WHERE "shopId" = ${testShopId}
+    `;
+
+    // Step 1: Run reinstall reset
+    const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+    const resetResult = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
+    expect(resetResult.wasReinstalled).toBe(true);
+
+    // Verify accounts have syncPending=true and metafieldSyncedAt=NULL
+    const afterReset = await sql<{
+      id: string;
+      metafieldSyncedAt: Date | null;
+      syncPending: boolean;
+    }[]>`
+      SELECT id, "metafieldSyncedAt", "syncPending"
+      FROM "BuyerAccount" WHERE "shopId" = ${testShopId}
+      ORDER BY id
+    `;
+    expect(afterReset).toHaveLength(2);
+    for (const acc of afterReset) {
+      expect(acc.metafieldSyncedAt).toBeNull();
+      expect(acc.syncPending).toBe(true);
+    }
+
+    // Verify control account is unchanged
+    const [controlBefore] = await sql<{
+      metafieldSyncedAt: Date | null;
+      syncPending: boolean;
+    }[]>`
+      SELECT "metafieldSyncedAt", "syncPending"
+      FROM "BuyerAccount" WHERE id = ${controlAccountId}
+    `;
+    expect(controlBefore.metafieldSyncedAt).not.toBeNull();
+    expect(controlBefore.syncPending).toBe(false);
+
+    // Step 2: Run the daily sweep (Part 3)
+    await sql`SELECT enqueue_credit_status_recomputes()`;
+
+    // Verify messages were enqueued for the target accounts (filter by buyerAccountId,
+    // not exact global count, because the sweep's 100 cap is shared across all shops)
+    const queuedMsgs = await sql<{ buyer_account_id: string }[]>`
+      SELECT message->>'buyerAccountId' AS buyer_account_id
+      FROM pgmq.q_s6_sync
+      WHERE message->>'buyerAccountId' IN (${testAccountId}, ${testAccountManualHoldId})
+        AND message->>'source' = 'daily_sweep'
+    `;
+    const queuedAccountIds = queuedMsgs.map(m => m.buyer_account_id);
+    expect(queuedAccountIds).toContain(testAccountId);
+    expect(queuedAccountIds).toContain(testAccountManualHoldId);
+
+    // Verify control shop had no messages enqueued
+    const controlMsgs = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${CONTROL_SHOP_DOMAIN}
+    `;
+    expect(controlMsgs[0].count).toBe(0);
+
+    // Step 3: Process the messages with real recompute (mocked Shopify call)
+    const { getSyncHandler } = await import("../../services/drain/processor.server");
+    const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+    expect(handler).toBeDefined();
+
+    for (const accountId of [testAccountId, testAccountManualHoldId]) {
+      const [msg] = await sql<{ msg_id: string; message: Record<string, unknown> }[]>`
+        SELECT msg_id, message
+        FROM pgmq.q_s6_sync
+        WHERE message->>'buyerAccountId' = ${accountId}
+        LIMIT 1
+      `;
+
+      // Simulate read and process
+      await sql`
+        UPDATE pgmq.q_s6_sync
+        SET read_ct = read_ct + 1, vt = NOW() + INTERVAL '30 seconds'
+        WHERE msg_id = ${msg.msg_id}
+      `;
+
+      const result = await handler!(sql, msg.message as import("~/lib/pgmq.server").SyncMessage);
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      // Archive the message
+      await sql`SELECT pgmq.archive('s6_sync', ${msg.msg_id}::bigint)`;
+    }
+
+    // Verify exactly 2 metafield writes (one per account)
+    expect(metafieldWriteCount).toBe(2);
+
+    // Step 4: Verify final state
+    const finalState = await sql<{
+      id: string;
+      metafieldSyncedAt: Date | null;
+      syncPending: boolean;
+    }[]>`
+      SELECT id, "metafieldSyncedAt", "syncPending"
+      FROM "BuyerAccount" WHERE "shopId" = ${testShopId}
+      ORDER BY id
+    `;
+    expect(finalState).toHaveLength(2);
+    for (const acc of finalState) {
+      expect(acc.metafieldSyncedAt).not.toBeNull();
+      expect(acc.syncPending).toBe(false);
+    }
+
+    // Verify control account unchanged
+    const [controlAfter] = await sql<{
+      metafieldSyncedAt: Date | null;
+      syncPending: boolean;
+    }[]>`
+      SELECT "metafieldSyncedAt", "syncPending"
+      FROM "BuyerAccount" WHERE id = ${controlAccountId}
+    `;
+    expect(controlAfter.metafieldSyncedAt?.getTime()).toBe(controlBefore.metafieldSyncedAt?.getTime());
+    expect(controlAfter.syncPending).toBe(false);
+  });
+
+  it("second call is idempotent: no further changes after successful resync", async () => {
+    // Self-contained: ensure shop is uninstalled with accounts that have metafieldSyncedAt set
+    const recentSyncedAt = new Date(Date.now() - 60 * 60 * 1000);
+    await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${testShopId}`;
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncedAt" = ${recentSyncedAt}, "syncPending" = false
+      WHERE id = ${testAccountId}
+    `;
+
+    // Run reinstall reset
+    const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+    const resetResult = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
+    expect(resetResult.wasReinstalled).toBe(true);
+
+    // Run sweep
+    await sql`SELECT enqueue_credit_status_recomputes()`;
+
+    // Process message for the test account
+    const { getSyncHandler } = await import("../../services/drain/processor.server");
+    const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+    const [msg] = await sql<{ msg_id: string; message: Record<string, unknown> }[]>`
+      SELECT msg_id, message
+      FROM pgmq.q_s6_sync
+      WHERE message->>'buyerAccountId' = ${testAccountId}
+      LIMIT 1
+    `;
+    expect(msg).toBeDefined();
+
+    await sql`
+      UPDATE pgmq.q_s6_sync
+      SET read_ct = read_ct + 1, vt = NOW() + INTERVAL '30 seconds'
+      WHERE msg_id = ${msg.msg_id}
+    `;
+
+    const result = await handler!(sql, msg.message as import("~/lib/pgmq.server").SyncMessage);
+    expect(result.success).toBe(true);
+    await sql`SELECT pgmq.archive('s6_sync', ${msg.msg_id}::bigint)`;
+
+    const firstWriteCount = metafieldWriteCount;
+    const [afterFirst] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+      SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${testAccountId}
+    `;
+    expect(afterFirst.syncPending).toBe(false);
+    expect(afterFirst.metafieldSyncedAt).not.toBeNull();
+
+    // Run reinstall reset again - should be no-op because shop is now installed (uninstalledAt=NULL)
+    const resetResult2 = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
+    expect(resetResult2.wasReinstalled).toBe(false);
+
+    // Account should be unchanged
+    const [afterSecondReset] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+      SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${testAccountId}
+    `;
+    expect(afterSecondReset.metafieldSyncedAt?.getTime()).toBe(afterFirst.metafieldSyncedAt?.getTime());
+    expect(afterSecondReset.syncPending).toBe(false);
+    expect(metafieldWriteCount).toBe(firstWriteCount);
+  });
+});
+

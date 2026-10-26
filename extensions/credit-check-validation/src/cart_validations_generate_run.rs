@@ -1171,4 +1171,290 @@ mod tests {
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 1, "Over-limit with missing currencyCode shop_config must block (fail-closed)");
     }
+
+    // =========================================================================
+    // Case 2: Credit-limit boundary math tests
+    // Tests exactly-at-limit, one paisa over, and multiple invoices summed
+    // =========================================================================
+
+    fn make_validation_input_runtime(
+        cart_amount: &str,
+        currency: &str,
+        limit_paise: &str,
+        exposure_paise: &str,
+        hold: bool,
+        has_b2b: bool,
+    ) -> String {
+        let metafield = format!(
+            r#"{{"schemaVersion": 1, "currencyCode": "{}", "hold": {}, "holdReasonCode": null, "limitPaise": "{}", "exposurePaise": "{}", "updatedAt": "2026-10-23T00:00:00Z"}}"#,
+            currency, hold, limit_paise, exposure_paise
+        );
+
+        let buyer_identity = if has_b2b {
+            format!(
+                r#"{{ "customer": null, "purchasingCompany": {{ "location": {{ "metafield": {{ "jsonValue": {} }} }} }} }}"#,
+                metafield
+            )
+        } else {
+            format!(
+                r#"{{ "customer": {{ "metafield": {{ "jsonValue": {} }} }}, "purchasingCompany": null }}"#,
+                metafield
+            )
+        };
+
+        format!(
+            r#"{{
+                "cart": {{
+                    "cost": {{ "totalAmount": {{ "amount": "{}", "currencyCode": "{}" }} }},
+                    "buyerIdentity": {}
+                }},
+                "buyerJourney": {{ "step": "CHECKOUT_COMPLETION" }},
+                "shop": {{ "metafield": {{ "jsonValue": {{"schemaVersion": 1, "currencyCode": "{}"}} }} }}
+            }}"#,
+            cart_amount, currency, buyer_identity, currency
+        )
+    }
+
+    #[test]
+    fn test_exactly_at_limit_passes_checkout() {
+        // limit = 100000.00 INR (10000000 paise), exposure = 50000.00 INR (5000000 paise)
+        // cart = 50000.00 INR (5000000 paise)
+        // total_exposure = 5000000 + 5000000 = 10000000 paise = limit
+        // Result: PASS (not over)
+        let input = make_validation_input_runtime(
+            "50000.00",  // cart amount
+            "INR",
+            "10000000",  // limit 100000.00 INR in paise
+            "5000000",   // existing exposure 50000.00 INR in paise
+            false,       // not held
+            true,        // B2B
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Exactly at limit (total_exposure == limit) should PASS");
+    }
+
+    #[test]
+    fn test_one_paisa_over_limit_blocks() {
+        // limit = 100000.00 INR (10000000 paise), exposure = 50000.00 INR (5000000 paise)
+        // cart = 50000.01 INR (5000001 paise)
+        // total_exposure = 5000000 + 5000001 = 10000001 paise > limit
+        // Result: BLOCK
+        let input = make_validation_input_runtime(
+            "50000.01",  // cart amount - one paisa over
+            "INR",
+            "10000000",  // limit 100000.00 INR in paise
+            "5000000",   // existing exposure 50000.00 INR in paise
+            false,       // not held
+            true,        // B2B
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "One paisa over limit should BLOCK");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("credit limit"), "Error message should mention credit limit");
+            }
+        }
+    }
+
+    #[test]
+    fn test_small_cart_with_high_exposure_blocks() {
+        // limit = 100000.00 INR, exposure = 99999.50 INR
+        // cart = 1.00 INR (100 paise)
+        // total_exposure = 9999950 + 100 = 10000050 paise > 10000000 limit
+        // Result: BLOCK
+        let input = make_validation_input_runtime(
+            "1.00",      // small cart
+            "INR",
+            "10000000",  // limit
+            "9999950",   // high exposure (99999.50 INR)
+            false,
+            true,
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Small cart pushing over limit should BLOCK");
+    }
+
+    #[test]
+    fn test_exposure_already_at_limit_any_cart_blocks() {
+        // limit = exposure = 10000000 paise (100000.00 INR)
+        // Any cart amount > 0 should block
+        let input = make_validation_input_runtime(
+            "0.01",      // minimal cart
+            "INR",
+            "10000000",
+            "10000000",  // exposure already at limit
+            false,
+            true,
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Exposure at limit + any cart should BLOCK");
+    }
+
+    #[test]
+    fn test_exposure_over_limit_but_not_held_still_blocks() {
+        // Simulates when exposure exceeded limit but hold wasn't set yet
+        // limit = 10000000, exposure = 11000000 (already over)
+        // hold = false (sync hasn't run yet)
+        // Should still block based on math
+        let input = make_validation_input_runtime(
+            "0.01",
+            "INR",
+            "10000000",  // 100000 INR limit
+            "11000000",  // 110000 INR exposure (already over)
+            false,       // not marked as held
+            true,
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Over-limit exposure should block even if not marked held");
+    }
+
+    #[test]
+    fn test_multiple_invoices_summed_correctly() {
+        // This test simulates the sum of multiple invoices via the exposure field
+        // exposure = 2500000 + 3500000 + 1500000 = 7500000 paise (75000 INR)
+        // limit = 10000000 paise (100000 INR)
+        // cart = 30000.00 INR (3000000 paise)
+        // total = 7500000 + 3000000 = 10500000 > 10000000
+        // Result: BLOCK
+        let input = make_validation_input_runtime(
+            "30000.00",  // cart
+            "INR",
+            "10000000",  // limit
+            "7500000",   // sum of multiple invoices
+            false,
+            true,
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Sum of multiple invoices + cart over limit should BLOCK");
+    }
+
+    #[test]
+    fn test_multiple_invoices_under_limit_passes() {
+        // exposure = 7000000 paise (70000 INR from multiple invoices)
+        // limit = 10000000 paise (100000 INR)
+        // cart = 25000.00 INR (2500000 paise)
+        // total = 7000000 + 2500000 = 9500000 < 10000000
+        // Result: PASS
+        let input = make_validation_input_runtime(
+            "25000.00",
+            "INR",
+            "10000000",
+            "7000000",
+            false,
+            true,
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Sum of invoices + cart under limit should PASS");
+    }
+
+    #[test]
+    fn test_zero_limit_any_cart_blocks() {
+        // Edge case: limit = 0 means no credit allowed
+        let input = make_validation_input_runtime(
+            "100.00",
+            "INR",
+            "0",  // zero limit
+            "0",
+            false,
+            true,
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Zero limit should block any cart");
+    }
+
+    #[test]
+    fn test_tagged_customer_exactly_at_limit_passes() {
+        // Same boundary test for tagged customer path
+        let input = make_validation_input_runtime(
+            "50000.00",
+            "INR",
+            "10000000",
+            "5000000",
+            false,
+            false,  // tagged customer, not B2B
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Tagged customer exactly at limit should PASS");
+    }
+
+    #[test]
+    fn test_tagged_customer_one_paisa_over_blocks() {
+        let input = make_validation_input_runtime(
+            "50000.01",
+            "INR",
+            "10000000",
+            "5000000",
+            false,
+            false,  // tagged customer
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Tagged customer one paisa over should BLOCK");
+    }
+
+    // =========================================================================
+    // Case 5: Non-INR shop fail-closed for validation
+    // =========================================================================
+
+    fn make_validation_input_with_shop_currency(
+        cart_amount: &str,
+        cart_currency: &str,
+        shop_currency: &str,
+        metafield_currency: &str,
+        limit_paise: &str,
+        exposure_paise: &str,
+    ) -> String {
+        let metafield = format!(
+            r#"{{"schemaVersion": 1, "currencyCode": "{}", "hold": false, "holdReasonCode": null, "limitPaise": "{}", "exposurePaise": "{}", "updatedAt": "2026-10-23T00:00:00Z"}}"#,
+            metafield_currency, limit_paise, exposure_paise
+        );
+
+        let shop_config = format!(r#"{{"schemaVersion": 1, "currencyCode": "{}"}}"#, shop_currency);
+
+        format!(
+            r#"{{
+                "cart": {{
+                    "cost": {{ "totalAmount": {{ "amount": "{}", "currencyCode": "{}" }} }},
+                    "buyerIdentity": {{
+                        "customer": null,
+                        "purchasingCompany": {{ "location": {{ "metafield": {{ "jsonValue": {} }} }} }}
+                    }}
+                }},
+                "buyerJourney": {{ "step": "CHECKOUT_COMPLETION" }},
+                "shop": {{ "metafield": {{ "jsonValue": {} }} }}
+            }}"#,
+            cart_amount, cart_currency, metafield, shop_config
+        )
+    }
+
+    #[test]
+    fn test_non_inr_shop_validation_passes() {
+        // Non-INR shop: validation passes (hide-terms handles it, no blocking)
+        // Even with over-limit exposure
+        let input = make_validation_input_with_shop_currency(
+            "60000.00",  // would be over limit
+            "USD",       // cart currency
+            "USD",       // shop currency
+            "USD",       // metafield currency
+            "10000000",
+            "5000000",
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Non-INR shop validation should pass (hide-terms handles restriction)");
+    }
+
+    #[test]
+    fn test_inr_shop_with_currency_mismatch_passes() {
+        // INR shop with non-INR cart: validation passes (currency mismatch)
+        // Metafield is INR (buyer's credit status currency), cart is USD
+        let input = make_validation_input_with_shop_currency(
+            "60000.00",
+            "USD",  // cart in USD
+            "INR",  // shop is INR
+            "INR",  // metafield is INR (buyer's credit currency)
+            "10000000",
+            "5000000",
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "INR shop with currency mismatch should pass");
+    }
 }
