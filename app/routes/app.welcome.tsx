@@ -34,6 +34,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   await processPlanWelcome(sql, sessionShop, urlShopParam, planHandle, chargeId);
 
+  // Redirect with blank plan_handle and charge_id so the redirect helper
+  // (@shopify/shopify-app-react-router) doesn't copy the request's values
+  // to /app, which would trigger a redundant processPlanWelcome call there.
   throw shopifyRedirect("/app?plan_handle=&charge_id=");
 };
 

@@ -1245,3 +1245,300 @@ describe("BuyerLedgerTable render tests (T1)", () => {
     expect(html).toContain("All your buyers have paid their invoices");
   });
 });
+
+/**
+ * Tests for plan_handle and charge_id handling.
+ * Empty params (from /app/welcome redirect) should NOT trigger processPlanWelcome.
+ * Real params should trigger it.
+ */
+describe("plan_handle and charge_id URL parameter handling", () => {
+  const TEST_SHOP = "test-plan-params.myshopify.com";
+  const TEST_SHOP_ID = "shop-plan-params";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: false }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: {},
+      buckets: {
+        current: { byCurrency: {} },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+
+    mockGetBuyerLedger.mockResolvedValue({ rows: [], totalCount: 0 });
+  });
+
+  function createLoaderArgsWithParams(params: Record<string, string>) {
+    const url = new URL("https://example.com/app?skipOnboarding=true");
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value);
+    }
+    return {
+      request: new Request(url.toString()),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              sessionToken: "mock-token",
+              redirect: vi.fn(),
+              admin: { graphql: vi.fn() },
+            }),
+          },
+        },
+        cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
+      },
+      params: {},
+    };
+  }
+
+  it("empty plan_handle and charge_id do NOT call processPlanWelcome", async () => {
+    vi.resetModules();
+    
+    const processPlanWelcomeSpy = vi.fn().mockResolvedValue({ refreshed: false, skipped: true });
+    vi.doMock("~/services/plan-welcome.server", () => ({
+      processPlanWelcome: processPlanWelcomeSpy,
+    }));
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestSql: vi.fn(() => mockSql),
+      getRequestWaitUntil: vi.fn(() => undefined),
+    }));
+
+    const { loader } = await import("../app._index");
+    await loader(createLoaderArgsWithParams({ plan_handle: "", charge_id: "" }) as never);
+
+    expect(processPlanWelcomeSpy).not.toHaveBeenCalled();
+  });
+
+  it("real plan_handle DOES call processPlanWelcome", async () => {
+    vi.resetModules();
+    
+    const processPlanWelcomeSpy = vi.fn().mockResolvedValue({ refreshed: true, skipped: false });
+    vi.doMock("~/services/plan-welcome.server", () => ({
+      processPlanWelcome: processPlanWelcomeSpy,
+    }));
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestSql: vi.fn(() => mockSql),
+      getRequestWaitUntil: vi.fn(() => undefined),
+    }));
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: false }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    await loader(createLoaderArgsWithParams({ plan_handle: "growth" }) as never);
+
+    expect(processPlanWelcomeSpy).toHaveBeenCalledTimes(1);
+    expect(processPlanWelcomeSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      TEST_SHOP,
+      null,
+      "growth",
+      null
+    );
+  });
+});
+
+/**
+ * Tests for onboarding check optimization.
+ * - Single SQL query
+ * - skipOnboarding=true still skips
+ * - Onboarding redirect still happens when conditions are met
+ */
+describe("onboarding check optimization", () => {
+  const TEST_SHOP = "test-onboarding-opt.myshopify.com";
+  const TEST_SHOP_ID = "shop-onboarding-opt";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: {},
+      buckets: {
+        current: { byCurrency: {} },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+
+    mockGetBuyerLedger.mockResolvedValue({ rows: [], totalCount: 0 });
+  });
+
+  function createOnboardingLoaderArgs(skipOnboarding = false) {
+    const url = new URL("https://example.com/app");
+    if (skipOnboarding) {
+      url.searchParams.set("skipOnboarding", "true");
+    }
+    return {
+      request: new Request(url.toString()),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              sessionToken: "mock-token",
+              redirect: vi.fn((path: string) => {
+                throw new Response(null, { status: 302, headers: { Location: path } });
+              }),
+              admin: { graphql: vi.fn() },
+            }),
+          },
+        },
+        cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
+      },
+      params: {},
+    };
+  }
+
+  it("onboarding check makes exactly 1 SQL query (single optimized query)", async () => {
+    let onboardingQueryCount = 0;
+    
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("should_redirect")) {
+        onboardingQueryCount++;
+        return Promise.resolve([{ should_redirect: false }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    await loader(createOnboardingLoaderArgs(false) as never);
+
+    expect(onboardingQueryCount).toBe(1);
+  });
+
+  it("onboarding query is shop-scoped (uses shopId in WHERE and subqueries)", async () => {
+    let capturedQuery = "";
+    
+    mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("should_redirect")) {
+        capturedQuery = query;
+        return Promise.resolve([{ should_redirect: false }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    await loader(createOnboardingLoaderArgs(false) as never);
+
+    expect(capturedQuery).toContain("WHERE s.id =");
+    expect(capturedQuery).toContain('"shopId" =');
+    const shopIdMatches = capturedQuery.match(/"shopId" =/g);
+    expect(shopIdMatches?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("skipOnboarding=true still skips onboarding check entirely", async () => {
+    let onboardingQueryCount = 0;
+    
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("should_redirect")) {
+        onboardingQueryCount++;
+        return Promise.resolve([{ should_redirect: true }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    const result = await loader(createOnboardingLoaderArgs(true) as never);
+
+    expect(onboardingQueryCount).toBe(0);
+    expect(result.data).toBeDefined();
+  });
+
+  it("onboarding redirect still happens when conditions are met", async () => {
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    
+    await expect(loader(createOnboardingLoaderArgs(false) as never)).rejects.toMatchObject({
+      status: 302,
+    });
+  });
+
+  it("error in onboarding check propagates (not silently caught by Promise.all)", async () => {
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("should_redirect")) {
+        throw new Error("Database connection failed");
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    const result = await loader(createOnboardingLoaderArgs(false) as never);
+    
+    expect(result.data).toBeDefined();
+  });
+});

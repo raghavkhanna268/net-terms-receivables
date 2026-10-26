@@ -1901,13 +1901,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
@@ -1944,14 +1941,8 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
-        return Promise.resolve([{ count: "0" }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
       return Promise.resolve([]);
     });
@@ -1990,13 +1981,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: false }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
