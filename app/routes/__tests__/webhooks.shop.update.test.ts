@@ -123,13 +123,16 @@ describe("webhooks.shop.update", () => {
     } as unknown as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
   }
 
-  function setupShopInDb(currency: string) {
+  function setupShopInDb(currency: string, hasFinancialRows = false) {
     mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       sqlCalls.push({ query, values });
 
       if (query.includes("SELECT id, currency FROM")) {
         return Promise.resolve([{ id: TEST_SHOP_ID, currency }]);
+      }
+      if (query.includes("SELECT EXISTS")) {
+        return Promise.resolve([{ has_rows: hasFinancialRows }]);
       }
       if (query.includes("UPDATE")) {
         return Promise.resolve([]);
@@ -273,6 +276,50 @@ describe("webhooks.shop.update", () => {
 
       const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE"));
       expect(updateCalls.length).toBe(0);
+    });
+
+    it("USD to INR blocked when shop has financial rows", async () => {
+      setupShopInDb("USD", true);
+      setupAdminApiResponse("INR");
+
+      const { action } = await import("../webhooks.shop.update");
+      const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");
+      const args = createActionArgs(request);
+
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      await args._waitUntil.mock.calls[0][0];
+
+      expect(mockWriteShopConfigMetafield).not.toHaveBeenCalled();
+
+      const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+      expect(updateCalls.length).toBe(0);
+    });
+
+    it("USD to INR allowed when shop has no financial rows", async () => {
+      setupShopInDb("USD", false);
+      setupAdminApiResponse("INR");
+      setupMetafieldWriteSuccess();
+
+      const { action } = await import("../webhooks.shop.update");
+      const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");
+      const args = createActionArgs(request);
+
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      await args._waitUntil.mock.calls[0][0];
+
+      expect(mockWriteShopConfigMetafield).toHaveBeenCalledWith(
+        expect.anything(),
+        TEST_SHOP_GID,
+        "INR"
+      );
+
+      const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+      expect(updateCalls.length).toBeGreaterThan(0);
+      expect(updateCalls.some((c) => c.values.includes("INR"))).toBe(true);
     });
   });
 
@@ -461,6 +508,20 @@ describe("webhooks.shop.update", () => {
     it("no_session path logs no shop domain", async () => {
       setupShopInDb("INR");
       setupNoSession();
+
+      const { action } = await import("../webhooks.shop.update");
+      const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");
+      const args = createActionArgs(request);
+
+      await action(args);
+      await args._waitUntil.mock.calls[0][0];
+
+      expectNoShopDomainInLogs();
+    });
+
+    it("flip blocked path logs no shop domain", async () => {
+      setupShopInDb("USD", true);
+      setupAdminApiResponse("INR");
 
       const { action } = await import("../webhooks.shop.update");
       const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");

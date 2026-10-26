@@ -3,8 +3,9 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
 import { writeShopConfigMetafield } from "~/services/shop-config.server";
-import { validateCurrencyCode, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
+import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "~/lib/shop-currency.server";
 import { safeLog, shopHash } from "~/lib/log.server";
+import { decideShopCurrencyUpdate, hasFinancialRows } from "~/lib/shop-currency-guard.server";
 import type { Sql } from "~/lib/db-light.server";
 
 /**
@@ -105,6 +106,19 @@ async function processShopUpdate(
 
   if (liveCurrency === dbCurrency) {
     return { status: "no_change" };
+  }
+
+  if (liveCurrency === SUPPORTED_SHOP_CURRENCY && dbCurrency !== SUPPORTED_SHOP_CURRENCY) {
+    const hasRows = await hasFinancialRows(sql, shopRow.id);
+    const guardDecision = decideShopCurrencyUpdate({
+      storedCurrency: dbCurrency,
+      liveCurrency,
+      hasFinancialRows: hasRows,
+    });
+    if (guardDecision.blocked) {
+      safeLog("info", "shop_update_webhook_flip_blocked", { shopHash: hash });
+      return { status: "skipped", reason: "flip_blocked" };
+    }
   }
 
   const adminClient = {
