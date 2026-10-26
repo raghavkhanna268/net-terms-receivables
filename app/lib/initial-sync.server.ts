@@ -117,6 +117,19 @@ export async function getInitialSyncState(
   `;
 
   if (!companiesOp) {
+    // Check if a RECONCILE_COMPANIES message is queued (sync enqueued but not started yet)
+    // This happens immediately after enqueueInitialSync - the message is in the queue
+    // but the drain hasn't created the bulk operation row yet.
+    const [queuedCompanies] = await sql<{ msg_id: string }[]>`
+      SELECT msg_id::text
+      FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${shopDomain}
+        AND message->>'topic' = 'RECONCILE_COMPANIES'
+      LIMIT 1
+    `;
+    if (queuedCompanies) {
+      return { status: "in_progress" };
+    }
     return { status: "not_started" };
   }
 

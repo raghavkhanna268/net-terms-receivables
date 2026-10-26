@@ -541,6 +541,12 @@ describe("Query count reduction", () => {
       if (query.includes("s6_dead_letter")) {
         return Promise.resolve([{ count: "0" }]);
       }
+      if (query.includes("q_s6_sync") && query.includes("RECONCILE_COMPANIES")) {
+        return Promise.resolve([]);
+      }
+      if (query.includes("s18_shop_reminder_settings")) {
+        return Promise.resolve([{ enabled: false }]);
+      }
       return Promise.resolve([]);
     });
   });
@@ -549,12 +555,18 @@ describe("Query count reduction", () => {
     vi.restoreAllMocks();
   });
 
-  it("makes exactly 4 DB queries and no separate currency SELECT", async () => {
+  it("makes exactly 6 DB queries and no separate currency SELECT", async () => {
     const { loader } = await import("../app.onboarding");
     await loader(createLoaderArgs());
 
-    // Exactly 4 queries: shop+currency (1), buyerCount (1), tagRuleCount (1), sync state ops (1)
-    expect(sqlQueries.length).toBe(4);
+    // Exactly 6 queries:
+    // 1. shop+currency (SELECT id, defaultTermsDays, currency, ...)
+    // 2. buyerCount (COUNT(*) FROM BuyerAccount)
+    // 3. tagRuleCount (COUNT(*) FROM AccountSource)
+    // 4. sync state bulk ops (s6_bulk_operations)
+    // 5. sync state queue check (pgmq.q_s6_sync for RECONCILE_COMPANIES)
+    // 6. reminder settings (s18_shop_reminder_settings)
+    expect(sqlQueries.length).toBe(6);
 
     // No separate currency SELECT - verify no query is just SELECT currency
     const separateCurrencyQuery = sqlQueries.find(
@@ -566,6 +578,14 @@ describe("Query count reduction", () => {
     const shopQuery = sqlQueries.find(q => q.includes("defaultTermsDays"));
     expect(shopQuery).toBeDefined();
     expect(shopQuery).toContain("currency");
+
+    // Verify reminder settings query is present
+    const reminderSettingsQuery = sqlQueries.find(q => q.includes("s18_shop_reminder_settings"));
+    expect(reminderSettingsQuery).toBeDefined();
+
+    // Verify sync state queue check for RECONCILE_COMPANIES is present
+    const syncQueueQuery = sqlQueries.find(q => q.includes("q_s6_sync") && q.includes("RECONCILE_COMPANIES"));
+    expect(syncQueueQuery).toBeDefined();
   });
 
   it("returns identical output structure after optimization", async () => {

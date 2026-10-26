@@ -80,6 +80,8 @@ export interface OnboardingStepInputs {
   paymentCustomization: PaymentCustomizationInfo | null;
   /** True only when BOTH RESEND_API_KEY and RESEND_FROM are configured. */
   emailSendingConfigured: boolean;
+  /** True when shop has enabled reminders via s18_shop_reminder_settings. */
+  remindersEnabled: boolean;
   dismissedAt: Date | null;
 }
 
@@ -241,10 +243,12 @@ export function computePaymentCustomizationStep(
 /**
  * Compute step 5: Reminder sender configured.
  * Shows as "coming soon" when email sending is not configured.
- * Requires BOTH RESEND_API_KEY and RESEND_FROM to be set (same check as Reminders service).
+ * Shows as "pending" when sending is configured but reminders are disabled.
+ * Shows as "complete" only when BOTH sending is configured AND reminders are enabled.
  */
 export function computeReminderStep(
-  emailSendingConfigured: boolean
+  emailSendingConfigured: boolean,
+  remindersEnabled: boolean
 ): OnboardingStep {
   if (!emailSendingConfigured) {
     return {
@@ -253,6 +257,18 @@ export function computeReminderStep(
       description: "Send automated payment reminder emails to buyers",
       status: "coming_soon",
       helpText: "Email reminders will be available when email sending is configured",
+    };
+  }
+
+  if (!remindersEnabled) {
+    return {
+      id: "reminders",
+      title: "Configure payment reminders",
+      description: "Set up automated reminder emails for upcoming and overdue invoices",
+      status: "pending",
+      helpText: "Email sending is ready",
+      actionUrl: "/app/settings/reminders",
+      actionLabel: "Enable reminders",
     };
   }
 
@@ -278,7 +294,7 @@ export function computeOnboardingState(
     computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),
-    computeReminderStep(inputs.emailSendingConfigured),
+    computeReminderStep(inputs.emailSendingConfigured, inputs.remindersEnabled),
   ];
 
   const completedCount = steps.filter(
