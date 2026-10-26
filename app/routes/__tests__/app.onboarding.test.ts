@@ -2773,50 +2773,6 @@ describe("Sequential DB: Initial Sync currency UI", () => {
       expect(html).not.toContain('>Retry<');
       expect(html).not.toContain('value="start_sync"');
     });
-
-    it("does not set up polling when currencySupported=false even with in_progress status (fails on revert)", async () => {
-      const mockRevalidate = vi.fn();
-      const mockSetInterval = vi.spyOn(global, "setInterval");
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useLoaderData: () => ({
-            error: null,
-            state: {
-              steps: [],
-              isComplete: false,
-              completedCount: 0,
-              totalCount: 5,
-              dismissedAt: null,
-            },
-            registrationStatus: null,
-            initialSyncState: { status: "in_progress" },
-            newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
-            currencySupported: false,
-            currencyFlipBlocked: false,
-          }),
-          useActionData: () => null,
-          useNavigation: () => ({ state: "idle", formData: null }),
-          useRevalidator: () => ({ state: "idle", revalidate: mockRevalidate }),
-          Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
-            createElement("form", props, children),
-        };
-      });
-
-      vi.resetModules();
-      const { default: OnboardingPage } = await import("../app.onboarding");
-
-      renderToString(createElement(OnboardingPage));
-
-      const pollCalls = mockSetInterval.mock.calls.filter(
-        ([, interval]) => interval === 5000
-      );
-      expect(pollCalls.length).toBe(0);
-
-      mockSetInterval.mockRestore();
-    });
   });
 
   describe("(c) INR shop with open op shows In progress plus polling unchanged", () => {
@@ -2926,42 +2882,33 @@ describe("Sequential DB: Initial Sync currency UI", () => {
       expect(html).not.toContain("Initial sync is available once the store currency is INR.");
     });
 
-    it("sets up polling for INR shop with in_progress status (fails on revert)", async () => {
-      const mockRevalidate = vi.fn();
-      const mockSetInterval = vi.spyOn(global, "setInterval");
+  });
+});
 
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useLoaderData: () => ({
-            error: null,
-            state: {
-              steps: [],
-              isComplete: false,
-              completedCount: 0,
-              totalCount: 5,
-              dismissedAt: null,
-            },
-            registrationStatus: null,
-            initialSyncState: { status: "in_progress" },
-            newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
-            currencySupported: true,
-            currencyFlipBlocked: false,
-          }),
-          useActionData: () => null,
-          useNavigation: () => ({ state: "idle", formData: null }),
-          useRevalidator: () => ({ state: "idle", revalidate: mockRevalidate }),
-          Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
-            createElement("form", props, children),
-        };
-      });
+describe("shouldPollInitialSync helper", () => {
+  it("returns true when status is in_progress and currency is supported", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("in_progress", true)).toBe(true);
+  });
 
-      vi.resetModules();
-      await import("../app.onboarding");
+  it("returns false when status is in_progress but currency is not supported", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("in_progress", false)).toBe(false);
+  });
 
-      mockSetInterval.mockRestore();
-    });
+  it("returns false when status is not_started even with supported currency", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("not_started", true)).toBe(false);
+  });
+
+  it("returns false when status is done even with supported currency", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("done", true)).toBe(false);
+  });
+
+  it("returns false when status is failed even with supported currency", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("failed", true)).toBe(false);
   });
 });
 

@@ -367,7 +367,7 @@ describeWithDb("Sequential DB: Initial Sync currency scenarios", () => {
   });
 
   describe("(a) USD shop with no ops", () => {
-    it("returns not_started for USD shop with no bulk operations (fails on revert)", async () => {
+    it("returns not_started for USD shop with no bulk operations", async () => {
       const { getInitialSyncState } = await import("../initial-sync.server");
       const result = await getInitialSyncState(sql, TEST_USD_SHOP);
 
@@ -381,7 +381,7 @@ describeWithDb("Sequential DB: Initial Sync currency scenarios", () => {
   });
 
   describe("(b) INR-to-USD flip: USD shop with open companies op", () => {
-    it("getInitialSyncState returns in_progress for USD shop with open companies op (fails on revert)", async () => {
+    it("getInitialSyncState returns in_progress for USD shop with open companies op", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/usd-open-${TEST_SUFFIX}`;
 
       await sql`
@@ -401,7 +401,7 @@ describeWithDb("Sequential DB: Initial Sync currency scenarios", () => {
       expect(result.status).toBe("in_progress");
     });
 
-    it("enqueueInitialSync returns unsupported_currency for USD shop (fails on revert)", async () => {
+    it("enqueueInitialSync returns unsupported_currency for USD shop", async () => {
       const { enqueueInitialSync } = await import("../initial-sync.server");
       const result = await enqueueInitialSync(sql, TEST_USD_SHOP);
 
@@ -411,7 +411,7 @@ describeWithDb("Sequential DB: Initial Sync currency scenarios", () => {
   });
 
   describe("(c) INR shop with open op", () => {
-    it("getInitialSyncState returns in_progress for INR shop with open companies op (fails on revert)", async () => {
+    it("getInitialSyncState returns in_progress for INR shop with open companies op", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/inr-open-${TEST_SUFFIX}`;
 
       await sql`
@@ -436,7 +436,7 @@ describeWithDb("Sequential DB: Initial Sync currency scenarios", () => {
       expect(isShopCurrencySupported("INR")).toBe(true);
     });
 
-    it("enqueueInitialSync returns in_progress for INR shop with existing open op (fails on revert)", async () => {
+    it("enqueueInitialSync returns in_progress for INR shop with existing open op", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/inr-enqueue-${TEST_SUFFIX}`;
 
       await sql`

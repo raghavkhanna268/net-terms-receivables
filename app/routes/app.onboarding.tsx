@@ -55,6 +55,18 @@ function canStartSync(status: InitialSyncStatus): boolean {
   return status === "not_started" || status === "failed";
 }
 
+/**
+ * Determine if the Initial Sync section should poll for updates.
+ * Only poll when sync is in progress AND currency is supported (INR).
+ * This prevents polling forever on a non-INR shop with an open companies op.
+ */
+export function shouldPollInitialSync(
+  status: InitialSyncStatus,
+  currencySupported: boolean
+): boolean {
+  return status === "in_progress" && currencySupported;
+}
+
 const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
 const PAYMENT_CUSTOMIZATION_HANDLE = "hide-terms-payment";
 
@@ -874,7 +886,7 @@ export default function OnboardingPage() {
   const currentSyncState: InitialSyncState = { status: loaderSyncStatus };
 
   useEffect(() => {
-    const shouldPoll = loaderSyncStatus === "in_progress" && currencySupported;
+    const shouldPoll = shouldPollInitialSync(loaderSyncStatus, currencySupported ?? false);
     if (shouldPoll) {
       if (!pollIntervalRef.current) {
         pollIntervalRef.current = setInterval(() => {
