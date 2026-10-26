@@ -1,17 +1,14 @@
-# Merchant Terms of Service & Data Processing Addendum
-
-**⚠️ DRAFT — NOT IN EFFECT**
-
-**This document is a draft that requires review by Raghav or a qualified lawyer before publishing. It is not legally binding and is not in effect.**
-
----
+# Merchant Terms of Service & Data Processing Addendum — Termwise: Net Terms & Credit
 
 **Owner/Operator:** Raghav Khanna, individual developer, India
 
 **Contact:** raghavkhanna468@gmail.com
 
+**Governing Law:** Laws of India  
+**Jurisdiction:** Courts at Delhi (New Delhi), India (exclusive)
+
 **Effective Date:** 2026-10-25  
-**Last Updated:** 2026-10-25
+**Last Updated:** 2026-10-26
 
 ---
 
@@ -19,7 +16,7 @@
 
 ### 1. Introduction
 
-These Terms of Service ("Terms") govern the use of Net Terms Receivables ("the App", "we", "us") by merchants ("you", "Merchant") who install the App through the Shopify App Store.
+These Terms of Service ("Terms") govern the use of Termwise: Net Terms & Credit ("the App", "we", "us") by merchants ("you", "Merchant") who install the App through the Shopify App Store.
 
 The App is built for Indian merchants with INR (Indian rupee) stores.
 
@@ -30,7 +27,7 @@ By installing or using the App, you agree to these Terms.
 The App provides:
 - B2B invoice tracking and credit management
 - Bank payment reconciliation for matching bank transfers to invoices
-- Payment reminder emails to buyers (not yet enabled)
+- Payment reminder emails to buyers
 - Checkout validation for credit limits and holds
 
 ### 3. Merchant Responsibilities
@@ -51,7 +48,7 @@ Subscription fees are handled through Shopify's billing system per the Shopify A
 
 ### 6. Limitation of Liability
 
-TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE APP IS PROVIDED "AS IS" WITHOUT WARRANTY. [Raghav to confirm — standard limitation of liability clause required]
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE APP IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE APP PROVIDER'S TOTAL LIABILITY EXCEED THE FEES PAID BY YOU IN THE TWELVE (12) MONTHS IMMEDIATELY PRECEDING THE CLAIM.
 
 ### 7. Termination
 
@@ -61,7 +58,7 @@ You may uninstall the App at any time through Shopify. Upon uninstallation:
 
 ### 8. Governing Law
 
-These Terms are governed by the laws of [Raghav to confirm].
+These Terms are governed by the laws of India. Any disputes arising under these Terms shall be subject to the exclusive jurisdiction of the courts at Delhi (New Delhi), India.
 
 ---
 
@@ -92,16 +89,16 @@ The App processes the following categories of buyer personal data:
 
 | Category | Fields | Purpose | Source |
 |----------|--------|---------|--------|
-| Buyer Identity | Name, email address | Payment reminders, account identification | Shopify Customer/Company sync (`app/services/sync/customer.server.ts`) |
-| Financial Data | Invoice amounts, outstanding balances, payment terms | Credit management, invoice tracking | Shopify Order sync (`app/services/sync/order.server.ts`) |
-| Payment Data | Bank transfer details (payer name, narration, UTR) | Payment reconciliation | Merchant-uploaded bank statements (`app/routes/app.imports.tsx`) |
+| Buyer Identity | Name, email address | Payment reminders, account identification | Shopify Customer/Company sync |
+| Financial Data | Invoice amounts, outstanding balances, payment terms | Credit management, invoice tracking | Shopify Order sync |
+| Payment Data | Bank transfer details (payer name, narration, UTR) | Payment reconciliation | Merchant-uploaded bank statements |
 
 **Note:** The App does NOT process or store:
 - Phone numbers
 - Physical addresses
 - Payment card data
 
-...except as incidentally present in uploaded bank-statement narration (`Payment.narration`/`payerText`, `prisma/schema.prisma:434-436`).
+...except as incidentally present in uploaded bank-statement narration.
 
 ### 4. Sub-Processors
 
@@ -109,14 +106,12 @@ We use the following sub-processors to provide the App:
 
 | Sub-Processor | Service | Data Processed | Location |
 |---------------|---------|----------------|----------|
-| **Cloudflare, Inc.** | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit; edge processing | Global (Worker placed ap-south-1 via region hint) |
-| **Supabase, Inc.** | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All App data at rest | AWS ap-south-1 (Mumbai, India) |
+| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit | Global (Worker placed near ap-south-1) |
+| Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored App data | AWS ap-south-1 (Mumbai, India) |
+| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
+| Functional Software, Inc. (Sentry) | Error monitoring. Data is stored in Sentry's EU data region (Germany). [TBD: Sentry data scope] | Sanitized error and performance events | EU (Germany) |
 
-**Not in use; will be listed here before they are enabled:**
-- Plus Five Five, Inc. (Resend) — email delivery
-- Functional Software, Inc. d/b/a Sentry — error monitoring
-
-**Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa).
+**Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa)
 
 ### 5. Data Subject Rights
 
@@ -124,8 +119,8 @@ We support your compliance with data subject requests:
 
 | Right | Implementation |
 |-------|----------------|
-| Access | `customers/data_request` webhook generates JSON export (`app/services/compliance/compliance.server.ts:490-648`) |
-| Erasure | `customers/redact` webhook deletes/anonymizes buyer data (`app/services/compliance/compliance.server.ts:314-425`) |
+| Access | `customers/data_request` webhook generates JSON export |
+| Erasure | `customers/redact` webhook deletes/anonymizes buyer data |
 | Portability | Export available via data requests page in JSON format |
 
 ### 6. Security Measures
@@ -133,37 +128,35 @@ We support your compliance with data subject requests:
 We implement appropriate technical and organizational measures:
 
 - **Encryption in transit:** TLS for all communications
-- **Encryption at rest:** Supabase encrypts data at rest with AES-256 (provider-managed, per [Supabase security](https://supabase.com/security))
-- **Access control:** OAuth 2.0 with shop-scoped sessions
-- **PII redaction in logs:** `safeLog()` with allowlist (`app/lib/log.server.ts`)
-- **Error monitoring scrubbing:** Sentry `beforeSend` hooks (`app/lib/sentry.ts:83-137`)
+- **Encryption at rest:** Supabase encrypts data at rest with AES-256; database backups are encrypted with age (public-key encryption)
+- **Access control:** OAuth 2.0 with shop-scoped sessions; a single person (the developer/operator) has access to production systems and data
+- **Authentication:** Password manager with unique passwords and 2FA on all accounts used to run the App
+- **PII redaction in logs:** All logs are scrubbed to remove personal data before storage
 
 ### 7. Data Retention
-
-See `docs/security/data-retention.md` for retention schedule.
 
 Key retention periods:
 - Unmatched payment narrations: 180 days, then purged
 - Data request exports: 30 days, then deleted
 - All shop data: Deleted 48 hours after uninstall via `shop/redact`
+- Database backups: Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted
 
 ### 8. Data Breach Notification
 
 In the event of a personal data breach affecting your data:
-- We will notify you without undue delay
+- Contain the incident first; then notify affected merchants and Shopify within 72 hours of becoming aware of a breach involving personal data, and, where it applies, report to CERT-In within the timelines required by Indian law (currently 6 hours under CERT-In's April 2022 directions)
 - We will provide information to assist with your regulatory notification obligations
-- See `docs/security/incident-response.md` for incident response procedures
 
-### 9. Audit Rights
+### 9. Information Requests
 
-[Raghav to confirm — standard audit rights clause required]
+We do not provide audit rights. Upon written request, we will provide reasonable written information about our data protection practices to help you verify compliance with applicable data protection laws.
 
 ### 10. Cross-Border Transfers
 
 Personal data may be transferred to:
-- **EU/other:** Cloudflare edge nodes (transient processing only)
-
-When Resend and Sentry are enabled, transfers to the US will be documented here.
+- **Japan:** Resend (ap-northeast-1 data region) for email delivery
+- **EU (Germany):** Sentry for error monitoring
+- **Global:** Cloudflare edge nodes (transient processing only)
 
 ### 11. Term and Termination
 
@@ -171,7 +164,7 @@ This DPA remains in effect as long as the App processes personal data on your be
 
 Upon termination:
 - We delete your data per Section 7 above
-- No personal data is retained beyond the stated retention periods, except copies in provider-managed backups and logs for the provider retention windows listed in `docs/security/data-retention.md`
+- No personal data is retained beyond the stated retention periods, except copies in encrypted backups for up to 30 days
 - Deletion is automatic via Shopify compliance webhooks
 
 ---

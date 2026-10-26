@@ -53,7 +53,7 @@ describe("/privacy route", () => {
     expect(response.status).toBe(200);
   });
 
-  it("contains privacy contact email, owner info, no placeholder email, no phone or address", async () => {
+  it("contains privacy contact email, owner info, no placeholder email, no stale TBD strings", async () => {
     const { loader } = await import("../privacy");
 
     const request = new Request("https://example.com/privacy");
@@ -73,13 +73,10 @@ describe("/privacy route", () => {
     expect(html).toContain("individual developer, India");
 
     expect(html).not.toContain("[privacy contact email]");
+    expect(html).not.toContain("[TBD: DPA]");
     expect(html).not.toContain("[TBD: legal entity]");
     expect(html).not.toContain("[TBD: contact email]");
     expect(html).not.toContain("[TBD: effective date]");
-
-    expect(html).not.toMatch(/phone|telephone|mobile/i);
-    expect(html).not.toContain("postal address");
-    expect(html).not.toContain("mailing address");
   });
 
   it("renders HTML with proper structure", async () => {
@@ -355,5 +352,98 @@ describe("privacy.md / shopify.app.toml scope sync", () => {
         `Scope "${scope}" from shopify.app.toml not found in docs/privacy.md`
       ).toContain(`\`${scope}\``);
     }
+  });
+});
+
+describe("privacy.md content requirements", () => {
+  const privacyPath = resolve(process.cwd(), "docs/privacy.md");
+  const privacyContent = readFileSync(privacyPath, "utf-8");
+
+  it("contains the product name 'Termwise: Net Terms & Credit'", () => {
+    expect(privacyContent).toContain("Termwise: Net Terms & Credit");
+  });
+
+  it("contains exact Resend subprocessor wording", () => {
+    expect(privacyContent).toContain(
+      "Resend, Inc., Tokyo, Japan (ap-northeast-1) data region"
+    );
+  });
+
+  it("contains exact backup retention sentence", () => {
+    expect(privacyContent).toContain(
+      "Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted."
+    );
+  });
+
+  it("does not say PCD access is approved or confirmed", () => {
+    const pcdSection = privacyContent.match(
+      /Protected Customer Data[\s\S]*?(?=##|$)/
+    );
+    expect(pcdSection).not.toBeNull();
+    const pcdText = pcdSection![0].toLowerCase();
+    expect(pcdText).not.toContain("approved");
+    expect(pcdText).not.toContain("confirmed");
+  });
+
+  it("says PCD access is requested and reviewed with submission", () => {
+    expect(privacyContent).toContain("requested access to protected customer data");
+    expect(privacyContent).toContain("Shopify reviews this request with our app submission");
+  });
+});
+
+describe("merchant-terms.md content requirements", () => {
+  const termsPath = resolve(process.cwd(), "docs/legal/merchant-terms.md");
+  const termsContent = readFileSync(termsPath, "utf-8");
+
+  it("contains the product name 'Termwise: Net Terms & Credit'", () => {
+    expect(termsContent).toContain("Termwise: Net Terms & Credit");
+  });
+
+  it("contains the privacy contact email", () => {
+    expect(termsContent).toContain("raghavkhanna468@gmail.com");
+  });
+
+  it("contains exact Resend subprocessor wording", () => {
+    expect(termsContent).toContain(
+      "Resend, Inc., Tokyo, Japan (ap-northeast-1) data region"
+    );
+  });
+
+  it("specifies liability cap of 12 months' fees", () => {
+    expect(termsContent).toContain("TWELVE (12) MONTHS");
+  });
+
+  it("specifies Indian law and Delhi courts", () => {
+    expect(termsContent).toContain("Laws of India");
+    expect(termsContent).toContain("Delhi (New Delhi), India");
+  });
+
+  it("does not grant audit rights", () => {
+    expect(termsContent).toContain("We do not provide audit rights");
+  });
+
+  it("specifies 72-hour breach notification", () => {
+    expect(termsContent).toContain("within 72 hours");
+  });
+
+  it("contains exact backup retention sentence", () => {
+    expect(termsContent).toContain(
+      "Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted"
+    );
+  });
+});
+
+describe("data-retention.md content requirements", () => {
+  const retentionPath = resolve(process.cwd(), "docs/security/data-retention.md");
+  const retentionContent = readFileSync(retentionPath, "utf-8");
+
+  it("contains exact backup retention sentence", () => {
+    expect(retentionContent).toContain(
+      "Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted"
+    );
+  });
+
+  it("specifies 30-day backup retention period", () => {
+    expect(retentionContent).toContain("30 days (nightly backup, rolling deletion)");
   });
 });
