@@ -1812,7 +1812,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
     });
 
     it("(a) unconfirmed shop (plan_cached_at NULL) over limit is NOT gated", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
 
       const { checkCompanyLimit, isGatingEnforced } = await import("../gating.server");
@@ -1853,7 +1853,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
     });
 
     it("(b) confirmed shop over limit IS gated", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
 
       const { checkCompanyLimit, isGatingEnforced } = await import("../gating.server");

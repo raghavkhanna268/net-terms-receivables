@@ -151,6 +151,21 @@ interface CachedPlanRow {
 }
 
 /**
+ * Shared predicate for ruling (b): determines if a cached plan row means "confirmed".
+ * A shop is confirmed when getCachedPlan returns a non-null row (plan_cached_at is set).
+ *
+ * This is the single source of truth for the "confirmed" definition, used by:
+ * - isPlanConfirmed()
+ * - getPlanWithConfirmedStatus()
+ *
+ * @param cached - The result of getCachedPlan (null means unconfirmed)
+ * @returns true if the shop has a confirmed plan
+ */
+export function isConfirmedCache(cached: CachedPlanRow | null): boolean {
+  return cached !== null;
+}
+
+/**
  * Result of plan resolution.
  */
 export interface ResolvedPlan {
@@ -642,7 +657,7 @@ export async function isPlanConfirmed(
   shopId: string
 ): Promise<boolean> {
   const cached = await getCachedPlan(sql, shopId);
-  return cached !== null;
+  return isConfirmedCache(cached);
 }
 
 /**
@@ -668,15 +683,16 @@ export async function getPlanWithConfirmedStatus(
   shopId: string
 ): Promise<PlanWithConfirmedStatus> {
   const cached = await getCachedPlan(sql, shopId);
+  const confirmed = isConfirmedCache(cached);
 
-  if (!cached) {
+  if (!confirmed) {
     return {
       plan: getDefaultPlan(),
       confirmed: false,
     };
   }
 
-  if (cached.isStale && getRequestWaitUntil()) {
+  if (cached!.isStale && getRequestWaitUntil()) {
     const [shopRow] = await sql<{ domain: string }[]>`
       SELECT domain FROM "Shop" WHERE id = ${shopId}
     `;
@@ -687,7 +703,7 @@ export async function getPlanWithConfirmedStatus(
   }
 
   return {
-    plan: getPlanConfig(cached.planKey),
+    plan: getPlanConfig(cached!.planKey),
     confirmed: true,
   };
 }

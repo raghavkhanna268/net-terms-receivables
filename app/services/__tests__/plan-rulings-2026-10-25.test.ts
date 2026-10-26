@@ -38,6 +38,8 @@ import {
   _resetInFlightRefreshesForTesting,
   _resetPartnerCachesForTesting,
   isPlanConfirmed,
+  getPlanWithConfirmedStatus,
+  isConfirmedCache,
 } from "../plan.server";
 import {
   checkCompanyLimit,
@@ -163,6 +165,46 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
 
       const confirmed = await isPlanConfirmed(mockSql as unknown as Sql, TEST_SHOP_ID);
       expect(confirmed).toBe(true);
+    });
+
+    it("isPlanConfirmed and getPlanWithConfirmedStatus use the same isConfirmedCache predicate", async () => {
+      // Test unconfirmed case: both should return false/confirmed:false
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "none",
+        subscription_id: null,
+        subscription_name: null,
+        is_test: false,
+        plan_cached_at: null, // Unconfirmed
+      }]);
+
+      const isPlanResult = await isPlanConfirmed(mockSql as unknown as Sql, TEST_SHOP_ID);
+      const withStatusResult = await getPlanWithConfirmedStatus(mockSql as unknown as Sql, TEST_SHOP_ID);
+
+      expect(isPlanResult).toBe(false);
+      expect(withStatusResult.confirmed).toBe(false);
+      // Both derive from the same predicate
+      expect(isPlanResult).toBe(withStatusResult.confirmed);
+
+      // Test confirmed case: both should return true/confirmed:true
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
+
+      const isPlanResult2 = await isPlanConfirmed(mockSql as unknown as Sql, TEST_SHOP_ID);
+      const withStatusResult2 = await getPlanWithConfirmedStatus(mockSql as unknown as Sql, TEST_SHOP_ID);
+
+      expect(isPlanResult2).toBe(true);
+      expect(withStatusResult2.confirmed).toBe(true);
+      // Both derive from the same predicate
+      expect(isPlanResult2).toBe(withStatusResult2.confirmed);
+
+      // Verify the shared predicate directly
+      expect(isConfirmedCache(null)).toBe(false);
+      expect(isConfirmedCache({ planKey: "starter", subscriptionId: null, subscriptionName: null, isTest: false, cachedAt: new Date(), isStale: false })).toBe(true);
     });
 
     it("checkCompanyLimit allows unconfirmed shop over none limit with gating ON", async () => {

@@ -491,7 +491,7 @@ describe("Gating Service", () => {
 
   describe("decideNewAccountGate", () => {
     it("checks confirmed status via isPlanConfirmed after lock (ruling b)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { decideNewAccountGate } = await import("../gating.server");
       
@@ -536,7 +536,7 @@ describe("Gating Service", () => {
     });
 
     it("returns gate: false for unconfirmed shop without counting (ruling b)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { decideNewAccountGate } = await import("../gating.server");
       
