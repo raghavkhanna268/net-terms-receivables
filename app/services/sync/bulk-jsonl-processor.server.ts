@@ -104,6 +104,10 @@ export const BULK_ERROR_CODES = {
   AUTH_NEEDS_REAUTH: "bulk_auth_needs_reauth",
   /** Non-retryable status fetch failure (not auth) - immediate DLQ */
   STATUS_FETCH_FAILED: "bulk_status_fetch_failed",
+  /** Operation row disappeared between lease acquisition and re-read */
+  OP_DISAPPEARED: "bulk_op_disappeared",
+  /** Operation row not found (not registered or deleted) */
+  OP_NOT_FOUND: "bulk_op_not_found",
 } as const;
 
 /**
@@ -1159,7 +1163,8 @@ export async function processBulkOperation(
     return {
       success: false,
       action: "skipped",
-      error: `Bulk operation not found: ${bulkOperationId}`,
+      error: BULK_ERROR_CODES.OP_NOT_FOUND,
+      errorCode: BULK_ERROR_CODES.OP_NOT_FOUND,
       status: "error",
       errorType: "permanent", // Bad data, operation not registered
     };
@@ -1208,7 +1213,8 @@ export async function processBulkOperation(
     return {
       success: false,
       action: "skipped",
-      error: `Bulk operation disappeared: ${bulkOperationId}`,
+      error: BULK_ERROR_CODES.OP_DISAPPEARED,
+      errorCode: BULK_ERROR_CODES.OP_DISAPPEARED,
       status: "error",
       errorType: "permanent",
     };

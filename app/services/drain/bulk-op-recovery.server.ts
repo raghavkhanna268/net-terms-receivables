@@ -189,6 +189,46 @@ export async function findLeaseExpiredBulkOperations(
 }
 
 /**
+ * Find stranded bulk operations where the lease is NULL but finish arrived.
+ *
+ * S25: This handles ops where:
+ * - The finish webhook arrived (finish_received_at IS NOT NULL)
+ * - completed_at IS NULL, closed_at IS NULL (not done)
+ * - processing_lease_until IS NULL (lease was released, never acquired, or cleared)
+ * - No live processor is working on it
+ *
+ * This catches ops that fell through the cracks:
+ * - Processor released lease before completing (e.g., error path exit)
+ * - The finish message was DLQ'd and no retries remain
+ * - The pgmq message disappeared (rare edge case)
+ *
+ * Uses finish_received_at threshold to avoid racing with in-flight processing.
+ *
+ * @param sql - postgres.js SQL client
+ * @param thresholdMinutes - Minutes after finish_received_at to consider stranded
+ * @returns List of stranded operations
+ */
+export async function findStrandedBulkOperations(
+  sql: Sql,
+  thresholdMinutes: number = LEASE_EXPIRY_THRESHOLD_MINUTES
+): Promise<StaleBulkOperation[]> {
+  const rows = await sql<StaleBulkOperation[]>`
+    SELECT bo.bulk_operation_id, bo.shop, bo.bulk_type, bo.started_at
+    FROM s6_bulk_operations bo
+    INNER JOIN "Shop" s ON s.domain = bo.shop
+    WHERE bo.completed_at IS NULL
+      AND bo.closed_at IS NULL
+      AND bo.failure_count < ${MAX_FAILURE_COUNT}
+      AND bo.finish_received_at IS NOT NULL
+      AND bo.processing_lease_until IS NULL
+      AND bo.finish_received_at < NOW() - make_interval(mins => ${thresholdMinutes})
+      AND s."uninstalledAt" IS NULL
+    ORDER BY bo.started_at ASC
+  `;
+  return rows;
+}
+
+/**
  * Query Shopify for a bulk operation's current status.
  *
  * @param shop - Shop domain
@@ -450,12 +490,17 @@ export async function recoverStaleBulkOperations(
 ): Promise<RecoveryResult> {
   const staleOps = await findStaleBulkOperations(sql, thresholdMinutes);
   const leaseExpiredOps = await findLeaseExpiredBulkOperations(sql, leaseExpiryThresholdMinutes);
+  const strandedOps = await findStrandedBulkOperations(sql, leaseExpiryThresholdMinutes);
 
   const seenIds = new Set(staleOps.map((op) => op.bulk_operation_id));
   const uniqueLeaseExpiredOps = leaseExpiredOps.filter(
     (op) => !seenIds.has(op.bulk_operation_id)
   );
-  const allOps = [...staleOps, ...uniqueLeaseExpiredOps];
+  for (const op of uniqueLeaseExpiredOps) seenIds.add(op.bulk_operation_id);
+  const uniqueStrandedOps = strandedOps.filter(
+    (op) => !seenIds.has(op.bulk_operation_id)
+  );
+  const allOps = [...staleOps, ...uniqueLeaseExpiredOps, ...uniqueStrandedOps];
 
   const result: RecoveryResult = {
     foundCount: allOps.length,
