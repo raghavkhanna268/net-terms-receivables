@@ -177,6 +177,25 @@ describe("#292 currency gate on /app/accounts/:id", () => {
     });
   }
 
+  const MONEY_KEY_PATTERNS = [
+    /balance/i,
+    /amount/i,
+    /outstanding/i,
+    /creditLimit/i,
+    /paise/i,
+    /exposure/i,
+    /utilization/i,
+  ];
+
+  function assertNoMoneyKeysInPayload(serialized: string) {
+    for (const pattern of MONEY_KEY_PATTERNS) {
+      const match = serialized.match(new RegExp(`"[^"]*${pattern.source}[^"]*"\\s*:\\s*[^n]`, "i"));
+      if (match && !match[0].includes("null")) {
+        throw new Error(`Serialized payload contains money key with value matching ${pattern}: ${match[0]}`);
+      }
+    }
+  }
+
   describe("loader", () => {
     it("USD shop: notSupported=true, no credit/invoice data in payload", async () => {
       setupSqlMock("USD");
@@ -191,6 +210,10 @@ describe("#292 currency gate on /app/accounts/:id", () => {
       expect(result.companyTotals).toBeNull();
       expect(result.invoices.rows).toHaveLength(0);
 
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
+
       expect(mockGetCreditStatusDisplay).not.toHaveBeenCalled();
     });
 
@@ -203,6 +226,10 @@ describe("#292 currency gate on /app/accounts/:id", () => {
       expect(result.notSupported).toBe(true);
       expect(result.shopCurrency).toBe("XXX");
       expect(result.creditStatus).toBeNull();
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
     });
 
     it("NULL currency: notSupported=true, fail-closed", async () => {
@@ -214,6 +241,10 @@ describe("#292 currency gate on /app/accounts/:id", () => {
       expect(result.notSupported).toBe(true);
       expect(result.shopCurrency).toBe("XXX");
       expect(result.creditStatus).toBeNull();
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
     });
 
     it("INR shop: creditStatus and invoices present", async () => {

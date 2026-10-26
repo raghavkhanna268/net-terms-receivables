@@ -173,6 +173,23 @@ describe("#292 currency gate on /app/reconcile", () => {
     });
   }
 
+  const MONEY_KEY_PATTERNS = [
+    /balance/i,
+    /amount/i,
+    /outstanding/i,
+    /paise/i,
+    /total(?!Count)/i,
+  ];
+
+  function assertNoMoneyKeysInPayload(serialized: string) {
+    for (const pattern of MONEY_KEY_PATTERNS) {
+      const match = serialized.match(new RegExp(`"[^"]*${pattern.source}[^"]*"\\s*:\\s*[^n\\[]`, "i"));
+      if (match && !match[0].includes("null")) {
+        throw new Error(`Serialized payload contains money key with value matching ${pattern}: ${match[0]}`);
+      }
+    }
+  }
+
   describe("loader", () => {
     it("USD shop: notSupported=true, no payments/matches in payload", async () => {
       setupSqlMock("USD");
@@ -185,6 +202,10 @@ describe("#292 currency gate on /app/reconcile", () => {
       expect(result.payments).toHaveLength(0);
       expect(result.matches).toHaveLength(0);
       expect(result.selectedPayment).toBeNull();
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
 
       expect(mockGetSuggestedMatches).not.toHaveBeenCalled();
     });
@@ -199,6 +220,10 @@ describe("#292 currency gate on /app/reconcile", () => {
       expect(result.shopCurrency).toBe("XXX");
       expect(result.payments).toHaveLength(0);
       expect(result.matches).toHaveLength(0);
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
     });
 
     it("NULL currency: notSupported=true, fail-closed", async () => {
@@ -210,6 +235,10 @@ describe("#292 currency gate on /app/reconcile", () => {
       expect(result.notSupported).toBe(true);
       expect(result.shopCurrency).toBe("XXX");
       expect(result.payments).toHaveLength(0);
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
     });
 
     it("INR shop: notSupported=false, payments/matches present", async () => {

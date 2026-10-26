@@ -134,6 +134,27 @@ describe("#292 currency gate on /app loader", () => {
     });
   }
 
+  const MONEY_KEY_PATTERNS = [
+    /balance/i,
+    /amount/i,
+    /outstanding/i,
+    /aging/i,
+    /total(?!Count)/i,
+    /creditLimit/i,
+    /paise/i,
+    /exposure/i,
+  ];
+
+  function assertNoMoneyKeysInPayload(serialized: string) {
+    for (const pattern of MONEY_KEY_PATTERNS) {
+      // Match money keys with non-null values (numbers, strings, objects, arrays)
+      const match = serialized.match(new RegExp(`"[^"]*${pattern.source}[^"]*"\\s*:\\s*([0-9"\\[{])`, "i"));
+      if (match && !match[0].includes("totalCount")) {
+        throw new Error(`Serialized payload contains money key with value matching ${pattern}: ${match[0]}`);
+      }
+    }
+  }
+
   it("USD shop: notSupported=true, no money fields in payload, money queries not run", async () => {
     setupSqlMock("USD");
 
@@ -147,6 +168,10 @@ describe("#292 currency gate on /app loader", () => {
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
     expect(result.selectedBuyerInvoices).toBeNull();
+
+    // Verify serialized payload has no money keys with values
+    const serialized = JSON.stringify(result);
+    assertNoMoneyKeysInPayload(serialized);
 
     expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
     expect(mockGetBuyerLedger).not.toHaveBeenCalled();
@@ -165,6 +190,10 @@ describe("#292 currency gate on /app loader", () => {
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
 
+    // Verify serialized payload has no money keys with values
+    const serialized = JSON.stringify(result);
+    assertNoMoneyKeysInPayload(serialized);
+
     expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
   });
 
@@ -180,6 +209,10 @@ describe("#292 currency gate on /app loader", () => {
     expect(result.shopCurrency).toBe("XXX");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
+
+    // Verify serialized payload has no money keys with values
+    const serialized = JSON.stringify(result);
+    assertNoMoneyKeysInPayload(serialized);
 
     expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
   });
@@ -199,5 +232,38 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(mockGetShopAgingTotals).toHaveBeenCalled();
     expect(mockGetBuyerLedger).toHaveBeenCalled();
+  });
+
+  it("no Shop row: notSupported=true, fail-closed with XXX sentinel", async () => {
+    // Simulate no shop row found
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([]); // No shop found
+      }
+      if (query.includes("onboarding_dismissed_at")) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data as Record<string, unknown>;
+
+    // Fail-closed: no Shop row triggers currency gate with XXX sentinel
+    expect(result.notSupported).toBe(true);
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("XXX");
+    expect(result.agingTotals).toBeNull();
+    expect(result.buyerLedger).toBeNull();
+
+    // Verify serialized payload has no money keys with values
+    const serialized = JSON.stringify(result);
+    assertNoMoneyKeysInPayload(serialized);
+
+    expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
+    expect(mockGetBuyerLedger).not.toHaveBeenCalled();
   });
 });

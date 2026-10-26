@@ -771,35 +771,18 @@ export default function ImportsPage() {
   const { shopCurrency, maxImportRows, notSupported } = loaderData;
   const fetcher = useFetcher<ImportResult>();
 
-  // #292: When currency not supported, show only the banner
-  if (notSupported) {
-    return (
-      <s-page heading="Import Bank Statement">
-        <s-section>
-          <s-banner tone="critical" heading="Currency Not Supported">
-            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
-          </s-banner>
-        </s-section>
-      </s-page>
-    );
-  }
-
   const [status, setStatus] = useState<ParseStatus>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
   const [result, setResult] = useState<ParseResultSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [overLimitError, setOverLimitError] = useState<{ rowCount: number; limit: number } | null>(null);
-  // Track whether error list is expanded to show all errors
   const [errorsExpanded, setErrorsExpanded] = useState(false);
-  // Track a reset key to properly clear importResult when user resets
   const [resetKey, setResetKey] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isImporting = fetcher.state === "submitting";
 
-  // Update import result when fetcher completes (transitions from non-idle to idle)
-  // Using effect to avoid re-setting on every render
   const prevFetcherState = useRef(fetcher.state);
   useEffect(() => {
     if (prevFetcherState.current !== "idle" && fetcher.state === "idle" && fetcher.data) {
@@ -903,6 +886,19 @@ export default function ImportsPage() {
       fileInputRef.current.value = "";
     }
   }, []);
+
+  // #292: When currency not supported, show only the banner (after all hooks)
+  if (notSupported) {
+    return (
+      <s-page heading="Import Bank Statement">
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
 
   return (
     <s-page heading="Import Bank Statement" key={resetKey}>

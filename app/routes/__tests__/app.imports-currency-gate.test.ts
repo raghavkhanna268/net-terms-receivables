@@ -114,6 +114,23 @@ describe("#292 currency gate on /app/imports", () => {
     });
   }
 
+  const MONEY_KEY_PATTERNS = [
+    /balance/i,
+    /amount/i,
+    /outstanding/i,
+    /paise/i,
+    /total(?!Count)/i,
+  ];
+
+  function assertNoMoneyKeysInPayload(serialized: string) {
+    for (const pattern of MONEY_KEY_PATTERNS) {
+      const match = serialized.match(new RegExp(`"[^"]*${pattern.source}[^"]*"\\s*:\\s*[^n]`, "i"));
+      if (match && !match[0].includes("null")) {
+        throw new Error(`Serialized payload contains money key with value matching ${pattern}: ${match[0]}`);
+      }
+    }
+  }
+
   describe("loader", () => {
     it("USD shop: notSupported=true, preview disabled", async () => {
       setupSqlMock("USD");
@@ -123,6 +140,10 @@ describe("#292 currency gate on /app/imports", () => {
 
       expect(result.notSupported).toBe(true);
       expect(result.shopCurrency).toBe("USD");
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
     });
 
     it("XXX (unknown) shop: notSupported=true, fail-closed", async () => {
@@ -133,6 +154,10 @@ describe("#292 currency gate on /app/imports", () => {
 
       expect(result.notSupported).toBe(true);
       expect(result.shopCurrency).toBe("XXX");
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
     });
 
     it("NULL currency: notSupported=true, fail-closed", async () => {
@@ -143,6 +168,10 @@ describe("#292 currency gate on /app/imports", () => {
 
       expect(result.notSupported).toBe(true);
       expect(result.shopCurrency).toBe("XXX");
+
+      // Verify serialized payload has no money keys with values
+      const serialized = JSON.stringify(result);
+      assertNoMoneyKeysInPayload(serialized);
     });
 
     it("INR shop: notSupported=false, preview enabled", async () => {

@@ -5,7 +5,8 @@
  * Uses fail-closed semantics: unknown, NULL, or 'XXX' are treated as not supported.
  *
  * Live re-read via checkAndRecoverCurrency is done only on /app and /app/onboarding.
- * Other routes use the stored value, which stays fresh via the shop/update webhook (#342).
+ * Other routes use the stored value, which may lag until one of those routes re-reads it.
+ * Once #349 (shop/update webhook) merges, the stored currency will stay fresh automatically.
  *
  * @module
  */
