@@ -212,8 +212,16 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
         const beforeAt = text.slice(0, atIdx);
 
         // Find hard boundary: last slash or whitespace before @
-        const boundaryMatch = beforeAt.match(/.*[\s/]/);
-        const boundaryIdx = boundaryMatch ? boundaryMatch[0].length : 0;
+        // Use backward loop instead of regex to avoid O(n^2) backtracking
+        let boundaryIdx = 0;
+        for (let i = beforeAt.length - 1; i >= 0; i--) {
+          const ch = beforeAt[i];
+          // Match /\s/ semantics (space, tab, newline, etc.) or '/'
+          if (ch === "/" || /\s/.test(ch)) {
+            boundaryIdx = i + 1;
+            break;
+          }
+        }
         const localPartRaw = beforeAt.slice(boundaryIdx);
 
         // Split by '-' and process segments

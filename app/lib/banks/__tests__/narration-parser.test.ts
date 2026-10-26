@@ -560,6 +560,85 @@ describe("narration-parser", () => {
         expect(result.upiId).toBe("9000000000-1@oksynt");
       });
     });
+
+    describe("performance (ReDoS prevention)", () => {
+      // These tests verify O(n) complexity, not O(n^2) backtracking
+      // Using 200ms cap as generous bound (actual should be <10ms)
+
+      it("handles 50k-char separator-free narration in linear time", () => {
+        const longInput = "PAYMENTUPI-" + "a".repeat(50000) + "@oksynt";
+        const start = performance.now();
+        const result = parseNarration(longInput);
+        const elapsed = performance.now() - start;
+
+        expect(result.rail).toBe("UPI");
+        // No separator before @, so VPA is the entire 50k 'a' string
+        expect(result.upiId).toBe("a".repeat(50000) + "@oksynt");
+        expect(elapsed).toBeLessThan(200);
+      });
+
+      it("handles 50k-char input with many dash segments in linear time", () => {
+        // 'a-'.repeat(25000) = 50k chars with 25k segments
+        const longInput = "PAYMENTUPI-" + "a-".repeat(25000) + "vpa@oksynt";
+        const start = performance.now();
+        const result = parseNarration(longInput);
+        const elapsed = performance.now() - start;
+
+        expect(result.rail).toBe("UPI");
+        // All segments are lowercase 'a', so they extend backwards
+        // Result is all 'a' segments joined with '-', plus 'vpa'
+        const expectedLocal = "a-".repeat(25000) + "vpa";
+        expect(result.upiId).toBe(expectedLocal + "@oksynt");
+        expect(elapsed).toBeLessThan(200);
+      });
+
+      it("boundary finder equivalence: matches old regex behavior", () => {
+        // Old regex: /.*[\s/]/ - finds last slash or whitespace
+        // New loop: backward scan for first '/' or /\s/ char
+        const oldRegexBoundary = (str: string): number => {
+          const match = str.match(/.*[\s/]/);
+          return match ? match[0].length : 0;
+        };
+
+        const testCases = [
+          // [input, description]
+          ["noslash", "no separator"],
+          ["with/slash", "single slash"],
+          ["with space", "single space"],
+          ["with\ttab", "single tab"],
+          ["multi/slashes/here", "multiple slashes"],
+          ["spaces in text here", "multiple spaces"],
+          ["mixed/ /sep", "mixed separators"],
+          ["/leading", "leading slash"],
+          [" leading", "leading space"],
+          ["trailing/", "trailing slash"],
+          ["trailing ", "trailing space"],
+          ["a/b c/d e", "alternating separators"],
+          ["", "empty string"],
+          ["abc", "short no separator"],
+        ];
+
+        for (const [input, desc] of testCases) {
+          // Compute boundary using old regex (only safe on short inputs)
+          const expectedBoundaryIdx = oldRegexBoundary(input);
+
+          // Compute boundary using new loop (same logic as in parser)
+          let actualBoundaryIdx = 0;
+          for (let i = input.length - 1; i >= 0; i--) {
+            const ch = input[i];
+            if (ch === "/" || /\s/.test(ch)) {
+              actualBoundaryIdx = i + 1;
+              break;
+            }
+          }
+
+          expect(actualBoundaryIdx).toBe(
+            expectedBoundaryIdx,
+            `Boundary mismatch for "${desc}": input="${input}"`
+          );
+        }
+      });
+    });
   });
 
   describe("extractUtrForDedupe", () => {
