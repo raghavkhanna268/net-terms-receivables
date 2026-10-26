@@ -214,6 +214,8 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
  * PII handling: Uses getRequestEnv() to read CUSTOMER_PII_FIELDS flag.
  * When flag is on, mainContact.customer { email displayName } are stored.
  * The query is built dynamically to only request PII when the flag is on.
+ *
+ * T5: triggeredAt is passed for locationDeletedAt handling (delete/restore).
  */
 async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check (S20: use shop for new table)
@@ -228,6 +230,9 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
   // Get Worker env for PII flag (passed to sync functions)
   const env = getRequestEnv() ?? {};
 
+  // T5: Parse triggeredAt from message for locationDeletedAt handling
+  const triggeredAt = message.triggeredAt ? new Date(message.triggeredAt) : null;
+
   // For DELETE, process without fetch
   if (message.topic === "COMPANY_LOCATIONS_DELETE") {
     const location: ShopifyCompanyLocation = {
@@ -235,7 +240,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId, env);
+    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId, env, true, triggeredAt);
   }
 
   // Build query dynamically based on PII flag (data minimization)
@@ -269,7 +274,8 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
           baseResult.data.node,
           message.webhookId,
           env,
-          false // contactKnown=false: preserve existing stored contact
+          false, // contactKnown=false: preserve existing stored contact
+          triggeredAt
         );
       }
     }
@@ -288,7 +294,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId, env);
+    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId, env, true, triggeredAt);
   }
 
   return processCompanyLocationWebhook(
@@ -297,7 +303,9 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
     message.topic,
     result.data.node,
     message.webhookId,
-    env
+    env,
+    true, // contactKnown=true
+    triggeredAt
   );
 }
 

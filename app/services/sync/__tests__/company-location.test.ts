@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
@@ -138,7 +138,7 @@ describeWithDb("CompanyLocation Sync", () => {
       expect(account.defaultTermsDays).toBe(45);
     });
 
-    it("skips DELETE and preserves account for financial history", async () => {
+    it("DELETE preserves account and sets locationDeletedAt (T5)", async () => {
       const locationId = `gid://shopify/CompanyLocation/loc-${TEST_SUFFIX}-3`;
       const companyId = `gid://shopify/Company/co-${TEST_SUFFIX}-3`;
 
@@ -169,14 +169,15 @@ describeWithDb("CompanyLocation Sync", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.action).toBe("skipped");
-      expect(result.skipReason).toContain("preserved for financial history");
+      expect(result.action).toBe("updated");
+      expect(result.skipReason).toContain("locationDeletedAt");
 
-      // Verify account still exists
-      const [account] = await sql`
-        SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      // Verify account still exists with locationDeletedAt set
+      const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+        SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
       `;
       expect(account).toBeDefined();
+      expect(account.locationDeletedAt).not.toBeNull();
     });
 
     it("is idempotent - skips duplicate webhooks", async () => {
@@ -912,6 +913,362 @@ describeWithDb("CompanyLocation Sync", () => {
         SELECT id FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
       `;
       expect(after).toHaveLength(0);
+    });
+  });
+
+  describe("T5: locationDeletedAt handling", () => {
+    it("DELETE webhook sets locationDeletedAt on COMPANY account", async () => {
+      const locationId = `gid://shopify/CompanyLocation/del-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/del-co-${TEST_SUFFIX}`;
+
+      // Create existing account
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'To Delete',
+          NOW(), NOW()
+        )
+      `;
+
+      const location = {
+        id: locationId,
+        name: "To Delete",
+        company: { id: companyId },
+      };
+
+      const triggeredAt = new Date("2026-10-20T10:00:00Z");
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_DELETE",
+        location,
+        `wh-del-${TEST_SUFFIX}`,
+        {},
+        true,
+        triggeredAt
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("updated");
+
+      const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+        SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.locationDeletedAt).not.toBeNull();
+      expect(account.locationDeletedAt!.getTime()).toBe(triggeredAt.getTime());
+    });
+
+    it("deleted account is excluded from active count", async () => {
+      const { countActiveAccounts } = await import("../../gating.server");
+
+      const locationId = `gid://shopify/CompanyLocation/count-del-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/count-del-co-${TEST_SUFFIX}`;
+      const activeLocationId = `gid://shopify/CompanyLocation/count-active-${TEST_SUFFIX}`;
+      const activeCompanyId = `gid://shopify/Company/count-active-co-${TEST_SUFFIX}`;
+
+      // Create one deleted account and one active account
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Deleted Account',
+          NOW(), NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${activeCompanyId}, ${activeLocationId}, 'Active Account',
+          NOW(), NOW()
+        )
+      `;
+
+      const count = await countActiveAccounts(sql, TEST_SHOP_ID);
+      expect(count).toBe(1); // Only the active one counts
+    });
+
+    it("restore with newer timestamp clears locationDeletedAt", async () => {
+      const locationId = `gid://shopify/CompanyLocation/restore-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/restore-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-20T10:00:00Z");
+      const restoreTime = new Date("2026-10-21T10:00:00Z"); // 1 day later
+
+      // Create account with locationDeletedAt set
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Deleted Then Restored',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      const location = {
+        id: locationId,
+        name: "Restored Location",
+        company: { id: companyId },
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_UPDATE",
+        location,
+        `wh-restore-${TEST_SUFFIX}`,
+        {},
+        true,
+        restoreTime
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+        SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.locationDeletedAt).toBeNull(); // Cleared because restoreTime > deleteTime
+    });
+
+    it("restore CAN push shop over limit (no gating on restore)", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+
+      try {
+        // Set shop to starter plan (limit 25)
+        await sql`
+          UPDATE "Shop" SET plan_key = 'starter', plan_cached_at = NOW()
+          WHERE id = ${TEST_SHOP_ID}
+        `;
+
+        // Create 25 active accounts to fill the limit
+        for (let i = 0; i < 25; i++) {
+          await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId", kind, "companyId", "companyLocationId", name,
+              "createdAt", "updatedAt"
+            ) VALUES (
+              ${TEST_SHOP_ID}, 'COMPANY',
+              ${'gid://shopify/Company/fill-restore-' + i + '-' + TEST_SUFFIX},
+              ${'gid://shopify/CompanyLocation/fill-restore-' + i + '-' + TEST_SUFFIX},
+              ${'Fill Account ' + i},
+              NOW(), NOW()
+            )
+          `;
+        }
+
+        // Create a deleted account (doesn't count)
+        const deletedLocationId = `gid://shopify/CompanyLocation/restore-over-${TEST_SUFFIX}`;
+        const deleteTime = new Date("2026-10-20T10:00:00Z");
+        await sql`
+          INSERT INTO "BuyerAccount" (
+            "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+            "createdAt", "updatedAt"
+          ) VALUES (
+            ${TEST_SHOP_ID}, 'COMPANY',
+            'gid://shopify/Company/restore-over-co',
+            ${deletedLocationId}, 'Was Deleted',
+            ${deleteTime}, NOW(), NOW()
+          )
+        `;
+
+        const { countActiveAccounts } = await import("../../gating.server");
+        const countBefore = await countActiveAccounts(sql, TEST_SHOP_ID);
+        expect(countBefore).toBe(25); // At limit
+
+        // Restore the deleted location with newer timestamp
+        const restoreTime = new Date("2026-10-21T10:00:00Z");
+        const result = await processCompanyLocationWebhook(
+          sql,
+          TEST_SHOP_DOMAIN,
+          "COMPANY_LOCATIONS_UPDATE",
+          {
+            id: deletedLocationId,
+            name: "Restored Over Limit",
+            company: { id: "gid://shopify/Company/restore-over-co" },
+          },
+          `wh-restore-over-${TEST_SUFFIX}`,
+          {},
+          true,
+          restoreTime
+        );
+
+        expect(result.success).toBe(true);
+
+        const countAfter = await countActiveAccounts(sql, TEST_SHOP_ID);
+        expect(countAfter).toBe(26); // Over limit! No gating on restore.
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
+
+    it("repeat DELETE keeps first timestamp (idempotent)", async () => {
+      const locationId = `gid://shopify/CompanyLocation/repeat-del-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/repeat-del-co-${TEST_SUFFIX}`;
+      const firstDeleteTime = new Date("2026-10-20T10:00:00Z");
+
+      // Create account with first delete timestamp
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Repeat Delete',
+          ${firstDeleteTime}, NOW(), NOW()
+        )
+      `;
+
+      // Second delete with later timestamp
+      const secondDeleteTime = new Date("2026-10-25T10:00:00Z");
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_DELETE",
+        { id: locationId, name: "", company: { id: companyId } },
+        `wh-repeat-del-${TEST_SUFFIX}`,
+        {},
+        true,
+        secondDeleteTime
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+        SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      // COALESCE keeps the first timestamp
+      expect(account.locationDeletedAt!.getTime()).toBe(firstDeleteTime.getTime());
+    });
+
+    it("stale restore payload (older than delete) does NOT clear locationDeletedAt", async () => {
+      const locationId = `gid://shopify/CompanyLocation/stale-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/stale-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-25T10:00:00Z");
+      const staleRestoreTime = new Date("2026-10-20T10:00:00Z"); // 5 days BEFORE delete
+
+      // Create account with locationDeletedAt set
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Stale Restore Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_UPDATE",
+        { id: locationId, name: "Stale Update", company: { id: companyId } },
+        `wh-stale-${TEST_SUFFIX}`,
+        {},
+        true,
+        staleRestoreTime
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+        SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      // locationDeletedAt NOT cleared because staleRestoreTime < deleteTime
+      expect(account.locationDeletedAt).not.toBeNull();
+      expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+    });
+
+    it("TAGGED_CUSTOMER rows are never marked with locationDeletedAt", async () => {
+      const customerId = `gid://shopify/Customer/tagged-del-${TEST_SUFFIX}`;
+
+      // Create a TAGGED_CUSTOMER account
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "customerId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${customerId}, 'Tagged Customer',
+          NOW(), NOW()
+        )
+      `;
+
+      // Try to "delete" using a COMPANY location with same ID (should not match)
+      // This simulates the fact that DELETE only affects COMPANY kind
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "locationDeletedAt" = COALESCE("locationDeletedAt", NOW())
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND "companyLocationId" = ${customerId}
+          AND kind = 'COMPANY'
+      `;
+
+      const [account] = await sql<{ locationDeletedAt: Date | null; kind: string }[]>`
+        SELECT "locationDeletedAt", kind FROM "BuyerAccount" WHERE "customerId" = ${customerId}
+      `;
+      expect(account.kind).toBe("TAGGED_CUSTOMER");
+      expect(account.locationDeletedAt).toBeNull(); // Never marked
+    });
+
+    it("flag-off: DELETE does not use sql.begin", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+
+      try {
+        vi.resetModules();
+        const beginSpy = vi.spyOn(sql, "begin");
+
+        const locationId = `gid://shopify/CompanyLocation/flagoff-del-${TEST_SUFFIX}`;
+        const companyId = `gid://shopify/Company/flagoff-del-co-${TEST_SUFFIX}`;
+
+        // Create account
+        await sql`
+          INSERT INTO "BuyerAccount" (
+            "shopId", kind, "companyId", "companyLocationId", name,
+            "createdAt", "updatedAt"
+          ) VALUES (
+            ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Flag Off Delete',
+            NOW(), NOW()
+          )
+        `;
+
+        const { processCompanyLocationWebhook: processWebhook } = await import("../company-location.server");
+        const result = await processWebhook(
+          sql,
+          TEST_SHOP_DOMAIN,
+          "COMPANY_LOCATIONS_DELETE",
+          { id: locationId, name: "", company: { id: companyId } },
+          `wh-flagoff-del-${TEST_SUFFIX}`,
+          {},
+          true,
+          new Date()
+        );
+
+        expect(result.success).toBe(true);
+        expect(beginSpy).not.toHaveBeenCalled();
+
+        // locationDeletedAt still set (write happens regardless of flag)
+        const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+          SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+        `;
+        expect(account.locationDeletedAt).not.toBeNull();
+
+        beginSpy.mockRestore();
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
     });
   });
 });

@@ -52,7 +52,8 @@ export async function processCompanyLocationWebhook(
   location: ShopifyCompanyLocation,
   webhookId: string,
   env: PiiEnv,
-  contactKnown: boolean = true
+  contactKnown: boolean = true,
+  triggeredAt: Date | null = null
 ): Promise<SyncResult> {
   // Idempotency check
   if (await isWebhookProcessed(sql, webhookId)) {
@@ -80,13 +81,22 @@ export async function processCompanyLocationWebhook(
   const shopId = shop.id;
 
   if (topic === "COMPANY_LOCATIONS_DELETE") {
-    // Don't delete BuyerAccount - it may have invoices (financial history)
-    // Just mark the webhook as processed
+    // T5: Set locationDeletedAt on existing COMPANY row (preserves first delete time)
+    // Use COALESCE so a repeat delete keeps the original timestamp
+    const deleteTime = triggeredAt ?? new Date();
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "locationDeletedAt" = COALESCE("locationDeletedAt", ${deleteTime}),
+          "updatedAt" = NOW()
+      WHERE "shopId" = ${shopId}
+        AND "companyLocationId" = ${location.id}
+        AND kind = 'COMPANY'
+    `;
     await markWebhookProcessed(sql, webhookId, topic, location.id);
     return {
       success: true,
-      action: "skipped",
-      skipReason: "Company location deleted; BuyerAccount preserved for financial history",
+      action: "updated",
+      skipReason: "Company location deleted; BuyerAccount marked with locationDeletedAt",
     };
   }
 
@@ -114,6 +124,8 @@ export async function processCompanyLocationWebhook(
   if (!isGatingEnforced()) {
     // Flag off: main's code path - plain upsert, no transaction, no lock
     // When contactKnown=false (ACCESS_DENIED fallback), preserve existing contact fields
+    // T5: Clear locationDeletedAt only if triggeredAt is newer than the delete
+    const restoreTime = triggeredAt ?? new Date();
     const [result] = await sql<{ id: string; upsertAction: string }[]>`
       INSERT INTO "BuyerAccount" (
         "shopId",
@@ -150,6 +162,11 @@ export async function processCompanyLocationWebhook(
         "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
         "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
         "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
+        "locationDeletedAt" = CASE
+          WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
+          THEN NULL
+          ELSE "BuyerAccount"."locationDeletedAt"
+        END,
         "updatedAt" = NOW()
       RETURNING id, (xmax = 0)::text as "upsertAction"
     `;
@@ -162,6 +179,8 @@ export async function processCompanyLocationWebhook(
 
     if (limit === -1) {
       // Unlimited plan: plain upsert without transaction (no gating needed)
+      // T5: Clear locationDeletedAt only if triggeredAt is newer than the delete
+      const restoreTime = triggeredAt ?? new Date();
       const [result] = await sql<{ id: string; upsertAction: string }[]>`
         INSERT INTO "BuyerAccount" (
           "shopId",
@@ -198,6 +217,11 @@ export async function processCompanyLocationWebhook(
           "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
           "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
           "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
+          "locationDeletedAt" = CASE
+            WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
+            THEN NULL
+            ELSE "BuyerAccount"."locationDeletedAt"
+          END,
           "updatedAt" = NOW()
         RETURNING id, (xmax = 0)::text as "upsertAction"
       `;
@@ -205,6 +229,8 @@ export async function processCompanyLocationWebhook(
       entityId = result.id;
     } else {
       // Limited plan: use transaction with gating decision
+      // T5: Clear locationDeletedAt only if triggeredAt is newer than the delete
+      const restoreTime = triggeredAt ?? new Date();
       const hash = await shopHash(shopDomain);
       const txResult = await sql.begin(async (tx) => {
         const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
@@ -257,6 +283,11 @@ export async function processCompanyLocationWebhook(
             "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
             "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
             "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
+            "locationDeletedAt" = CASE
+              WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
+              THEN NULL
+              ELSE "BuyerAccount"."locationDeletedAt"
+            END,
             "updatedAt" = NOW()
           RETURNING id, (xmax = 0)::text as "upsertAction", gated_at
         `;
@@ -397,6 +428,7 @@ export async function bulkUpsertBuyerAccounts(
   let totalCount = 0;
 
   // Flag off: row-by-row without transaction (main's behavior, errors propagate)
+  // T5: Clear locationDeletedAt when location seen in bulk (restore)
   if (!isGatingEnforced()) {
     for (const [, shopAccounts] of accountsByShop) {
       for (const a of shopAccounts) {
@@ -440,6 +472,11 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactEmail" = EXCLUDED."mainContactEmail",
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+              "locationDeletedAt" = CASE
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                THEN NULL
+                ELSE "BuyerAccount"."locationDeletedAt"
+              END,
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -478,6 +515,11 @@ export async function bulkUpsertBuyerAccounts(
               "companyId" = EXCLUDED."companyId",
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "locationDeletedAt" = CASE
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                THEN NULL
+                ELSE "BuyerAccount"."locationDeletedAt"
+              END,
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -506,6 +548,7 @@ export async function bulkUpsertBuyerAccounts(
     }
 
     // Unlimited: process row-by-row without gating (no transaction needed, errors propagate)
+    // T5: Clear locationDeletedAt when location seen in bulk (restore)
     if (limit === -1) {
       for (const a of shopAccounts) {
         if (a.contactKnown) {
@@ -545,6 +588,11 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactEmail" = EXCLUDED."mainContactEmail",
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+              "locationDeletedAt" = CASE
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                THEN NULL
+                ELSE "BuyerAccount"."locationDeletedAt"
+              END,
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -582,6 +630,11 @@ export async function bulkUpsertBuyerAccounts(
               "companyId" = EXCLUDED."companyId",
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "locationDeletedAt" = CASE
+                WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                THEN NULL
+                ELSE "BuyerAccount"."locationDeletedAt"
+              END,
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -624,6 +677,7 @@ export async function bulkUpsertBuyerAccounts(
           }
 
           // Use different UPDATE logic based on contactKnown
+          // T5: Clear locationDeletedAt when location seen in bulk (restore)
           if (a.contactKnown) {
             const result = await tx`
               INSERT INTO "BuyerAccount" (
@@ -663,6 +717,11 @@ export async function bulkUpsertBuyerAccounts(
                 "mainContactEmail" = EXCLUDED."mainContactEmail",
                 "mainContactName" = EXCLUDED."mainContactName",
                 "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+                "locationDeletedAt" = CASE
+                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                  THEN NULL
+                  ELSE "BuyerAccount"."locationDeletedAt"
+                END,
                 "updatedAt" = NOW()
             `;
             count += result.count;
@@ -703,6 +762,11 @@ export async function bulkUpsertBuyerAccounts(
                 "companyId" = EXCLUDED."companyId",
                 name = EXCLUDED.name,
                 "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+                "locationDeletedAt" = CASE
+                  WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND NOW() > "BuyerAccount"."locationDeletedAt"
+                  THEN NULL
+                  ELSE "BuyerAccount"."locationDeletedAt"
+                END,
                 "updatedAt" = NOW()
             `;
             count += result.count;
