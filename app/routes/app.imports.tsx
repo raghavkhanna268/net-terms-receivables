@@ -23,8 +23,7 @@ import { useLoaderData, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
-import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
-import type { PaymentRail } from "~/lib/banks/types";
+import { insertBankImportRows } from "~/services/bank-import.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
@@ -364,161 +363,17 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const shopId = shop.id;
 
   try {
-    // Compute dedupe keys server-side for all credits
-    // Use isValidUtrForRail to validate UTRs - fall back to hash for invalid/untrusted rails
-    const creditsWithKeys: Array<CreditRow & { dedupeKey: string }> = [];
-    for (const credit of importData.credits) {
-      let dedupeKey: string;
-      
-      // Only trust UTR if it's valid for the rail
-      const hasValidUtr = credit.utr && isValidUtrForRail(credit.utr, credit.rail as PaymentRail);
-      
-      if (hasValidUtr) {
-        // Use UTR-based key
-        dedupeKey = await generateDedupeKey(
-          credit.date,
-          credit.amountPaise,
-          "CR",
-          credit.narration,
-          credit.rail as PaymentRail,
-          credit.utr,
-          credit.balancePaise,
-          credit.valueDate,
-          credit.refNo
-        );
-      } else {
-        // Generate hash-based key (includes balancePaise for identical same-day distinction)
-        dedupeKey = await generateDedupeKey(
-          credit.date,
-          credit.amountPaise,
-          "CR",
-          credit.narration,
-          credit.rail as PaymentRail,
-          undefined, // Don't pass untrusted UTR
-          credit.balancePaise,
-          credit.valueDate,
-          credit.refNo
-        );
-      }
-      
-      creditsWithKeys.push({ ...credit, dedupeKey });
-    }
-
-    // Normalize dedupe keys for DB storage
-    // UTR-based keys stay as-is, hash-based get SYNTH- prefix
-    const normalizeForDb = (key: string): string => {
-      if (key.startsWith("utr:")) {
-        // Extract the actual UTR value from utr:RAIL:DIR:VALUE format
-        const parts = key.split(":");
-        return parts[3] || key;
-      }
-      return `SYNTH-${key}`;
-    };
-
-    // Use batched INSERT ... ON CONFLICT DO NOTHING in a transaction
-    const result = await sql.begin(async (tx) => {
-      // Create BankImport record
-      const [bankImport] = await tx<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (
-          ${shopId},
-          ${importData.bank.toLowerCase()},
-          ${importData.fileName},
-          ${importData.credits.length},
-          ${now}
-        )
-        RETURNING id
-      `;
-
-      const importId = bankImport.id;
-
-      // Log import start (counts only, no PII)
-      safeLog("info", "import.start", {
+    // Dedupe keys + BankImport/Payment inserts live in the shared service
+    // (also used by scripts/e2e-bank-import.ts) so both paths stay identical.
+    const result = await sql.begin((tx) =>
+      insertBankImportRows(tx, {
         shopId,
-        importId,
-        count: importData.credits.length,
-      });
-
-      // Prepare all rows for batch insert
-      const rows = creditsWithKeys.map((credit) => {
-        const dbUtr = normalizeForDb(credit.dedupeKey);
-        // Convert to ISO string for JSON serialization (tx.json() needs string, not Date)
-        const valueDate = credit.valueDate 
-          ? new Date(credit.valueDate + "T00:00:00Z").toISOString()
-          : new Date(credit.date + "T00:00:00Z").toISOString();
-        // Use exact decimal string to avoid float precision issues
-        const amountString = (credit.amountPaise / 100).toFixed(2);
-        
-        return {
-          shopId,
-          importId,
-          valueDate,
-          amount: amountString,
-          rail: credit.rail,
-          utr: dbUtr,
-          payerText: credit.payerName ?? null,
-          narration: credit.narration,
-        };
-      });
-
-      // Batch insert with ON CONFLICT DO NOTHING
-      // Returns only the inserted rows (not duplicates)
-      // Use tx.json() for proper JSON serialization - JSON.stringify() causes
-      // postgres.js to double-encode, sending a JSON string scalar instead of array
-      const insertedRows = await tx<{ id: string }[]>`
-        INSERT INTO "Payment" (
-          "shopId",
-          "importId",
-          "valueDate",
-          amount,
-          rail,
-          utr,
-          "payerText",
-          narration,
-          status,
-          "createdAt",
-          "updatedAt"
-        )
-        SELECT
-          r."shopId",
-          r."importId",
-          r."valueDate"::timestamptz,
-          r.amount::decimal(14,2),
-          r.rail,
-          r.utr,
-          r."payerText",
-          r.narration,
-          'unmatched',
-          ${now},
-          ${now}
-        FROM jsonb_to_recordset(${tx.json(rows)}) AS r(
-          "shopId" text,
-          "importId" text,
-          "valueDate" text,
-          amount text,
-          rail text,
-          utr text,
-          "payerText" text,
-          narration text
-        )
-        ON CONFLICT ("shopId", utr) DO NOTHING
-        RETURNING id
-      `;
-
-      const inserted = insertedRows.length;
-      const duplicates = rows.length - inserted;
-
-      // Log import completion (counts only, no PII)
-      safeLog("info", "import.complete", {
-        importId,
-        insertedCount: inserted,
-        duplicateCount: duplicates,
-      });
-
-      return { importId, inserted, duplicates };
-    });
+        bank: importData.bank,
+        fileName: importData.fileName,
+        credits: importData.credits,
+        now,
+      })
+    );
 
     // Trigger matcher for newly imported payments
     let matcherResult = null;

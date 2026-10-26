@@ -69,6 +69,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - scripts/__tests__/credit-status-metafield-backfill.test.ts
  * - scripts/__tests__/refresh-offline-token.test.ts
  * - scripts/ci/__tests__/backfill-dry-run-preflight.test.ts
+ * - scripts/__tests__/e2e-bank-import.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
@@ -102,6 +103,7 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
   "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
   "app/services/drain/__tests__/drain-guard-db.test.ts",
+  "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
@@ -139,6 +141,7 @@ const DB_TEST_PATTERNS = [
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
   "scripts/__tests__/refresh-offline-token.test.ts",
   "scripts/ci/__tests__/backfill-dry-run-preflight.test.ts",
+  "scripts/__tests__/e2e-bank-import.test.ts",
 
   // Reviewer demo DB tests
   "tests/integration/review-csv-matcher-db.test.ts",
