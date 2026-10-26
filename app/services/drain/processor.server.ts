@@ -69,6 +69,43 @@ import {
 } from "./dead-letter-sanitize.server";
 
 /**
+ * Check if a no_session error should be relabelled as shop_not_found.
+ *
+ * Used by COMPANIES_* and COMPANY_LOCATIONS_* CREATE/UPDATE handlers to detect
+ * post-uninstall webhooks. When adminGraphQL fails with no_session and the Shop
+ * row is missing or uninstalledAt is set, we relabel the error as shop_not_found
+ * so the message can be sanitized in the DLQ.
+ *
+ * Part of #239: no-session path for COMPANIES_* and company-location CREATE/UPDATE.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain to check
+ * @returns SyncResult with shop_not_found if shop is missing/uninstalled, null otherwise
+ */
+async function checkNoSessionForUninstalledShop(
+  sql: Sql,
+  shopDomain: string
+): Promise<SyncResult | null> {
+  const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
+    SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+
+  if (!shop || shop.uninstalledAt !== null) {
+    // Shop is missing or uninstalled—relabel to shop_not_found for DLQ sanitization.
+    // Omit `retryable` because shop_not_found is non-retryable by definition and the
+    // drain uses errorCode (not retryable flag) to decide sanitization eligibility.
+    return {
+      success: false,
+      action: "skipped",
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
+    };
+  }
+
+  return null;
+}
+
+/**
  * #292 G8: Terminal topics that must reach handlers even for non-INR shops.
  * These update existing rows without importing new amounts:
  * - ORDERS_PAID: marks existing invoice as paid
@@ -193,6 +230,14 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
   }>(message.shop, COMPANY_QUERY, { id: message.resourceGid });
 
   if (!result.success) {
+    // Part of #239: Check if this is a no_session error on a CREATE/UPDATE webhook.
+    if (
+      result.errorCode === "no_session" &&
+      (message.topic === "COMPANIES_CREATE" || message.topic === "COMPANIES_UPDATE")
+    ) {
+      const shopNotFound = await checkNoSessionForUninstalledShop(sql, message.shop);
+      if (shopNotFound) return shopNotFound;
+    }
     return {
       success: false,
       action: "skipped",
@@ -285,6 +330,14 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
           false // contactKnown=false: preserve existing stored contact
         );
       }
+    }
+    // Part of #239: Check if this is a no_session error on a CREATE/UPDATE webhook.
+    if (
+      result.errorCode === "no_session" &&
+      (message.topic === "COMPANY_LOCATIONS_CREATE" || message.topic === "COMPANY_LOCATIONS_UPDATE")
+    ) {
+      const shopNotFound = await checkNoSessionForUninstalledShop(sql, message.shop);
+      if (shopNotFound) return shopNotFound;
     }
     return {
       success: false,
