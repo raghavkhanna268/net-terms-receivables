@@ -1,0 +1,17 @@
+mutation BulkDraftOrdersExport {
+  bulkOperationRunQuery(
+    query: """
+    {
+      draftOrders(query: "status:open OR status:invoice_sent") {
+        edges { node {
+          id name createdAt updatedAt status
+          totalPriceSet { shopMoney { amount currencyCode } }
+          paymentTerms { id paymentTermsName paymentTermsType dueInDays }
+          purchasingEntity { ... on PurchasingCompany { company { id } location { id } } }
+          customer { id }
+        } }
+      }
+    }
+    """
+  ) { bulkOperation { id status url } userErrors { field message } }
+}

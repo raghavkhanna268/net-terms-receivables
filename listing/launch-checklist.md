@@ -69,13 +69,10 @@ Write scopes include read access to the same resource type. See [Access scopes](
 
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `write_customers`, `write_orders` scopes (write grants read)
-  - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
+  - **Status:** Level 2 (Name, Email): request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing. As of 26 Oct. (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
   - **Owner:** Raghav (Partner Dashboard) — cite [docs/privacy.md Section 2.3](../docs/privacy.md#23-tagged-customer-data) and [Appendix A](../docs/privacy.md#appendix-a-shopify-oauth-scopes)
   - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
-    - [ ] File PCD access request form in Partner Dashboard
-    - [ ] Justify data access requirements
   - [ ] **Protected Customer Fields (Level 2)** — Name and Email fields only (no phone, no address)
-    - Request per-field access for Name and Email in Partner Dashboard
     - Phone, addresses, and other PII fields are never stored (blocked by code)
     - When `CUSTOMER_PII_FIELDS=1` is enabled, only `email` and `displayName` are persisted
   - **Reference:** [Shopify Protected Customer Data](https://shopify.dev/docs/apps/launch/protected-customer-data)
@@ -197,6 +194,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] Lighthouse audit passing
 - [ ] Sentry wired and receiving errors
 - [ ] CI/CD pipeline green
+- [ ] PCD request is reviewed with the listing; confirm the selected fields are Name and Email only before submitting (no changes allowed during review).
 
 ---
 

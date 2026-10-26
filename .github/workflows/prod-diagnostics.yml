@@ -1509,8 +1509,14 @@ jobs:
           # A null/missing inputQuery tells us nothing about credit_status, so report
           # the JSON string "unknown" rather than false. A non-null query (including the
           # empty string "", which is non-null with length 0) keeps a true/false verdict.
+          # deployed_input_query_check: unavailable_api_null (null, not a failure),
+          # has_credit_status (non-null with credit_status), or missing_credit_status.
+          DEPLOYED_INPUT_QUERY_CHECK="missing_credit_status"
           if [ "$INPUT_QUERY_NULL" = "true" ]; then
             DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS='"unknown"'
+            DEPLOYED_INPUT_QUERY_CHECK="unavailable_api_null"
+          elif [ "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" = "true" ]; then
+            DEPLOYED_INPUT_QUERY_CHECK="has_credit_status"
           fi
 
           echo "S12 Validation status (read-only):"
@@ -1520,13 +1526,15 @@ jobs:
             --argjson block_on_failure "$VALIDATION_BLOCK_ON_FAILURE" \
             --argjson repo_input_query_has_credit_status "$REPO_INPUT_QUERY_HAS_CREDIT_STATUS" \
             --argjson deployed_input_query_has_credit_status "$DEPLOYED_INPUT_QUERY_HAS_CREDIT_STATUS" \
+            --arg deployed_input_query_check "$DEPLOYED_INPUT_QUERY_CHECK" \
             --argjson input_query_null "$INPUT_QUERY_NULL" \
             --argjson input_query_length "$INPUT_QUERY_LENGTH" \
             --argjson iq_has_credit_status "$IQ_HAS_CREDIT_STATUS" \
             --argjson iq_has_dollar_app "$IQ_HAS_DOLLAR_APP" \
             --argjson iq_has_app_prefix "$IQ_HAS_APP_PREFIX" \
             --argjson iq_has_metafield "$IQ_HAS_METAFIELD" \
-            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, input_query_null: $input_query_null, input_query_length: $input_query_length, iq_has_credit_status: $iq_has_credit_status, iq_has_dollar_app: $iq_has_dollar_app, iq_has_app_prefix: $iq_has_app_prefix, iq_has_metafield: $iq_has_metafield}'
+            '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, deployed_input_query_check: $deployed_input_query_check, input_query_null: $input_query_null, input_query_length: $input_query_length, iq_has_credit_status: $iq_has_credit_status, iq_has_dollar_app: $iq_has_dollar_app, iq_has_app_prefix: $iq_has_app_prefix, iq_has_metafield: $iq_has_metafield}'
+          echo "deployed_input_query_check=$DEPLOYED_INPUT_QUERY_CHECK"
 
           # Cross-check via shopifyFunctions(apiType: cart_checkout_validation), read-only.
           # Prints a count, ordinal indices and per-function booleans/integers only; never
@@ -1557,12 +1565,16 @@ jobs:
               | ("metafield\\s*\\([^)]*(" + $ns + "[^)]*" + $key + "|" + $key + "[^)]*" + $ns + ")") as $re
               | {cross_check: "ok",
                  function_count: ($fns | length),
-                 functions: [$fns | to_entries | .[] | {
+                 functions: [$fns | to_entries | .[] |
+                   ((.value.inputQuery | type) != "string") as $null
+                   | (.value.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else false end) as $has_cs
+                   | {
                    function_idx: (.key + 1),
                    handle_is_credit_check_validation: (.value.handle == "credit-check-validation"),
-                   input_query_null: ((.value.inputQuery | type) != "string"),
+                   input_query_null: $null,
                    input_query_length: (.value.inputQuery | if type == "string" then length else 0 end),
-                   has_credit_status: (.value.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else "unknown" end)
+                   has_credit_status: (if $null then "unknown" elif $has_cs then true else false end),
+                   input_query_check: (if $null then "unavailable_api_null" elif $has_cs then "has_credit_status" else "missing_credit_status" end)
                  }]}' "$FN_RESPONSE"
           fi
           rm -f "$FN_RESPONSE"
@@ -1734,6 +1746,258 @@ jobs:
               echo "Validation already exists and is enabled, no action needed."
             fi
           fi
+
+      # Cron job 11 (credit_status_daily_sweep) last run and sweep effect counts.
+      # Read-only; prints only timestamps, enums, durations and counts.
+      - name: Cron sweep diagnostics
+        id: cron_sweep
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::notice::DATABASE_URL_MIGRATIONS not set, skipping cron sweep diagnostics"
+            echo "cron_sweep=skipped_no_db"
+            exit 0
+          fi
+
+          echo "=== Cron Sweep Diagnostics ==="
+          echo ""
+
+          # Check if cron schema exists
+          CRON_EXISTS=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron');
+          EOSQL
+          )
+
+          if [ "$CRON_EXISTS" != "t" ]; then
+            echo "cron_sweep=skipped_no_cron_schema"
+            exit 0
+          fi
+
+          # Check if job_run_details table exists (pg_cron 1.4+)
+          JRD_EXISTS=$(psql -X -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT to_regclass('cron.job_run_details') IS NOT NULL;
+          EOSQL
+          )
+
+          if [ "$JRD_EXISTS" != "t" ]; then
+            echo "cron_sweep=skipped_no_job_run_details"
+            exit 0
+          fi
+
+          # Query last run of credit_status_daily_sweep by job name
+          echo "credit_status_daily_sweep last run (by jobname):"
+          LAST_RUN=$(psql -X -v ON_ERROR_STOP=1 -t -A -F '|' "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            jrd.runid,
+            jrd.start_time AT TIME ZONE 'UTC',
+            jrd.end_time AT TIME ZONE 'UTC',
+            jrd.status,
+            EXTRACT(EPOCH FROM (jrd.end_time - jrd.start_time))::int AS duration_sec
+          FROM cron.job_run_details jrd
+          JOIN cron.job j ON j.jobid = jrd.jobid
+          WHERE j.jobname = 'credit_status_daily_sweep'
+          ORDER BY jrd.start_time DESC
+          LIMIT 1;
+          EOSQL
+          )
+
+          if [ -z "$LAST_RUN" ]; then
+            echo "cron_sweep_last_run=none"
+          else
+            # Fields: runid|start_time|end_time|status|duration_sec
+            # Only use start_time (f2), status (f4), duration (f5); skip runid and end_time (SC2034)
+            START_TIME=$(echo "$LAST_RUN" | cut -d'|' -f2)
+            STATUS=$(echo "$LAST_RUN" | cut -d'|' -f4)
+            DURATION=$(echo "$LAST_RUN" | cut -d'|' -f5)
+            jq -n \
+              --arg start_time "${START_TIME}Z" \
+              --arg status "$STATUS" \
+              --argjson duration_sec "${DURATION:-0}" \
+              '{cron_sweep_last_run: {start_time_utc: $start_time, status: $status, duration_sec: $duration_sec}}'
+          fi
+
+          echo ""
+          echo "=== Sweep Effect Counts ==="
+          echo ""
+
+          # Current syncPending count and count changed since last sweep start
+          # "before" is not stored, so we report current and delta based on audit events
+          SWEEP_COUNTS=$(psql -X -v ON_ERROR_STOP=1 -t "$DATABASE_URL" <<'EOSQL'
+          WITH last_sweep AS (
+            SELECT jrd.start_time
+            FROM cron.job_run_details jrd
+            JOIN cron.job j ON j.jobid = jrd.jobid
+            WHERE j.jobname = 'credit_status_daily_sweep'
+            ORDER BY jrd.start_time DESC
+            LIMIT 1
+          )
+          SELECT json_build_object(
+            'sync_pending_current', (SELECT COUNT(*) FROM "BuyerAccount" WHERE "syncPending" = true),
+            'holds_applied_since_sweep', (
+              SELECT COUNT(*) FROM "AuditEvent"
+              WHERE type = 'credit_status.hold_applied'
+                AND at >= COALESCE((SELECT start_time FROM last_sweep), '1970-01-01'::timestamptz)
+            ),
+            'holds_released_since_sweep', (
+              SELECT COUNT(*) FROM "AuditEvent"
+              WHERE type = 'credit_status.hold_released'
+                AND at >= COALESCE((SELECT start_time FROM last_sweep), '1970-01-01'::timestamptz)
+            ),
+            'sweep_start_found', EXISTS(SELECT 1 FROM last_sweep)
+          );
+          EOSQL
+          )
+
+          echo "sweep_effect_counts (current syncPending, holds applied/released since last sweep start):"
+          echo "$SWEEP_COUNTS" | jq .
+
+      # Admin API checks for the allowed dev store: hide-terms-payment active and webhook subscription diff.
+      # Read-only; uses the existing offline token path. Skips gracefully if token expired or shop mismatch.
+      # ALLOWED_DEV_STORE comes from secrets (not vars) to prevent log header leaks.
+      # Shop comparison uses $SHOP_DOMAIN from GITHUB_ENV (already masked); only a boolean is printed.
+      - name: Allowed dev store Admin checks
+        id: allowed_admin
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
+          REFRESH_SUCCESS: ${{ steps.refresh.outputs.refresh_success }}
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh
+
+          echo "=== Allowed Dev Store Admin Checks ==="
+          echo ""
+
+          # Skip if no allowed dev store configured
+          if [ -z "${ALLOWED_DEV_STORE:-}" ]; then
+            echo "allowed_admin=skipped_no_allowed_dev_store"
+            exit 0
+          fi
+
+          # Validate myshopify.com domain format and mask immediately (fail closed)
+          if ! [[ "$ALLOWED_DEV_STORE" =~ ^[a-z0-9][a-z0-9-]*\.myshopify\.com$ ]]; then
+            echo "allowed_admin=error code=invalid_domain_format"
+            exit 0
+          fi
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+
+          # Gate: compare this run's shop (SHOP_DOMAIN from GITHUB_ENV, already masked) to allowed dev store.
+          # Plain shell string compare; print only the boolean, never echo the domain.
+          SHOP_MATCHES=false
+          if [ "${SHOP_DOMAIN:-}" = "$ALLOWED_DEV_STORE" ]; then
+            SHOP_MATCHES=true
+          fi
+          echo "shop_matches_allowed=$SHOP_MATCHES"
+
+          if [ "$SHOP_MATCHES" != "true" ]; then
+            echo "allowed_admin=skipped_shop_mismatch"
+            exit 0
+          fi
+
+          # Gate: skip if token expired and refresh didn't succeed
+          if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
+            echo "allowed_admin=skipped_token_expired"
+            exit 0
+          fi
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "allowed_admin=skipped_no_db"
+            exit 0
+          fi
+
+          # Fetch offline access token for allowed dev store
+          ACCESS_TOKEN=$(psql -X -v ON_ERROR_STOP=1 -v shop="$ALLOWED_DEV_STORE" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+          )
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "allowed_admin=skipped_no_offline_session"
+            exit 0
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          CURL_CONFIG=""
+          HTTP_RESPONSE=""
+          cleanup() { rm -f "$CURL_CONFIG" "$HTTP_RESPONSE"; }
+          trap cleanup EXIT
+
+          CURL_CONFIG=$(mktemp)
+          chmod 600 "$CURL_CONFIG"
+          cat > "$CURL_CONFIG" <<EOF
+          header = "Content-Type: application/json"
+          header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
+          EOF
+
+          HTTP_RESPONSE=$(mktemp)
+
+          # Query paymentCustomizations and webhookSubscriptions
+          QUERY='{"query":"{ paymentCustomizations(first: 50) { nodes { enabled shopifyFunction { handle } } } webhookSubscriptions(first: 100) { nodes { topic } } }"}'
+
+          HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+            -X POST \
+            --config "$CURL_CONFIG" \
+            --data-binary "$QUERY" \
+            "https://${ALLOWED_DEV_STORE}/admin/api/2026-10/graphql.json" || echo "000")
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "allowed_admin=error http_status=$HTTP_STATUS"
+            exit 0
+          fi
+
+          if ! jq -e . "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "allowed_admin=error parse_failed"
+            exit 0
+          fi
+
+          if jq -e '(.errors | length) > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "allowed_admin=error error_codes=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN" | if test("^[A-Z0-9_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$HTTP_RESPONSE")"
+            exit 0
+          fi
+
+          # hide-terms-payment active check (boolean only)
+          echo "hide-terms-payment active (boolean):"
+          jq -r '
+            [.data.paymentCustomizations.nodes[]? | select(.shopifyFunction.handle == "hide-terms-payment")] as $pc
+            | "hide_terms_payment_present=\($pc | length > 0)",
+              "hide_terms_payment_enabled=\([$pc[] | select(.enabled == true)] | length > 0)"
+          ' "$HTTP_RESPONSE"
+
+          echo ""
+          # Webhook subscription diff
+          # Expected topics from shopify.app.toml (excluding compliance_topics)
+          EXPECTED_TOPICS_FILE=$(mktemp)
+          { grep -E '^[[:space:]]*topics[[:space:]]*=' shopify.app.toml || true; } \
+            | grep -oE '"[a-z_]+/[a-z_]+"' | tr -d '"' | tr 'a-z/' 'A-Z_' | sort -u > "$EXPECTED_TOPICS_FILE"
+
+          echo "Webhook subscription diff (topics only, never URLs):"
+          jq -r --rawfile exp "$EXPECTED_TOPICS_FILE" '
+            def okenum: type == "string" and test("^[A-Z0-9_]{1,64}$");
+            ($exp | split("\n") | map(select(okenum)) | unique) as $e
+            | [.data.webhookSubscriptions.nodes[]? | .topic] as $raw
+            | ($raw | map(if okenum then . else "INVALID_TOPIC" end) | unique) as $p
+            | ($e - $p) as $missing
+            | ($p - $e) as $extra
+            | "webhook_expected_count=\($e | length)",
+              "webhook_present_count=\($p | length)",
+              "webhook_missing_count=\($missing | length)",
+              "webhook_extra_count=\($extra | length)",
+              "webhook_missing_topics=\(if ($missing | length) == 0 then "none" else ($missing | join(",")) end)",
+              "webhook_extra_topics=\(if ($extra | length) == 0 then "none" else ($extra | join(",")) end)"
+          ' "$HTTP_RESPONSE"
+
+          rm -f "$EXPECTED_TOPICS_FILE"
 
       - name: Reconcile probe
         if: ${{ inputs.invoke_reconcile }}
