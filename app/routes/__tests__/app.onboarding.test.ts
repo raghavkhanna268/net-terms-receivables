@@ -3013,6 +3013,102 @@ describe("Button loading state isolation", () => {
     expect(html).toContain("Retry");
     expect(html).not.toContain("Retrying...");
   });
+
+  it("Start sync submit does not put Dismiss into loading state (fails on revert)", async () => {
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "start_sync");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Validation Function", status: "ok" },
+            paymentCustomization: { name: "Payment Customization", status: "ok" },
+            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Starting...");
+    expect(html).toContain("Dismiss for now");
+    expect(html).not.toContain("Dismissing...");
+  });
+
+  it("Reopen submit shows Reopening... and does not affect other buttons (fails on revert)", async () => {
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "reopen");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 5,
+            dismissedAt: "2026-10-26T10:00:00Z",
+          },
+          registrationStatus: {
+            validation: { name: "Validation Function", status: "ok" },
+            paymentCustomization: { name: "Payment Customization", status: "ok" },
+            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+          },
+          initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Reopening...");
+    expect(html).not.toContain("Dismissing...");
+    expect(html).not.toContain("Retrying...");
+  });
 });
 
 describe("Merchant-facing copy", () => {
