@@ -780,9 +780,14 @@ describe("getNextStage", () => {
     expect(getNextStage("customers")).toBe("orders");
   });
 
-  it("returns undefined after orders (final stage)", async () => {
+  it("returns draft_orders after orders", async () => {
     const { getNextStage } = await import("../bulk-jsonl-processor.server");
-    expect(getNextStage("orders")).toBeUndefined();
+    expect(getNextStage("orders")).toBe("draft_orders");
+  });
+
+  it("returns undefined after draft_orders (final stage)", async () => {
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+    expect(getNextStage("draft_orders")).toBeUndefined();
   });
 
   it("returns undefined for null stage", async () => {
@@ -860,6 +865,66 @@ describe("Reconcile chaining", () => {
     expect(metadata!.origin).toBe("reconcile");
     expect(metadata!.reconcileStage).toBe("customers");
     expect(getNextStage(metadata!.reconcileStage)).toBe("orders");
+  });
+
+  it("orders reconcile sets nextStage=draft_orders when origin=reconcile and stage=orders", async () => {
+    const { getBulkOperationMetadata } = await import(
+      "../bulk-operations.server"
+    );
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+
+    const mockSql = vi.fn().mockImplementation(() =>
+      Promise.resolve([
+        {
+          shop: "test-s8b-drafts.myshopify.com",
+          bulk_type: "orders",
+          origin: "reconcile",
+          reconcile_stage: "orders",
+          failure_count: 0,
+          chunk_size: 524288,
+        },
+      ])
+    );
+
+    const metadata = await getBulkOperationMetadata(
+      mockSql as never,
+      "gid://shopify/BulkOperation/789"
+    );
+
+    expect(metadata).not.toBeNull();
+    expect(metadata!.origin).toBe("reconcile");
+    expect(metadata!.reconcileStage).toBe("orders");
+    expect(getNextStage(metadata!.reconcileStage)).toBe("draft_orders");
+  });
+
+  it("draft_orders reconcile has no nextStage (final stage)", async () => {
+    const { getBulkOperationMetadata } = await import(
+      "../bulk-operations.server"
+    );
+    const { getNextStage } = await import("../bulk-jsonl-processor.server");
+
+    const mockSql = vi.fn().mockImplementation(() =>
+      Promise.resolve([
+        {
+          shop: "test-s8b-drafts.myshopify.com",
+          bulk_type: "draft_orders",
+          origin: "reconcile",
+          reconcile_stage: "draft_orders",
+          failure_count: 0,
+          chunk_size: 524288,
+        },
+      ])
+    );
+
+    const metadata = await getBulkOperationMetadata(
+      mockSql as never,
+      "gid://shopify/BulkOperation/999"
+    );
+
+    expect(metadata).not.toBeNull();
+    expect(metadata!.origin).toBe("reconcile");
+    expect(metadata!.reconcileStage).toBe("draft_orders");
+    expect(getNextStage(metadata!.reconcileStage)).toBeUndefined();
   });
 });
 
