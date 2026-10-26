@@ -457,5 +457,26 @@ describe("PlanBanner component", () => {
       // When gating is ON and at/over limit, shows "Upgrade to Add More"
       expect(html).toContain("Upgrade to Add More");
     });
+
+    it("View Plans link is present for starter plan with gating ON (not at limit)", () => {
+      const html = renderToString(
+        createElement(PlanBanner, {
+          planKey: "starter",
+          planName: "Starter",
+          isTest: false,
+          companiesUsed: 10,
+          companiesLimit: 25,
+          gatingEnforced: true,
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        })
+      );
+      // Plan label is shown
+      expect(html).toContain("Plan:");
+      expect(html).toContain("Starter");
+      // When gating is ON but NOT at limit, shows "View Plans"
+      expect(html).toContain("View Plans");
+      // Should not show "Upgrade to Add More" when not at limit
+      expect(html).not.toContain("Upgrade to Add More");
+    });
   });
 });
