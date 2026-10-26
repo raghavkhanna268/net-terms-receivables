@@ -108,6 +108,7 @@ const DB_TEST_PATTERNS = [
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
+  "app/services/__tests__/customer-data-redaction-completeness-db.test.ts",
 
   // Sync DB tests (these use TEST_DATABASE_URL)
   "app/services/sync/__tests__/company-location.test.ts",
