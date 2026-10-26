@@ -8,10 +8,10 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 |----------|-------|--------|
 | [Sentry Setup](./sentry-setup.md) | Raghav | Done (#390) |
 | [Workers Paid Upgrade](./workers-paid-upgrade.md) | Raghav | Pending |
-| [Request `read_all_orders` Scope](./read-all-orders-request.md) | Raghav | Appears granted (Partner Dashboard state, 2026-10-26) |
-| [Privacy Policy](/privacy) — Fill in `[TBD: ...]` placeholders in [docs/privacy.md](../privacy.md) and verify route is accessible | Raghav | Done (#313, #357) |
+| [Request `read_all_orders` Scope](./read-all-orders-request.md) | Raghav | Granted, session scope 9/9 (run ci-40305655924-1) |
+| [Privacy Policy](/privacy) — Fill in `[TBD: ...]` placeholders in [docs/privacy.md](../privacy.md) and verify route is accessible | Raghav | Done (#162, #313, #357) |
 | `PLAN_GATING_ENFORCED` stays `"false"` in every environment until Raghav decides pricing and the Shopify plans are created. The go comes from Raghav via Wholesale Terms Builder. Enabling it gates new over-limit accounts and skips reminders for gated accounts (holds and aging are unaffected). | Raghav (decision), then DevOps | Holding |
-| `RESEND_API_KEY` + `RESEND_FROM` set as Worker secrets. Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard. | Raghav | Done |
+| `RESEND_API_KEY` and `RESEND_TEST_RECIPIENTS` set as Worker secrets (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST). `RESEND_FROM` pending #427 (ships as wrangler.jsonc var). Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard (product-owner ruling, 2026-10-26). | Raghav | Pending #427 for RESEND_FROM |
 | Disable the pre-launch recipient allowlist guard by setting `RESEND_RECIPIENT_ALLOWLIST_ENFORCED=false` as a Worker secret. This guard (Gates 10d/11c in reminders.server.ts, the check in resend-client.server.ts and compliance.server.ts) blocks ALL emails when `RESEND_TEST_RECIPIENTS` is empty/unset (fail-closed). **Only the exact string "false" disables the guard.** Any other value (unset, empty, "False", "0", "no", whitespace, "true") keeps it enforced. Do NOT just unset or empty `RESEND_TEST_RECIPIENTS` — that blocks everything when the guard is enforced. **There is no diagnostics output for this flag** (Actions cannot read Worker secret values). Verification at the launch flip is a live send to a non-allowlisted test inbox, performed by DevOps after setting the flag to exactly `"false"`, and only with Raghav's go. The flag stays enforced until then. | Raghav (decision), then DevOps | Pending |
 
 ## Order of Operations
@@ -20,7 +20,7 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 2. **Workers Paid Upgrade** — Raghav upgrades the Cloudflare account ($5/month). DevOps redeploys after.
 3. **`read_all_orders` Request** — Submit in Partner Dashboard. After approval, a separate PR adds the scope.
 4. **Protected customer data request** — Confirm the selected fields are Name and Email only before App Store listing submission; Shopify reviews the PCD request with the listing.
-5. **Resend (S18 reminders)** — Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard. `RESEND_API_KEY` / `RESEND_FROM` set as Worker secrets (production). `RESEND_TEST_RECIPIENTS` restricts all sends to the test recipient until G4.
+5. **Resend (S18 reminders)** — Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard (product-owner ruling, 2026-10-26). `RESEND_API_KEY` and `RESEND_TEST_RECIPIENTS` set as Worker secrets (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST). `RESEND_FROM` pending #427 (ships as wrangler.jsonc var). `RESEND_TEST_RECIPIENTS` restricts all sends to the test recipient until G4.
 
 **Standing gate:** `PLAN_GATING_ENFORCED` remains `"false"` everywhere until Raghav decides pricing and the Shopify plans are created. The go comes from Raghav via Wholesale Terms Builder. Enabling it gates new over-limit accounts and skips reminders for gated accounts (holds and aging are unaffected).
 

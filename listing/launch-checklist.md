@@ -79,9 +79,9 @@ Write scopes include read access to the same resource type. See [Access scopes](
 
 ### Privacy Policy
 
-- [x] **⚠️ Privacy policy URL hosted and accessible** (#313, #357 merged)
+- [x] **⚠️ Privacy policy URL hosted and accessible** (#162, #313, #357 merged)
   - Draft: `docs/privacy.md`
-  - [x] **Host on public URL** — `/privacy` route renders `docs/privacy.md` (#313)
+  - [x] **Host on public URL** — `/privacy` route renders `docs/privacy.md` (`app/routes/privacy.tsx`, #162)
   - [x] **Raghav: fill privacy.md TBDs** — legal entity, contact email, effective date, DPA links, Sentry data region filled (#313, #357)
   - [ ] Legal review of privacy policy — Why open: no legal review conducted
 
@@ -120,8 +120,8 @@ Write scopes include read access to the same resource type. See [Access scopes](
 ### Billing (if paid app)
 
 - [x] **Billing mechanism is correct:** Uses Shopify Managed App Pricing (reads `currentAppInstallation.activeSubscriptions`, links to Shopify's hosted pricing page for upgrades). No custom charge flow or hardcoded prices in code.
-- [x] **Pricing decided:** (Partner Dashboard state, 2026-10-26) Starter $9/mo or $90/yr, Growth $19/mo or $190/yr, Unlimited $29/mo or $290/yr. 30-day free trial on all plans. No free plan; development and partner stores free.
-- [x] **Plans created in Partner Dashboard:** (Partner Dashboard state, 2026-10-26) Starter, Growth, Unlimited configured with above prices. No Scale plan.
+- [x] **Pricing decided** (product-owner ruling): Starter $9/mo or $90/yr, Growth $19/mo or $190/yr, Unlimited $29/mo or $290/yr; 30-day free trial; all features on every plan (`listing/app-store-listing.md:45-49`, `app/lib/entitlements.ts`).
+- [ ] **Plans created in Partner Dashboard** — Why open: Plans reported configured in Partner Dashboard (Starter, Growth, Unlimited; no Scale); to be confirmed by the QA billing test.
 - [ ] **QA billing test** — Why open: QA billing test pending
 - **Reference:** [Shopify App Pricing](https://shopify.dev/docs/apps/launch/billing)
 
@@ -151,9 +151,9 @@ Write scopes include read access to the same resource type. See [Access scopes](
   - Package installed: `@sentry/cloudflare`
   - Wrapper implemented: `app/lib/sentry.ts`
   - [x] Create Sentry project (Raghav), DSN provided through a secure secret request (#390)
-  - [x] Set `SENTRY_DSN` secret in Cloudflare Workers (DevOps) (#390)
+  - [x] Set `SENTRY_DSN` secret in Cloudflare Workers (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST)
   - **Steps:** [docs/launch-checklist/sentry-setup.md](../docs/launch-checklist/sentry-setup.md)
-  - [x] Verify errors are captured: test event captured by the manual Sentry smoke workflow (#390)
+  - [x] Sentry ingest accepted a synthetic event (HTTP 200 + event id) in the manual sentry-smoke.yml run on main, 26 Oct (#390); arrival not confirmed via Sentry API
   - [ ] Release tags and source maps — Why open: in open PR #323
 
 ---
@@ -193,7 +193,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] App tested on dev store with real Shopify data
 - [ ] GDPR webhooks tested with Shopify's test tool
 - [ ] Lighthouse audit passing
-- [x] Sentry wired and receiving errors (#390)
+- [ ] Sentry wired and receiving errors — Why open: Sentry wired in code (`workers/app.ts`, `app/lib/sentry.ts`); ingest smoke passed (#390); Worker-side capture pending
 - [ ] CI/CD pipeline green
 - [ ] PCD request is reviewed with the listing; confirm the selected fields are Name and Email only before submitting (no changes allowed during review).
 

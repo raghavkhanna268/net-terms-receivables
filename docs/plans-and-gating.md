@@ -27,7 +27,7 @@ Plans are configured in the Shopify Partner Dashboard with these exact names (ca
 - **Growth** - Mid-tier plan ($19/mo or $190/yr, up to 100 accounts)
 - **Unlimited** - Top-tier plan ($29/mo or $290/yr, unlimited accounts)
 
-There is no free plan. Development and partner stores are free. 30-day trial on all plans. (Partner Dashboard state, 2026-10-26)
+There is no free plan. Development and partner stores are free. 30-day trial on all plans. (see `listing/app-store-listing.md:45-49`)
 
 The app matches subscription names case-insensitively, so "Growth", "growth", "GROWTH" all map to the growth plan.
 

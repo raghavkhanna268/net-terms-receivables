@@ -136,7 +136,7 @@ When quota is exhausted, new events are dropped until the next billing cycle. To
 - [x] Create project (JavaScript platform, match Worker name) (#390)
 - [x] Locate DSN in project settings (#390)
 - [x] Submit DSN via DevOps secure secret-request card (never paste in chat) (#390)
-- [x] DevOps stores DSN as `wrangler secret SENTRY_DSN` (#390)
+- [x] DevOps stores DSN as `wrangler secret SENTRY_DSN` (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST)
 - [ ] (Optional) Create Organization Auth Token for source maps — Why open: in open PR #323
 - [ ] (Optional) DevOps stores auth token as GitHub Actions secret `SENTRY_AUTH_TOKEN` — Why open: in open PR #323
 - [x] Restrictive SDK data collection: `dataCollection: RESTRICTIVE_DATA_COLLECTION` (replaces `sendDefaultPii` in @sentry/core 11.8) in `app/lib/sentry.ts`
