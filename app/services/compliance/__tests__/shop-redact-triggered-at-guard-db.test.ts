@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { deleteShop } from "../compliance.server";
+import { deleteShop, markShopUninstalled } from "../compliance.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -233,6 +233,157 @@ describeWithDb("shop/redact triggeredAt guard", () => {
         await sqlConn1.end();
         await sqlConn2.end();
       }
+    });
+  });
+
+  describe("6. 47h boundary tests", () => {
+    const SHOP_ID_EXACT = `shop-47h-exact-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN_EXACT = `test-47h-exact-${TEST_SUFFIX}.myshopify.com`;
+    const SHOP_ID_MINUS1 = `shop-47h-minus1-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN_MINUS1 = `test-47h-minus1-${TEST_SUFFIX}.myshopify.com`;
+    const SHOP_ID_PLUS1 = `shop-47h-plus1-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN_PLUS1 = `test-47h-plus1-${TEST_SUFFIX}.myshopify.com`;
+
+    // REVERT NOTE: This test FAILS if the triggeredAt guard is reverted.
+    it("exactly at 47h boundary: uninstalledAt == triggeredAt - 47h skips (reinstall detected)", async () => {
+      const triggeredAt = new Date();
+      const uninstalledAt = new Date(triggeredAt.getTime() - 47 * 60 * 60 * 1000);
+      await seedShop(SHOP_ID_EXACT, SHOP_DOMAIN_EXACT, uninstalledAt);
+
+      const result = await deleteShop(sql, SHOP_DOMAIN_EXACT, triggeredAt);
+
+      expect(result.deleted).toBe(false);
+      expect(result.skippedReinstalled).toBe(true);
+    });
+
+    // REVERT NOTE: This test FAILS if the triggeredAt guard is reverted.
+    it("1 minute inside 47h window: uninstalledAt == triggeredAt - 47h + 1min skips", async () => {
+      const triggeredAt = new Date();
+      const uninstalledAt = new Date(triggeredAt.getTime() - 47 * 60 * 60 * 1000 + 60 * 1000);
+      await seedShop(SHOP_ID_MINUS1, SHOP_DOMAIN_MINUS1, uninstalledAt);
+
+      const result = await deleteShop(sql, SHOP_DOMAIN_MINUS1, triggeredAt);
+
+      expect(result.deleted).toBe(false);
+      expect(result.skippedReinstalled).toBe(true);
+    });
+
+    it("1 minute outside 47h window: uninstalledAt == triggeredAt - 47h - 1min deletes", async () => {
+      const triggeredAt = new Date();
+      const uninstalledAt = new Date(triggeredAt.getTime() - 47 * 60 * 60 * 1000 - 60 * 1000);
+      await seedShop(SHOP_ID_PLUS1, SHOP_DOMAIN_PLUS1, uninstalledAt);
+
+      const result = await deleteShop(sql, SHOP_DOMAIN_PLUS1, triggeredAt);
+
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
+    });
+  });
+
+  describe("7. markShopUninstalled redelivery does not advance timestamp", () => {
+    const SHOP_ID = `shop-redeliver-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN = `test-redeliver-${TEST_SUFFIX}.myshopify.com`;
+
+    // REVERT NOTE: This test FAILS if markShopUninstalled COALESCE is reverted.
+    it("redelivered app/uninstalled keeps first uninstalledAt, then shop/redact deletes", async () => {
+      const now = new Date();
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', ${now}, ${now}, NULL)
+      `;
+      allShopIds.push(SHOP_ID);
+      allShopDomains.push(SHOP_DOMAIN);
+
+      await markShopUninstalled(sql, SHOP_DOMAIN);
+      const [first] = await sql<[{ uninstalledAt: Date }]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_ID}
+      `;
+      const firstUninstalledAt = first.uninstalledAt;
+      expect(firstUninstalledAt).not.toBeNull();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await markShopUninstalled(sql, SHOP_DOMAIN);
+      const [second] = await sql<[{ uninstalledAt: Date }]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_ID}
+      `;
+      expect(second.uninstalledAt.getTime()).toBe(firstUninstalledAt.getTime());
+
+      const triggeredAt = new Date(firstUninstalledAt.getTime() + 48 * 60 * 60 * 1000);
+      const result = await deleteShop(sql, SHOP_DOMAIN, triggeredAt);
+
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
+    });
+  });
+
+  describe("8. Uninstall, reinstall, uninstall again lifecycle", () => {
+    const SHOP_ID = `shop-lifecycle-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN = `test-lifecycle-${TEST_SUFFIX}.myshopify.com`;
+
+    // REVERT NOTE: This test FAILS if the triggeredAt guard is reverted.
+    it("first redact skips (reinstalled), second redact (after re-uninstall) deletes", async () => {
+      const now = new Date();
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', ${now}, ${now}, NULL)
+      `;
+      allShopIds.push(SHOP_ID);
+      allShopDomains.push(SHOP_DOMAIN);
+
+      await markShopUninstalled(sql, SHOP_DOMAIN);
+      const [firstUninstall] = await sql<[{ uninstalledAt: Date }]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_ID}
+      `;
+      const firstUninstalledAt = firstUninstall.uninstalledAt;
+
+      await sql`
+        UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${SHOP_ID}
+      `;
+
+      await sql`
+        UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${SHOP_ID}
+      `;
+      const [secondUninstall] = await sql<[{ uninstalledAt: Date }]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_ID}
+      `;
+      const secondUninstalledAt = secondUninstall.uninstalledAt;
+
+      const firstRedactTriggeredAt = new Date(firstUninstalledAt.getTime() + 48 * 60 * 60 * 1000);
+      const firstRedactResult = await deleteShop(sql, SHOP_DOMAIN, firstRedactTriggeredAt);
+      expect(firstRedactResult.deleted).toBe(false);
+      expect(firstRedactResult.skippedReinstalled).toBe(true);
+      expect(await getShopExists(SHOP_ID)).toBe(true);
+
+      const secondRedactTriggeredAt = new Date(secondUninstalledAt.getTime() + 48 * 60 * 60 * 1000);
+      const secondRedactResult = await deleteShop(sql, SHOP_DOMAIN, secondRedactTriggeredAt);
+      expect(secondRedactResult.deleted).toBe(true);
+      expect(secondRedactResult.skippedReinstalled).toBe(false);
+      expect(await getShopExists(SHOP_ID)).toBe(false);
+    });
+  });
+
+  describe("9. Failed reinstall clear leaves old uninstalledAt (fail-safe)", () => {
+    const SHOP_ID = `shop-failsafe-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN = `test-failsafe-${TEST_SUFFIX}.myshopify.com`;
+
+    /**
+     * FAIL-SAFE: If the after-auth reinstall clear fails or is skipped (e.g., DB error,
+     * race condition, or code bug), the old uninstalledAt remains. This ensures the
+     * shop/redact triggered by the original uninstall STILL DELETES the shop, which
+     * is the safe direction: better to delete an active shop (merchant can reinstall
+     * and restore from Shopify) than to preserve a shop that should have been erased.
+     */
+    it("shop/redact deletes when reinstall failed to clear uninstalledAt", async () => {
+      const firstUninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      await seedShop(SHOP_ID, SHOP_DOMAIN, firstUninstalledAt);
+
+      const triggeredAt = new Date(firstUninstalledAt.getTime() + 48 * 60 * 60 * 1000);
+      const result = await deleteShop(sql, SHOP_DOMAIN, triggeredAt);
+
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
+      expect(await getShopExists(SHOP_ID)).toBe(false);
     });
   });
 });

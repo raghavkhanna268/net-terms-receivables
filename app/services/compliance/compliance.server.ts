@@ -153,8 +153,10 @@ export async function deleteShop(
     // the reinstalled shop's data. See issue #291.
     //
     // Additionally, if triggeredAt is provided and uninstalledAt is NEWER than
-    // triggeredAt - 47 hours, the shop was reinstalled after the uninstall that
-    // triggered this webhook. Skip deletion to preserve the reinstalled shop's data.
+    // triggeredAt - 47 hours, the shop reinstalled and then uninstalled again
+    // after the original uninstall that triggered this webhook. The current
+    // uninstalledAt does not match the uninstall that fired shop/redact, so
+    // skip deletion to avoid erasing data from the newer install cycle.
     const skipReinstall =
       lockedShop &&
       (lockedShop.uninstalledAt === null ||
@@ -1164,6 +1166,10 @@ export async function minimiseCustomerPiiIfInactive(
  * Mark a shop as uninstalled.
  * Full data deletion happens on shop/redact (48h later per Shopify docs).
  *
+ * Only sets uninstalledAt when it is currently NULL, so redeliveries of
+ * app/uninstalled never advance the timestamp. This ensures shop/redact
+ * (triggered ~48h after the FIRST uninstall) uses the correct window.
+ *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
  * @returns Whether the shop was found and updated
@@ -1174,7 +1180,7 @@ export async function markShopUninstalled(
 ): Promise<boolean> {
   const result = await sql`
     UPDATE "Shop"
-    SET "uninstalledAt" = NOW(), "updatedAt" = NOW()
+    SET "uninstalledAt" = COALESCE("uninstalledAt", NOW()), "updatedAt" = NOW()
     WHERE domain = ${shopDomain}
   `;
   return result.count > 0;

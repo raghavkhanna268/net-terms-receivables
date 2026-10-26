@@ -77,8 +77,24 @@ export async function deleteWebhookReceiptsForShop(
 }
 
 /**
- * Parse X-Shopify-Triggered-At header to Date.
- * Returns null if header is missing or invalid.
+ * Strict ISO-8601 regex: requires explicit timezone (Z or ±hh:mm).
+ * Examples that match: "2026-10-25T12:00:00Z", "2026-10-25T12:00:00+05:30"
+ * Examples that do NOT match: "2026-10-25T12:00:00", "1", "Oct 25 2026"
+ */
+const STRICT_ISO8601_WITH_ZONE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Parse X-Shopify-Triggered-At header to Date with strict validation.
+ *
+ * Only accepts strict ISO-8601 with an explicit zone (Z or ±hh:mm).
+ * Rejects lenient inputs like '1' or 'Oct 25 2026'.
+ *
+ * Returns null (keeps current delete behaviour) if:
+ * - Header is missing
+ * - Header is not strict ISO-8601 with explicit zone
+ * - Parsed date is more than 5 minutes in the future
+ * - Parsed date is older than 30 days
  *
  * @param request - The incoming request
  * @returns Parsed Date or null
@@ -87,8 +103,17 @@ export function parseTriggeredAt(request: Request): Date | null {
   const header = request.headers.get("X-Shopify-Triggered-At");
   if (!header) return null;
 
+  if (!STRICT_ISO8601_WITH_ZONE.test(header)) return null;
+
   const parsed = new Date(header);
   if (isNaN(parsed.getTime())) return null;
+
+  const now = Date.now();
+  const fiveMinutesMs = 5 * 60 * 1000;
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+
+  if (parsed.getTime() > now + fiveMinutesMs) return null;
+  if (parsed.getTime() < now - thirtyDaysMs) return null;
 
   return parsed;
 }
