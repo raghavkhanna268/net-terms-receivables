@@ -19,9 +19,10 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { sendBulkMessage, type BulkMessage, BULK_OPERATIONS_FINISH_TOPIC } from "~/lib/pgmq.server";
+import { sendBulkMessage, type BulkMessage, BULK_OPERATIONS_FINISH_TOPIC, S6_QUEUES } from "~/lib/pgmq.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "./admin-client.server";
 import { safeLog, shopHash } from "~/lib/log.server";
+import { BULK_ERROR_CODES } from "~/services/sync/bulk-jsonl-processor.server";
 
 /**
  * Maximum number of stale operations to check on page load.
@@ -48,6 +49,20 @@ export const STALE_THRESHOLD_MINUTES = 60;
  * Matches MAX_FAILURE_COUNT from bulk-jsonl-processor.server.ts.
  */
 const MAX_FAILURE_COUNT = 5;
+
+/**
+ * Threshold in minutes for lease expiry recovery.
+ *
+ * When a processor dies after receiving the finish webhook but before completing,
+ * the operation has finish_received_at set but completed_at NULL, and the
+ * processing lease expires. The lease-contention DLQ path (bulk_lease_contention)
+ * means no further finish messages will be retried.
+ *
+ * This threshold determines how long after lease expiry we consider the processor
+ * dead. Must be >> PROCESSING_LEASE_SECONDS to avoid racing with slow processors.
+ * 5 minutes (300s) vs 60s lease gives a 5x buffer.
+ */
+export const LEASE_EXPIRY_THRESHOLD_MINUTES = 5;
 
 /**
  * Shopify bulk operation statuses (GraphQL enum).
@@ -105,10 +120,13 @@ interface StaleBulkOperation {
 /**
  * Find stale bulk operations that need recovery.
  *
- * An operation is stale if:
+ * S25: An operation is stale if:
  * - completed_at IS NULL (not finished)
+ * - closed_at IS NULL (not closed by reinstall reset)
  * - failure_count < MAX_FAILURE_COUNT (not already marked failed)
- * - started_at < NOW() - STALE_THRESHOLD_MINUTES
+ * - finish_received_at IS NULL (never received the finish webhook)
+ * - processing_lease_until IS NULL OR < NOW() (not currently being processed)
+ * - started_at < NOW() - STALE_THRESHOLD_MINUTES (old enough)
  * - Shop is still installed (uninstalledAt IS NULL)
  *
  * @param sql - postgres.js SQL client
@@ -124,8 +142,46 @@ export async function findStaleBulkOperations(
     FROM s6_bulk_operations bo
     INNER JOIN "Shop" s ON s.domain = bo.shop
     WHERE bo.completed_at IS NULL
+      AND bo.closed_at IS NULL
       AND bo.failure_count < ${MAX_FAILURE_COUNT}
+      AND bo.finish_received_at IS NULL
+      AND (bo.processing_lease_until IS NULL OR bo.processing_lease_until < NOW())
       AND bo.started_at < NOW() - INTERVAL '1 minute' * ${thresholdMinutes}
+      AND s."uninstalledAt" IS NULL
+    ORDER BY bo.started_at ASC
+  `;
+  return rows;
+}
+
+/**
+ * Find bulk operations with expired processing leases that need re-enqueueing.
+ *
+ * S25: This handles the "stranded op" case where:
+ * - The finish webhook arrived (finish_received_at IS NOT NULL)
+ * - Processing started but the processor died (lease expired)
+ * - The finish message was DLQ'd as bulk_lease_contention
+ * - No further retries will occur, leaving the op stuck
+ *
+ * Recovery re-enqueues such ops so they can be processed again.
+ *
+ * @param sql - postgres.js SQL client
+ * @param thresholdMinutes - Minutes after lease expiry to consider dead
+ * @returns List of lease-expired operations
+ */
+export async function findLeaseExpiredBulkOperations(
+  sql: Sql,
+  thresholdMinutes: number = LEASE_EXPIRY_THRESHOLD_MINUTES
+): Promise<StaleBulkOperation[]> {
+  const rows = await sql<StaleBulkOperation[]>`
+    SELECT bo.bulk_operation_id, bo.shop, bo.bulk_type, bo.started_at
+    FROM s6_bulk_operations bo
+    INNER JOIN "Shop" s ON s.domain = bo.shop
+    WHERE bo.completed_at IS NULL
+      AND bo.closed_at IS NULL
+      AND bo.failure_count < ${MAX_FAILURE_COUNT}
+      AND bo.finish_received_at IS NOT NULL
+      AND bo.processing_lease_until IS NOT NULL
+      AND bo.processing_lease_until < NOW() - make_interval(mins => ${thresholdMinutes})
       AND s."uninstalledAt" IS NULL
     ORDER BY bo.started_at ASC
   `;
@@ -162,27 +218,82 @@ async function queryShopifyBulkOperationStatus(
 /**
  * Mark a bulk operation as failed by setting failure_count to MAX_FAILURE_COUNT.
  *
+ * S25: Also writes a DLQ row with error code bulk_stale_recovery so the FAILED
+ * initial-sync state can be explained.
+ *
  * Uses conditional UPDATE with completed_at IS NULL and shop to avoid race with
  * concurrent finish webhook processing and cross-shop mismatches.
  *
  * @param sql - postgres.js SQL client
  * @param bulkOperationId - Bulk operation GID
  * @param shop - Shop domain
+ * @param bulkType - Type of bulk operation (for DLQ message)
+ * @param shopifyStatus - Shopify status that caused the failure
  * @returns True if the row was updated, false if already completed
  */
 export async function markBulkOperationFailed(
   sql: Sql,
   bulkOperationId: string,
-  shop: string
+  shop: string,
+  bulkType?: "companies" | "orders" | "customers",
+  shopifyStatus?: string
 ): Promise<boolean> {
-  const result = await sql`
-    UPDATE s6_bulk_operations
-    SET failure_count = ${MAX_FAILURE_COUNT}
-    WHERE bulk_operation_id = ${bulkOperationId}
-      AND shop = ${shop}
-      AND completed_at IS NULL
-  `;
-  return result.count > 0;
+  const marked = await sql.begin(async (tx) => {
+    const result = await tx`
+      UPDATE s6_bulk_operations
+      SET failure_count = ${MAX_FAILURE_COUNT}
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND shop = ${shop}
+        AND completed_at IS NULL
+        AND closed_at IS NULL
+      RETURNING bulk_operation_id, bulk_type
+    `;
+    
+    if (result.count === 0) {
+      return false;
+    }
+    
+    // S25: Write DLQ row with bulk_stale_recovery error code
+    const opBulkType = bulkType || result[0]?.bulk_type || "unknown";
+    const dlqMessage: BulkMessage = {
+      topic: BULK_OPERATIONS_FINISH_TOPIC,
+      shop,
+      webhookId: `stale-recovery:${bulkOperationId}`,
+      bulkOperationId,
+      bulkType: opBulkType as "companies" | "orders" | "customers",
+      enqueuedAt: new Date().toISOString(),
+    };
+    
+    await tx`
+      INSERT INTO s6_dead_letter (
+        original_queue,
+        original_msg_id,
+        message,
+        error,
+        dead_lettered_at
+      ) VALUES (
+        ${S6_QUEUES.BULK},
+        ${`stale-recovery-${bulkOperationId}`},
+        ${tx.json(dlqMessage)},
+        ${BULK_ERROR_CODES.STALE_RECOVERY},
+        NOW()
+      )
+    `;
+    
+    return true;
+  });
+
+  // S25: Log when marking failed with allowlisted keys only
+  if (marked) {
+    const hash = await shopHash(shop);
+    safeLog("warn", "bulk_op_recovery_marked_failed", {
+      shopHash: hash,
+      bulkType: bulkType ?? "unknown",
+      status: shopifyStatus ?? "unknown",
+    });
+  }
+
+  return marked;
 }
 
 /**
@@ -207,6 +318,7 @@ async function enqueueCompletedOperation(
       WHERE bulk_operation_id = ${op.bulk_operation_id}
         AND shop = ${op.shop}
         AND completed_at IS NULL
+        AND closed_at IS NULL
       FOR UPDATE
     `;
 
@@ -269,7 +381,7 @@ async function recoverSingleOperation(
   }
 
   if (status === null) {
-    const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop);
+    const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop, op.bulk_type, "NOT_FOUND");
     return {
       bulkOperationId: op.bulk_operation_id,
       shop: op.shop,
@@ -292,7 +404,7 @@ async function recoverSingleOperation(
     case "FAILED":
     case "CANCELED":
     case "EXPIRED": {
-      const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop);
+      const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop, op.bulk_type, status);
       return {
         bulkOperationId: op.bulk_operation_id,
         shop: op.shop,
@@ -318,25 +430,35 @@ async function recoverSingleOperation(
  * Recover stale bulk operations.
  *
  * This is the main entry point for the recovery mechanism. It:
- * 1. Finds all stale operations (open > STALE_THRESHOLD_MINUTES)
- * 2. Queries Shopify for each operation's status
- * 3. Takes appropriate action based on status
+ * 1. Finds all stale operations (open > STALE_THRESHOLD_MINUTES, no finish webhook)
+ * 2. Finds lease-expired operations (finish arrived, processor died)
+ * 3. Queries Shopify for each operation's status
+ * 4. Takes appropriate action based on status
  *
  * Safe to call repeatedly; idempotent via conditional updates and
  * existing webhook deduplication.
  *
  * @param sql - postgres.js SQL client
- * @param thresholdMinutes - Optional override for threshold (for testing)
+ * @param thresholdMinutes - Optional override for stale threshold (for testing)
+ * @param leaseExpiryThresholdMinutes - Optional override for lease expiry threshold
  * @returns Recovery statistics
  */
 export async function recoverStaleBulkOperations(
   sql: Sql,
-  thresholdMinutes: number = STALE_THRESHOLD_MINUTES
+  thresholdMinutes: number = STALE_THRESHOLD_MINUTES,
+  leaseExpiryThresholdMinutes: number = LEASE_EXPIRY_THRESHOLD_MINUTES
 ): Promise<RecoveryResult> {
   const staleOps = await findStaleBulkOperations(sql, thresholdMinutes);
+  const leaseExpiredOps = await findLeaseExpiredBulkOperations(sql, leaseExpiryThresholdMinutes);
+
+  const seenIds = new Set(staleOps.map((op) => op.bulk_operation_id));
+  const uniqueLeaseExpiredOps = leaseExpiredOps.filter(
+    (op) => !seenIds.has(op.bulk_operation_id)
+  );
+  const allOps = [...staleOps, ...uniqueLeaseExpiredOps];
 
   const result: RecoveryResult = {
-    foundCount: staleOps.length,
+    foundCount: allOps.length,
     enqueuedCount: 0,
     markedFailedCount: 0,
     skippedCount: 0,
@@ -344,11 +466,11 @@ export async function recoverStaleBulkOperations(
     attempts: [],
   };
 
-  if (staleOps.length === 0) {
+  if (allOps.length === 0) {
     return result;
   }
 
-  for (const op of staleOps) {
+  for (const op of allOps) {
     const attemptResult = await recoverSingleOperation(sql, op);
     result.attempts.push(attemptResult);
 
@@ -412,6 +534,7 @@ export async function recoverStaleBulkOperationsForShop(
     FROM s6_bulk_operations
     WHERE shop = ${shop}
       AND completed_at IS NULL
+      AND closed_at IS NULL
       AND failure_count < ${MAX_FAILURE_COUNT}
       AND started_at < NOW() - INTERVAL '1 minute' * ${thresholdMinutes}
     ORDER BY started_at ASC

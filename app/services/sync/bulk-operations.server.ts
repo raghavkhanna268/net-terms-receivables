@@ -18,19 +18,26 @@
  * removed to backfill all historical orders with payment terms.
  */
 
+import { shouldIncludePiiFields, type PiiEnv } from "./customer-fields.server";
+
 /**
- * GraphQL mutation to start a bulk operation for companies and locations.
+ * Build a bulk companies export mutation dynamically based on PII flag.
  *
- * This query exports all companies with their locations and payment terms
- * configuration. The JSONL output will contain Company and CompanyLocation
- * objects linked by __parentId.
+ * DPDP data minimization:
+ * - When CUSTOMER_PII_FIELDS=1: requests mainContact.customer { id email displayName }
+ * - When flag is off: requests mainContact.customer { id } only
  *
- * DPDP note: Only billingAddress.companyName is fetched (name fallback for BuyerAccount).
- * No PII fields (names, addresses, phones) are requested.
- *
+ * The B2B recipient is the COMPANY's main contact (mainContact is on Company, not Location).
  * Note: CompanyAddress.company was renamed to companyName in 2026-10.
+ *
+ * @param env - Environment for PII flag check (required, no default)
+ * @returns GraphQL mutation string
  */
-export const BULK_COMPANIES_QUERY = `
+export function getBulkCompaniesQuery(env: PiiEnv): string {
+  const piiEnabled = shouldIncludePiiFields(env);
+  const customerFields = piiEnabled ? "id\n                  email\n                  displayName" : "id";
+  
+  return `
   mutation BulkCompaniesExport {
     bulkOperationRunQuery(
       query: """
@@ -44,6 +51,11 @@ export const BULK_COMPANIES_QUERY = `
               note
               createdAt
               updatedAt
+              mainContact {
+                customer {
+                  ${customerFields}
+                }
+              }
               locations {
                 edges {
                   node {
@@ -83,6 +95,7 @@ export const BULK_COMPANIES_QUERY = `
     }
   }
 `;
+}
 
 /**
  * GraphQL mutation to start a bulk operation for orders with payment terms.
@@ -251,10 +264,13 @@ export type ReconcileStage = "companies" | "customers" | "orders";
  * The actual GraphQL call will be made by the caller with access
  * to the authenticated session.
  *
+ * DPDP data minimization: only requests email/displayName when CUSTOMER_PII_FIELDS=1.
+ *
+ * @param env - Environment for PII flag check (required, no default)
  * @returns The GraphQL mutation string to execute
  */
-export function getCompaniesExportMutation(): string {
-  return BULK_COMPANIES_QUERY;
+export function getCompaniesExportMutation(env: PiiEnv): string {
+  return getBulkCompaniesQuery(env);
 }
 
 /**
@@ -399,46 +415,73 @@ export async function getBulkOperationMetadata(
 
 /**
  * Increment failure count for a bulk operation.
+ *
+ * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from incrementing failure_count after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function incrementBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
-  bulkOperationId: string
-): Promise<number> {
+  bulkOperationId: string,
+  leaseToken: string
+): Promise<{ rowUpdated: boolean; failureCount: number }> {
   const [row] = await sql<{ failure_count: number }[]>`
     UPDATE s6_bulk_operations
     SET failure_count = failure_count + 1
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
     RETURNING failure_count
   `;
-  return row?.failure_count ?? 0;
+  return { rowUpdated: row !== undefined, failureCount: row?.failure_count ?? 0 };
 }
 
 /**
  * Reset failure count to 0 after successful progress.
  * Called on successful progress to give the operation a clean slate.
+ *
+ * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from resetting failure_count after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function resetBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  leaseToken: string
 ): Promise<void> {
   await sql`
     UPDATE s6_bulk_operations
     SET failure_count = 0
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
   `;
 }
 
 /**
  * Update chunk size for a bulk operation (for growing range window).
+ *
+ * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
+ *
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from updating chunk_size after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function updateBulkOperationChunkSize(
   sql: import("~/lib/db-light.server").Sql,
   bulkOperationId: string,
-  chunkSize: number
+  chunkSize: number,
+  leaseToken: string
 ): Promise<void> {
   await sql`
     UPDATE s6_bulk_operations
     SET chunk_size = ${chunkSize}
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
   `;
 }

@@ -29,9 +29,19 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 const originalFetch = global.fetch;
 const originalEnv = { ...process.env };
 
+/**
+ * Generate a letters-only random string (a-z) to avoid /\d{5,}/ assertion conflicts.
+ * Date.now().toString(36) can produce 5+ consecutive digits, failing digit-leak checks.
+ */
+function lettersOnlyId(len: number): string {
+  return Array.from({ length: len }, () =>
+    String.fromCharCode(97 + Math.floor(Math.random() * 26))
+  ).join("");
+}
+
 describeWithDb("scripts/backstop-backfill", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-backfill";
+  const TEST_SUFFIX = lettersOnlyId(8) + "-backfill";
   const TEST_SHOP_ID = `shop-backfill-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `backfill-test-${TEST_SUFFIX}.myshopify.com`;
 
@@ -1000,9 +1010,10 @@ describeWithDb("scripts/backstop-backfill", () => {
     });
 
     it("processBackfill dry-run works inside a READ ONLY transaction", async () => {
-      const HELD_ACCOUNT_ID = `acc-readonly-test-${Date.now().toString(36)}`;
-      const ORDER_GID = `gid://shopify/Order/readonly-test-${Date.now().toString(36)}`;
-      const INVOICE_ID = `inv-readonly-test-${Date.now().toString(36)}`;
+      const localSuffix = lettersOnlyId(8);
+      const HELD_ACCOUNT_ID = `acc-readonly-test-${localSuffix}`;
+      const ORDER_GID = `gid://shopify/Order/readonly-test-${localSuffix}`;
+      const INVOICE_ID = `inv-readonly-test-${localSuffix}`;
 
       await sql`
         INSERT INTO "BuyerAccount" (
@@ -1012,7 +1023,7 @@ describeWithDb("scripts/backstop-backfill", () => {
         )
         VALUES (
           ${HELD_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
-          ${"co-readonly-" + Date.now().toString(36)}, ${"loc-readonly-" + Date.now().toString(36)},
+          ${"co-readonly-" + localSuffix}, ${"loc-readonly-" + localSuffix},
           'Read Only Test Account', 100000.00, 'HELD', false, true, 'MANUAL_HOLD',
           NOW(), NOW()
         )

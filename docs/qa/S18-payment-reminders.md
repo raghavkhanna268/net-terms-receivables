@@ -192,3 +192,39 @@ The code constants (`DAILY_SEND_CAP=100`, `MONTHLY_SEND_CAP=3000` in `app/servic
 ### 11.3 Done criteria
 - [x] S18-50: `app/services/__tests__/reminders-uninstalled-db.test.ts` - uninstalled shop skips send
 - [x] S18-51: `app/services/__tests__/reminders-uninstalled-db.test.ts` - catch-up deletes delayed row
+
+## 12. B2B Contact Reminders
+
+**Status:** Implemented. B2B (COMPANY) buyer accounts now receive payment reminder emails.
+
+### 12.1 Behavior
+| # | Steps | Expected |
+|---|---|---|
+| S18-60 | B2B account with mainContactEmail set, invoice due today. | Reminder is sent to mainContactEmail with mainContactName as recipient name. |
+| S18-61 | B2B account with no mainContactEmail (NULL). | Reminder is **skipped** with skip reason code `no_b2b_contact_email`. No error. |
+| S18-62 | B2B account with opted-out main contact. | Reminder is **skipped**. Opt-out applies to the buyer account, affects both account types. |
+| S18-63 | Mixed shop: one B2B account, one tagged customer account. | Each account receives reminder to its respective email (mainContactEmail vs s8_tagged_customers.email). |
+| S18-64 | B2B account is gated (over plan limit). | Reminder is **skipped** when PLAN_GATING_ENFORCED=true. |
+| S18-65 | customers/redact for the main contact. | mainContactEmail, mainContactName, mainContactCustomerId are **nulled**. No future reminders. |
+| S18-66 | Main contact changes on company location. | New contact's email/name/id overwrite the old values. |
+| S18-67 | Main contact removed from company location. | All three fields are **nulled**. |
+| S18-68 | CUSTOMER_PII_FIELDS is off. | All three main contact fields remain NULL. B2B accounts skip reminders with `no_b2b_contact_email`. |
+
+### 12.2 Implementation
+- `BuyerAccount` gains three nullable columns: `mainContactEmail`, `mainContactName`, `mainContactCustomerId`
+- Migration: `20261115000000_b2b_main_contact`
+- `company-location.server.ts`: fetches `mainContact { customer { id email displayName } }` and stores fields when `CUSTOMER_PII_FIELDS=1`
+- `getInvoiceForReminder`: resolves recipient by `accountKind`: B2B uses `mainContactEmail`/`mainContactName`, tagged uses `s8_tagged_customers`
+- `redactCustomer`: nulls all three fields where `mainContactCustomerId` matches
+- No new Shopify scopes required (uses existing `read_companies`)
+
+### 12.3 Done criteria
+- [ ] S18-60: `app/services/__tests__/reminders-b2b-db.test.ts` - B2B due sends to mainContactEmail
+- [ ] S18-61: `app/services/__tests__/reminders-b2b-db.test.ts` - no email skips with code
+- [ ] S18-62: `app/services/__tests__/reminders-b2b-db.test.ts` - opted-out B2B contact skipped
+- [ ] S18-63: `app/services/__tests__/reminders-b2b-db.test.ts` - mixed shop sends to each
+- [ ] S18-64: `app/services/__tests__/reminders-b2b-db.test.ts` - gated B2B skipped
+- [ ] S18-65: `app/services/__tests__/reminders-b2b-db.test.ts` - redact nulls main contact fields
+- [ ] S18-66-67: `app/services/__tests__/company-location-db.test.ts` - contact change/removal
+- [ ] S18-68: `app/services/__tests__/company-location-db.test.ts` - PII flag off nulls fields
+- [ ] Leak test: no PII in safeLog/console output on failure paths

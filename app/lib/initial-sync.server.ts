@@ -31,6 +31,7 @@ import type { Sql } from "./db-light.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
+import { isShopCurrencySupported } from "./shop-currency.server";
 import {
   recoverStaleBulkOperationsForShop,
   STALE_THRESHOLD_MINUTES,
@@ -98,6 +99,7 @@ export async function getInitialSyncState(
     SELECT bulk_operation_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
     WHERE shop = ${shopDomain} AND origin = 'reconcile' AND reconcile_stage = 'companies'
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -113,6 +115,7 @@ export async function getInitialSyncState(
       AND origin = 'reconcile'
       AND reconcile_stage = 'customers'
       AND started_at >= ${companiesOp.started_at}
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -124,6 +127,7 @@ export async function getInitialSyncState(
       AND origin = 'reconcile'
       AND reconcile_stage = 'orders'
       AND started_at >= ${companiesOp.started_at}
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -136,11 +140,15 @@ export async function getInitialSyncState(
     bulkOpIds.push(ordersOp.bulk_operation_id);
   }
 
+  // S25: Exclude bulk_lease_contention from DLQ count - lease contention is
+  // transient contention, not a real failure. It happens when two processors
+  // race to process the same bulk op and one loses the lease.
   const dlqCount = await sql<{ count: string }[]>`
     SELECT COUNT(*)::text as count
     FROM s6_dead_letter
     WHERE message->>'bulkOperationId' IN ${sql(bulkOpIds)}
       AND message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH')
+      AND error != 'bulk_lease_contention'
   `;
 
   const hasDlqEntries = parseInt(dlqCount[0]?.count ?? "0", 10) > 0;
@@ -235,6 +243,14 @@ export async function enqueueInitialSync(
   sql: Sql,
   shopDomain: string
 ): Promise<{ enqueued: boolean; reason?: string }> {
+  // #292: Check shop currency before allowing sync
+  const [shopRow] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  if (!isShopCurrencySupported(shopRow?.currency)) {
+    return { enqueued: false, reason: "unsupported_currency" };
+  }
+
   if (await hasManualSyncQueued(sql, shopDomain)) {
     return { enqueued: false, reason: "already_queued" };
   }

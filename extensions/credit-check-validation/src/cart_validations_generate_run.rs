@@ -6,6 +6,47 @@ use shopify_function::Result;
 const ERROR_MSG_ON_HOLD: &str = "Your account is currently on hold. Please contact us to resolve any outstanding issues before placing an order.";
 const ERROR_MSG_OVER_LIMIT: &str = "This order would exceed your credit limit. Please contact us to discuss your account or make a payment on outstanding invoices.";
 
+/// #292: The only supported shop currency in v1.
+const SUPPORTED_SHOP_CURRENCY: &str = "INR";
+
+/// #292: Shop config from the $app:shop_config metafield.
+/// Written by after-auth and read by functions to determine shop currency.
+#[derive(Default, PartialEq, Clone, Debug)]
+pub struct ShopConfig {
+    pub schema_version: Option<i32>,
+    pub currency_code: Option<String>,
+}
+
+impl ShopConfig {
+    fn from_json_value(json_value: &JsonValue) -> Self {
+        if let JsonValue::Object(obj) = json_value {
+            ShopConfig {
+                schema_version: obj
+                    .get("schemaVersion")
+                    .and_then(|v| match v {
+                        JsonValue::Number(n) => Some(*n as i32),
+                        _ => None,
+                    }),
+                currency_code: obj
+                    .get("currencyCode")
+                    .and_then(|v| match v {
+                        JsonValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+            }
+        } else {
+            ShopConfig::default()
+        }
+    }
+
+    /// #292: Check if the shop is an INR shop.
+    /// Returns Some(true) if shop_config has INR currency, Some(false) if non-INR.
+    /// Returns None if shop_config is missing/invalid (caller decides fail-open vs fail-closed).
+    fn is_inr_shop(&self) -> Option<bool> {
+        self.currency_code.as_ref().map(|c| c == SUPPORTED_SHOP_CURRENCY)
+    }
+}
+
 #[derive(Default, PartialEq, Clone, Debug)]
 pub struct CreditStatus {
     pub schema_version: Option<i32>,
@@ -126,11 +167,27 @@ fn pass() -> schema::CartValidationsGenerateRunResult {
     schema::CartValidationsGenerateRunResult { operations: vec![] }
 }
 
+/// #292: Evaluate credit status with INR-only logic.
+///
+/// Decision table (per rulings):
+/// 1. HELD → block (before any other check)
+/// 2. schemaVersion missing or != 1 → pass (fail-open)
+/// 3. Non-INR shop (shop_config.currencyCode != "INR") → pass (non-held buyers never blocked)
+/// 4. INR shop with non-INR cart → pass (hide-terms handles it, no blocking)
+/// 5. Over-limit → block
+/// 6. Otherwise → pass
 fn evaluate_credit_status(
     credit_status: &CreditStatus,
     cart_currency: &str,
     cart_total_paise: u64,
+    shop_config: &ShopConfig,
 ) -> schema::CartValidationsGenerateRunResult {
+    // #292: HELD check comes FIRST, before schemaVersion
+    if credit_status.hold == Some(true) {
+        return create_validation_error(ERROR_MSG_ON_HOLD);
+    }
+
+    // schemaVersion gate (unchanged from original)
     if credit_status.schema_version.is_none() {
         return pass();
     }
@@ -139,8 +196,12 @@ fn evaluate_credit_status(
         return pass();
     }
 
-    if credit_status.hold == Some(true) {
-        return create_validation_error(ERROR_MSG_ON_HOLD);
+    // #292: Non-INR shop → pass (non-held buyers never blocked in non-INR shop)
+    // Missing shop_config: continue checking (fail-closed, not fail-open)
+    if let Some(is_inr) = shop_config.is_inr_shop() {
+        if !is_inr {
+            return pass();
+        }
     }
 
     let status_currency = match &credit_status.currency_code {
@@ -148,6 +209,8 @@ fn evaluate_credit_status(
         None => return pass(),
     };
 
+    // #292: INR shop with non-INR cart → pass (hide-terms handles it)
+    // Changed from the original fail-open to explicit pass with different intent
     if status_currency != cart_currency {
         return pass();
     }
@@ -197,6 +260,12 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
         None => return Ok(pass()),
     };
 
+    // #292: Read shop_config for INR-only logic
+    let shop_config = match input.shop().metafield() {
+        Some(m) => ShopConfig::from_json_value(m.json_value()),
+        None => ShopConfig::default(),
+    };
+
     let buyer_identity = match cart.buyer_identity() {
         Some(bi) => bi,
         None => return Ok(pass()),
@@ -211,6 +280,7 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
                 &credit_status,
                 &cart_currency,
                 cart_total_paise,
+                &shop_config,
             ));
         }
         return Ok(pass());
@@ -224,6 +294,7 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
                 &credit_status,
                 &cart_currency,
                 cart_total_paise,
+                &shop_config,
             ));
         }
     }
@@ -253,7 +324,15 @@ mod tests {
         serde_json::to_string(current).expect("Failed to serialize fixture")
     }
 
-    fn make_input_with_step(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: Option<&str>) -> String {
+    /// #292: Helper to create test input with shop_config
+    fn make_input_with_step_and_shop_config(
+        cart_amount: &str,
+        currency: &str,
+        metafield_json: Option<&str>,
+        has_b2b: bool,
+        buyer_journey_step: Option<&str>,
+        shop_config_json: Option<&str>,
+    ) -> String {
         let customer_metafield = match metafield_json {
             Some(mf) if !has_b2b => format!(r#"{{ "jsonValue": {} }}"#, mf),
             _ => "null".to_string(),
@@ -276,6 +355,11 @@ mod tests {
             None => "null".to_string(),
         };
 
+        let shop_metafield = match shop_config_json {
+            Some(cfg) => format!(r#"{{ "jsonValue": {} }}"#, cfg),
+            None => "null".to_string(),
+        };
+
         format!(
             r#"{{
                 "cart": {{
@@ -294,9 +378,24 @@ mod tests {
                 }},
                 "buyerJourney": {{
                     "step": {}
+                }},
+                "shop": {{
+                    "metafield": {}
                 }}
             }}"#,
-            cart_amount, currency, customer_metafield, purchasing_company, step_value
+            cart_amount, currency, customer_metafield, purchasing_company, step_value, shop_metafield
+        )
+    }
+
+    fn make_input_with_step(cart_amount: &str, currency: &str, metafield_json: Option<&str>, has_b2b: bool, buyer_journey_step: Option<&str>) -> String {
+        // #292: Default to INR shop config for backward compatibility
+        make_input_with_step_and_shop_config(
+            cart_amount,
+            currency,
+            metafield_json,
+            has_b2b,
+            buyer_journey_step,
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR"}"#),
         )
     }
 
@@ -355,11 +454,26 @@ mod tests {
     }
 
     #[test]
-    fn test_fixtures_invalid_wrong_schema_version_passes() {
+    fn test_fixtures_invalid_wrong_schema_version_held_blocks() {
+        // #292: HELD check runs FIRST, before schemaVersion - held buyer is always blocked
         let fixture = load_fixture("invalid.wrongSchemaVersion");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "invalid.wrongSchemaVersion should fail-open");
+        assert_eq!(result.operations.len(), 1, "invalid.wrongSchemaVersion (held=true) should BLOCK due to HELD-first");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixtures_invalid_wrong_schema_version_not_held_passes() {
+        // Non-held buyer with wrong schemaVersion should fail-open (pass)
+        let fixture = load_fixture("invalid.wrongSchemaVersionNotHeld");
+        let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "invalid.wrongSchemaVersionNotHeld should fail-open");
     }
 
     #[test]
@@ -464,6 +578,11 @@ mod tests {
             },
             "buyerJourney": {
                 "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
             }
         }
         "#;
@@ -546,6 +665,42 @@ mod tests {
         assert!(result.operations.is_empty(), "Currency mismatch should pass (fail-open)");
     }
 
+    /// #292: Non-INR shop with over-limit buyer should NOT block (net-terms not enforced)
+    /// This test verifies the validation function does NOT fail-open incorrectly:
+    /// - shop_config.currencyCode = "EUR" (non-INR shop)
+    /// - Buyer has a limit that would be exceeded (limit=10000000, exposure=5000000, cart=60000.00)
+    /// - Checkout should PASS because non-INR shop = no net-terms enforcement
+    #[test]
+    fn test_non_inr_shop_over_limit_passes() {
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",  // 6000000 paise - would exceed limit if enforced
+            "EUR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "EUR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"schemaVersion": 1, "currencyCode": "EUR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Non-INR shop should NOT block over-limit buyer (net-terms not enforced)");
+    }
+
+    /// #292: Missing shop_config must NOT fail-open - over-limit buyer should be blocked.
+    /// When shop_config is missing, we cannot determine if the shop is INR or not,
+    /// so we conservatively continue checking credit limits.
+    #[test]
+    fn test_missing_shop_config_over_limit_blocks() {
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",  // 6000000 paise - would exceed limit if enforced
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            None,  // Missing shop_config - should NOT fail-open
+        );
+        let result = run_test(&input).unwrap();
+        assert!(!result.operations.is_empty(), "Missing shop_config must NOT fail-open - over-limit buyer should be blocked");
+    }
+
     #[test]
     fn test_malformed_json_passes() {
         let input = make_input(
@@ -603,6 +758,11 @@ mod tests {
             },
             "buyerJourney": {
                 "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
             }
         }
         "#;
@@ -634,7 +794,22 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_schema_version_passes() {
+    fn test_unknown_schema_version_not_held_passes() {
+        // #292: Non-held buyer with unknown schemaVersion should fail-open (pass)
+        let input = make_input(
+            "100.00",
+            "INR",
+            Some(r#"{"schemaVersion": 999, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            "CHECKOUT_COMPLETION"
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Unknown schema version (not held) should fail-open");
+    }
+
+    #[test]
+    fn test_unknown_schema_version_held_blocks() {
+        // #292: HELD check runs FIRST - held buyer with unknown schemaVersion should BLOCK
         let input = make_input(
             "100.00",
             "INR",
@@ -643,7 +818,12 @@ mod tests {
             "CHECKOUT_COMPLETION"
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Unknown schema version should fail-open");
+        assert_eq!(result.operations.len(), 1, "Unknown schema version (held=true) should BLOCK due to HELD-first");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
     }
 
     #[test]
@@ -680,6 +860,11 @@ mod tests {
             },
             "buyerJourney": {
                 "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": {
+                    "jsonValue": {"schemaVersion": 1, "currencyCode": "INR"}
+                }
             }
         }
         "#;
@@ -727,6 +912,55 @@ mod tests {
         assert!(result.operations.is_empty(), "Empty object metafield must ALLOW (fail-open)");
     }
 
+    /// #292: Both credit_status AND shop_config missing must ALLOW (fail-open).
+    /// This is the scenario for brand-new CompanyLocations before any metafield sync.
+    #[test]
+    fn test_missing_credit_status_and_missing_shop_config_allows_checkout() {
+        let input = make_input_with_step_and_shop_config(
+            "100.00",
+            "INR",
+            None,  // No credit_status metafield
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            None,  // No shop_config metafield
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Missing credit_status AND missing shop_config must ALLOW (fail-open)");
+    }
+
+    /// #292: B2B location with both metafields missing must ALLOW.
+    #[test]
+    fn test_b2b_missing_credit_status_and_missing_shop_config_allows_checkout() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": {
+                    "totalAmount": {
+                        "amount": "100.00",
+                        "currencyCode": "INR"
+                    }
+                },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": {
+                            "metafield": null
+                        }
+                    }
+                }
+            },
+            "buyerJourney": {
+                "step": "CHECKOUT_COMPLETION"
+            },
+            "shop": {
+                "metafield": null
+            }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert!(result.operations.is_empty(), "B2B with missing credit_status AND missing shop_config must ALLOW");
+    }
+
     fn make_b2b_input(metafield_json: Option<&str>, _payment_methods: &[(&str, &str)]) -> String {
         let location_metafield = match metafield_json {
             Some(mf) => format!(r#"{{ "jsonValue": {} }}"#, mf),
@@ -753,6 +987,11 @@ mod tests {
                 }},
                 "buyerJourney": {{
                     "step": "CHECKOUT_COMPLETION"
+                }},
+                "shop": {{
+                    "metafield": {{
+                        "jsonValue": {{"schemaVersion": 1, "currencyCode": "INR"}}
+                    }}
                 }}
             }}"#,
             location_metafield
@@ -842,5 +1081,94 @@ mod tests {
         let input = make_input("1000.00", "USD", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
         assert!(result.operations.is_empty(), "Shared fixture usdCurrency should pass for USD cart under limit");
+    }
+
+    // =========================================================================
+    // #292 G2: Malformed shop_config tests (fail-closed for over-limit)
+    // =========================================================================
+
+    #[test]
+    fn test_malformed_shop_config_held_buyer_still_blocks() {
+        // #292 G2: A HELD buyer is still blocked even with malformed shop_config
+        let input = make_input_with_step_and_shop_config(
+            "100.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "HELD buyer must be blocked even with malformed shop_config");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_malformed_shop_config_over_limit_fails_closed() {
+        // #292 G2: Over-limit buyer fails closed even with malformed shop_config
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",  // 6000000 paise - would exceed limit
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Over-limit buyer must be blocked even with malformed shop_config (fail-closed)");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("credit limit"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_malformed_shop_config_no_credit_status_passes() {
+        // #292 G2: Ordinary cart with no credit_status and malformed shop_config passes
+        let input = make_input_with_step_and_shop_config(
+            "100.00",
+            "INR",
+            None,  // No credit_status
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Ordinary cart with no credit_status should pass even with malformed shop_config");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_wrong_schema_version_over_limit_blocks() {
+        // #292 G2: Over-limit buyer with wrong schemaVersion in shop_config fails closed
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"schemaVersion": 999, "currencyCode": "INR"}"#),  // Wrong schemaVersion
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Over-limit with wrong schemaVersion shop_config must block (fail-closed)");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_missing_currency_code_over_limit_blocks() {
+        // #292 G2: Over-limit buyer with missing currencyCode in shop_config fails closed
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"schemaVersion": 1}"#),  // Missing currencyCode
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Over-limit with missing currencyCode shop_config must block (fail-closed)");
     }
 }

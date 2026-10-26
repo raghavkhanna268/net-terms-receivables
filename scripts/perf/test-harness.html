@@ -265,7 +265,7 @@
     // Create simple representations of the pages
     function Dashboard({ data }) {
       return h('div', { className: 'page' },
-        h('s-page', { heading: 'Net Terms Receivables' },
+        h('s-page', { heading: 'Termwise: Net Terms & Credit' },
           h('s-section', { heading: 'Your Plan' },
             h('s-stack', null,
               h('s-paragraph', null,
@@ -570,7 +570,7 @@
             h('s-paragraph', null, 'When you import, only the normalised credit rows are sent to our server:'),
             h('s-unordered-list', null,
               h('s-list-item', null, 'Transaction date and amount'),
-              h('s-list-item', null, 'Payment rail (NEFT/RTGS/IMPS/UPI)'),
+              h('s-list-item', null, 'Payment rail (NEFT/RTGS/IMPS/UPI/CMS)'),
               h('s-list-item', null, 'UTR or reference number'),
               h('s-list-item', null, 'Remitter name and narration (for matching)')
             )

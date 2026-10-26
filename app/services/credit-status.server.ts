@@ -527,7 +527,8 @@ async function computeExposure(
   const [shopResult] = await sql<{ currency: string }[]>`
     SELECT currency FROM "Shop" WHERE id = ${shopId}
   `;
-  const currency = shopResult?.currency ?? "INR";
+  // #292: Unknown currency = 'XXX', never default to 'INR'
+  const currency = shopResult?.currency ?? "XXX";
 
   const [invoiceResult] = await sql<{ total_paise: string | null }[]>`
     SELECT COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS total_paise
@@ -1399,7 +1400,8 @@ export async function getCompanyTotals(
   const [shopResult] = await sql<{ currency: string }[]>`
     SELECT currency FROM "Shop" WHERE id = ${shopId}
   `;
-  const shopCurrency = shopResult?.currency ?? "INR";
+  // #292: Unknown currency = 'XXX', never default to 'INR'
+  const shopCurrency = shopResult?.currency ?? "XXX";
 
   const locationIds = locations.map(l => l.id);
 

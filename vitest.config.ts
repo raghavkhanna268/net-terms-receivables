@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (36 total):
+ * Files included (37 total):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -37,6 +37,8 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/drain/__tests__/processor-backstop-db.test.ts
  * - app/services/drain/__tests__/reconcile-manual-key-db.test.ts
  * - app/services/drain/__tests__/dlq-sanitize-db.test.ts
+ * - app/services/drain/__tests__/s25-exactly-once-db.test.ts
+ * - app/services/drain/__tests__/currency-guard-followups-db.test.ts
  *
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
@@ -69,11 +71,13 @@ import tsconfigPaths from "vite-tsconfig-paths";
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
   "app/__tests__/integration/s6-pgmq.test.ts",
+  "app/__tests__/integration/s8-draft-delete-id-only-db.test.ts",
   "app/__tests__/integration/s10-drain.test.ts",
   "app/__tests__/integration/s10b-bulk-queue.test.ts",
   "app/__tests__/integration/s20-idempotency.test.ts",
   "app/__tests__/integration/s22-compliance.test.ts",
   "app/__tests__/integration/shop-redact-complete-db.test.ts",
+  "app/__tests__/integration/shop-redact-reinstall-guard-db.test.ts",
   "app/__tests__/integration/s5-schema.test.ts",
   "app/__tests__/integration/light-session-storage.test.ts",
   "app/__tests__/integration/prisma-session-storage.test.ts",
@@ -84,12 +88,16 @@ const DB_TEST_PATTERNS = [
   "app/services/__tests__/reminders-catchup-db.test.ts",
   "app/services/__tests__/reminders-uninstalled-db.test.ts",
   "app/services/__tests__/reminder-optout-db.test.ts",
+  "app/services/__tests__/retention-db.test.ts",
 
   // Drain processor DB tests
   "app/services/drain/__tests__/processor-backstop-db.test.ts",
   "app/services/drain/__tests__/reconcile-manual-key-db.test.ts",
   "app/services/drain/__tests__/dlq-sanitize-db.test.ts",
   "app/services/drain/__tests__/bulk-op-recovery-db.test.ts",
+  "app/services/drain/__tests__/s25-exactly-once-db.test.ts",
+  "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
+  "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
@@ -111,9 +119,11 @@ const DB_TEST_PATTERNS = [
 
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",
+  "app/lib/__tests__/after-auth-syncshopinfo-db.test.ts",
   "app/lib/__tests__/aging-reconcile.test.ts",
   "app/lib/__tests__/initial-sync-db.test.ts",
   "app/lib/__tests__/offline-token.test.ts",
+  "app/lib/__tests__/reinstall-sync-reset-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
   // Script DB tests
@@ -122,6 +132,9 @@ const DB_TEST_PATTERNS = [
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
   "scripts/__tests__/refresh-offline-token.test.ts",
   "scripts/ci/__tests__/backfill-dry-run-preflight.test.ts",
+
+  // Reviewer demo DB tests
+  "tests/integration/review-csv-matcher-db.test.ts",
 ];
 
 export default defineConfig({

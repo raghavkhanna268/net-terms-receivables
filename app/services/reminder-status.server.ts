@@ -10,6 +10,7 @@ export interface ReminderStatusCounts {
   sent: number;
   delayed: number;
   skippedDailyLimit: number;
+  skippedOptedOut: number;
 }
 
 export interface DelayedReminder {
@@ -40,6 +41,7 @@ export async function getReminderStatusCounts(
     sent: 0,
     delayed: 0,
     skippedDailyLimit: 0,
+    skippedOptedOut: 0,
   };
 
   for (const row of rows) {
@@ -53,6 +55,9 @@ export async function getReminderStatusCounts(
         break;
       case "skipped_daily_limit":
         counts.skippedDailyLimit = count;
+        break;
+      case "skipped_opted_out":
+        counts.skippedOptedOut = count;
         break;
     }
   }

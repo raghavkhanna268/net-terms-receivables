@@ -336,6 +336,77 @@ describe("scorePaymentToInvoice", () => {
     expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
   });
 
+  it("does NOT award alias points for empty payer text", () => {
+    const payment = makePayment({ payerText: "" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["synthetic corp", "synth"] });
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "payer_name")).toBe(false);
+  });
+
+  it("does NOT award alias points for whitespace-only payer text", () => {
+    const payment = makePayment({ payerText: "   " });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["synthetic corp", "synth"] });
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "payer_name")).toBe(false);
+  });
+
+  it("does NOT award alias points for short unrelated payer (< 3 chars after normalize)", () => {
+    // "AB" normalizes to "ab" (2 chars) - too short for substring matching
+    const payment = makePayment({ payerText: "AB" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["synthetic corp"] });
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    // Should not match via substring (alias.includes("ab") would be false anyway,
+    // but normalizedPayer.includes(alias) is guarded by length >= 3)
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+  });
+
+  it("does NOT award alias points for empty alias with long payer", () => {
+    // Empty alias should not match any payer via substring
+    const payment = makePayment({ payerText: "ACME INDUSTRIES CORPORATION" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: [""] }); // Empty alias
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    // Empty alias should not match - guarded by alias.length >= 3
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+  });
+
+  it("does NOT award alias points for 2-char alias inside unrelated payer", () => {
+    // 2-char alias "ab" appears inside "FABRICA CORP" but should not match
+    const payment = makePayment({ payerText: "FABRICA CORP" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["ab"] }); // 2-char alias
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    // Short alias should not match - guarded by alias.length >= 3
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+  });
+
+  it("DOES award alias points for 3+ char alias matching by substring", () => {
+    // 3+ char alias "fab" appears inside "FABRICA CORP" - should match
+    const payment = makePayment({ payerText: "FABRICA CORP" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["fab"] }); // 3-char alias
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    // 3+ char alias should match via payer.includes(alias)
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+  });
+
   it("scores payer name match (fuzzy)", () => {
     const payment = makePayment({ payerText: "SYNTHETIC CORPORATION" });
     const invoice = makeInvoice();
@@ -704,7 +775,7 @@ describe("reasonsContainNoPII", () => {
 
   it("returns true for approved detail patterns", () => {
     const reasons: MatchReason[] = [
-      { type: "payer_alias", points: 10, detail: "Alias matched" },
+      { type: "payer_alias", points: 30, detail: "Alias matched" },
       { type: "email_match", points: 6, detail: "Email prefix matched" },
       { type: "amount_overpayment", points: 10, detail: "Overpayment (excess flagged)" },
     ];
@@ -872,5 +943,240 @@ describe("email prefix minimum length", () => {
     const result = scorePaymentToInvoice(payment, invoice, buyer, []);
     // Should NOT have email_match reason
     expect(result.reasons.some((r) => r.type === "email_match")).toBe(false);
+  });
+});
+
+/**
+ * Reachability table: combinations that reach >= 80 (High confidence)
+ *
+ * Current weights:
+ * - invoice_ref: +30
+ * - order_ref: +30
+ * - amount_exact: +20
+ * - amount_partial: +10
+ * - amount_overpayment: +10
+ * - payer_alias: +30 (confirmed alias only)
+ * - payer_name: +8 (fuzzy match)
+ * - email_match: +6
+ * - multi_invoice: +5
+ *
+ * CONFIDENCE_THRESHOLD: 80
+ */
+describe("reachability: combinations that reach High (>= 80)", () => {
+  const makePayment = (overrides: Partial<PaymentForScoring> = {}): PaymentForScoring => ({
+    id: "payment-1",
+    amountPaise: 1000000n,
+    narration: "NEFT-#1001-PAYMENT",
+    payerText: "SYNTHETIC CORP",
+    utr: null,
+    rail: "NEFT",
+    ...overrides,
+  });
+
+  const makeInvoice = (overrides: Partial<InvoiceForScoring> = {}): InvoiceForScoring => ({
+    id: "invoice-1",
+    name: "#1001",
+    orderId: null,
+    outstandingPaise: 1000000n,
+    buyerAccountId: "buyer-1",
+    dueAt: new Date("2026-10-15"),
+    ...overrides,
+  });
+
+  /**
+   * Reachability table for >= 80:
+   *
+   * | Combination                              | Score | Reaches 80? | Has payer_alias? |
+   * |------------------------------------------|-------|-------------|------------------|
+   * | invoice_ref + amount_exact + payer_alias | 80    | YES         | YES              |
+   * | order_ref + amount_exact + payer_alias   | 80    | YES         | YES              |
+   * | invoice_ref + amount_partial + payer_alias| 70   | NO          | YES              |
+   * | invoice_ref + amount_exact + payer_name  | 58    | NO          | NO (BEST NO-ALIAS)|
+   * | invoice_ref + amount_exact + email_match | 56    | NO          | NO               |
+   * | multi_invoice (avg 48 + bonus 5)         | 53    | NO          | NO               |
+   *
+   * Multi-invoice note: Each invoice is scored against the FULL payment amount.
+   * If payment = sum of invoices, each gets amount_overpayment(+10) not amount_exact(+20).
+   * So multi-invoice scores LOWER than single-invoice exact match.
+   *
+   * Conclusion: ALL combinations reaching >= 80 require payer_alias.
+   * Maximum without alias is 58 (single-invoice with amount_exact).
+   */
+  it("invoice_ref + amount_exact + payer_alias = 80 (High)", () => {
+    const payment = makePayment({ narration: "#1001 payment", payerText: "SYNTHETIC CORP" });
+    const invoice = makeInvoice({ name: "#1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Other Name",
+      aliases: ["synthetic"],
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(80);
+    expect(result.reasons.some((r) => r.type === "invoice_ref")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "amount_exact")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+  });
+
+  it("order_ref + amount_exact + payer_alias = 80 (High)", () => {
+    const payment = makePayment({ narration: "ORDER-1001 payment", payerText: "SYNTHETIC CORP" });
+    const invoice = makeInvoice({ name: "#9999", orderId: "gid://shopify/Order/1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Other Name",
+      aliases: ["synthetic"],
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(80);
+    expect(result.reasons.some((r) => r.type === "order_ref")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "amount_exact")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+  });
+
+  it("best without payer_alias: invoice_ref + amount_exact + payer_name = 58 (< 80)", () => {
+    const payment = makePayment({ narration: "#1001 payment", payerText: "SYNTHETIC CORP" });
+    const invoice = makeInvoice({ name: "#1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Synthetic Corp",
+      aliases: [], // No aliases
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(58);
+    expect(result.score).toBeLessThan(80);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "payer_name")).toBe(true);
+  });
+
+  it("invoice_ref + amount_exact + email_match = 56 (< 80, no alias)", () => {
+    const payment = makePayment({ narration: "#1001 payment", payerText: "JOHNDOE COMPANY" });
+    const invoice = makeInvoice({ name: "#1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Different Name",
+      aliases: [],
+      email: "johndoe@example.com",
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(56);
+    expect(result.score).toBeLessThan(80);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "email_match")).toBe(true);
+  });
+
+  it("invoice_ref + overpayment + payer_alias = 70 (< 80)", () => {
+    const payment = makePayment({
+      narration: "#1001 payment",
+      payerText: "SYNTHETIC CORP",
+      amountPaise: 1200000n, // overpayment
+    });
+    const invoice = makeInvoice({ name: "#1001", outstandingPaise: 1000000n });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Other Name",
+      aliases: ["synthetic"],
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(70);
+    expect(result.score).toBeLessThan(80);
+    expect(result.reasons.some((r) => r.type === "amount_overpayment")).toBe(true);
+  });
+
+  it("maximum score without payer_alias is 58 (single-invoice), still < 80", () => {
+    // This test documents that under current weights, no combination
+    // without payer_alias can reach 80:
+    //
+    // Single-invoice maximum (no alias):
+    // - invoice_ref(30) + amount_exact(20) + payer_name(8) = 58
+    // - invoice_ref(30) + amount_exact(20) + email_match(6) = 56
+    //
+    // Multi-invoice does NOT beat single-invoice because:
+    // - Each invoice is scored against the FULL payment amount
+    // - If payment = sum of invoices, each invoice gets amount_overpayment(+10), not amount_exact(+20)
+    // - Multi-invoice: invoice_ref(30) + amount_overpayment(10) + payer_name(8) = 48 avg + 5 = 53
+    //
+    // The only way to reach 80 is:
+    // - invoice_ref/order_ref (30) + amount_exact (20) + payer_alias (30) = 80
+    const singleInvoiceMaxNoAlias = 30 + 20 + 8; // invoice_ref + amount_exact + payer_name
+    const singleInvoiceWithEmail = 30 + 20 + 6; // invoice_ref + amount_exact + email_match
+    const multiInvoicePerInvoice = 30 + 10 + 8; // invoice_ref + amount_overpayment + payer_name
+    const multiInvoiceBonus = 5;
+    const multiInvoiceTotal = multiInvoicePerInvoice + multiInvoiceBonus;
+
+    expect(singleInvoiceMaxNoAlias).toBe(58);
+    expect(singleInvoiceWithEmail).toBe(56);
+    expect(multiInvoiceTotal).toBe(53);
+    expect(singleInvoiceMaxNoAlias).toBeLessThan(80);
+    // Single-invoice beats multi-invoice
+    expect(singleInvoiceMaxNoAlias).toBeGreaterThan(multiInvoiceTotal);
+  });
+
+  it("multi-invoice match without alias scores 53 (verified)", () => {
+    // Create a payment that matches two invoices (multi-invoice)
+    // Payment amount = sum of invoices, so each invoice gets amount_overpayment
+    const payment: PaymentForScoring = {
+      id: "payment-multi",
+      amountPaise: 1500000n, // ₹15,000 = ₹10,000 + ₹5,000
+      narration: "#1001 #1002 SYNTHETIC CORP",
+      payerText: "SYNTHETIC CORP",
+      utr: null,
+      rail: "NEFT",
+    };
+
+    const invoices: InvoiceForScoring[] = [
+      {
+        id: "inv-1",
+        name: "#1001",
+        orderId: null,
+        outstandingPaise: 1000000n, // ₹10,000
+        buyerAccountId: "buyer-1",
+        dueAt: new Date("2026-10-15"),
+      },
+      {
+        id: "inv-2",
+        name: "#1002",
+        orderId: null,
+        outstandingPaise: 500000n, // ₹5,000
+        buyerAccountId: "buyer-1",
+        dueAt: new Date("2026-10-20"),
+      },
+    ];
+
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Synthetic Corp",
+      aliases: [], // No aliases
+      email: null,
+    };
+
+    const result = scoreMultiInvoiceMatch(payment, invoices, buyer);
+
+    // Should be multi-invoice match
+    expect(result).not.toBeNull();
+    expect(result!.allocations.length).toBe(2);
+    expect(result!.reasons.some((r) => r.type === "multi_invoice")).toBe(true);
+
+    // Each invoice scores: invoice_ref(30) + amount_overpayment(10) + payer_name(8) = 48
+    // Average = 48, plus multi_invoice bonus = 53
+    expect(result!.totalScore).toBe(53);
+    expect(result!.totalScore).toBeLessThan(80);
+
+    // Verify no payer_alias
+    for (const alloc of result!.allocations) {
+      expect(alloc.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    }
   });
 });

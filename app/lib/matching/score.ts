@@ -48,6 +48,9 @@ const WEIGHT_AMOUNT_PARTIAL = 10;
 /** Score weight for payer name match */
 const WEIGHT_NAME_MATCH = 10;
 
+/** Score weight for confirmed payer alias match (higher than fuzzy name) */
+const WEIGHT_CONFIRMED_ALIAS = 30;
+
 /** Reason types for match explanation */
 export type MatchReasonType =
   | "invoice_ref"
@@ -328,13 +331,27 @@ function scorePayerNameMatch(
 ): PayerNameMatchResult {
   const normalizedPayer = normalizePayerName(payerText);
 
-  // Check aliases first (highest confidence for names)
+  // Guard: empty/whitespace payer text gets no name-based points
+  if (normalizedPayer.length === 0) {
+    return {
+      matched: false,
+      type: "payer_name",
+      points: 0,
+      detail: "",
+    };
+  }
+
+  // Check aliases first (highest confidence - confirmed aliases only)
+  // Require minimum 3 chars for BOTH sides in substring matches to avoid false positives
   for (const alias of buyer.aliases) {
-    if (alias === normalizedPayer || normalizedPayer.includes(alias) || alias.includes(normalizedPayer)) {
+    const isExactMatch = alias === normalizedPayer;
+    const payerContainsAlias = normalizedPayer.length >= 3 && alias.length >= 3 && normalizedPayer.includes(alias);
+    const aliasContainsPayer = normalizedPayer.length >= 3 && alias.length >= 3 && alias.includes(normalizedPayer);
+    if (isExactMatch || payerContainsAlias || aliasContainsPayer) {
       return {
         matched: true,
         type: "payer_alias",
-        points: WEIGHT_NAME_MATCH,
+        points: WEIGHT_CONFIRMED_ALIAS,
         detail: `Alias matched`, // No PII - just indicate match type
       };
     }
