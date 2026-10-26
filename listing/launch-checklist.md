@@ -139,7 +139,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] **⚠️ Payment reminders (S18): Resend prerequisites before any shop enables reminders**
   - [ ] Resend Data Processing Agreement (DPA) accepted by Raghav (first)
   - [ ] Then `RESEND_API_KEY` set as a Worker secret (names only in tickets and logs; never paste values)
-  - [ ] Then `RESEND_FROM` set as a Worker secret
+  - [ ] `RESEND_FROM` set as a plain (non-secret) var in `wrangler.jsonc`: `reminders@mail.termwiseapp.com`
   - **Owner:** Raghav (DPA, values via secure secret request), then DevOps sets the secrets
   - **Why:** without both secrets reminder sends are acked as "disabled" (safe no-op); once set, real emails go to buyers of any shop with reminders enabled, so the DPA must be in place first
 
