@@ -11,6 +11,7 @@ describe("sendViaResend", () => {
     // Make tests hermetic by clearing RESEND_* env vars
     vi.stubEnv("RESEND_API_KEY", "");
     vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
+    vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", undefined as unknown as string);
   });
 
   afterEach(() => {
@@ -467,6 +468,241 @@ describe("sendViaResend", () => {
       const [, options] = mockFetch.mock.calls[0];
       const body = JSON.parse(options.body);
       expect(body.text).toBe("Plain text version");
+    });
+  });
+
+  describe("RESEND_RECIPIENT_ALLOWLIST_ENFORCED flag", () => {
+    it("sends to any recipient when enforcement is disabled (env var is 'false')", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-123" }),
+      });
+
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["notallowed@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false",
+        }
+      );
+
+      expect(result.sent).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [, options] = mockFetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+      expect(body.to).toEqual(["notallowed@test-example.com"]);
+    });
+
+    it("sends even when allowlist is empty and enforcement is disabled", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-123" }),
+      });
+
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["buyer@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "",
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false",
+        }
+      );
+
+      expect(result.sent).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends even when allowlist is undefined and enforcement is disabled", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "email-123" }),
+      });
+
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["buyer@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: undefined,
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false",
+        }
+      );
+
+      expect(result.sent).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("enforces allowlist when env var is 'FALSE' (wrong case)", async () => {
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["notallowed@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "FALSE",
+        }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+        if (result.skipped) {
+          expect(result.reason).toBe("recipient_not_allowlisted");
+        }
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("enforces allowlist when env var is 'False' (wrong case)", async () => {
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["notallowed@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "False",
+        }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("enforces allowlist when env var is '0'", async () => {
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["notallowed@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "0",
+        }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("enforces allowlist when env var is ' false ' (with spaces)", async () => {
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["notallowed@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: " false ",
+        }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("enforces allowlist when env var is 'true'", async () => {
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["notallowed@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+          RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "true",
+        }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("enforces allowlist when env var is not set (default enforced)", async () => {
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["notallowed@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+        }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("blocks empty allowlist when enforcement is enabled (default)", async () => {
+      const result = await sendViaResend(
+        {
+          from: "sender@test-example.com",
+          to: ["buyer@test-example.com"],
+          subject: "Test",
+          html: "<p>Test</p>",
+        },
+        {
+          RESEND_API_KEY: "re_test_1234",
+          RESEND_TEST_RECIPIENTS: "",
+        }
+      );
+
+      expect(result.sent).toBe(false);
+      if (!result.sent) {
+        expect(result.skipped).toBe(true);
+        if (result.skipped) {
+          expect(result.reason).toBe("recipient_allowlist_empty");
+        }
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 });

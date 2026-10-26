@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   parseRecipientAllowlist,
   isRecipientAllowed,
   filterRecipients,
+  isAllowlistEnforced,
 } from "../recipient-allowlist.server";
 
 describe("parseRecipientAllowlist", () => {
@@ -176,5 +177,185 @@ describe("filterRecipients", () => {
     );
     expect(result.allowed).toHaveLength(0);
     expect(result.skippedCount).toBe(2);
+  });
+});
+
+describe("isAllowlistEnforced", () => {
+  beforeEach(() => {
+    vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", undefined as unknown as string);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns true when env var is undefined (not set)", () => {
+    expect(isAllowlistEnforced({})).toBe(true);
+  });
+
+  it("returns true when env var is empty string", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "" })).toBe(true);
+  });
+
+  it("returns false only when env var is exactly 'false'", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" })).toBe(false);
+  });
+
+  it("returns true when env var is 'FALSE' (wrong case)", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "FALSE" })).toBe(true);
+  });
+
+  it("returns true when env var is 'False' (wrong case)", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "False" })).toBe(true);
+  });
+
+  it("returns true when env var is '0'", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "0" })).toBe(true);
+  });
+
+  it("returns true when env var is 'true'", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "true" })).toBe(true);
+  });
+
+  it("returns true when env var is ' false ' (with spaces)", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: " false " })).toBe(true);
+  });
+
+  it("returns true when env var is 'no'", () => {
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "no" })).toBe(true);
+  });
+
+  it("falls back to process.env when env param has no value", () => {
+    vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", "false");
+    expect(isAllowlistEnforced({})).toBe(false);
+  });
+
+  it("prefers env param over process.env", () => {
+    vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", "false");
+    expect(isAllowlistEnforced({ RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "true" })).toBe(true);
+  });
+});
+
+describe("isRecipientAllowed with enforcement flag", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns true for any address when enforcement is disabled", () => {
+    const allowlist = parseRecipientAllowlist("allowed@test-example.com");
+    const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" };
+    
+    expect(isRecipientAllowed("allowed@test-example.com", allowlist, env)).toBe(true);
+    expect(isRecipientAllowed("notallowed@test-example.com", allowlist, env)).toBe(true);
+    expect(isRecipientAllowed("random@example.com", allowlist, env)).toBe(true);
+  });
+
+  it("returns true for any address when enforcement is disabled and allowlist is empty", () => {
+    const allowlist = parseRecipientAllowlist("");
+    const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" };
+    
+    expect(isRecipientAllowed("buyer@test-example.com", allowlist, env)).toBe(true);
+    expect(isRecipientAllowed("anyone@example.com", allowlist, env)).toBe(true);
+  });
+
+  it("enforces allowlist when enforcement is enabled (default)", () => {
+    const allowlist = parseRecipientAllowlist("allowed@test-example.com");
+    
+    expect(isRecipientAllowed("allowed@test-example.com", allowlist)).toBe(true);
+    expect(isRecipientAllowed("notallowed@test-example.com", allowlist)).toBe(false);
+  });
+
+  it("blocks all addresses when enforcement is enabled and allowlist is empty", () => {
+    const allowlist = parseRecipientAllowlist("");
+    
+    expect(isRecipientAllowed("buyer@test-example.com", allowlist)).toBe(false);
+  });
+
+  it("enforces allowlist when env var is 'FALSE' (wrong case)", () => {
+    const allowlist = parseRecipientAllowlist("allowed@test-example.com");
+    const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "FALSE" };
+    
+    expect(isRecipientAllowed("allowed@test-example.com", allowlist, env)).toBe(true);
+    expect(isRecipientAllowed("notallowed@test-example.com", allowlist, env)).toBe(false);
+  });
+
+  it("enforces allowlist when env var is ' false ' (with spaces)", () => {
+    const allowlist = parseRecipientAllowlist("allowed@test-example.com");
+    const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: " false " };
+    
+    expect(isRecipientAllowed("allowed@test-example.com", allowlist, env)).toBe(true);
+    expect(isRecipientAllowed("notallowed@test-example.com", allowlist, env)).toBe(false);
+  });
+});
+
+describe("filterRecipients with enforcement flag", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("allows all addresses when enforcement is disabled", () => {
+    const allowlist = parseRecipientAllowlist("allowed@test-example.com");
+    const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" };
+    
+    const result = filterRecipients(
+      ["allowed@test-example.com", "notallowed@test-example.com", "random@example.com"],
+      allowlist,
+      env
+    );
+    
+    expect(result.allowed).toHaveLength(3);
+    expect(result.skippedCount).toBe(0);
+  });
+
+  it("allows all addresses when enforcement is disabled and allowlist is empty", () => {
+    const allowlist = parseRecipientAllowlist("");
+    const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" };
+    
+    const result = filterRecipients(
+      ["buyer1@test-example.com", "buyer2@example.com"],
+      allowlist,
+      env
+    );
+    
+    expect(result.allowed).toHaveLength(2);
+    expect(result.skippedCount).toBe(0);
+  });
+
+  it("filters addresses when enforcement is enabled (default)", () => {
+    const allowlist = parseRecipientAllowlist("allowed@test-example.com");
+    
+    const result = filterRecipients(
+      ["allowed@test-example.com", "notallowed@test-example.com"],
+      allowlist
+    );
+    
+    expect(result.allowed).toEqual(["allowed@test-example.com"]);
+    expect(result.skippedCount).toBe(1);
+  });
+
+  it("skips all addresses when enforcement is enabled and allowlist is empty", () => {
+    const allowlist = parseRecipientAllowlist("");
+    
+    const result = filterRecipients(
+      ["buyer1@test-example.com", "buyer2@test-example.com"],
+      allowlist
+    );
+    
+    expect(result.allowed).toHaveLength(0);
+    expect(result.skippedCount).toBe(2);
+  });
+
+  it("filters addresses when env var is 'FALSE' (wrong case)", () => {
+    const allowlist = parseRecipientAllowlist("allowed@test-example.com");
+    const env = { RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "FALSE" };
+    
+    const result = filterRecipients(
+      ["allowed@test-example.com", "notallowed@test-example.com"],
+      allowlist,
+      env
+    );
+    
+    expect(result.allowed).toEqual(["allowed@test-example.com"]);
+    expect(result.skippedCount).toBe(1);
   });
 });
