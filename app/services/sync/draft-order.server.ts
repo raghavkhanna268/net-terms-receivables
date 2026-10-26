@@ -442,7 +442,7 @@ export async function bulkUpsertDraftOrders(
     const oldRows = await tx<OldRowWithId[]>`
       SELECT draft_order_id, buyer_account_id, total::text AS total, status, has_payment_terms
       FROM s8_draft_orders
-      WHERE shop_id = ${shopId} AND draft_order_id = ANY(${draftOrderIds})
+      WHERE shop_id = ${shopId} AND draft_order_id IN ${sql(draftOrderIds)}
       FOR UPDATE
     `;
     const oldRowMap = new Map<string, OldRowWithId>(oldRows.map((r) => [r.draft_order_id, r]));

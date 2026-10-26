@@ -364,7 +364,7 @@ export async function flagAccountsForRecompute(
     FROM pgmq.q_s6_sync
     WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
       AND message->>'shop' = ${shopDomain}
-      AND message->>'buyerAccountId' = ANY(${ids})
+      AND message->>'buyerAccountId' IN ${sql(ids)}
       AND read_ct = 0
   `;
   const skip = new Set(queued.map((r) => r.id));
