@@ -771,6 +771,13 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       `;
       expect(matchA).toHaveLength(1);
       expect(matchA[0].amount).toBe("5000.00");
+
+      // Verify ReminderLog preserved (pinned as not deleted on redaction)
+      const reminderLogA = await sql<{ id: string }[]>`
+        SELECT id FROM "ReminderLog" WHERE id = ${seededA.reminderLogId}
+      `;
+      expect(reminderLogA).toHaveLength(1);
+      expect(reminderLogA[0].id).toBe(seededA.reminderLogId);
     });
 
     it("customer B is byte-for-byte untouched (full-row snapshots)", async () => {
@@ -837,6 +844,8 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       const aliasCount1 = await sql`SELECT COUNT(*) as cnt FROM "PayerAlias" WHERE "buyerAccountId" = ${ACCOUNT_A_ID}`;
       const invoiceCount1 = await sql`SELECT COUNT(*) as cnt FROM "Invoice" WHERE "shopId" = ${SHOP_1_ID}`;
       const matchCount1 = await sql`SELECT COUNT(*) as cnt FROM "Match" WHERE "shopId" = ${SHOP_1_ID}`;
+      const paymentCount1 = await sql`SELECT COUNT(*) as cnt FROM "Payment" WHERE "shopId" = ${SHOP_1_ID}`;
+      const reminderLogCount1 = await sql`SELECT COUNT(*) as cnt FROM "ReminderLog" WHERE "shopId" = ${SHOP_1_ID}`;
 
       // Second redaction
       const result2 = await redactCustomer(sql, SHOP_1_ID, CUSTOMER_A_GID);
@@ -857,6 +866,8 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       const aliasCount2 = await sql`SELECT COUNT(*) as cnt FROM "PayerAlias" WHERE "buyerAccountId" = ${ACCOUNT_A_ID}`;
       const invoiceCount2 = await sql`SELECT COUNT(*) as cnt FROM "Invoice" WHERE "shopId" = ${SHOP_1_ID}`;
       const matchCount2 = await sql`SELECT COUNT(*) as cnt FROM "Match" WHERE "shopId" = ${SHOP_1_ID}`;
+      const paymentCount2 = await sql`SELECT COUNT(*) as cnt FROM "Payment" WHERE "shopId" = ${SHOP_1_ID}`;
+      const reminderLogCount2 = await sql`SELECT COUNT(*) as cnt FROM "ReminderLog" WHERE "shopId" = ${SHOP_1_ID}`;
 
       expect(taggedCount2[0].cnt).toBe(taggedCount1[0].cnt);
       expect(draftCount2[0].cnt).toBe(draftCount1[0].cnt);
@@ -864,6 +875,8 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       expect(aliasCount2[0].cnt).toBe(aliasCount1[0].cnt);
       expect(invoiceCount2[0].cnt).toBe(invoiceCount1[0].cnt);
       expect(matchCount2[0].cnt).toBe(matchCount1[0].cnt);
+      expect(paymentCount2[0].cnt).toBe(paymentCount1[0].cnt);
+      expect(reminderLogCount2[0].cnt).toBe(reminderLogCount1[0].cnt);
     });
 
     it("financial amounts on invoices, payments and matches are retained after redaction", async () => {
