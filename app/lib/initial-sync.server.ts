@@ -140,11 +140,15 @@ export async function getInitialSyncState(
     bulkOpIds.push(ordersOp.bulk_operation_id);
   }
 
+  // S25: Exclude bulk_lease_contention from DLQ count - lease contention is
+  // transient contention, not a real failure. It happens when two processors
+  // race to process the same bulk op and one loses the lease.
   const dlqCount = await sql<{ count: string }[]>`
     SELECT COUNT(*)::text as count
     FROM s6_dead_letter
     WHERE message->>'bulkOperationId' IN ${sql(bulkOpIds)}
       AND message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH')
+      AND error != 'bulk_lease_contention'
   `;
 
   const hasDlqEntries = parseInt(dlqCount[0]?.count ?? "0", 10) > 0;
