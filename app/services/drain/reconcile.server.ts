@@ -102,13 +102,23 @@ export async function enqueueReconcileForAllShops(sql: Sql): Promise<number> {
     });
   }
 
-  // Get all installed shops (exclude uninstalled)
+  // #292: Get all installed INR shops only (exclude uninstalled and non-INR)
   const shops = await sql<{ domain: string }[]>`
-    SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL
+    SELECT domain FROM "Shop" WHERE "uninstalledAt" IS NULL AND currency = 'INR'
   `;
 
+  // #292: Count excluded non-INR shops for logging
+  const [nonInrCount] = await sql<{ count: string }[]>`
+    SELECT COUNT(*)::text AS count FROM "Shop"
+    WHERE "uninstalledAt" IS NULL AND currency != 'INR'
+  `;
+  const excludedCount = parseInt(nonInrCount?.count ?? "0", 10);
+  if (excludedCount > 0) {
+    console.log(`[reconcile] excluded ${excludedCount} non-INR shops`);
+  }
+
   if (shops.length === 0) {
-    console.log("[reconcile] no installed shops, skipping");
+    console.log("[reconcile] no installed INR shops, skipping");
     return 0;
   }
 

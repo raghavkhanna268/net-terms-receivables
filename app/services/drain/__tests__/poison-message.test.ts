@@ -208,6 +208,11 @@ describe("Per-message isolation (poison message test)", () => {
           return Promise.resolve([{ delete: true }]);
         }
 
+        // #292: Shop currency lookup - return INR for test shop
+        if (query.includes("Shop") && query.includes("currency")) {
+          return Promise.resolve([{ domain: "test.myshopify.com", currency: "INR" }]);
+        }
+
         return Promise.resolve([]);
       });
       return fn;
@@ -217,8 +222,9 @@ describe("Per-message isolation (poison message test)", () => {
       createMockSqlFn(),
       {
         json: vi.fn((v: unknown) => v),
+        array: vi.fn((arr: unknown[]) => arr),
         begin: vi.fn().mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => {
-          const txSql = Object.assign(createMockSqlFn(), { json: vi.fn((v: unknown) => v) });
+          const txSql = Object.assign(createMockSqlFn(), { json: vi.fn((v: unknown) => v), array: vi.fn((arr: unknown[]) => arr) });
           return callback(txSql);
         }),
       }
