@@ -285,6 +285,108 @@ describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB
       expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
     });
   });
+
+  describe("concurrent reinstall atomicity", () => {
+    it("two concurrent clearUninstalledAtAndMetafieldErrors: exactly one gets RETURNING row", async () => {
+      const TEST_SHOP = `concurrent-atomicity-${TEST_SUFFIX}.myshopify.com`;
+      
+      // Create shop with uninstalledAt set
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
+      `;
+
+      const [before] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(before.uninstalledAt).not.toBeNull();
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+
+      // Run two concurrent clearUninstalledAtAndMetafieldErrors calls with Promise.all
+      // This simulates two isolates receiving the same reinstall simultaneously
+      const [result1, result2] = await Promise.all([
+        _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP),
+        _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP),
+      ]);
+
+      // Count how many calls got the RETURNING row (wasReinstalled=true)
+      const reinstallWinners = [result1, result2].filter(r => r.wasReinstalled);
+      const normalPathTakers = [result1, result2].filter(r => !r.wasReinstalled);
+
+      // EXACTLY ONE call should get the RETURNING row (reinstall path winner)
+      expect(reinstallWinners).toHaveLength(1);
+      // The other call should get empty (normal path - row already cleared)
+      expect(normalPathTakers).toHaveLength(1);
+
+      // Both should have same shop ID (the winner got it, loser has undefined)
+      expect(reinstallWinners[0].shopId).toBeDefined();
+      expect(normalPathTakers[0].shopId).toBeUndefined();
+
+      // Verify the shop is now cleared
+      const [after] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(after.uninstalledAt).toBeNull();
+    });
+
+    it("concurrent reinstall: registration should only run once per shop", async () => {
+      const TEST_SHOP = `concurrent-registration-${TEST_SUFFIX}.myshopify.com`;
+      
+      // Create shop with uninstalledAt set
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP}, 'UTC', 'INR', 'free', NOW(), NOW(), NOW())
+      `;
+
+      // Track registration calls
+      let registrationCallCount = 0;
+      const mockEnsureValidation = vi.fn().mockImplementation(async () => {
+        registrationCallCount++;
+        // Add small delay to increase chance of race
+        await new Promise(r => setTimeout(r, 5));
+        return { id: "val-123", created: false };
+      });
+
+      vi.doMock("../validation-registration.server", () => ({
+        ensureValidation: mockEnsureValidation,
+      }));
+      vi.doMock("../metafield-definitions.server", () => ({
+        ensureMetafieldDefinitions: vi.fn().mockResolvedValue([]),
+      }));
+      vi.doMock("../payment-customization-registration.server", () => ({
+        ensurePaymentCustomization: vi.fn().mockResolvedValue({ id: "pc-123", created: false }),
+      }));
+      vi.doMock("../request-context.server", () => ({
+        getRequestSql: vi.fn(() => sql),
+      }));
+
+      vi.resetModules();
+      const { runAfterAuth, _resetSetupCacheForTesting } = await import("../after-auth.server");
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () => Promise.resolve({ data: { shop: { ianaTimezone: "America/New_York" } } }),
+        }),
+      };
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p: Promise<unknown>) => waitUntilPromises.push(p));
+
+      // Run two concurrent runAfterAuth calls
+      await Promise.all([
+        runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
+        runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
+      ]);
+
+      await Promise.allSettled(waitUntilPromises);
+
+      // Due to in-flight deduplication, registration should only run once
+      // The second call either shares the in-flight promise or takes normal path
+      // Either way, ensureValidation should only be called once
+      expect(registrationCallCount).toBe(1);
+    });
+  });
 });
 
 describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
@@ -2072,32 +2174,77 @@ describeWithDb("markShopUninstalled plan cache invalidation (DB)", () => {
     expect(after.uninstalledAt).not.toBeNull();
   });
 
-  it("next resolvePlan after uninstall reads from Shopify (cache miss)", async () => {
-    // Create shop with cached plan
+  it("next resolvePlan after uninstall queries Shopify (cache invalidated)", async () => {
+    // Create shop with cached plan (plan_cached_at set = cache is valid)
     await sql`
       INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, plan_cached_at, "createdAt", "updatedAt")
       VALUES (${TEST_SHOP_DOMAIN}, 'UTC', 'INR', 'starter', 'gid://shopify/AppSubscription/123', NOW(), NOW(), NOW())
     `;
 
-    // Verify cached plan exists
+    // Verify cached plan exists with valid cache
     const [before] = await sql<{ plan_key: string; plan_cached_at: Date | null }[]>`
       SELECT plan_key, plan_cached_at FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
     `;
     expect(before.plan_key).toBe("starter");
     expect(before.plan_cached_at).not.toBeNull();
 
-    // Mark shop uninstalled
+    // Mark shop uninstalled (this should clear plan_cached_at)
     const { markShopUninstalled } = await import("~/services/compliance/compliance.server");
     await markShopUninstalled(sql, TEST_SHOP_DOMAIN);
 
     // Verify plan_cached_at is NULL (cache invalidated)
-    const [after] = await sql<{ plan_cached_at: Date | null }[]>`
+    const [afterUninstall] = await sql<{ plan_cached_at: Date | null }[]>`
       SELECT plan_cached_at FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
     `;
-    expect(after.plan_cached_at).toBeNull();
+    expect(afterUninstall.plan_cached_at).toBeNull();
 
-    // On next resolvePlan with forceRefresh=true, it would fetch from Shopify
-    // because the cache is invalidated (plan_cached_at is NULL means isStale = true)
-    // We verify the cache is in the correct state for a refresh
+    // Clear uninstalledAt to simulate reinstall (so resolvePlan can find the shop)
+    await sql`
+      UPDATE "Shop" SET "uninstalledAt" = NULL WHERE domain = ${TEST_SHOP_DOMAIN}
+    `;
+
+    // Mock adminGraphQL to track if Shopify was called
+    const { adminGraphQL: realAdminGraphQL } = await import("~/services/drain/admin-client.server");
+    let shopifyQueryCalled = false;
+    const mockAdminGraphQL = vi.fn().mockImplementation(async (shop: string, query: string) => {
+      if (query.includes("currentAppInstallation")) {
+        shopifyQueryCalled = true;
+        return {
+          success: true,
+          data: {
+            currentAppInstallation: {
+              activeSubscriptions: [{
+                id: "gid://shopify/AppSubscription/new-456",
+                name: "Growth",
+                status: "ACTIVE",
+                test: false,
+                lineItems: [],
+              }],
+            },
+          },
+          retryable: false,
+        };
+      }
+      return { success: false, error: "Unknown query", retryable: false };
+    });
+
+    // Replace the adminGraphQL function
+    vi.doMock("~/services/drain/admin-client.server", () => ({
+      adminGraphQL: mockAdminGraphQL,
+    }));
+
+    // Re-import resolvePlan to pick up the mock
+    vi.resetModules();
+    const { resolvePlan } = await import("~/services/plan.server");
+
+    // Call resolvePlan - since plan_cached_at is NULL, it should query Shopify
+    const result = await resolvePlan(sql, TEST_SHOP_DOMAIN);
+
+    // Verify that Shopify was queried (cache miss)
+    expect(shopifyQueryCalled).toBe(true);
+
+    // Verify the new plan was resolved
+    expect(result.plan.key).toBe("growth");
+    expect(result.fromCache).toBe(false);
   });
 });
