@@ -3,9 +3,9 @@
  *
  * This test exercises the REAL import action path for re-importing a statement
  * after a match has been confirmed:
- * 1. Import synthetic statement via real import action (SYNT00999888777 fixture)
+ * 1. Import synthetic credits via real import action (with valid NEFT UTRs)
  * 2. Confirm the suggested match, which stores the payer alias
- * 3. Re-import the same statement via real import action
+ * 3. Re-import the same credits via real import action
  *
  * Assertions:
  * - Duplicate detection: second import returns 0 inserted, 3 duplicates
@@ -15,9 +15,9 @@
  * - High band (≥80) still only suggests, never auto-confirms
  * - Scores and bands are pinned exactly as main produces them today
  *
- * NOTE: Row 2 is confirmed (not row 1) because row 2's payerText ("TEST BUYER CO")
- * produces an alias that helps both row 1 and row 3. Row 1's payerText is different
- * ("SYNT0001 TEST BUYER CO #1001") due to NEFT parsing extracting different segments.
+ * IMPORTANT: This test uses valid NEFT UTR format (HDFCN + 11 digits) so that:
+ * - The ON CONFLICT ("shopId", utr) clause in app.imports.tsx:506 is exercised
+ * - The test FAILS if that ON CONFLICT is removed (all 3 would insert twice)
  *
  * This test uses the "Sequential DB" project via the *-db.test.ts naming pattern.
  * All data is FICTIONAL - no real bank data. Uses test- domains for isolation.
@@ -25,22 +25,24 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
-import { readFileSync } from "fs";
-import { join } from "path";
 import { sqlOptions } from "../../app/lib/db-light.server.js";
-import { parseBankStatement } from "../../app/lib/banks/index.js";
 import { confirmMatch } from "../../app/services/matcher.server.js";
 import { CONFIDENCE_THRESHOLD } from "../../app/lib/matching/score.js";
 import { normalizeNarrationForLookup } from "../../app/lib/matching/normalize.js";
 import { assertNoQueueLeftovers } from "../helpers/queue-leftovers.js";
 import { action as importAction } from "../../app/routes/app.imports.js";
 import { requestContext } from "../../app/lib/request-context.server.js";
-import { mapCreditsForImport } from "../../app/routes/app.imports.js";
+
+vi.mock("../../app/services/credit-status-recompute.server", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    enqueueRecomputeForInvoice: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
-
-const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
 
 type ConfidenceBand = "high" | "medium" | "low";
 
@@ -90,9 +92,22 @@ async function callImportAction(
   });
 }
 
+function getUtcDateString(daysAgo: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  return d.toISOString().slice(0, 10);
+}
+
+function makeValidNeftUtr(suffix: string): string {
+  const paddedSuffix = suffix.replace(/[^0-9]/g, "").padStart(11, "0").slice(0, 11);
+  return `HDFCN${paddedSuffix}`;
+}
+
 interface ImportResult {
   success: boolean;
   importId?: string;
+  error?: string;
+  details?: string[];
   counts?: {
     inserted: number;
     duplicates: number;
@@ -107,7 +122,7 @@ interface ImportResult {
   } | null;
 }
 
-describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
+describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
   let sql: ReturnType<typeof postgres>;
   let testShopId: string;
   let testBuyerId: string;
@@ -121,31 +136,46 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
 
   const DEMO_BUYER = {
     name: "Test Buyer Co",
-    email: "test.buyer@test-confirm-reimport.example",
   };
 
-  const DEMO_AMOUNTS = {
-    order1: 10000,
-    order2: 5000,
-  };
+  const UTR1 = makeValidNeftUtr("10000000001");
+  const UTR2 = makeValidNeftUtr("10000000002");
+  const UTR3 = makeValidNeftUtr("10000000003");
 
-  async function parseFixtureCredits() {
-    const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic.csv"));
-    const file = new File([content], "hdfc-review-synthetic.csv", { type: "text/csv" });
-    const result = await parseBankStatement(file);
-    const credits = result.transactions.filter((t) => t.direction === "CR");
+  function makeSyntheticCredits() {
+    return [
+      {
+        date: getUtcDateString(5),
+        amountPaise: 1000000,
+        rail: "NEFT",
+        utr: UTR1,
+        payerName: "SYNT0001 TEST BUYER CO #1001",
+        narration: `NEFT CR-SYNT0001-TEST BUYER CO-#1001`,
+      },
+      {
+        date: getUtcDateString(4),
+        amountPaise: 500000,
+        rail: "NEFT",
+        utr: UTR2,
+        payerName: "TEST BUYER CO",
+        narration: `NEFT CR-TEST BUYER CO-#1002`,
+      },
+      {
+        date: getUtcDateString(3),
+        amountPaise: 250000,
+        rail: "NEFT",
+        utr: UTR3,
+        payerName: "TEST BUYER CO",
+        narration: `NEFT CR-TEST BUYER CO-#1002 PART PAYMENT`,
+      },
+    ];
+  }
+
+  function makeImportPayload() {
     return {
-      bank: result.detection.bank,
-      credits: credits.map((c) => ({
-        date: c.date,
-        amountPaise: c.amountPaise,
-        rail: c.parsed.rail,
-        utr: c.parsed.utr,
-        payerName: c.parsed.payerName,
-        narration: c.narration,
-        refNo: c.refNo,
-        balancePaise: c.balancePaise,
-      })),
+      bank: "HDFC",
+      fileName: "confirm-reimport-synthetic.csv",
+      credits: makeSyntheticCredits(),
     };
   }
 
@@ -180,7 +210,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       )
       VALUES (
         ${invoice1Id}, ${testShopId}, ${testBuyerId},
-        'gid://shopify/Order/1001', '#1001', ${DEMO_AMOUNTS.order1}, 'open', ${DEMO_AMOUNTS.order1},
+        'gid://shopify/Order/1001', '#1001', 10000, 'open', 10000,
         NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
     `;
@@ -192,7 +222,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       )
       VALUES (
         ${invoice2Id}, ${testShopId}, ${testBuyerId},
-        'gid://shopify/Order/1002', '#1002', ${DEMO_AMOUNTS.order2}, 'open', ${DEMO_AMOUNTS.order2},
+        'gid://shopify/Order/1002', '#1002', 5000, 'open', 5000,
         NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
     `;
@@ -308,11 +338,11 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     /**
      * PINNED SCORES - Fresh store, no aliases:
      *
-     * | Row | UTR      | Amount  | Top Candidate | Score | Band   |
-     * |-----|----------|---------|---------------|-------|--------|
-     * | 1   | SYNT0001 | ₹10,000 | #1001         | 58    | medium |
-     * | 2   | SYNT0002 | ₹5,000  | #1002         | 58    | medium |
-     * | 3   | SYNT0003 | ₹2,500  | #1002         | 48    | low    |
+     * | Row | UTR  | Amount  | Top Candidate | Score | Band   |
+     * |-----|------|---------|---------------|-------|--------|
+     * | 1   | UTR1 | ₹10,000 | #1001         | 58    | medium |
+     * | 2   | UTR2 | ₹5,000  | #1002         | 58    | medium |
+     * | 3   | UTR3 | ₹2,500  | #1002         | 48    | low    |
      *
      * Score breakdown (no alias):
      * - invoice_ref: +30 (#1001/#1002 in narration)
@@ -320,12 +350,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
      * - payer_name: +8 (fuzzy match "TEST BUYER CO")
      */
     it("imports 3 credits via real action and pins scores 58/58/48", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
+      const importPayload = makeImportPayload();
 
       const response = await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
       expect(response.status).toBe(200);
@@ -338,9 +363,9 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       const payments = await getPaymentsByUtr();
       expect(payments.length).toBe(3);
 
-      const p1 = payments.find((p) => p.utr?.includes("SYNT0001"));
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
-      const p3 = payments.find((p) => p.utr?.includes("SYNT0003"));
+      const p1 = payments.find((p) => p.utr === UTR1);
+      const p2 = payments.find((p) => p.utr === UTR2);
+      const p3 = payments.find((p) => p.utr === UTR3);
 
       expect(p1).toBeDefined();
       expect(p2).toBeDefined();
@@ -368,13 +393,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("all matches are 'suggested' state, nothing auto-confirmed", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
-
+      const importPayload = makeImportPayload();
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       const payments = await getPaymentsByUtr();
@@ -387,13 +406,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("no payer aliases exist before confirm", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
-
+      const importPayload = makeImportPayload();
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       const aliases = await getPayerAliases();
@@ -404,23 +417,17 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
   describe("Step 2: Confirm row 2 match (stores alias)", () => {
     /**
      * Confirm row 2 (not row 1) because:
-     * - Row 2 payerText: "TEST BUYER CO" → alias "test buyer"
-     * - Row 1 payerText: "SYNT0001 TEST BUYER CO #1001" → different alias
+     * - Row 2 payerName: "TEST BUYER CO" → alias "test buyer"
+     * - Row 1 payerName: "SYNT0001 TEST BUYER CO #1001" → different alias
      *
      * Confirming row 2 creates alias "test buyer" which helps both row 1 and row 3.
      */
     it("confirm creates payer alias from payment's payerText", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
-
+      const importPayload = makeImportPayload();
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       expect(p2).toBeDefined();
 
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
@@ -437,17 +444,11 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("confirmed match state changes to 'confirmed'", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
-
+      const importPayload = makeImportPayload();
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
@@ -458,17 +459,11 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("payment status updates to 'matched' after full allocation", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
-
+      const importPayload = makeImportPayload();
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
@@ -483,6 +478,8 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     /**
      * CRITICAL ASSERTIONS for re-import via real import action:
      * 1. All 3 payments are duplicates (0 inserted, 3 duplicates)
+     *    - This exercises ON CONFLICT ("shopId", utr) in app.imports.tsx
+     *    - If that clause is removed, this test FAILS (would insert 3 more)
      * 2. Payment count unchanged (still 3)
      * 3. No new Match for confirmed payment (row 2)
      * 4. Matcher re-runs on unconfirmed payments, giving alias-boosted scores
@@ -490,35 +487,30 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
      *
      * PINNED SCORES - After confirm row 2 + re-import:
      *
-     * | Row | UTR      | Amount  | Top Candidate | Score | Band   | State     |
-     * |-----|----------|---------|---------------|-------|--------|-----------|
-     * | 1   | SYNT0001 | ₹10,000 | #1001         | 80    | high   | suggested |
-     * | 2   | SYNT0002 | ₹5,000  | #1002         | 58    | medium | confirmed |
-     * | 3   | SYNT0003 | ₹2,500  | #1002         | 70    | medium | suggested |
+     * | Row | UTR  | Amount  | Top Candidate | Score | Band   | State     |
+     * |-----|------|---------|---------------|-------|--------|-----------|
+     * | 1   | UTR1 | ₹10,000 | #1001         | 80    | high   | suggested |
+     * | 2   | UTR2 | ₹5,000  | #1002         | 58    | medium | confirmed |
+     * | 3   | UTR3 | ₹2,500  | #1002         | 70    | medium | suggested |
      *
      * Score breakdown (with alias):
      * - invoice_ref: +30 (#1001/#1002 in narration)
      * - amount_exact: +20 (row 1) / amount_partial: +10 (row 3)
      * - payer_alias: +30 (confirmed alias match)
      */
-    it("re-import detects all 3 as duplicates", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
+    it("re-import detects all 3 as duplicates (exercises ON CONFLICT)", async () => {
+      const importPayload = makeImportPayload();
 
       // First import
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       // Confirm row 2
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
-      // Re-import
+      // Re-import (same UTRs should hit ON CONFLICT)
       const response = await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
       expect(response.status).toBe(200);
 
@@ -529,12 +521,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("payment count unchanged after re-import", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
+      const importPayload = makeImportPayload();
 
       // First import
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
@@ -546,7 +533,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
 
       // Confirm row 2
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
@@ -560,19 +547,14 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("no new Match created for confirmed payment after re-import", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
+      const importPayload = makeImportPayload();
 
       // First import
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       // Confirm row 2
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2Before = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2Before[0].id, "test-user");
 
@@ -599,19 +581,14 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("unconfirmed payments get alias-boosted scores: 80 for row 1, 70 for row 3", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
+      const importPayload = makeImportPayload();
 
       // First import
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       // Confirm row 2
       let payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
@@ -619,8 +596,8 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       payments = await getPaymentsByUtr();
-      const p1 = payments.find((p) => p.utr?.includes("SYNT0001"));
-      const p3 = payments.find((p) => p.utr?.includes("SYNT0003"));
+      const p1 = payments.find((p) => p.utr === UTR1);
+      const p3 = payments.find((p) => p.utr === UTR3);
 
       const m1 = await getMatchesForPayment(p1!.id, "suggested");
       const m3 = await getMatchesForPayment(p3!.id, "suggested");
@@ -638,19 +615,14 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("High band (80) still only suggests, never auto-confirms", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
+      const importPayload = makeImportPayload();
 
       // First import
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       // Confirm row 2
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
@@ -662,7 +634,7 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       expect(data.matcher?.highConfidenceMatches).toBe(1);
 
       // But they are still suggested, not confirmed
-      const p1 = payments.find((p) => p.utr?.includes("SYNT0001"));
+      const p1 = payments.find((p) => p.utr === UTR1);
       const m1 = await getMatchesForPayment(p1!.id, "suggested");
       expect(m1.length).toBeGreaterThan(0);
       expect(m1[0].score).toBe(80);
@@ -682,26 +654,21 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
      * Complete end-to-end test pinning the full flow:
      *
      * BEFORE CONFIRM (fresh store):
-     * | UTR      | Score | Band   | State     |
-     * |----------|-------|--------|-----------|
-     * | SYNT0001 | 58    | medium | suggested |
-     * | SYNT0002 | 58    | medium | suggested |
-     * | SYNT0003 | 48    | low    | suggested |
+     * | UTR  | Score | Band   | State     |
+     * |------|-------|--------|-----------|
+     * | UTR1 | 58    | medium | suggested |
+     * | UTR2 | 58    | medium | suggested |
+     * | UTR3 | 48    | low    | suggested |
      *
      * AFTER CONFIRM ROW 2 + RE-IMPORT:
-     * | UTR      | Score | Band   | State     |
-     * |----------|-------|--------|-----------|
-     * | SYNT0001 | 80    | high   | suggested | (alias boost)
-     * | SYNT0002 | 58    | medium | confirmed | (unchanged)
-     * | SYNT0003 | 70    | medium | suggested | (alias boost)
+     * | UTR  | Score | Band   | State     |
+     * |------|-------|--------|-----------|
+     * | UTR1 | 80    | high   | suggested | (alias boost)
+     * | UTR2 | 58    | medium | confirmed | (unchanged)
+     * | UTR3 | 70    | medium | suggested | (alias boost)
      */
     it("E2E: pins scores and bands through confirm-then-re-import", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
+      const importPayload = makeImportPayload();
 
       // First import
       const firstResponse = await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
@@ -709,9 +676,9 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       expect(firstData.counts?.inserted).toBe(3);
 
       const payments = await getPaymentsByUtr();
-      const p1 = payments.find((p) => p.utr?.includes("SYNT0001"));
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
-      const p3 = payments.find((p) => p.utr?.includes("SYNT0003"));
+      const p1 = payments.find((p) => p.utr === UTR1);
+      const p2 = payments.find((p) => p.utr === UTR2);
+      const p3 = payments.find((p) => p.utr === UTR3);
 
       // Pin scores before confirm
       const before1 = await getMatchesForPayment(p1!.id, "suggested");
@@ -752,17 +719,11 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
 
     it("audit event is created for confirmed match only", async () => {
-      const fixture = await parseFixtureCredits();
-      const importPayload = {
-        bank: fixture.bank,
-        fileName: "hdfc-review-synthetic.csv",
-        credits: mapCreditsForImport(fixture.credits),
-      };
-
+      const importPayload = makeImportPayload();
       await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
 
       const payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr?.includes("SYNT0002"));
+      const p2 = payments.find((p) => p.utr === UTR2);
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
