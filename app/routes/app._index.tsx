@@ -1,5 +1,6 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, data } from "react-router";
+import { useLoaderData, data, Await } from "react-router";
+import { Suspense } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
@@ -209,15 +210,201 @@ async function checkOnboardingRedirect(
   }
 }
 
+/**
+ * Deferred dashboard data type for streaming.
+ * This is the shape of the promise returned by loadDashboardData.
+ */
+export interface DeferredDashboardData {
+  plan: {
+    key: PlanKey;
+    name: string;
+    isTest: boolean;
+  } | null;
+  usage: {
+    companies: { current: number; limit: number };
+    importsThisMonth: { current: number; limit: number };
+  } | null;
+  agingTotals: SerializableAgingTotals | null;
+  buyerLedger: { rows: BuyerLedgerRow[]; totalCount: number } | null;
+  selectedBuyerInvoices: {
+    rows: BuyerInvoiceRow[];
+    totalCount: number;
+    buyerName: string;
+  } | null;
+  overLimitCount: number;
+  error: string | null;
+  newAccountsPausedBanner: {
+    show: boolean;
+    heading: string;
+    bodyText: string;
+    upgradeUrl: string | null;
+  };
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalCount: number;
+  };
+}
+
+/**
+ * Load dashboard data (deferred).
+ * This function is NOT awaited in the loader - it returns a promise that
+ * React Router streams to the client for Suspense rendering.
+ */
+async function loadDashboardData(
+  sql: Sql,
+  shop: { id: string; currency: string; timezone: string },
+  shopDomain: string,
+  sessionToken: { sub?: string } | undefined,
+  session: { shop: string; accessToken?: string; onlineAccessInfo?: { associated_user?: { id?: string | number | bigint } } },
+  params: {
+    page: number;
+    sortBy: SortBy;
+    sortOrder: SortOrder;
+    selectedBuyerId: string | null;
+    onlyOverLimit: boolean;
+  },
+  timing: ServerTiming,
+): Promise<DeferredDashboardData> {
+  const { page, sortBy, sortOrder, selectedBuyerId, onlyOverLimit } = params;
+  const gatingEnforced = isGatingEnforced();
+
+  let planData: ResolvedPlan | null = null;
+  let usage: {
+    companies: { current: number; limit: number };
+    importsThisMonth: { current: number; limit: number };
+  } | null = null;
+  let agingTotals: SerializableAgingTotals | null = null;
+  let buyerLedger: { rows: BuyerLedgerRow[]; totalCount: number } | null = null;
+  let selectedBuyerInvoices: {
+    rows: BuyerInvoiceRow[];
+    totalCount: number;
+    buyerName: string;
+  } | null = null;
+  let error: string | null = null;
+  let overLimitCount = 0;
+
+  const asOf = new Date();
+
+  try {
+    const ledgerOptions = {
+      limit: PAGE_SIZE,
+      offset: (page - 1) * PAGE_SIZE,
+      sortBy,
+      sortOrder,
+    };
+
+    const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
+      timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
+      getUsageStats(sql, shop.id).catch((err) => {
+        safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+        return null;
+      }),
+      getShopAgingTotals(sql, shop.id, asOf),
+      timing.time("ledger_rows", () =>
+        onlyOverLimit
+          ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+          : getBuyerLedger(sql, shop.id, asOf, ledgerOptions)
+      ),
+      onlyOverLimit
+        ? Promise.resolve(null)
+        : timing.time("ledger_count", () => getOverLimitCount(sql, shop.id)),
+    ]);
+
+    planData = planResult;
+    usage = usageResult;
+    agingTotals = agingResult;
+    buyerLedger = ledgerResult;
+
+    overLimitCount = onlyOverLimit ? buyerLedger.totalCount : (countResult ?? 0);
+
+    if (selectedBuyerId) {
+      const buyerInvoices = await getBuyerInvoices(
+        sql,
+        shop.id,
+        selectedBuyerId,
+        asOf,
+        { limit: 50, offset: 0 }
+      );
+
+      const buyerRow = buyerLedger?.rows.find(
+        (r) => r.buyer_account_id === selectedBuyerId
+      );
+      if (!buyerRow) {
+        const [buyerAccount] = await sql<{ name: string }[]>`
+          SELECT name FROM "BuyerAccount" WHERE id = ${selectedBuyerId} AND "shopId" = ${shop.id}
+        `;
+        selectedBuyerInvoices = {
+          ...buyerInvoices,
+          buyerName: buyerAccount?.name ?? "Unknown Buyer",
+        };
+      } else {
+        selectedBuyerInvoices = {
+          ...buyerInvoices,
+          buyerName: buyerRow.buyer_name,
+        };
+      }
+    }
+  } catch (err) {
+    safeLog("error", "app._index.load_aging_data_failed", { err: toErrorCode(err) });
+    error = "Failed to load aging data. Please try again.";
+  }
+
+  if (!error) {
+    const accessParams: Parameters<typeof recordAccess>[1] = {
+      shopId: shop.id,
+      actor: getActorFromSessionToken(sessionToken, session),
+      action: "dashboard",
+      recordType: "BuyerAccount",
+      count: buyerLedger?.totalCount ?? 0,
+    };
+    if (selectedBuyerId) {
+      accessParams.recordId = selectedBuyerId;
+    }
+    recordAccess(sql, accessParams);
+  }
+
+  return {
+    plan: planData
+      ? {
+          key: resolvePlanKey(planData.plan.key),
+          name: PLAN_DISPLAY_NAMES[resolvePlanKey(planData.plan.key) as PlanKey],
+          isTest: planData.isTest,
+        }
+      : null,
+    usage,
+    agingTotals,
+    buyerLedger,
+    selectedBuyerInvoices,
+    overLimitCount,
+    error,
+    newAccountsPausedBanner: (gatingEnforced && usage)
+      ? buildNewAccountsPausedBannerState(
+          usage.companies.current,
+          usage.companies.limit,
+          gatingEnforced,
+          (() => {
+            const handle = getAppHandle();
+            if (handle === null) return null;
+            return buildPlanSelectionUrl(shopDomain, handle);
+          })()
+        )
+      : { show: false, heading: "", bodyText: "", upgradeUrl: null },
+    pagination: {
+      page,
+      pageSize: PAGE_SIZE,
+      totalCount: buyerLedger?.totalCount ?? 0,
+    },
+  };
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  // Read cold once - layout and index get same value with same context object
   const cold = readColdOnce(context);
   const timing = new ServerTiming(cold);
   timing.startPhase("loader_total");
 
   const { shopify } = context;
 
-  // Time auth_index phase
   timing.startPhase("auth_index");
   const { session, sessionToken, redirect: shopifyRedirect, admin } = await shopify.authenticate.admin(request);
   timing.endPhase("auth_index");
@@ -233,23 +420,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const skipOnboarding = url.searchParams.get("skipOnboarding") === "true";
   const onlyOverLimit = url.searchParams.get("overlimit") === "true";
 
-  // Time shop_lookup phase
   timing.startPhase("shop_lookup");
   const [shop] = await sql<{ id: string; currency: string; timezone: string }[]>`
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
   timing.endPhase("shop_lookup");
 
-  // #292: Re-read currency for non-INR shops to enable recovery when shop changes to INR
-  // Pass shop.id to avoid re-querying the shop row
-  // Defensive: handle null/undefined result with fail-closed defaults
   const currencyResult = shop
     ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
     : null;
   const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
-  // #292: Check currency gate BEFORE money queries - if not supported, return minimal payload with no amounts
   const currencySupported = isCurrencyGateOpen(shopCurrency);
   if (!currencySupported) {
     timing.endPhase("loader_total");
@@ -266,27 +448,21 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopDomain,
       storeHandle: notSupportedStoreHandle,
       shopCurrency: getEffectiveCurrency(shopCurrency),
-      currencySupported: false,
+      currencySupported: false as const,
       currencyFlipBlocked,
-      plan: null,
-      usage: { companies: { current: 0, limit: 0 }, importsThisMonth: { current: 0, limit: -1 } },
-      upgradeUrl: null,
       gatingEnforced: false,
-      agingTotals: null,
-      buyerLedger: null,
-      selectedBuyerInvoices: null,
-      selectedBuyerId: null,
-      pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
+      upgradeUrl: null,
       sortBy: "outstanding" as SortBy,
       sortOrder: "desc" as SortOrder,
       onlyOverLimit: false,
-      overLimitCount: 0,
-      error: null,
-      newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+      selectedBuyerId: null,
+      agingTotals: null,
+      buyerLedger: null,
+      selectedBuyerInvoices: null,
+      dashboardData: null,
     }, { headers });
   }
 
-  // Time onboarding_checks phase
   if (shop && !skipOnboarding) {
     timing.startPhase("onboarding_checks");
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
@@ -296,176 +472,79 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     }
   }
 
-  let planData: ResolvedPlan | null = null;
-  let usage: {
-    companies: { current: number; limit: number };
-    importsThisMonth: { current: number; limit: number };
-  } | null = null;
-  let agingTotals: SerializableAgingTotals | null = null;
-  let buyerLedger: { rows: BuyerLedgerRow[]; totalCount: number } | null = null;
-  let selectedBuyerInvoices: {
-    rows: BuyerInvoiceRow[];
-    totalCount: number;
-    buyerName: string;
-  } | null = null;
-  let error: string | null = null;
-
-  let overLimitCount = 0;
-
-  if (shop) {
-    const asOf = new Date();
-
-    try {
-      const ledgerOptions = {
-        limit: PAGE_SIZE,
-        offset: (page - 1) * PAGE_SIZE,
-        sortBy,
-        sortOrder,
-      };
-
-      // Run all main queries in parallel with timing
-      // Always call getUsageStats for usage display. Only skip gatedAccountCount and paused banner when flag off.
-      const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
-        timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
-        getUsageStats(sql, shop.id).catch((err) => {
-          safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
-          return null;
-        }),
-        getShopAgingTotals(sql, shop.id, asOf),
-        timing.time("ledger_rows", () =>
-          onlyOverLimit
-            ? getOverLimitBuyerLedger(sql, shop.id, asOf, ledgerOptions)
-            : getBuyerLedger(sql, shop.id, asOf, ledgerOptions)
-        ),
-        onlyOverLimit
-          ? Promise.resolve(null)
-          : timing.time("ledger_count", () => getOverLimitCount(sql, shop.id)),
-      ]);
-
-      planData = planResult;
-      usage = usageResult;
-      agingTotals = agingResult;
-      buyerLedger = ledgerResult;
-
-      // Use totalCount from ledger when filtering over-limit, otherwise use separate count
-      overLimitCount = onlyOverLimit ? buyerLedger.totalCount : (countResult ?? 0);
-
-      if (selectedBuyerId) {
-        const buyerInvoices = await getBuyerInvoices(
-          sql,
-          shop.id,
-          selectedBuyerId,
-          asOf,
-          { limit: 50, offset: 0 }
-        );
-
-        const buyerRow = buyerLedger?.rows.find(
-          (r) => r.buyer_account_id === selectedBuyerId
-        );
-        if (!buyerRow) {
-          const [buyerAccount] = await sql<{ name: string }[]>`
-            SELECT name FROM "BuyerAccount" WHERE id = ${selectedBuyerId} AND "shopId" = ${shop.id}
-          `;
-          selectedBuyerInvoices = {
-            ...buyerInvoices,
-            buyerName: buyerAccount?.name ?? "Unknown Buyer",
-          };
-        } else {
-          selectedBuyerInvoices = {
-            ...buyerInvoices,
-            buyerName: buyerRow.buyer_name,
-          };
-        }
-      }
-    } catch (err) {
-      safeLog("error", "app._index.load_aging_data_failed", { err: toErrorCode(err) });
-      error = "Failed to load aging data. Please try again.";
-    }
-  }
-
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
-
-  if (shop && !error) {
-    const accessParams: Parameters<typeof recordAccess>[1] = {
-      shopId: shop.id,
-      actor: getActorFromSessionToken(sessionToken, session),
-      action: "dashboard",
-      recordType: "BuyerAccount",
-      count: buyerLedger?.totalCount ?? 0,
-    };
-    if (selectedBuyerId) {
-      accessParams.recordId = selectedBuyerId;
+  const upgradeUrl = (() => {
+    const handle = getAppHandle();
+    if (handle === null) {
+      safeLog("warn", "plan_url_app_handle_missing", {});
+      return null;
     }
-    recordAccess(sql, accessParams);
-  }
+    return buildPlanSelectionUrl(shopDomain, handle);
+  })();
 
-  // End loader_total timing and log all phases
   timing.endPhase("loader_total");
-
-  // Log timing: one line per phase with { route, stage, durationMs }
   timing.logAllPhases();
 
   const serverTiming = timing.toHeaderValue();
+  const headers: HeadersInit = {};
+  if (serverTiming) {
+    headers["Server-Timing"] = serverTiming;
+  }
 
-  const responseData = {
+  if (!shop) {
+    return data({
+      shopName: storeHandle,
+      shopDomain,
+      storeHandle,
+      shopCurrency,
+      currencySupported: true as const,
+      currencyFlipBlocked,
+      gatingEnforced,
+      upgradeUrl,
+      sortBy,
+      sortOrder,
+      onlyOverLimit,
+      selectedBuyerId,
+      dashboardData: Promise.resolve({
+        plan: null,
+        usage: null,
+        agingTotals: null,
+        buyerLedger: null,
+        selectedBuyerInvoices: null,
+        overLimitCount: 0,
+        error: "Shop not found",
+        newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+        pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
+      } satisfies DeferredDashboardData),
+    }, { headers });
+  }
+
+  const dashboardData = loadDashboardData(
+    sql,
+    shop,
+    shopDomain,
+    sessionToken,
+    session,
+    { page, sortBy, sortOrder, selectedBuyerId, onlyOverLimit },
+    timing,
+  );
+
+  return data({
     shopName: storeHandle,
     shopDomain,
     storeHandle,
     shopCurrency,
     currencySupported: true as const,
     currencyFlipBlocked,
-    plan: planData
-      ? {
-          key: resolvePlanKey(planData.plan.key),
-          name: PLAN_DISPLAY_NAMES[resolvePlanKey(planData.plan.key) as PlanKey],
-          isTest: planData.isTest,
-        }
-      : null,
-    usage,
-    upgradeUrl: (() => {
-      const handle = getAppHandle();
-      if (handle === null) {
-        safeLog("warn", "plan_url_app_handle_missing", {});
-        return null;
-      }
-      return buildPlanSelectionUrl(shopDomain, handle);
-    })(),
     gatingEnforced,
-    agingTotals,
-    buyerLedger,
-    selectedBuyerInvoices,
-    selectedBuyerId,
-    pagination: {
-      page,
-      pageSize: PAGE_SIZE,
-      totalCount: buyerLedger?.totalCount ?? 0,
-    },
+    upgradeUrl,
     sortBy,
     sortOrder,
     onlyOverLimit,
-    overLimitCount,
-    error,
-    newAccountsPausedBanner: (gatingEnforced && usage)
-      ? buildNewAccountsPausedBannerState(
-          usage.companies.current,
-          usage.companies.limit,
-          gatingEnforced,
-          (() => {
-            const handle = getAppHandle();
-            if (handle === null) return null;
-            return buildPlanSelectionUrl(shopDomain, handle);
-          })()
-        )
-      : { show: false, heading: "", bodyText: "", upgradeUrl: null },
-  };
-
-  const headers: HeadersInit = {};
-  if (serverTiming) {
-    headers["Server-Timing"] = serverTiming;
-  }
-
-  return data(responseData, { headers });
+    selectedBuyerId,
+    dashboardData,
+  }, { headers });
 };
 
 const BUCKET_LABELS: Record<AgingBucketKey, string> = {
@@ -754,46 +833,77 @@ function BuyerInvoiceList({
   );
 }
 
-export default function Index() {
+/**
+ * Polaris skeleton component for the dashboard while data loads.
+ * Uses s-spinner and placeholder sections for loading states.
+ * Exported for testing.
+ */
+export function DashboardSkeleton() {
+  return (
+    <>
+      {/* Plan section skeleton */}
+      <s-section heading="Your Plan">
+        <s-box padding="base">
+          <s-stack direction="inline" gap="base">
+            <s-spinner size="base" />
+            <s-text>Loading plan information...</s-text>
+          </s-stack>
+        </s-box>
+      </s-section>
+
+      {/* Receivables Summary skeleton */}
+      <s-section heading="Receivables Summary">
+        <s-box padding="base">
+          <s-stack direction="inline" gap="base">
+            <s-spinner size="base" />
+            <s-text>Loading receivables data...</s-text>
+          </s-stack>
+        </s-box>
+      </s-section>
+
+      {/* Buyer Ledger skeleton */}
+      <s-section heading="Buyer Ledger">
+        <s-box padding="base">
+          <s-stack direction="inline" gap="base">
+            <s-spinner size="base" />
+            <s-text>Loading buyer ledger...</s-text>
+          </s-stack>
+        </s-box>
+      </s-section>
+    </>
+  );
+}
+
+/**
+ * Dashboard content component that renders with resolved data.
+ * Separated from Index to allow Suspense boundary wrapping.
+ */
+function DashboardContent({
+  dashboardData,
+  gatingEnforced,
+  upgradeUrl,
+  sortBy,
+  sortOrder,
+  onlyOverLimit,
+}: {
+  dashboardData: DeferredDashboardData;
+  gatingEnforced: boolean;
+  upgradeUrl: string | null;
+  sortBy: SortBy;
+  sortOrder: SortOrder;
+  onlyOverLimit: boolean;
+}) {
   const {
     plan,
     usage,
-    upgradeUrl,
-    gatingEnforced,
     agingTotals,
     buyerLedger,
     selectedBuyerInvoices,
-    pagination,
-    sortBy,
-    sortOrder,
-    onlyOverLimit,
     overLimitCount,
     error,
     newAccountsPausedBanner,
-    currencySupported,
-    currencyFlipBlocked,
-  } = useLoaderData<typeof loader>();
-
-  // #292: When currency not supported, show the appropriate banner
-  // If flip was blocked, show the flip blocked banner; otherwise show the not supported banner
-  if (!currencySupported) {
-    return (
-      <s-page heading="Termwise: Net Terms & Credit">
-        <s-section>
-          {currencyFlipBlocked ? (
-            <s-banner tone="critical" heading="Currency Conversion Not Available">
-              {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
-              Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
-            </s-banner>
-          ) : (
-            <s-banner tone="critical" heading="Currency Not Supported">
-              {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
-            </s-banner>
-          )}
-        </s-section>
-      </s-page>
-    );
-  }
+    pagination,
+  } = dashboardData;
 
   const planKey = (plan?.key ?? "none") as PlanKey;
   const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
@@ -812,7 +922,7 @@ export default function Index() {
   const closeInvoiceListUrl = `?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page}`;
 
   return (
-    <s-page heading="Termwise: Net Terms & Credit">
+    <>
       {/* T4: New accounts paused banner */}
       {newAccountsPausedBanner.show && (
         <s-section>
@@ -954,6 +1064,57 @@ export default function Index() {
           )}
         </>
       )}
+    </>
+  );
+}
+
+export default function Index() {
+  const {
+    upgradeUrl,
+    gatingEnforced,
+    sortBy,
+    sortOrder,
+    onlyOverLimit,
+    currencySupported,
+    currencyFlipBlocked,
+    dashboardData,
+  } = useLoaderData<typeof loader>();
+
+  if (!currencySupported) {
+    return (
+      <s-page heading="Termwise: Net Terms & Credit">
+        <s-section>
+          {currencyFlipBlocked ? (
+            <s-banner tone="critical" heading="Currency Conversion Not Available">
+              {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
+              Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
+            </s-banner>
+          ) : (
+            <s-banner tone="critical" heading="Currency Not Supported">
+              {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+            </s-banner>
+          )}
+        </s-section>
+      </s-page>
+    );
+  }
+
+  return (
+    <s-page heading="Termwise: Net Terms & Credit">
+      <Suspense fallback={<DashboardSkeleton />}>
+        <Await resolve={dashboardData}>
+          {(data) => (
+            <DashboardContent
+              dashboardData={data}
+              gatingEnforced={gatingEnforced}
+              upgradeUrl={upgradeUrl}
+              sortBy={sortBy}
+              sortOrder={sortOrder}
+              onlyOverLimit={onlyOverLimit}
+            />
+          )}
+        </Await>
+      </Suspense>
 
       <s-section slot="aside" heading="Getting Started">
         <s-paragraph>Features included in this app:</s-paragraph>

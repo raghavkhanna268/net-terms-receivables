@@ -185,13 +185,18 @@ describe("app home timing instrumentation", () => {
   describe("app_home_timing log lines (one per phase)", () => {
     let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
+    /**
+     * Phases that run in the initial loader response (before streaming).
+     * These are logged immediately and included in Server-Timing header.
+     *
+     * Note: plan_resolve, ledger_rows, ledger_count now run in the deferred
+     * promise (streaming) and are not included in the initial response timing.
+     * This improves LCP by returning a skeleton immediately while data loads.
+     */
     const EXPECTED_PHASES = [
       "auth_index",
       "shop_lookup",
       "onboarding_checks",
-      "plan_resolve",
-      "ledger_rows",
-      "ledger_count",
       "loader_total",
     ];
 
@@ -397,22 +402,31 @@ describe("app home timing instrumentation", () => {
       expect(serverTiming).toContain("shop_lookup");
     });
 
-    it("times plan_resolve phase", async () => {
+    /**
+     * With streaming/deferred data, plan_resolve runs in the deferred promise
+     * and is NOT included in the Server-Timing header of the initial response.
+     * This is expected behavior for LCP optimization.
+     */
+    it("does NOT include plan_resolve in initial response Server-Timing (runs in deferred promise)", async () => {
       const { loader } = await import("../app._index");
       const result = await loader(createLoaderArgs());
       const headers = extractHeaders(result);
 
       const serverTiming = headers?.get("Server-Timing") ?? "";
-      expect(serverTiming).toContain("plan_resolve");
+      expect(serverTiming).not.toContain("plan_resolve");
     });
 
-    it("times ledger_rows phase", async () => {
+    /**
+     * With streaming/deferred data, ledger_rows runs in the deferred promise
+     * and is NOT included in the Server-Timing header of the initial response.
+     */
+    it("does NOT include ledger_rows in initial response Server-Timing (runs in deferred promise)", async () => {
       const { loader } = await import("../app._index");
       const result = await loader(createLoaderArgs());
       const headers = extractHeaders(result);
 
       const serverTiming = headers?.get("Server-Timing") ?? "";
-      expect(serverTiming).toContain("ledger_rows");
+      expect(serverTiming).not.toContain("ledger_rows");
     });
 
     it("times loader_total phase", async () => {
