@@ -72,6 +72,22 @@ describe("sentry.ts", () => {
       expect(config.beforeSendTransaction).toBeDefined();
     });
 
+    it("sets traceLifecycle to static so beforeSendTransaction is not ignored", async () => {
+      const { withSentry } = await import("@sentry/cloudflare");
+      const { wrapWithSentry } = await import("../sentry");
+
+      const mockHandler = { fetch: vi.fn() };
+      wrapWithSentry(mockHandler);
+
+      const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
+
+      // @sentry/core 11.8.0 defaults to traceLifecycle "stream", which ignores
+      // beforeSendTransaction. "static" keeps transaction scrubbing in effect.
+      expect(config.traceLifecycle).toBe("static");
+      expect(config.beforeSendTransaction).toBeDefined();
+    });
+
     it("disables fetch error hostname enrichment to prevent shop domain leakage", async () => {
       const { withSentry } = await import("@sentry/cloudflare");
       const { wrapWithSentry } = await import("../sentry");
