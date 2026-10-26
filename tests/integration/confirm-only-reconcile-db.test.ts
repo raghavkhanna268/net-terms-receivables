@@ -210,7 +210,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:hdfc");
     });
 
-    it("HDFC: upload, get suggestions, confirm one match, verify invoice outstanding and status", async () => {
+    it("HDFC: upload, suggestions, confirm match - invoice outstanding unchanged (confirm-only), match amount 10000", async () => {
       const credits = makeHdfcCredits(runId);
 
       const importResult = await sql.begin((tx) =>
@@ -250,10 +250,11 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       expect(confirmedMatch.state).toBe("confirmed");
       expect(parseFloat(confirmedMatch.amount)).toBe(10000);
 
-      const paymentCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Payment" WHERE "shopId" = ${testShopId}
+      const [invoiceAfter] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoice1Id}
       `;
-      expect(parseInt(paymentCount[0].count, 10)).toBe(2);
+      expect(parseFloat(invoiceAfter.outstanding)).toBe(10000);
+      expect(invoiceAfter.status).toBe("open");
 
       const matchCount = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "Match"
@@ -349,7 +350,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:icici");
     });
 
-    it("ICICI: upload, get suggestions, confirm one match, verify invoice outstanding and status", async () => {
+    it("ICICI: upload, suggestions, confirm match - invoice outstanding unchanged (confirm-only), match amount 10000", async () => {
       const credits = makeIciciCredits(runId);
 
       const importResult = await sql.begin((tx) =>
@@ -382,10 +383,17 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       const confirmResult = await confirmMatch(sql, testShopId, matchToConfirm!.id, "test-user");
       expect(confirmResult.success).toBe(true);
 
-      const paymentCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Payment" WHERE "shopId" = ${testShopId}
+      const [confirmedMatch] = await sql<{ state: string; amount: string }[]>`
+        SELECT state, amount::text FROM "Match" WHERE id = ${matchToConfirm!.id}
       `;
-      expect(parseInt(paymentCount[0].count, 10)).toBe(2);
+      expect(confirmedMatch.state).toBe("confirmed");
+      expect(parseFloat(confirmedMatch.amount)).toBe(10000);
+
+      const [invoiceAfter] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoice1Id}
+      `;
+      expect(parseFloat(invoiceAfter.outstanding)).toBe(10000);
+      expect(invoiceAfter.status).toBe("open");
 
       const matchCount = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "Match"
@@ -468,7 +476,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:idempotent");
     });
 
-    it("double confirm still results in exactly 1 Payment and 1 Match, outstanding not reduced twice", async () => {
+    it("double confirm: exactly 1 AuditEvent, match amount 10000, invoice outstanding unchanged at 10000", async () => {
       const credits: SyntheticCredit[] = [
         {
           date: getUtcDateString(5),
@@ -504,17 +512,24 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       const result2 = await confirmMatch(sql, testShopId, match.id, "test-user");
       expect(result2.success).toBe(true);
 
-      const paymentCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Payment" WHERE "shopId" = ${testShopId}
+      const auditEvents = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM "AuditEvent"
+        WHERE "shopId" = ${testShopId} AND type = 'match.confirmed'
       `;
-      expect(parseInt(paymentCount[0].count, 10)).toBe(1);
+      expect(parseInt(auditEvents[0].count, 10)).toBe(1);
 
-      const matchCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Match"
+      const [confirmedMatch] = await sql<{ amount: string }[]>`
+        SELECT amount::text FROM "Match"
         WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice1Id}
           AND state IN ('confirmed', 'pushed')
       `;
-      expect(parseInt(matchCount[0].count, 10)).toBe(1);
+      expect(parseFloat(confirmedMatch.amount)).toBe(10000);
+
+      const [invoice] = await sql<{ outstanding: string; status: string }[]>`
+        SELECT outstanding::text, status FROM "Invoice" WHERE id = ${invoice1Id}
+      `;
+      expect(parseFloat(invoice.outstanding)).toBe(10000);
+      expect(invoice.status).toBe("open");
     });
   });
 
@@ -604,7 +619,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:concurrent");
     });
 
-    it("concurrent confirms (Promise.all) give exactly one Match and one Payment", async () => {
+    it("concurrent confirms on 2 suggestions for same 10000 payment: total confirmed <= 10000", async () => {
       const credits: SyntheticCredit[] = [
         {
           date: getUtcDateString(5),
@@ -612,7 +627,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
           rail: "NEFT",
           utr: makeValidNeftUtr(`${runId}20`),
           payerName: "Test Concurrent Co",
-          narration: `NEFT CR-TEST CONCURRENT CO-#1001`,
+          narration: `NEFT CR-TEST CONCURRENT CO`,
         },
       ];
 
@@ -626,32 +641,47 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
         })
       );
 
-      await runMatcher(sql, testShopId);
+      const [payment] = await sql<{ id: string }[]>`
+        SELECT id FROM "Payment" WHERE "shopId" = ${testShopId}
+      `;
 
-      const [match] = await sql<{ id: string }[]>`
+      await sql`
+        INSERT INTO "Match" ("shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
+        VALUES
+          (${testShopId}, ${payment.id}, ${invoice1Id}, 10000, 80, '{"concurrent": true}'::jsonb, 'suggested', NOW(), NOW()),
+          (${testShopId}, ${payment.id}, ${invoice2Id}, 10000, 70, '{"concurrent": true}'::jsonb, 'suggested', NOW(), NOW())
+      `;
+
+      const [match1] = await sql<{ id: string }[]>`
         SELECT id FROM "Match"
         WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice1Id} AND state = 'suggested'
       `;
-      expect(match).toBeDefined();
+      expect(match1).toBeDefined();
+
+      const [match2] = await sql<{ id: string }[]>`
+        SELECT id FROM "Match"
+        WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice2Id} AND state = 'suggested'
+      `;
+      expect(match2).toBeDefined();
 
       const results = await Promise.all([
-        confirmMatch(sql, testShopId, match.id, "user-1"),
-        confirmMatch(sql, testShopId, match.id, "user-2"),
+        confirmMatch(sql, testShopId, match1.id, "user-1"),
+        confirmMatch(sql, testShopId, match2.id, "user-2"),
       ]);
 
       const successCount = results.filter((r) => r.success).length;
-      expect(successCount).toBe(2);
+      expect(successCount).toBeGreaterThanOrEqual(1);
 
-      const paymentCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Payment" WHERE "shopId" = ${testShopId}
-      `;
-      expect(parseInt(paymentCount[0].count, 10)).toBe(1);
-
-      const matchCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Match"
+      const confirmedMatches = await sql<{ amount: string }[]>`
+        SELECT amount::text FROM "Match"
         WHERE "shopId" = ${testShopId} AND state IN ('confirmed', 'pushed')
       `;
-      expect(parseInt(matchCount[0].count, 10)).toBe(1);
+
+      const totalConfirmed = confirmedMatches.reduce(
+        (sum, m) => sum + parseFloat(m.amount),
+        0
+      );
+      expect(totalConfirmed).toBeLessThanOrEqual(10000);
     });
   });
 
@@ -796,7 +826,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       expect(parseFloat(invoice.outstanding)).toBe(10000);
     });
 
-    it("confirm against paid invoice (outstanding=0) fails with clear error", async () => {
+    it("confirm against paid invoice (outstanding=0) fails with 'Invoice fully allocated' error", async () => {
       const credits: SyntheticCredit[] = [
         {
           date: getUtcDateString(5),
@@ -839,7 +869,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
 
       const confirmResult = await confirmMatch(sql, testShopId, match.id, "test-user");
       expect(confirmResult.success).toBe(false);
-      expect(confirmResult.error).toContain("fully allocated");
+      expect(confirmResult.error).toBe("Invoice fully allocated");
 
       const confirmedCount = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "Match"
@@ -922,7 +952,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:partial");
     });
 
-    it("partial payment confirm: 5000 against 10000 invoice allocates partial payment", async () => {
+    it("partial payment confirm: 5000 against 10000 invoice - match amount 5000, payment status matched", async () => {
       const credits: SyntheticCredit[] = [
         {
           date: getUtcDateString(5),
@@ -930,7 +960,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
           rail: "NEFT",
           utr: makeValidNeftUtr(`${runId}40`),
           payerName: "Test Partial Payment Co",
-          narration: `NEFT CR-TEST PARTIAL CO-#1001 PART`,
+          narration: `NEFT CR-TEST PARTIAL PAYMENT CO-#1001`,
         },
       ];
 
@@ -949,35 +979,14 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       const [match] = await sql<{ id: string }[]>`
         SELECT id FROM "Match"
         WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice1Id} AND state = 'suggested'
-        LIMIT 1
       `;
+      expect(match).toBeDefined();
 
-      if (!match) {
-        const [payment] = await sql<{ id: string }[]>`
-          SELECT id FROM "Payment" WHERE "shopId" = ${testShopId}
-        `;
-        await sql`
-          INSERT INTO "Match" (
-            "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
-            "createdAt", "updatedAt"
-          )
-          VALUES (
-            ${testShopId}, ${payment.id}, ${invoice1Id}, 5000, 50,
-            '{"partial": true}'::jsonb, 'suggested', NOW(), NOW()
-          )
-        `;
-      }
-
-      const [matchToConfirm] = await sql<{ id: string }[]>`
-        SELECT id FROM "Match"
-        WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice1Id} AND state = 'suggested'
-      `;
-
-      const confirmResult = await confirmMatch(sql, testShopId, matchToConfirm.id, "test-user");
+      const confirmResult = await confirmMatch(sql, testShopId, match.id, "test-user");
       expect(confirmResult.success).toBe(true);
 
       const [confirmedMatch] = await sql<{ state: string; amount: string }[]>`
-        SELECT state, amount::text FROM "Match" WHERE id = ${matchToConfirm.id}
+        SELECT state, amount::text FROM "Match" WHERE id = ${match.id}
       `;
       expect(confirmedMatch.state).toBe("confirmed");
       expect(parseFloat(confirmedMatch.amount)).toBe(5000);
@@ -1204,7 +1213,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:unmatch");
     });
 
-    it("unmatch of confirmed (not applied) match restores state", async () => {
+    it("unmatch of confirmed match: match state unmatched, payment status unmatched", async () => {
       const credits: SyntheticCredit[] = [
         {
           date: getUtcDateString(5),
@@ -1228,33 +1237,13 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
 
       await runMatcher(sql, testShopId);
 
-      const matches = await sql<{ id: string }[]>`
+      const [match] = await sql<{ id: string }[]>`
         SELECT id FROM "Match"
         WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice1Id} AND state = 'suggested'
       `;
+      expect(match).toBeDefined();
 
-      let matchId: string;
-      if (matches.length === 0) {
-        const [payment] = await sql<{ id: string }[]>`
-          SELECT id FROM "Payment" WHERE "shopId" = ${testShopId}
-        `;
-        const [newMatch] = await sql<{ id: string }[]>`
-          INSERT INTO "Match" (
-            "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
-            "createdAt", "updatedAt"
-          )
-          VALUES (
-            ${testShopId}, ${payment.id}, ${invoice1Id}, 5000, 50,
-            '{"test": true}'::jsonb, 'suggested', NOW(), NOW()
-          )
-          RETURNING id
-        `;
-        matchId = newMatch.id;
-      } else {
-        matchId = matches[0].id;
-      }
-
-      const confirmResult = await confirmMatch(sql, testShopId, matchId, "test-user");
+      const confirmResult = await confirmMatch(sql, testShopId, match.id, "test-user");
       expect(confirmResult.success).toBe(true);
 
       const [beforeUnmatch] = await sql<{ status: string }[]>`
@@ -1263,11 +1252,11 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       `;
       expect(beforeUnmatch.status).toBe("matched");
 
-      const unmatchResult = await unmatchMatch(sql, testShopId, matchId, "test-user");
+      const unmatchResult = await unmatchMatch(sql, testShopId, match.id, "test-user");
       expect(unmatchResult.success).toBe(true);
 
       const [afterUnmatch] = await sql<{ state: string }[]>`
-        SELECT state FROM "Match" WHERE id = ${matchId}
+        SELECT state FROM "Match" WHERE id = ${match.id}
       `;
       expect(afterUnmatch.state).toBe("unmatched");
 
@@ -1277,15 +1266,15 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       expect(paymentAfter.status).toBe("unmatched");
     });
 
-    it("reject creates rejection record preventing re-suggestion", async () => {
+    it("reject creates rejection record in rejected_matches table", async () => {
       const credits: SyntheticCredit[] = [
         {
           date: getUtcDateString(5),
           amountPaise: 500000,
           rail: "NEFT",
           utr: makeValidNeftUtr(`${runId}61`),
-          payerName: "Test Reject Co",
-          narration: `NEFT CR-TEST REJECT CO-#1001`,
+          payerName: "Test Unmatch Co",
+          narration: `NEFT CR-TEST UNMATCH CO-#1001`,
         },
       ];
 
@@ -1301,41 +1290,18 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
 
       await runMatcher(sql, testShopId);
 
-      const matches = await sql<{ id: string; payment_id: string }[]>`
+      const [match] = await sql<{ id: string; payment_id: string }[]>`
         SELECT id, "paymentId" AS payment_id FROM "Match"
-        WHERE "shopId" = ${testShopId} AND state = 'suggested'
+        WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice1Id} AND state = 'suggested'
       `;
+      expect(match).toBeDefined();
 
-      let matchId: string;
-      let paymentId: string;
-      if (matches.length === 0) {
-        const [payment] = await sql<{ id: string }[]>`
-          SELECT id FROM "Payment" WHERE "shopId" = ${testShopId}
-        `;
-        paymentId = payment.id;
-        const [newMatch] = await sql<{ id: string }[]>`
-          INSERT INTO "Match" (
-            "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
-            "createdAt", "updatedAt"
-          )
-          VALUES (
-            ${testShopId}, ${payment.id}, ${invoice1Id}, 5000, 50,
-            '{"test": true}'::jsonb, 'suggested', NOW(), NOW()
-          )
-          RETURNING id
-        `;
-        matchId = newMatch.id;
-      } else {
-        matchId = matches[0].id;
-        paymentId = matches[0].payment_id;
-      }
-
-      const rejectResult = await rejectMatch(sql, testShopId, matchId, "test-user");
+      const rejectResult = await rejectMatch(sql, testShopId, match.id, "test-user");
       expect(rejectResult.success).toBe(true);
 
       const rejectedCount = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "rejected_matches"
-        WHERE "shopId" = ${testShopId} AND "paymentId" = ${paymentId} AND "invoiceId" = ${invoice1Id}
+        WHERE "shopId" = ${testShopId} AND "paymentId" = ${match.payment_id} AND "invoiceId" = ${invoice1Id}
       `;
       expect(parseInt(rejectedCount[0].count, 10)).toBe(1);
     });
@@ -1419,10 +1385,29 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:privacy");
     });
 
-    it("positive control: spy captures safeLog calls", async () => {
+    it("positive control: spy captures safeLog calls during real import flow", async () => {
       logSpy.mockClear();
 
-      logModule.safeLog("info", "test_event", { shopId: testShopId });
+      const credits: SyntheticCredit[] = [
+        {
+          date: getUtcDateString(5),
+          amountPaise: 1000000,
+          rail: "NEFT",
+          utr: makeValidNeftUtr(`${runId}69`),
+          payerName: "Test Privacy Control Co",
+          narration: `NEFT CR-TEST PRIVACY CONTROL CO-#1001`,
+        },
+      ];
+
+      await sql.begin((tx) =>
+        insertBankImportRows(tx, {
+          shopId: testShopId,
+          bank: "HDFC",
+          fileName: "test-privacy-control.csv",
+          credits,
+          now: new Date(),
+        })
+      );
 
       expect(logSpy).toHaveBeenCalled();
       expect(logSpy.mock.calls.length).toBeGreaterThan(0);
@@ -1454,33 +1439,21 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
 
       await runMatcher(sql, testShopId);
 
-      const matches = await sql<{ id: string }[]>`
+      const [match] = await sql<{ id: string }[]>`
         SELECT id FROM "Match"
-        WHERE "shopId" = ${testShopId} AND state = 'suggested'
+        WHERE "shopId" = ${testShopId} AND "invoiceId" = ${invoice1Id} AND state = 'suggested'
       `;
+      expect(match).toBeDefined();
 
-      let matchId: string;
-      if (matches.length === 0) {
-        const [payment] = await sql<{ id: string }[]>`
-          SELECT id FROM "Payment" WHERE "shopId" = ${testShopId}
-        `;
-        const [newMatch] = await sql<{ id: string }[]>`
-          INSERT INTO "Match" (
-            "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
-            "createdAt", "updatedAt"
-          )
-          VALUES (
-            ${testShopId}, ${payment.id}, ${invoice1Id}, 10000, 50,
-            '{"test": true}'::jsonb, 'suggested', NOW(), NOW()
-          )
-          RETURNING id
-        `;
-        matchId = newMatch.id;
-      } else {
-        matchId = matches[0].id;
-      }
+      const confirmResult = await confirmMatch(sql, testShopId, match.id, "test-user");
+      expect(confirmResult.success).toBe(true);
 
-      await confirmMatch(sql, testShopId, matchId, "test-user");
+      expect(logSpy.mock.calls.length).toBeGreaterThan(0);
+
+      const auditEvents = await sql<{ data: unknown }[]>`
+        SELECT data FROM "AuditEvent" WHERE "shopId" = ${testShopId}
+      `;
+      expect(auditEvents.length).toBeGreaterThan(0);
 
       const allLogCalls = JSON.stringify(logSpy.mock.calls);
 
@@ -1495,10 +1468,6 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       for (const term of sensitiveTerms) {
         expect(allLogCalls.toLowerCase()).not.toContain(term);
       }
-
-      const auditEvents = await sql<{ data: unknown }[]>`
-        SELECT data FROM "AuditEvent" WHERE "shopId" = ${testShopId}
-      `;
 
       for (const event of auditEvents) {
         const eventStr = JSON.stringify(event.data).toLowerCase();
