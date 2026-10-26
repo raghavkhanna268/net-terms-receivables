@@ -125,6 +125,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
   "app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts",
   "app/routes/__tests__/app.data-requests.download-db.test.ts",
+  "app/routes/__tests__/webhooks.compliance.customers.test.ts",
 
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",
@@ -150,6 +151,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm-reimport pin DB tests
   "tests/integration/confirm-reimport-pin-db.test.ts",
+
+  // Ingestion paths DB tests
+  "tests/integration/ingestion-paths-db.test.ts",
 ];
 
 export default defineConfig({
