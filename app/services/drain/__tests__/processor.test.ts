@@ -1228,9 +1228,12 @@ describe("Handler registration completeness", () => {
       "app_subscriptions/update",
     ];
 
+    // #342: Exclude shop/update - handled directly in webhook route, not via sync queue
+    const shopUpdateTopics = ["shop/update"];
+
     // Filter to sync-queue-relevant topics only
     const syncRelevantTopics = webhookTopics.filter(
-      (t) => !complianceTopics.includes(t) && !appLifecycleTopics.includes(t)
+      (t) => !complianceTopics.includes(t) && !appLifecycleTopics.includes(t) && !shopUpdateTopics.includes(t)
     );
 
     // Transform to handler topic format: "companies/create" -> "COMPANIES_CREATE"
