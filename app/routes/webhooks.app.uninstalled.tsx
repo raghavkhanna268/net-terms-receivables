@@ -81,7 +81,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     evictShopFromSetupCache(shop);
   } catch (error) {
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[uninstalled] uninstall_failed reason=db_error err=${errInfo}`);
+    console.error(`[uninstalled] mark_uninstalled_failed reason=db_error err=${errInfo}`);
     return new Response(null, { status: 500 });
   }
 

@@ -7,11 +7,11 @@
  *
  * Tests:
  * - Both writes commit together
- * - Failure after UPDATE rolls back both (sessions kept, uninstalledAt still NULL)
+ * - Failure during session DELETE rolls back both (trigger-based injection)
  * - Duplicate delivery keeps the FIRST uninstalledAt (COALESCE)
  * - Shop row missing: sessions are still deleted
- * - Concurrent FOR SHARE blocks until tx commits, then sees uninstalledAt set
- * - Serializes with deleteShop's FOR UPDATE
+ * - Helper blocks while Shop row is locked (real concurrency test)
+ * - Helper serializes with deleteShop's FOR UPDATE (real concurrency test)
  * - Reinstall scenario: afterAuth clears uninstalledAt and creates new session
  * - KNOWN-GAP: late uninstall after reinstall deletes fresh session
  *
@@ -25,7 +25,7 @@ import { sqlOptions } from "~/lib/db-light.server";
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
-const TEST_SUFFIX = `uninstall-order-${Date.now()}`;
+const TEST_SUFFIX = `uninstall_order_${Date.now()}`;
 const TEST_SHOP_DOMAIN = `test-${TEST_SUFFIX}.myshopify.com`;
 const TEST_SESSION_ID = `offline_${TEST_SHOP_DOMAIN}`;
 
@@ -42,8 +42,8 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
   });
 
   beforeEach(async () => {
-    await sql`DELETE FROM "Session" WHERE shop LIKE ${'test-uninstall-order-%'}`;
-    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'test-uninstall-order-%'}`;
+    await sql`DELETE FROM "Session" WHERE shop LIKE ${'test-uninstall_order_%'}`;
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'test-uninstall_order_%'}`;
 
     await sql`
       INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
@@ -75,42 +75,49 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
     expect(sessions.length).toBe(0);
   });
 
-  it("failure after UPDATE rolls back both (sessions kept, uninstalledAt still NULL)", async () => {
-    const failingSql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  it("failure during session DELETE rolls back uninstalledAt (atomic guarantee)", async () => {
+    const { markUninstalledAndDeleteSessions } = await import("../compliance/compliance.server");
+
+    const triggerFnName = `block_session_delete_${TEST_SUFFIX}`;
+    const triggerName = `trg_block_session_delete_${TEST_SUFFIX}`;
 
     try {
-      await failingSql.begin(async (tx) => {
-        const [shopRow] = await tx<[{ id: string }?]>`
-          SELECT id FROM "Shop"
-          WHERE domain = ${TEST_SHOP_DOMAIN}
-          FOR UPDATE
-        `;
+      await sql`
+        CREATE OR REPLACE FUNCTION ${sql(triggerFnName)}()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          IF OLD.shop LIKE 'test-uninstall_order_%' THEN
+            RAISE EXCEPTION 'Simulated session delete failure for test';
+          END IF;
+          RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql
+      `;
 
-        if (shopRow) {
-          await tx`
-            UPDATE "Shop"
-            SET "uninstalledAt" = COALESCE("uninstalledAt", NOW()), "updatedAt" = NOW()
-            WHERE domain = ${TEST_SHOP_DOMAIN}
-          `;
-        }
+      await sql`
+        CREATE TRIGGER ${sql(triggerName)}
+        BEFORE DELETE ON "Session"
+        FOR EACH ROW
+        EXECUTE FUNCTION ${sql(triggerFnName)}()
+      `;
 
-        throw new Error("Simulated failure after UPDATE");
-      });
-    } catch (e) {
-      expect((e as Error).message).toBe("Simulated failure after UPDATE");
+      await expect(
+        markUninstalledAndDeleteSessions(sql, TEST_SHOP_DOMAIN)
+      ).rejects.toThrow("Simulated session delete failure for test");
+
+      const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+      `;
+      expect(shop.uninstalledAt).toBeNull();
+
+      const sessions = await sql<{ id: string }[]>`
+        SELECT id FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}
+      `;
+      expect(sessions.length).toBe(1);
+    } finally {
+      await sql`DROP TRIGGER IF EXISTS ${sql(triggerName)} ON "Session"`;
+      await sql`DROP FUNCTION IF EXISTS ${sql(triggerFnName)}()`;
     }
-
-    const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
-      SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
-    `;
-    expect(shop.uninstalledAt).toBeNull();
-
-    const sessions = await sql<{ id: string }[]>`
-      SELECT id FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}
-    `;
-    expect(sessions.length).toBe(1);
-
-    await failingSql.end();
   });
 
   it("duplicate delivery keeps the FIRST uninstalledAt (COALESCE)", async () => {
@@ -158,72 +165,116 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
     expect(sessions2.length).toBe(0);
   });
 
-  it("concurrent FOR SHARE blocks until tx commits, then sees uninstalledAt set", async () => {
-    const conn1 = postgres(TEST_DATABASE_URL!, sqlOptions);
-    const conn2 = postgres(TEST_DATABASE_URL!, sqlOptions);
+  it("helper blocks while Shop row is locked by FOR UPDATE (real concurrency)", async () => {
+    const { markUninstalledAndDeleteSessions } = await import("../compliance/compliance.server");
+
+    const connA = postgres(TEST_DATABASE_URL!, sqlOptions);
+    const connB = postgres(TEST_DATABASE_URL!, sqlOptions);
+    const LOCK_TIMEOUT_MS = 300;
 
     try {
-      let conn2SeenUninstalledAt: Date | null = null;
+      let connACommitted = false;
 
-      await conn1.begin(async (tx1) => {
-        await tx1`
+      const connATransaction = connA.begin(async (txA) => {
+        await txA`
           SELECT id FROM "Shop"
           WHERE domain = ${TEST_SHOP_DOMAIN}
           FOR UPDATE
         `;
 
-        await tx1`
-          UPDATE "Shop"
-          SET "uninstalledAt" = NOW(), "updatedAt" = NOW()
-          WHERE domain = ${TEST_SHOP_DOMAIN}
-        `;
+        await new Promise((r) => setTimeout(r, LOCK_TIMEOUT_MS + 100));
+        connACommitted = true;
       });
 
-      await conn2.begin(async (tx2) => {
-        const [shop] = await tx2<[{ uninstalledAt: Date | null }?]>`
-          SELECT "uninstalledAt" FROM "Shop"
-          WHERE domain = ${TEST_SHOP_DOMAIN}
-          FOR SHARE
-        `;
-        conn2SeenUninstalledAt = shop?.uninstalledAt ?? null;
-      });
+      await new Promise((r) => setTimeout(r, 50));
 
-      expect(conn2SeenUninstalledAt).not.toBeNull();
+      const helperPromise = markUninstalledAndDeleteSessions(connB, TEST_SHOP_DOMAIN);
+
+      const timeoutPromise = new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), LOCK_TIMEOUT_MS)
+      );
+
+      const raceResult = await Promise.race([
+        helperPromise.then(() => "completed" as const),
+        timeoutPromise,
+      ]);
+
+      expect(raceResult).toBe("timeout");
+      expect(connACommitted).toBe(false);
+
+      await connATransaction;
+
+      const helperResult = await helperPromise;
+      expect(helperResult.shopFound).toBe(true);
+      expect(helperResult.sessionsDeleted).toBe(1);
+
+      const [shop] = await sql<{ uninstalledAt: Date | null }[]>`
+        SELECT "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+      `;
+      expect(shop.uninstalledAt).not.toBeNull();
+
+      const sessions = await sql<{ id: string }[]>`
+        SELECT id FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}
+      `;
+      expect(sessions.length).toBe(0);
     } finally {
-      await conn1.end();
-      await conn2.end();
+      await connA.end();
+      await connB.end();
     }
   });
 
-  it("serializes with deleteShop's FOR UPDATE (sequential verification)", async () => {
-    const conn1 = postgres(TEST_DATABASE_URL!, sqlOptions);
-    const conn2 = postgres(TEST_DATABASE_URL!, sqlOptions);
+  it("helper serializes with deleteShop's FOR UPDATE (real concurrency)", async () => {
+    const { markUninstalledAndDeleteSessions } = await import("../compliance/compliance.server");
+    const { deleteShop } = await import("../compliance/compliance.server");
+
+    const connA = postgres(TEST_DATABASE_URL!, sqlOptions);
+    const connB = postgres(TEST_DATABASE_URL!, sqlOptions);
+    const LOCK_TIMEOUT_MS = 300;
+
+    await sql`
+      UPDATE "Shop"
+      SET "uninstalledAt" = NOW() - INTERVAL '49 hours'
+      WHERE domain = ${TEST_SHOP_DOMAIN}
+    `;
 
     try {
-      let lockObtained = false;
+      let connACommitted = false;
 
-      await conn1.begin(async (tx1) => {
-        const [row] = await tx1<[{ id: string }?]>`
-          SELECT id FROM "Shop"
-          WHERE domain = ${TEST_SHOP_DOMAIN}
-          FOR UPDATE
-        `;
-        lockObtained = !!row;
+      const deleteShopPromise = deleteShop(connA, TEST_SHOP_DOMAIN).then((result) => {
+        connACommitted = true;
+        return result;
       });
 
-      expect(lockObtained).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
 
-      await conn2.begin(async (tx2) => {
-        const [row] = await tx2<[{ id: string }?]>`
-          SELECT id FROM "Shop"
-          WHERE domain = ${TEST_SHOP_DOMAIN}
-          FOR UPDATE
-        `;
-        expect(row).toBeDefined();
-      });
+      const helperPromise = markUninstalledAndDeleteSessions(connB, TEST_SHOP_DOMAIN);
+
+      const timeoutPromise = new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), LOCK_TIMEOUT_MS)
+      );
+
+      const raceResult = await Promise.race([
+        helperPromise.then(() => "completed" as const),
+        timeoutPromise,
+      ]);
+
+      expect(raceResult).toBe("timeout");
+
+      const deleteResult = await deleteShopPromise;
+      expect(deleteResult.deleted).toBe(true);
+      expect(connACommitted).toBe(true);
+
+      const helperResult = await helperPromise;
+      expect(helperResult.shopFound).toBe(false);
+      expect(helperResult.sessionsDeleted).toBe(0);
+
+      const shops = await sql<{ domain: string }[]>`
+        SELECT domain FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
+      `;
+      expect(shops.length).toBe(0);
     } finally {
-      await conn1.end();
-      await conn2.end();
+      await connA.end();
+      await connB.end();
     }
   });
 
