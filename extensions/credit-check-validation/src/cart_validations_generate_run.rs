@@ -1177,11 +1177,6 @@ mod tests {
     // Tests exactly-at-limit, one paisa over, and multiple invoices summed
     // =========================================================================
 
-    #[allow(dead_code)]
-    fn pm_gid(n: u64) -> String {
-        format!("gid://shopify/PaymentCustomizationPaymentMethod/{}", n)
-    }
-
     fn make_validation_input_runtime(
         cart_amount: &str,
         currency: &str,

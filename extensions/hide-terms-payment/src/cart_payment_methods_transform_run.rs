@@ -1363,16 +1363,6 @@ mod tests {
         format!("gid://shopify/PaymentCustomizationPaymentMethod/{}", n)
     }
 
-    #[allow(dead_code)]
-    fn company_location_gid(n: u64) -> String {
-        format!("gid://shopify/CompanyLocation/{}", n)
-    }
-
-    #[allow(dead_code)]
-    fn customer_gid(n: u64) -> String {
-        format!("gid://shopify/Customer/{}", n)
-    }
-
     fn make_b2b_input_runtime_ids(
         metafield_json: Option<&str>,
         payment_method_ids: &[(u64, &str)],
@@ -1466,12 +1456,12 @@ mod tests {
     }
 
     #[test]
-    fn test_bypass_buyer_sees_all_methods() {
-        let bypass_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "99000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+    fn test_hold_false_shows_all_methods_even_when_overlimit() {
+        let overlimit_not_held = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "99000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let pms = &[(301, "Net Terms"), (302, "Pay Later"), (303, "COD")];
-        let input = make_b2b_input_runtime_ids(Some(bypass_metafield), pms);
+        let input = make_b2b_input_runtime_ids(Some(overlimit_not_held), pms);
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Bypass buyer (hold=false in metafield) should see all methods");
+        assert!(result.operations.is_empty(), "hold=false shows all methods regardless of exposure vs limit");
     }
 
     #[test]
