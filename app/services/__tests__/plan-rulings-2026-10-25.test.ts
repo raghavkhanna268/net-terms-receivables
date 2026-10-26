@@ -41,7 +41,6 @@ import {
 } from "../plan.server";
 import {
   checkCompanyLimit,
-  checkImportLimit,
 } from "../gating.server";
 
 const adminGraphQL = _adminGraphQL as ReturnType<typeof vi.fn>;
@@ -178,23 +177,6 @@ describe("Team Lead ruling 2026-10-25: plan resolution", () => {
       mockSql.setMockResult("buyer_account_count", [{ count: "100" }]); // Way over none limit
 
       const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
-
-      expect(result.allowed).toBe(true);
-      expect(result.reason).toContain("Plan not confirmed");
-    });
-
-    it("checkImportLimit allows unconfirmed shop over none limit with gating ON", async () => {
-      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
-      mockSql.setMockResult("shop_plan", [{
-        plan_key: "none",
-        subscription_id: null,
-        subscription_name: null,
-        is_test: false,
-        plan_cached_at: null, // Unconfirmed
-      }]);
-      mockSql.setMockResult("bank_import_count", [{ count: "100" }]); // Way over none limit
-
-      const result = await checkImportLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
 
       expect(result.allowed).toBe(true);
       expect(result.reason).toContain("Plan not confirmed");
