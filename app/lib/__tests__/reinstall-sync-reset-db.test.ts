@@ -229,11 +229,12 @@ describeWithDb("reinstall sync reset (DB-backed)", () => {
         const { saveBulkOperationProgress } = await import(
           "~/services/sync/bulk-jsonl-processor.server"
         );
+        // Pass a dummy lease token - the update should fail because closed_at IS NOT NULL
         const { rowUpdated } = await saveBulkOperationProgress(
           sql2,
           bulkOpId,
           1000,
-          new Date()
+          "stale-processor-token"
         );
         expect(rowUpdated).toBe(false);
 
@@ -267,7 +268,8 @@ describeWithDb("reinstall sync reset (DB-backed)", () => {
       const { resetBulkOperationFailureCount } = await import(
         "~/services/sync/bulk-operations.server"
       );
-      await resetBulkOperationFailureCount(sql, bulkOpId);
+      // Pass a dummy lease token - the update should fail because closed_at IS NOT NULL
+      await resetBulkOperationFailureCount(sql, bulkOpId, "stale-processor-token");
 
       const [op] = await sql<{ failure_count: number }[]>`
         SELECT failure_count FROM s6_bulk_operations
