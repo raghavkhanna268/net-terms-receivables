@@ -263,7 +263,7 @@ export const loader = async (_args: LoaderFunctionArgs) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Privacy Policy — Net Terms Receivables</title>
+  <title>Privacy Policy — Termwise: Net Terms & Credit</title>
   <style>${CSS}</style>
 </head>
 <body>
