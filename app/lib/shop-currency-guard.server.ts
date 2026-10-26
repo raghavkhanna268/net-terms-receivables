@@ -5,7 +5,7 @@
  * existing financial data. Used by:
  * - shop-currency-recovery.server.ts (on /app and /app/onboarding load)
  * - after-auth.server.ts (on install/reinstall/re-auth)
- * - Future: shop/update webhook (#349)
+ * - webhooks.shop.update.tsx (on shop/update webhook, #349)
  *
  * The guard blocks ANY flip to INR when financial rows exist, including:
  * - Known non-INR currencies (USD, EUR, GBP, etc.)

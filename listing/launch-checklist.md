@@ -1,4 +1,4 @@
-# Launch Checklist — Net Terms Receivables
+# Launch Checklist — Termwise: Net Terms & Credit
 
 > **Status:** Pre-launch checklist for App Store review and production readiness.
 > Items marked ⚠️ are blocking. Items marked **TBD** require decisions.

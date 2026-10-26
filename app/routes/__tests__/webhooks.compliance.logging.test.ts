@@ -179,27 +179,29 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
     // 3. DELETE s6_bulk_operations
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 4. DELETE order_outstanding_missing
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-    // 5. DELETE s10b_customer_pii_fallback
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 6. DELETE pgmq.q_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-    // 7. DELETE pgmq.q_s6_bulk
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-    // 8. DELETE pgmq.a_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 9. DELETE pgmq.a_s6_bulk
+    // 4. DELETE s6_reconcile_stage_claims
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-    // 10. DELETE s6_dead_letter
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 11. DELETE s6_processed_webhooks (reconcile prefix)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-    // 12. DELETE s6_processed_webhooks (receipts join)
+    // 5. DELETE order_outstanding_missing
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-    // 13. DELETE webhook_receipts
+    // 6. DELETE s10b_customer_pii_fallback
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+    // 7. DELETE pgmq.q_s6_sync
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
+    // 8. DELETE pgmq.q_s6_bulk
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+    // 9. DELETE pgmq.a_s6_sync
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+    // 10. DELETE pgmq.a_s6_bulk
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+    // 11. DELETE s6_dead_letter
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+    // 12. DELETE s6_processed_webhooks (reconcile prefix)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+    // 13. DELETE s6_processed_webhooks (receipts join)
+    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+    // 14. DELETE webhook_receipts
     mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
-    // 14. DELETE Shop (returns deleted shop)
+    // 15. DELETE Shop (returns deleted shop)
     mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
 
     const payload = { shop_id: 123, shop_domain: TEST_SHOP };
