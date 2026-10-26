@@ -1,0 +1,124 @@
+# One-off ops (S18): delete the 3 duplicate ReminderRule rows on the main USD
+# dev store, keeping the older copy of each pair.
+#
+# Approved by Raghav 2026-10-26 20:35 IST ("Yes"), scoped by Team Lead to: the
+# USD main dev store (shop_idx 2) only, the NEWER copy (by createdAt, id as
+# tiebreak) of each of the 3 pairs (-3, email), (0, email), (7, email). 3 rows,
+# nothing else. Sizing: read-only prod-readonly-query run 40344367330
+# (s18-reminder-rule-dupes). Remove this workflow in a follow-up PR after the
+# single apply.
+#
+# SAFETY:
+#   - Manual trigger only (workflow_dispatch), main branch only
+#   - The only input is dry_run (boolean, default true). No ids, GIDs or
+#     domains are inputs; the shop and the rows are found in SQL
+#   - Shop = the ALLOWED_DEV_STORE secret (validated, masked, never printed).
+#     Fails closed if the secret is missing/invalid, there is no Shop row, the
+#     currency is not USD or the shop's shop_idx is not 2
+#   - dry_run=true: session default_transaction_read_only=on and
+#     BEGIN TRANSACTION READ ONLY ... ROLLBACK. Fails unless target_rows=3,
+#     target_log_rows=0 and kept_rows=3 (and groups=3)
+#   - dry_run=false: one transaction that recomputes every assertion under
+#     FOR UPDATE locks, deletes only those rows (NOT EXISTS ReminderLog), and
+#     asserts deleted=3 and 0 duplicate groups left on the shop, else RAISE +
+#     rollback. The only DELETE is FROM "ReminderRule"
+#   - Output: counts, booleans, shop_idx and refuse codes only. psql stderr
+#     goes through scripts/ci/psql-redacted.sh
+#   - No GitHub Environment: the repo has none for prod DB writes (only
+#     shopify-release, which this must never use)
+#
+# Dispatch:
+#   gh workflow run ops-s18-reminder-rule-dedupe.yml --ref main                 (dry run)
+#   gh workflow run ops-s18-reminder-rule-dedupe.yml --ref main -f dry_run=false (apply)
+
+name: Ops S18 ReminderRule Dedupe
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (read-only, ROLLBACK). Set false to delete the 3 newer duplicate rules"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-s18-reminder-rule-dedupe
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: ReminderRule dedupe (dry_run=${{ inputs.dry_run }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          case "$INPUT_DRY_RUN" in
+            true|false) ;;
+            *)
+              echo "::error::dry_run must be true or false"
+              exit 1
+              ;;
+          esac
+          echo "dry_run=$INPUT_DRY_RUN"
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install psql
+        run: |
+          set -euo pipefail
+          if ! command -v psql &> /dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+
+      - name: Run guarded dedupe
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secret, so the env header prints *** (#190 F1: never committed).
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+        run: |
+          set -euo pipefail
+          # Fail closed: no secret, no run. Validate before masking so a
+          # multi-line value cannot slip past ::add-mask::.
+          if [ -z "${ALLOWED_DEV_STORE:-}" ]; then
+            echo "::error::ALLOWED_DEV_STORE secret is not set"
+            exit 1
+          fi
+          if [[ ! "$ALLOWED_DEV_STORE" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+            echo "::error::ALLOWED_DEV_STORE secret is not a valid *.myshopify.com domain"
+            exit 1
+          fi
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret is not set"
+            exit 1
+          fi
+          if [ "$INPUT_DRY_RUN" = "false" ]; then
+            APPLY=true
+          else
+            APPLY=false
+            # Belt and braces: the session itself is read-only in a dry run.
+            export PGOPTIONS="-c default_transaction_read_only=on"
+          fi
+          echo "apply=$APPLY"
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          rc=0
+          psql -X -q -v ON_ERROR_STOP=1 \
+            -v "shop=${ALLOWED_DEV_STORE}" -v "apply=${APPLY}" \
+            -f scripts/ops/s18-reminder-rule-dedupe.sql "$DATABASE_URL" || rc=$?
+          echo "exit_code=$rc"
+          exit "$rc"
