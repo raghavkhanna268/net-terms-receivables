@@ -24,6 +24,19 @@ vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
 
+// Mock markUninstalledAndDeleteSessions for uninstall webhook tests
+const mockMarkUninstalledAndDeleteSessions = vi.fn().mockResolvedValue({ shopFound: true, sessionsDeleted: 1 });
+vi.mock("~/services/compliance", () => ({
+  markUninstalledAndDeleteSessions: (...args: unknown[]) => mockMarkUninstalledAndDeleteSessions(...args),
+  deleteProcessedWebhooksViaReceipts: vi.fn().mockResolvedValue(0),
+  deleteShop: vi.fn().mockResolvedValue({ deleted: true, shopId: "shop-123", skippedReinstalled: false, sessionsDeleted: 0, refetchNullPurged: 0, bulkOperationsPurged: 0, reconcileClaimsPurged: 0, orderGapPurged: 0, piiFallbackPurged: 0, pgmqSyncQueuePurged: 0, pgmqBulkQueuePurged: 0, pgmqSyncArchivePurged: 0, pgmqBulkArchivePurged: 0, deadLetterPurged: 0, processedWebhooksPurged: 0, webhookReceiptsPurged: 0 }),
+  purgePgmqMessages: vi.fn().mockResolvedValue({ purged: false, reason: "mocked" }),
+  redactCustomer: vi.fn().mockResolvedValue({ taggedCustomersDeleted: 0, draftOrdersDeleted: 0, dataRequestsDeleted: 0, payerAliasesDeleted: 0, buyerAccountAnonymized: false, paymentsRedacted: 0, b2bMainContactsRedacted: 0 }),
+  generateCustomerDataExport: vi.fn().mockResolvedValue({ customerGid: "", requestId: "", requestedAt: "", data: {} }),
+  persistDataRequest: vi.fn().mockResolvedValue({ id: "", alreadyExists: false }),
+  sendDataRequestNotification: vi.fn().mockResolvedValue({ sent: false }),
+}));
+
 /**
  * Tests that non-document routes (webhooks, loaders, actions) receive
  * session storage from the Worker entry's loadContext, NOT from module imports.
@@ -122,10 +135,7 @@ describe("Route context storage verification", () => {
   });
 
   describe("webhooks.app.uninstalled route", () => {
-    it("uses sessionStorage.deleteAllForShop (bypasses 25-session limit)", async () => {
-      const sessionStorage = createMockSessionStorage();
-      sessionStorage.deleteAllForShop.mockResolvedValue(5);
-
+    it("calls markUninstalledAndDeleteSessions with shop domain", async () => {
       mockVerifyWebhook.mockResolvedValue({
         shop: "test-uninstall.myshopify.com",
         topic: "app/uninstalled",
@@ -135,24 +145,23 @@ describe("Route context storage verification", () => {
         rawBody: new ArrayBuffer(0),
       });
 
-      const args = createMockArgs({ sessionStorage });
+      mockMarkUninstalledAndDeleteSessions.mockResolvedValueOnce({ shopFound: true, sessionsDeleted: 5 });
+
+      const args = createMockArgs({});
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
       );
       await action(args);
 
-      expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(
+      expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledTimes(1);
+      expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledWith(
+        expect.anything(),
         "test-uninstall.myshopify.com"
       );
     });
 
-    it("uses context.sessionStorage, not a module-level import", async () => {
-      const storage1 = createMockSessionStorage();
-      const storage2 = createMockSessionStorage();
-      storage1.deleteAllForShop.mockResolvedValue(3);
-      storage2.deleteAllForShop.mockResolvedValue(7);
-
+    it("calls markUninstalledAndDeleteSessions once per shop with correct domain", async () => {
       mockVerifyWebhook
         .mockResolvedValueOnce({
           shop: "shop1.myshopify.com",
@@ -171,8 +180,12 @@ describe("Route context storage verification", () => {
           rawBody: new ArrayBuffer(0),
         });
 
-      const args1 = createMockArgs({ sessionStorage: storage1 });
-      const args2 = createMockArgs({ sessionStorage: storage2 });
+      mockMarkUninstalledAndDeleteSessions
+        .mockResolvedValueOnce({ shopFound: true, sessionsDeleted: 3 })
+        .mockResolvedValueOnce({ shopFound: true, sessionsDeleted: 7 });
+
+      const args1 = createMockArgs({});
+      const args2 = createMockArgs({});
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
@@ -180,8 +193,15 @@ describe("Route context storage verification", () => {
 
       await Promise.all([action(args1), action(args2)]);
 
-      expect(storage1.deleteAllForShop).toHaveBeenCalledWith("shop1.myshopify.com");
-      expect(storage2.deleteAllForShop).toHaveBeenCalledWith("shop2.myshopify.com");
+      expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledTimes(2);
+      expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledWith(
+        expect.anything(),
+        "shop1.myshopify.com"
+      );
+      expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledWith(
+        expect.anything(),
+        "shop2.myshopify.com"
+      );
     });
   });
 

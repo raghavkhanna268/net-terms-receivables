@@ -63,10 +63,6 @@ function createSignedRequest(
   });
 }
 
-const mockSessionStorage = {
-  deleteAllForShop: vi.fn().mockResolvedValue(0),
-};
-
 const mockTx = vi.fn().mockResolvedValue(Object.assign([], { count: 0 }));
 const mockSql = Object.assign(
   vi.fn().mockResolvedValue([]),
@@ -82,10 +78,10 @@ vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
 
-const mockMarkShopUninstalled = vi.fn().mockResolvedValue(true);
+const mockMarkUninstalledAndDeleteSessions = vi.fn().mockResolvedValue({ shopFound: true, sessionsDeleted: 0 });
 const mockDeleteProcessedWebhooksViaReceipts = vi.fn().mockResolvedValue(0);
 vi.mock("~/services/compliance", () => ({
-  markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
+  markUninstalledAndDeleteSessions: (...args: unknown[]) => mockMarkUninstalledAndDeleteSessions(...args),
   deleteProcessedWebhooksViaReceipts: (...args: unknown[]) =>
     mockDeleteProcessedWebhooksViaReceipts(...args),
 }));
@@ -103,8 +99,6 @@ function createMockActionArgs(request: Request): ActionFunctionArgs {
     params: {},
     context: {
       cloudflare: { env: {}, ctx: {} },
-      shopify: {},
-      sessionStorage: mockSessionStorage,
     },
     url: new URL(request.url),
     pattern: "/webhooks/app/uninstalled",
@@ -234,8 +228,7 @@ describe("webhooks.app.uninstalled unmocked HMAC tests", () => {
 
   describe("happy path with valid HMAC and all headers", () => {
     it("returns 200 and processes uninstall with valid signature", async () => {
-      mockSessionStorage.deleteAllForShop.mockResolvedValue(2);
-      mockMarkShopUninstalled.mockResolvedValue(true);
+      mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 2 });
 
       const payload = { shop_id: 123 };
       const body = JSON.stringify(payload);
@@ -244,14 +237,12 @@ describe("webhooks.app.uninstalled unmocked HMAC tests", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP);
-      expect(mockMarkShopUninstalled).toHaveBeenCalled();
+      expect(mockMarkUninstalledAndDeleteSessions).toHaveBeenCalledWith(mockSql, TEST_SHOP);
       expect(mockEvictShopFromSetupCache).toHaveBeenCalledWith(TEST_SHOP);
     });
 
     it("returns 200 even when no sessions exist (idempotent)", async () => {
-      mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
-      mockMarkShopUninstalled.mockResolvedValue(false);
+      mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: false, sessionsDeleted: 0 });
 
       const payload = { shop_id: 123 };
       const body = JSON.stringify(payload);
@@ -266,7 +257,7 @@ describe("webhooks.app.uninstalled unmocked HMAC tests", () => {
   describe("logs do not contain shop domain", () => {
     it("success path does not log shop domain", async () => {
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-      mockSessionStorage.deleteAllForShop.mockResolvedValue(1);
+      mockMarkUninstalledAndDeleteSessions.mockResolvedValue({ shopFound: true, sessionsDeleted: 1 });
 
       const payload = { shop_id: 123 };
       const body = JSON.stringify(payload);
@@ -284,7 +275,7 @@ describe("webhooks.app.uninstalled unmocked HMAC tests", () => {
 
     it("error path does not log shop domain", async () => {
       const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      mockSessionStorage.deleteAllForShop.mockRejectedValue(new Error("DB error"));
+      mockMarkUninstalledAndDeleteSessions.mockRejectedValue(new Error("DB error"));
 
       const payload = { shop_id: 123 };
       const body = JSON.stringify(payload);
