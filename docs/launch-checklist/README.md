@@ -19,7 +19,8 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 1. **Sentry Setup** — Create account, project, and submit DSN via secure channel. DevOps stores secrets.
 2. **Workers Paid Upgrade** — Raghav upgrades the Cloudflare account ($5/month). DevOps redeploys after.
 3. **`read_all_orders` Request** — Submit in Partner Dashboard. After approval, a separate PR adds the scope.
-4. **Resend (S18 reminders)** — Raghav accepts the Resend DPA and supplies `RESEND_API_KEY` / `RESEND_FROM` via secure channel; DevOps sets them as Worker secrets. Only then may any shop enable reminders.
+4. **Protected customer data request** — Confirm the selected fields are Name and Email only before App Store listing submission; Shopify reviews the PCD request with the listing.
+5. **Resend (S18 reminders)** — Raghav accepts the Resend DPA and supplies `RESEND_API_KEY` / `RESEND_FROM` via secure channel; DevOps sets them as Worker secrets. Only then may any shop enable reminders.
 
 **Standing gate:** `PLAN_GATING_ENFORCED` remains `"false"` everywhere until Raghav decides pricing and the Shopify plans are created. The go comes from Raghav via Wholesale Terms Builder. Enabling it gates new over-limit accounts and skips reminders for gated accounts (holds and aging are unaffected).
 
