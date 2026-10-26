@@ -52,7 +52,7 @@ import { sendViaResend } from "./resend-client.server";
 
 /**
  * Merchant info fetched from Admin GraphQL for Reply-To and email footer.
- * Cached per-run to avoid repeated API calls.
+ * Cached in a module-level TTL cache per isolate (10 min success, 60s failure).
  */
 export interface MerchantInfo {
   /** Shop display name (shop.name from Admin API) */
@@ -155,19 +155,12 @@ function evictStaleEntries(): void {
  *
  * @param shopId - Shop ID for cache key
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
- * @param overrideCache - Optional cache override for testing
  * @returns MerchantInfo with name and contactEmail, or null values on failure
  */
 export async function fetchMerchantInfo(
   shopId: string,
-  shopDomain: string,
-  overrideCache?: Map<string, MerchantInfo>
+  shopDomain: string
 ): Promise<MerchantInfo> {
-  if (overrideCache) {
-    const cached = overrideCache.get(shopId);
-    if (cached) return cached;
-  }
-  
   evictStaleEntries();
   
   const cached = merchantInfoCache.get(shopId);
@@ -182,6 +175,7 @@ export async function fetchMerchantInfo(
   const result: MerchantInfo = { name: null, contactEmail: null };
 
   try {
+    // Dynamic import: static import broke app.settings.reminders.test.ts via transitive imports.
     const { shopifyGraphQLQueue } = await import("./shopify-client.server");
     
     const response = await shopifyGraphQLQueue<{
@@ -194,7 +188,6 @@ export async function fetchMerchantInfo(
         fetchedAt: Date.now(),
         isFailure: true,
       });
-      if (overrideCache) overrideCache.set(shopId, result);
       return result;
     }
 
@@ -207,7 +200,6 @@ export async function fetchMerchantInfo(
       fetchedAt: Date.now(),
       isFailure: false,
     });
-    if (overrideCache) overrideCache.set(shopId, result);
     return result;
   } catch {
     merchantInfoCache.set(shopId, {
@@ -215,7 +207,6 @@ export async function fetchMerchantInfo(
       fetchedAt: Date.now(),
       isFailure: true,
     });
-    if (overrideCache) overrideCache.set(shopId, result);
     return result;
   }
 }
@@ -940,7 +931,7 @@ export async function sendPaymentReminder(
   offsetDays: number,
   timezone: string,
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
-  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot; merchantInfoCache?: Map<string, MerchantInfo> } = {}
+  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1124,7 +1115,7 @@ export async function sendPaymentReminder(
   // Fetch merchant info for Reply-To and footer BEFORE claiming slot
   // Uses module-level in-memory cache with 10min TTL (per isolate)
   // Fail-open: on failure, replyTo is omitted and handle label is used
-  const merchantInfo = await fetchMerchantInfo(shopId, invoice.shopDomain, deps.merchantInfoCache);
+  const merchantInfo = await fetchMerchantInfo(shopId, invoice.shopDomain);
 
   // Phase A: Short transaction to claim slot with per-invoice lock
   // This ensures at most one reminder per invoice per day
@@ -1333,8 +1324,7 @@ export async function sendCatchupReminder(
   _logId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
-  deps: { merchantInfoCache?: Map<string, MerchantInfo> } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1602,7 +1592,7 @@ export async function sendCatchupReminder(
   // Fetch merchant info for Reply-To and footer BEFORE claiming slot
   // Uses module-level in-memory cache with 10min TTL (per isolate)
   // Fail-open: on failure, replyTo is omitted and handle label is used
-  const merchantInfo = await fetchMerchantInfo(shopId, invoice.shopDomain, deps.merchantInfoCache);
+  const merchantInfo = await fetchMerchantInfo(shopId, invoice.shopDomain);
 
   // Phase A: Claim under per-invoice lock (same-day check + claim in one tx)
   // This prevents a same-day new-stage send and catch-up from both going out.
