@@ -48,6 +48,8 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/sync/__tests__/customer.test.ts
  * - app/services/sync/__tests__/order.test.ts
  * - app/services/sync/__tests__/draft-order.test.ts
+ * - app/services/sync/__tests__/draft-order-bulk-db.test.ts
+ * - app/services/sync/__tests__/bulk-empty-result-db.test.ts
  *
  * Route DB tests:
  * - app/routes/__tests__/app.imports.test.ts
@@ -67,6 +69,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - scripts/__tests__/credit-status-metafield-backfill.test.ts
  * - scripts/__tests__/refresh-offline-token.test.ts
  * - scripts/ci/__tests__/backfill-dry-run-preflight.test.ts
+ * - scripts/__tests__/e2e-bank-import.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
@@ -94,10 +97,13 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/processor-backstop-db.test.ts",
   "app/services/drain/__tests__/reconcile-manual-key-db.test.ts",
   "app/services/drain/__tests__/dlq-sanitize-db.test.ts",
+  "app/services/drain/__tests__/dlq-redact-race-db.test.ts",
   "app/services/drain/__tests__/bulk-op-recovery-db.test.ts",
   "app/services/drain/__tests__/s25-exactly-once-db.test.ts",
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
   "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
+  "app/services/drain/__tests__/drain-guard-db.test.ts",
+  "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
@@ -107,6 +113,8 @@ const DB_TEST_PATTERNS = [
   "app/services/sync/__tests__/customer.test.ts",
   "app/services/sync/__tests__/order.test.ts",
   "app/services/sync/__tests__/draft-order.test.ts",
+  "app/services/sync/__tests__/draft-order-bulk-db.test.ts",
+  "app/services/sync/__tests__/bulk-empty-result-db.test.ts",
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
@@ -133,9 +141,14 @@ const DB_TEST_PATTERNS = [
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
   "scripts/__tests__/refresh-offline-token.test.ts",
   "scripts/ci/__tests__/backfill-dry-run-preflight.test.ts",
+  "scripts/ci/__tests__/shop-identity-labels-db.test.ts",
+  "scripts/__tests__/e2e-bank-import.test.ts",
 
   // Reviewer demo DB tests
   "tests/integration/review-csv-matcher-db.test.ts",
+
+  // Confirm-reimport pin DB tests
+  "tests/integration/confirm-reimport-pin-db.test.ts",
 ];
 
 export default defineConfig({

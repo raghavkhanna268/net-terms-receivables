@@ -78,7 +78,8 @@ export interface OnboardingStepInputs {
   tagRuleCount: number;
   validation: ValidationInfo | null;
   paymentCustomization: PaymentCustomizationInfo | null;
-  resendApiKeyConfigured: boolean;
+  /** True only when BOTH RESEND_API_KEY and RESEND_FROM are configured. */
+  emailSendingConfigured: boolean;
   dismissedAt: Date | null;
 }
 
@@ -239,12 +240,13 @@ export function computePaymentCustomizationStep(
 
 /**
  * Compute step 5: Reminder sender configured.
- * Shows as "coming soon" when RESEND_API_KEY is not configured.
+ * Shows as "coming soon" when email sending is not configured.
+ * Requires BOTH RESEND_API_KEY and RESEND_FROM to be set (same check as Reminders service).
  */
 export function computeReminderStep(
-  resendApiKeyConfigured: boolean
+  emailSendingConfigured: boolean
 ): OnboardingStep {
-  if (!resendApiKeyConfigured) {
+  if (!emailSendingConfigured) {
     return {
       id: "reminders",
       title: "Email reminders",
@@ -271,11 +273,12 @@ export function computeOnboardingState(
   inputs: OnboardingStepInputs
 ): OnboardingState {
   const steps: OnboardingStep[] = [
-    computeDefaultTermsStep(inputs.defaultTermsDays),
+    // Re-enable in v1.1 once a default-terms settings route exists
+    // computeDefaultTermsStep(inputs.defaultTermsDays),
     computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),
-    computeReminderStep(inputs.resendApiKeyConfigured),
+    computeReminderStep(inputs.emailSendingConfigured),
   ];
 
   const completedCount = steps.filter(

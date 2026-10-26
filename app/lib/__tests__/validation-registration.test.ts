@@ -39,6 +39,7 @@ describe("validation-registration", () => {
                         },
                         title: "Termwise Credit Check",
                         enabled: true,
+                        blockOnFailure: false,
                       },
                     },
                   ],
@@ -80,6 +81,7 @@ describe("validation-registration", () => {
                           },
                           title: "Old Title",
                           enabled: true,
+                          blockOnFailure: false,
                         },
                       },
                     ],
@@ -113,12 +115,17 @@ describe("validation-registration", () => {
       expect(result.errCode).toBeUndefined();
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
 
+      const queryCall = mockAdmin.graphql.mock.calls[0];
+      expect(queryCall[0]).toContain("blockOnFailure");
+
       const updateCall = mockAdmin.graphql.mock.calls[1];
       expect(updateCall[0]).toContain("validationUpdate");
       expect(updateCall[1]).toEqual({
         variables: {
           id: "gid://shopify/Validation/123",
           title: "Termwise Credit Check",
+          enable: true,
+          blockOnFailure: false,
         },
       });
       expect(safeLogSpy).not.toHaveBeenCalled();
@@ -142,6 +149,7 @@ describe("validation-registration", () => {
                         },
                         title: "Termwise Credit Check",
                         enabled: true,
+                        blockOnFailure: false,
                       },
                     },
                   ],
@@ -182,6 +190,7 @@ describe("validation-registration", () => {
                           },
                           title: "Old Title",
                           enabled: true,
+                          blockOnFailure: false,
                         },
                       },
                     ],
@@ -239,6 +248,7 @@ describe("validation-registration", () => {
                           },
                           title: "Old Title",
                           enabled: true,
+                          blockOnFailure: false,
                         },
                       },
                     ],
@@ -296,6 +306,7 @@ describe("validation-registration", () => {
                           },
                           title: "Old Title",
                           enabled: true,
+                          blockOnFailure: false,
                         },
                       },
                     ],
@@ -346,6 +357,7 @@ describe("validation-registration", () => {
                           },
                           title: "Old Title",
                           enabled: true,
+                          blockOnFailure: false,
                         },
                       },
                     ],
@@ -396,6 +408,7 @@ describe("validation-registration", () => {
                           },
                           title: "Old Title",
                           enabled: true,
+                          blockOnFailure: false,
                         },
                       },
                     ],
@@ -575,6 +588,7 @@ describe("validation-registration", () => {
                           },
                           title: "Other Validation",
                           enabled: true,
+                          blockOnFailure: false,
                         },
                       },
                     ],
@@ -613,6 +627,284 @@ describe("validation-registration", () => {
       expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("T1: rename keeps an enabled rule enabled", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "test-validation-t1",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                          blockOnFailure: false,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validationUpdate: {
+                    validation: {
+                      id: "test-validation-t1",
+                      title: "Termwise Credit Check",
+                    },
+                    userErrors: [],
+                  },
+                },
+              }),
+          }),
+      };
+
+      await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      const queryCall = mockAdmin.graphql.mock.calls[0];
+      expect(queryCall[0]).toContain("blockOnFailure");
+
+      const updateCall = mockAdmin.graphql.mock.calls[1];
+      expect(updateCall[0]).toContain("enable: $enable");
+      expect(updateCall[1]).toEqual({
+        variables: {
+          id: "test-validation-t1",
+          title: "Termwise Credit Check",
+          enable: true,
+          blockOnFailure: false,
+        },
+      });
+    });
+
+    it("T2: rename keeps a merchant-disabled rule disabled", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "test-validation-t2",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: false,
+                          blockOnFailure: false,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validationUpdate: {
+                    validation: {
+                      id: "test-validation-t2",
+                      title: "Termwise Credit Check",
+                    },
+                    userErrors: [],
+                  },
+                },
+              }),
+          }),
+      };
+
+      await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      const updateCall = mockAdmin.graphql.mock.calls[1];
+      expect(updateCall[1]).toEqual({
+        variables: {
+          id: "test-validation-t2",
+          title: "Termwise Credit Check",
+          enable: false,
+          blockOnFailure: false,
+        },
+      });
+    });
+
+    it("T3: rename keeps blockOnFailure: true", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "test-validation-t3",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                          blockOnFailure: true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validationUpdate: {
+                    validation: {
+                      id: "test-validation-t3",
+                      title: "Termwise Credit Check",
+                    },
+                    userErrors: [],
+                  },
+                },
+              }),
+          }),
+      };
+
+      await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      const updateCall = mockAdmin.graphql.mock.calls[1];
+      expect(updateCall[0]).toContain("blockOnFailure: $blockOnFailure");
+      expect(updateCall[1]).toEqual({
+        variables: {
+          id: "test-validation-t3",
+          title: "Termwise Credit Check",
+          enable: true,
+          blockOnFailure: true,
+        },
+      });
+    });
+
+    it("T4: schema guard - when ValidationUpdateInput.enable defaults to false, mutation must set both enable and blockOnFailure", async () => {
+      const fs = await import("fs");
+      const path = await import("path");
+      const schemaPath = path.resolve(
+        import.meta.dirname,
+        "../../../test/fixtures/admin-2026-10.schema.json",
+      );
+      const schemaJson = JSON.parse(fs.readFileSync(schemaPath, "utf-8"));
+
+      const validationUpdateInput = schemaJson.data.__schema.types.find(
+        (t: { name: string }) => t.name === "ValidationUpdateInput",
+      );
+      const enableField = validationUpdateInput.inputFields.find(
+        (f: { name: string }) => f.name === "enable",
+      );
+
+      expect(enableField.defaultValue).toBe("false");
+
+      const { VALIDATION_UPDATE_MUTATION } = await import(
+        "../validation-registration.server"
+      );
+      expect(VALIDATION_UPDATE_MUTATION).toContain("$enable: Boolean!");
+      expect(VALIDATION_UPDATE_MUTATION).toContain("$blockOnFailure: Boolean!");
+      expect(VALIDATION_UPDATE_MUTATION).toContain("enable: $enable");
+      expect(VALIDATION_UPDATE_MUTATION).toContain("blockOnFailure: $blockOnFailure");
+    });
+
+    it("T5: matching title means 0 update calls, create path sends enable: true", async () => {
+      const mockAdminSkip = {
+        graphql: vi.fn().mockResolvedValueOnce({
+          json: () =>
+            Promise.resolve({
+              data: {
+                validations: {
+                  edges: [
+                    {
+                      node: {
+                        id: "test-validation-t5-skip",
+                        shopifyFunction: {
+                          handle: "credit-check-validation",
+                        },
+                        title: "Termwise Credit Check",
+                        enabled: true,
+                        blockOnFailure: false,
+                      },
+                    },
+                  ],
+                },
+              },
+            }),
+        }),
+      };
+
+      const resultSkip = await ensureValidation(
+        mockAdminSkip as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(resultSkip.titleUpdate).toBe("skipped");
+      expect(mockAdminSkip.graphql).toHaveBeenCalledTimes(1);
+
+      const mockAdminCreate = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validationCreate: {
+                    validation: {
+                      id: "test-validation-t5-create",
+                      shopifyFunction: {
+                        handle: "credit-check-validation",
+                      },
+                      title: "Termwise Credit Check",
+                      enabled: true,
+                    },
+                    userErrors: [],
+                  },
+                },
+              }),
+          }),
+      };
+
+      await ensureValidation(
+        mockAdminCreate as Parameters<typeof ensureValidation>[0],
+      );
+
+      const createCall = mockAdminCreate.graphql.mock.calls[1];
+      expect(createCall[0]).toContain("enable: true");
+      expect(createCall[0]).toContain("blockOnFailure: false");
     });
   });
 });

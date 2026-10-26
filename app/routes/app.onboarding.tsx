@@ -46,6 +46,7 @@ import {
 } from "~/lib/initial-sync.server";
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
+import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 
 /**
@@ -53,6 +54,18 @@ import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.serve
  */
 function canStartSync(status: InitialSyncStatus): boolean {
   return status === "not_started" || status === "failed";
+}
+
+/**
+ * Determine if the Initial Sync section should poll for updates.
+ * Only poll when sync is in progress AND currency is supported (INR).
+ * This prevents polling forever on a non-INR shop with an open companies op.
+ */
+export function shouldPollInitialSync(
+  status: InitialSyncStatus,
+  currencySupported: boolean
+): boolean {
+  return status === "in_progress" && currencySupported;
 }
 
 const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
@@ -306,17 +319,17 @@ function computeRegistrationStatus(
 ): RegistrationStatus {
   return {
     validation: {
-      name: "Validation Function",
+      name: "Checkout credit check",
       status: validationError ? "error" : validation ? "ok" : "missing",
       errorCode: validationError ?? undefined,
     },
     paymentCustomization: {
-      name: "Payment Customization",
+      name: "Hide net terms at checkout",
       status: paymentCustomizationError ? "error" : paymentCustomization ? "ok" : "missing",
       errorCode: paymentCustomizationError ?? undefined,
     },
     metafieldDefinitions: {
-      name: "Metafield Definitions",
+      name: "Store data fields",
       status: metafieldStatus.status,
       errorCode: metafieldStatus.errorCode,
     },
@@ -398,7 +411,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const paymentCustomization = paymentCustomizationResult.info;
   const paymentCustomizationError = paymentCustomizationResult.error;
 
-  const resendApiKeyConfigured = Boolean(process.env.RESEND_API_KEY);
+  const emailSendingConfigured = isEmailSendingConfigured();
 
   const inputs: OnboardingStepInputs = {
     shopId: dbData.shopId,
@@ -407,7 +420,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     tagRuleCount: dbData.tagRuleCount,
     validation,
     paymentCustomization,
-    resendApiKeyConfigured,
+    emailSendingConfigured,
     dismissedAt: dbData.dismissedAt,
   };
 
@@ -530,19 +543,19 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         paymentCustomization: RegistrationItem;
         metafieldDefinitions: RegistrationItem;
       } = {
-        validation: { name: "Validation Function", status: currentStatus.validation.status },
-        paymentCustomization: { name: "Payment Customization", status: currentStatus.paymentCustomization.status },
-        metafieldDefinitions: { name: "Metafield Definitions", status: currentStatus.metafieldDefinitions.status },
+        validation: { name: "Checkout credit check", status: currentStatus.validation.status },
+        paymentCustomization: { name: "Hide net terms at checkout", status: currentStatus.paymentCustomization.status },
+        metafieldDefinitions: { name: "Store data fields", status: currentStatus.metafieldDefinitions.status },
       };
 
       if (currentStatus.validation.status !== "ok") {
         try {
           await ensureValidation(admin);
-          results.validation = { name: "Validation Function", status: "ok" };
+          results.validation = { name: "Checkout credit check", status: "ok" };
           safeLog("info", "onboarding.retry_validation_success", { shopHash: hash });
         } catch (e) {
           results.validation = {
-            name: "Validation Function",
+            name: "Checkout credit check",
             status: "error",
             errorCode: toErrorCode(e),
           };
@@ -553,11 +566,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       if (currentStatus.paymentCustomization.status !== "ok") {
         try {
           await ensurePaymentCustomization(admin);
-          results.paymentCustomization = { name: "Payment Customization", status: "ok" };
+          results.paymentCustomization = { name: "Hide net terms at checkout", status: "ok" };
           safeLog("info", "onboarding.retry_payment_customization_success", { shopHash: hash });
         } catch (e) {
           results.paymentCustomization = {
-            name: "Payment Customization",
+            name: "Hide net terms at checkout",
             status: "error",
             errorCode: toErrorCode(e),
           };
@@ -568,11 +581,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       if (currentStatus.metafieldDefinitions.status !== "ok") {
         try {
           await ensureMetafieldDefinitions(admin);
-          results.metafieldDefinitions = { name: "Metafield Definitions", status: "ok" };
+          results.metafieldDefinitions = { name: "Store data fields", status: "ok" };
           safeLog("info", "onboarding.retry_metafield_definitions_success", { shopHash: hash });
         } catch (e) {
           results.metafieldDefinitions = {
-            name: "Metafield Definitions",
+            name: "Store data fields",
             status: "error",
             errorCode: toErrorCode(e),
           };
@@ -640,9 +653,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         shopHash: hash,
         reason: result.reason,
       });
+      const syncReasonCopy: Record<string, string> = {
+        already_queued: "A sync is already running. Refresh the page to check progress.",
+        in_progress: "A sync is already running. Refresh the page to check progress.",
+        unsupported_currency: "Initial sync is available only for stores that use INR.",
+      };
+      const errorMessage = syncReasonCopy[result.reason ?? ""] ?? "Sync could not be started. Try again or contact support.";
       return {
         success: false,
-        error: `Sync ${result.reason?.replace("_", " ")}`,
+        error: errorMessage,
         action: "start_sync",
       };
     }
@@ -752,12 +771,24 @@ function SyncStatusBadge({ status }: { status: InitialSyncStatus }) {
 function InitialSyncSection({
   syncState,
   isStarting,
+  currencySupported,
 }: {
   syncState: InitialSyncState;
   isStarting: boolean;
+  currencySupported: boolean;
 }) {
   const canStart = canStartSync(syncState.status);
   const buttonLabel = syncState.status === "failed" ? "Retry" : "Start sync";
+
+  if (!currencySupported) {
+    return (
+      <s-stack gap="base">
+        <s-paragraph>
+          Initial sync is available once the store currency is INR.
+        </s-paragraph>
+      </s-stack>
+    );
+  }
 
   return (
     <s-stack gap="base">
@@ -850,6 +881,8 @@ export default function OnboardingPage() {
 
   const isRetrying = isSubmitting && navigation.formData?.get("_action") === "retry_registration";
   const isStartingSync = isSubmitting && navigation.formData?.get("_action") === "start_sync";
+  const isDismissing = isSubmitting && navigation.formData?.get("_action") === "dismiss";
+  const isReopening = isSubmitting && navigation.formData?.get("_action") === "reopen";
 
   const currentRegistrationStatus: RegistrationStatus | null =
     actionData?.action === "retry_registration" && actionData.registrationStatus
@@ -860,7 +893,8 @@ export default function OnboardingPage() {
   const currentSyncState: InitialSyncState = { status: loaderSyncStatus };
 
   useEffect(() => {
-    if (loaderSyncStatus === "in_progress") {
+    const shouldPoll = shouldPollInitialSync(loaderSyncStatus, currencySupported ?? false);
+    if (shouldPoll) {
       if (!pollIntervalRef.current) {
         pollIntervalRef.current = setInterval(() => {
           if (revalidator.state === "idle") {
@@ -881,7 +915,7 @@ export default function OnboardingPage() {
         pollIntervalRef.current = null;
       }
     };
-  }, [loaderSyncStatus, revalidator]);
+  }, [loaderSyncStatus, revalidator, currencySupported]);
 
   if (error || !state) {
     return (
@@ -971,7 +1005,7 @@ export default function OnboardingPage() {
         <s-section>
           <s-banner tone="info" heading="Done">
             {actionData.action === "dismissed"
-              ? "Setup guide dismissed. You can reopen it from the help menu."
+              ? "Setup guide dismissed. You can reopen it from the Setup Guide in the app menu."
               : "Setup guide reopened."}
           </s-banner>
         </s-section>
@@ -990,7 +1024,7 @@ export default function OnboardingPage() {
         <s-stack gap="base">
           <s-paragraph>
             Complete these steps to set up net terms management for your store.
-            Each step checks your actual configuration - nothing is hardcoded.
+            Each step reflects your store&apos;s actual settings.
           </s-paragraph>
 
           <OnboardingChecklist
@@ -1003,16 +1037,16 @@ export default function OnboardingPage() {
             {!isDismissed && !state.isComplete && (
               <Form method="post">
                 <input type="hidden" name="_action" value="dismiss" />
-                <s-button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "Dismissing..." : "Dismiss for now"}
+                <s-button type="submit" disabled={isDismissing}>
+                  {isDismissing ? "Dismissing..." : "Dismiss for now"}
                 </s-button>
               </Form>
             )}
             {isDismissed && (
               <Form method="post">
                 <input type="hidden" name="_action" value="reopen" />
-                <s-button type="submit" variant="primary" disabled={isSubmitting}>
-                  {isSubmitting ? "Reopening..." : "Continue setup"}
+                <s-button type="submit" variant="primary" disabled={isReopening}>
+                  {isReopening ? "Reopening..." : "Continue setup"}
                 </s-button>
               </Form>
             )}
@@ -1025,11 +1059,12 @@ export default function OnboardingPage() {
         <InitialSyncSection
           syncState={currentSyncState}
           isStarting={isStartingSync}
+          currencySupported={currencySupported ?? false}
         />
       </s-section>
 
       {currentRegistrationStatus && (
-        <s-section heading="App Registration &amp; Metafield Definitions">
+        <s-section heading="Checkout connection">
           <RegistrationStatusSection
             status={currentRegistrationStatus}
             isRetrying={isRetrying}
@@ -1056,8 +1091,8 @@ export default function OnboardingPage() {
 
       <s-section slot="aside" heading="Need help?">
         <s-paragraph>
-          Check the documentation in this repository for detailed setup
-          instructions and troubleshooting.
+          <s-link href={SUPPORT_EMAIL_MAILTO}>Contact support</s-link> for setup
+          assistance and troubleshooting.
         </s-paragraph>
       </s-section>
     </s-page>

@@ -157,16 +157,48 @@ describe("onboarding-steps", () => {
   });
 
   describe("computeReminderStep", () => {
-    it("returns coming_soon when RESEND_API_KEY is not configured", () => {
+    it("returns coming_soon when email sending is not configured", () => {
       const step = computeReminderStep(false);
       expect(step.status).toBe("coming_soon");
       expect(step.helpText).toContain("will be available");
     });
 
-    it("returns complete when RESEND_API_KEY is configured", () => {
+    it("returns complete when email sending is configured (both key and sender)", () => {
       const step = computeReminderStep(true);
       expect(step.status).toBe("complete");
       expect(step.helpText).toContain("configured and ready");
+    });
+  });
+
+  describe("computeReminderStep with isEmailSendingConfigured", () => {
+    it("step is not-ready when only API key is set (sender missing)", async () => {
+      const { isEmailSendingConfigured } = await import("../email-sender-config.server");
+      const configured = isEmailSendingConfigured({
+        RESEND_API_KEY: "re_fake_key_for_test_only_12345",
+        RESEND_FROM: undefined,
+      });
+      const step = computeReminderStep(configured);
+      expect(step.status).toBe("coming_soon");
+    });
+
+    it("step is not-ready when only sender is set (API key missing)", async () => {
+      const { isEmailSendingConfigured } = await import("../email-sender-config.server");
+      const configured = isEmailSendingConfigured({
+        RESEND_API_KEY: undefined,
+        RESEND_FROM: "noreply@example.com",
+      });
+      const step = computeReminderStep(configured);
+      expect(step.status).toBe("coming_soon");
+    });
+
+    it("step is ready when both API key and sender are set", async () => {
+      const { isEmailSendingConfigured } = await import("../email-sender-config.server");
+      const configured = isEmailSendingConfigured({
+        RESEND_API_KEY: "re_fake_key_for_test_only_12345",
+        RESEND_FROM: "noreply@example.com",
+      });
+      const step = computeReminderStep(configured);
+      expect(step.status).toBe("complete");
     });
   });
 
@@ -178,14 +210,14 @@ describe("onboarding-steps", () => {
       tagRuleCount: 0,
       validation: null,
       paymentCustomization: null,
-      resendApiKeyConfigured: false,
+      emailSendingConfigured: false,
       dismissedAt: null,
     };
 
     it("returns incomplete state when no steps are done", () => {
       const state = computeOnboardingState(baseInputs);
       expect(state.isComplete).toBe(false);
-      expect(state.steps).toHaveLength(5);
+      expect(state.steps).toHaveLength(4);
     });
 
     it("returns complete state when all required steps are done", () => {
@@ -205,7 +237,7 @@ describe("onboarding-steps", () => {
           enabled: true,
           title: "Termwise Payment Hide",
         },
-        resendApiKeyConfigured: false, // coming_soon doesn't block completion
+        emailSendingConfigured: false, // coming_soon doesn't block completion
       };
 
       const state = computeOnboardingState(inputs);
@@ -215,7 +247,7 @@ describe("onboarding-steps", () => {
     it("counts coming_soon as completed for progress", () => {
       const inputs: OnboardingStepInputs = {
         ...baseInputs,
-        resendApiKeyConfigured: false,
+        emailSendingConfigured: false,
       };
 
       const state = computeOnboardingState(inputs);
@@ -236,13 +268,77 @@ describe("onboarding-steps", () => {
     });
   });
 
+  describe("v1 step list pinning", () => {
+    const freshShopInputs: OnboardingStepInputs = {
+      shopId: "shop-fresh",
+      defaultTermsDays: null,
+      buyerAccountCount: 0,
+      tagRuleCount: 0,
+      validation: null,
+      paymentCustomization: null,
+      emailSendingConfigured: false,
+      dismissedAt: null,
+    };
+
+    it("v1 step list contains exactly 4 steps in order: buyer-setup, checkout-validation, payment-customization, reminders", () => {
+      const state = computeOnboardingState(freshShopInputs);
+      const stepIds = state.steps.map((s) => s.id);
+      expect(stepIds).toEqual([
+        "buyer-setup",
+        "checkout-validation",
+        "payment-customization",
+        "reminders",
+      ]);
+    });
+
+    it("fresh shop yields 1 of 4 completed (reminders is coming_soon)", () => {
+      const state = computeOnboardingState(freshShopInputs);
+      expect(state.completedCount).toBe(1);
+      expect(state.totalCount).toBe(4);
+    });
+
+    it("defaultTermsDays being set does not change the step list or count", () => {
+      const inputsWithTerms: OnboardingStepInputs = {
+        ...freshShopInputs,
+        defaultTermsDays: 30,
+      };
+      const state = computeOnboardingState(inputsWithTerms);
+      const stepIds = state.steps.map((s) => s.id);
+      expect(stepIds).toEqual([
+        "buyer-setup",
+        "checkout-validation",
+        "payment-customization",
+        "reminders",
+      ]);
+      expect(state.completedCount).toBe(1);
+      expect(state.totalCount).toBe(4);
+    });
+
+    it("defaultTermsDays being unset does not change the step list or count", () => {
+      const inputsWithoutTerms: OnboardingStepInputs = {
+        ...freshShopInputs,
+        defaultTermsDays: null,
+      };
+      const state = computeOnboardingState(inputsWithoutTerms);
+      const stepIds = state.steps.map((s) => s.id);
+      expect(stepIds).toEqual([
+        "buyer-setup",
+        "checkout-validation",
+        "payment-customization",
+        "reminders",
+      ]);
+      expect(state.completedCount).toBe(1);
+      expect(state.totalCount).toBe(4);
+    });
+  });
+
   describe("shouldShowOnboarding", () => {
     it("returns false when setup is complete", () => {
       const state = {
         steps: [],
         isComplete: true,
-        completedCount: 5,
-        totalCount: 5,
+        completedCount: 4,
+        totalCount: 4,
         dismissedAt: null,
       };
       expect(shouldShowOnboarding(state)).toBe(false);
@@ -253,7 +349,7 @@ describe("onboarding-steps", () => {
         steps: [],
         isComplete: false,
         completedCount: 2,
-        totalCount: 5,
+        totalCount: 4,
         dismissedAt: new Date(),
       };
       expect(shouldShowOnboarding(state)).toBe(false);
@@ -264,7 +360,7 @@ describe("onboarding-steps", () => {
         steps: [],
         isComplete: false,
         completedCount: 2,
-        totalCount: 5,
+        totalCount: 4,
         dismissedAt: null,
       };
       expect(shouldShowOnboarding(state)).toBe(true);
@@ -290,13 +386,14 @@ describe("onboarding-steps", () => {
           enabled: true,
           title: "Termwise Payment Hide",
         },
-        resendApiKeyConfigured: true,
+        emailSendingConfigured: true,
         dismissedAt: null,
       };
 
       const state = computeOnboardingState(inputs);
       const ids = state.steps.map((s) => s.id);
       const uniqueIds = [...new Set(ids)];
+      expect(uniqueIds).toHaveLength(4);
       expect(uniqueIds).toHaveLength(ids.length);
     });
   });
@@ -310,7 +407,7 @@ describe("onboarding-steps", () => {
         tagRuleCount: 0,
         validation: null,
         paymentCustomization: null,
-        resendApiKeyConfigured: false,
+        emailSendingConfigured: false,
         dismissedAt: null,
       };
 

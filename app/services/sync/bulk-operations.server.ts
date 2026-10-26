@@ -242,9 +242,9 @@ export interface BulkOperationResult {
 
 /**
  * Bulk operation type for tracking.
- * S8 adds "customers" for tagged customer backfill.
+ * S8 adds "customers" for tagged customer backfill and "draft_orders" for draft order reconcile.
  */
-export type BulkOperationType = "companies" | "orders" | "customers";
+export type BulkOperationType = "companies" | "orders" | "customers" | "draft_orders";
 
 /**
  * Origin of a bulk operation.
@@ -253,9 +253,9 @@ export type BulkOperationOrigin = "reconcile" | "webhook" | "manual";
 
 /**
  * Reconcile stage for sequential processing.
- * Sequence: companies → customers → orders (→ draft_orders in PR-B)
+ * Sequence: companies → customers → orders → draft_orders
  */
-export type ReconcileStage = "companies" | "customers" | "orders";
+export type ReconcileStage = "companies" | "customers" | "orders" | "draft_orders";
 
 /**
  * Start a bulk companies export.
@@ -293,6 +293,89 @@ export {
   getBulkCustomersQuery as getCustomersExportMutation,
   type PiiEnv,
 } from "./customer-fields.server";
+
+/**
+ * GraphQL mutation to start a bulk operation for draft orders.
+ *
+ * Filters to draft orders relevant for pending credit exposure:
+ * - open: Draft orders awaiting completion (uncommitted credit exposure)
+ * - invoice_sent: Invoice has been sent, awaiting payment (pending credit)
+ *
+ * Completed draft orders are excluded as they become Orders with their own
+ * invoices. The Invoice is created by the order processor.
+ *
+ * DPDP note: Only order metadata and buyer references are fetched.
+ * No customer PII is requested.
+ */
+export const BULK_DRAFT_ORDERS_QUERY = `
+  mutation BulkDraftOrdersExport {
+    bulkOperationRunQuery(
+      query: """
+      {
+        draftOrders(query: "status:OPEN OR status:INVOICE_SENT") {
+          edges {
+            node {
+              id
+              name
+              createdAt
+              updatedAt
+              status
+              totalPriceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              paymentTerms {
+                id
+                paymentTermsName
+                paymentTermsType
+                dueInDays
+              }
+              purchasingEntity {
+                ... on PurchasingCompany {
+                  company {
+                    id
+                  }
+                  location {
+                    id
+                  }
+                }
+              }
+              customer {
+                id
+              }
+            }
+          }
+        }
+      }
+      """
+    ) {
+      bulkOperation {
+        id
+        status
+        url
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+/**
+ * Start a bulk draft orders export.
+ *
+ * This is meant to be called from reconcile or an admin action.
+ * The actual GraphQL call will be made by the caller with access
+ * to the authenticated session.
+ *
+ * @returns The GraphQL mutation string to execute
+ */
+export function getDraftOrdersExportMutation(): string {
+  return BULK_DRAFT_ORDERS_QUERY;
+}
 
 /**
  * Parse the result of a bulkOperationRunQuery mutation.

@@ -1,5 +1,5 @@
 /**
- * Bank statement parsing for HDFC and ICICI banks.
+ * Bank statement parsing for HDFC, ICICI, SBI, and Axis banks.
  * Browser-safe module with no Node-only APIs.
  *
  * Part of S14/S15: Net Terms Receivables bank statement parsing.
@@ -55,13 +55,27 @@ export {
 export { detectFileType, loadSpreadsheet, getSheetNames } from "./spreadsheet-loader.js";
 
 // Import for main parser
-import type { ParseResult, ParseOptions } from "./types.js";
+import type { BankId, ParseResult, ParseOptions } from "./types.js";
 import { detectFileType, loadSpreadsheet } from "./spreadsheet-loader.js";
 import { detectBank } from "./detection.js";
 import { parseHdfcStatement } from "./parsers/hdfc.js";
 import { parseIciciStatement } from "./parsers/icici.js";
 import { parseSbiStatement } from "./parsers/sbi.js";
 import { parseAxisStatement } from "./parsers/axis.js";
+
+/**
+ * Banks supported by the statement parser.
+ * This is the single source of truth - the parser switch below uses this list.
+ * "UNKNOWN" is excluded as it represents unrecognised statements.
+ */
+export const SUPPORTED_BANKS: readonly Exclude<BankId, "UNKNOWN">[] = [
+  "HDFC",
+  "ICICI",
+  "SBI",
+  "AXIS",
+] as const;
+
+export type SupportedBankId = (typeof SUPPORTED_BANKS)[number];
 
 /**
  * Parse a bank statement file.
