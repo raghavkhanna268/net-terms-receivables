@@ -111,9 +111,9 @@ export default function DataRequestsPage() {
     <s-page heading="Customer Data Requests">
       <s-section heading="GDPR/CCPA Data Requests">
         <s-paragraph>
-          When customers request their data under GDPR or CCPA, Shopify sends a
-          webhook to the app. This page shows pending requests and allows you to
-          download the data exports.
+          When a customer requests their data under GDPR or CCPA, Shopify
+          notifies Termwise and we prepare an export here. This page shows
+          pending requests and allows you to download the data exports.
         </s-paragraph>
 
         {error && (
@@ -140,10 +140,6 @@ export default function DataRequestsPage() {
                   <s-paragraph>
                     <s-text type="strong">Request ID:</s-text>{" "}
                     <s-text>{dr.requestId}</s-text>
-                  </s-paragraph>
-                  <s-paragraph>
-                    <s-text type="strong">Customer:</s-text>{" "}
-                    <s-text>{dr.customerGid}</s-text>
                   </s-paragraph>
                   <s-paragraph>
                     <s-text type="strong">Received:</s-text>{" "}

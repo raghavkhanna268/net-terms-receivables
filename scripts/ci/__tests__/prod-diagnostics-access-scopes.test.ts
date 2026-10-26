@@ -1,9 +1,14 @@
 /**
  * Tests for the read-only access scopes probes in prod-diagnostics.yml:
- * "Access scopes probe" (diagnostics job, shop_idx=2) and
- * "E2E access scopes probe" (e2e_second_shop job, shop_idx=1).
+ * "Access scopes probe" (diagnostics job, shop_kind=main|e2e|unknown),
+ * "E2E access scopes probe" (e2e_second_shop job, shop_kind=e2e|unknown) and
+ * "Reviewer shop probe" (reviewer_shop_probe job, shop_idx=reviewer, from
+ * #466 and left as is; its selection, refusals and currency enum are covered
+ * in prod-diagnostics-reviewer-shop-probe.test.ts).
+ * shop_kind is the identity label (scripts/ci/shop-labels.ts) derived by
+ * comparing the selected shop with the ALLOWED_DEV_STORE / E2E_SHOP secrets.
  *
- * Public-repo safe: each probe prints ONLY shop_idx, a status line,
+ * Public-repo safe: each probe prints ONLY shop_kind, a status line,
  * scopes_count=<int> and has_read_all_orders=<bool>. Never the scope handle
  * list, a shop domain or the access token.
  *
@@ -34,6 +39,7 @@ interface Workflow {
 
 const PLANTED_DOMAIN = "planted-scopes-secret-shop.myshopify.com";
 const PLANTED_ALLOWED = "planted-scopes-allowed-store.myshopify.com";
+const PLANTED_E2E = "planted-scopes-e2e-store.myshopify.com";
 const PLANTED_TOKEN = "shpat_planted_scopes_token_0123456789abcdef";
 const PLANTED_SCOPE = "write_planted_secret_scope_zyxw";
 const SCOPES_QUERY = '{"query":"{ currentAppInstallation { accessScopes { handle } } }"}';
@@ -128,7 +134,7 @@ function visible(stdout: string): string {
 
 function expectSafe(stdout: string) {
   const out = visible(stdout);
-  for (const planted of [PLANTED_DOMAIN, PLANTED_ALLOWED, PLANTED_TOKEN, PLANTED_SCOPE]) {
+  for (const planted of [PLANTED_DOMAIN, PLANTED_ALLOWED, PLANTED_E2E, PLANTED_TOKEN, PLANTED_SCOPE]) {
     expect(out).not.toContain(planted);
   }
   // No handle list: no scope-like handles (read_*/write_*/unauthenticated_*).
@@ -138,7 +144,7 @@ function expectSafe(stdout: string) {
   for (const line of out.trim().split("\n")) {
     if (line === "" || line === "=== Access scopes (read-only) ===" || line.startsWith("::warning::")) continue;
     expect(line).toMatch(
-      /^(shop_idx=(1|2|unknown)|scopes_count=\d+|has_read_all_orders=(true|false)|access_scopes=(ok|skipped_[a-z_]+|error (http_status=\d{3}|parse_failed|error_codes=[A-Z0-9_,]+)))$/
+      /^(shop_kind=(main|e2e|unknown)|shop_idx=reviewer|currency=(INR|USD|NONE|OTHER)|token_expired=(true|false|unknown)|scopes_count=\d+|has_read_all_orders=(true|false)|access_scopes=(ok|skipped_[a-z_]+|error (http_status=\d{3}|parse_failed|error_codes=[A-Z0-9_,]+)))$/
     );
   }
 }
@@ -148,7 +154,7 @@ const CASES = [
     label: "diagnostics job",
     job: "diagnostics",
     stepName: "Access scopes probe",
-    idx: "2",
+    kinds: ["main", "e2e", "unknown"],
     start: "# Access scopes query and summary (counts/booleans only)",
     end: "# End access scopes query and summary",
     env: { SHOP_DOMAIN: PLANTED_DOMAIN },
@@ -157,10 +163,19 @@ const CASES = [
     label: "e2e_second_shop job",
     job: "e2e_second_shop",
     stepName: "E2E access scopes probe",
-    idx: "1",
+    kinds: ["e2e", "unknown"],
     start: "# E2E access scopes query and summary (counts/booleans only)",
     end: "# End E2E access scopes query and summary",
     env: { E2E_SHOP_DOMAIN: PLANTED_DOMAIN },
+  },
+  {
+    label: "reviewer_shop_probe job",
+    job: "reviewer_shop_probe",
+    stepName: "Reviewer shop probe",
+    idx: "reviewer",
+    start: "# Reviewer access scopes query and summary (counts/booleans only)",
+    end: "# End reviewer access scopes query and summary",
+    env: { REVIEWER_SHOP_DOMAIN: PLANTED_DOMAIN },
   },
 ] as const;
 
@@ -209,10 +224,16 @@ describe("prod-diagnostics access scopes probes", () => {
         // Never echoes the handles, the domain or the token.
         const echoes = run.split("\n").filter((l) => /^\s*echo\b/.test(l) && !l.includes("::add-mask::"));
         for (const l of echoes) {
-          expect(l).not.toMatch(/\$\{?(ACCESS_TOKEN|SHOP_DOMAIN|E2E_SHOP_DOMAIN|ALLOWED_DEV_STORE)\b/);
+          expect(l).not.toMatch(/\$\{?(ACCESS_TOKEN|SHOP_DOMAIN|E2E_SHOP_DOMAIN|REVIEWER_SHOP_DOMAIN|ALLOWED_DEV_STORE|E2E_SHOP)\b/);
         }
         expect(run).not.toMatch(/join\(",\s*"\)[^\n]*handle|handle[^\n]*join\(/);
-        expect(run).toContain(`echo "shop_idx=${c.idx}"`);
+        if ("kinds" in c) {
+          for (const k of c.kinds) expect(run).toContain(`echo "shop_kind=${k}"`);
+          expect(run).not.toMatch(/shop_idx/);
+        } else {
+          // #466 reviewer probe: fixed role label, not sort-order numbering
+          expect(run).toContain(`echo "shop_idx=${c.idx}"`);
+        }
       });
 
       it("prints only status, scopes_count and has_read_all_orders; never handles, domain or token", () => {
@@ -287,22 +308,47 @@ describe("prod-diagnostics access scopes probes", () => {
     });
   }
 
-  it("diagnostics probe prints shop_idx=2 only when the selected shop is the allowed dev store", () => {
+  it("diagnostics probe labels the selected shop main / e2e from the secrets, else unknown", () => {
     const run = steps.diagnostics.run ?? "";
-    const START = "# Access scopes shop index";
-    const END = "# End access scopes shop index";
-    const match = runSnippet(run, START, END, {
-      env: { SHOP_DOMAIN: PLANTED_ALLOWED, ALLOWED_DEV_STORE: PLANTED_ALLOWED },
-    });
-    expect(match.stdout.trim()).toBe("shop_idx=2");
-    const other = runSnippet(run, START, END, {
-      env: { SHOP_DOMAIN: PLANTED_DOMAIN, ALLOWED_DEV_STORE: PLANTED_ALLOWED },
-    });
-    expect(other.stdout.trim()).toBe("shop_idx=unknown");
-    const unset = runSnippet(run, START, END, { env: { SHOP_DOMAIN: PLANTED_DOMAIN } });
-    expect(unset.stdout.trim()).toBe("shop_idx=unknown");
-    for (const r of [match, other, unset]) {
+    const START = "# Access scopes shop kind";
+    const END = "# End access scopes shop kind";
+    const both = { ALLOWED_DEV_STORE: PLANTED_ALLOWED, E2E_SHOP: PLANTED_E2E };
+    const cases: [Record<string, string>, string][] = [
+      [{ ...both, SHOP_DOMAIN: PLANTED_ALLOWED }, "shop_kind=main"],
+      [{ ...both, SHOP_DOMAIN: PLANTED_E2E }, "shop_kind=e2e"],
+      [{ ...both, SHOP_DOMAIN: PLANTED_DOMAIN }, "shop_kind=unknown"],
+      // a missing secret never yields a label (fail closed to unknown)
+      [{ ALLOWED_DEV_STORE: PLANTED_ALLOWED, SHOP_DOMAIN: PLANTED_ALLOWED }, "shop_kind=unknown"],
+      [{ E2E_SHOP: PLANTED_E2E, SHOP_DOMAIN: PLANTED_E2E }, "shop_kind=unknown"],
+      [{ SHOP_DOMAIN: PLANTED_DOMAIN }, "shop_kind=unknown"],
+      // both secrets equal: ambiguous, so unknown
+      [{ ALLOWED_DEV_STORE: PLANTED_ALLOWED, E2E_SHOP: PLANTED_ALLOWED, SHOP_DOMAIN: PLANTED_ALLOWED }, "shop_kind=unknown"],
+    ];
+    for (const [env, want] of cases) {
+      const r = runSnippet(run, START, END, { env });
       expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(want);
+      expectSafe(r.stdout);
+    }
+  });
+
+  it("e2e probe labels the selected shop e2e only when it is the E2E_SHOP secret", () => {
+    const run = steps.e2e_second_shop.run ?? "";
+    const START = "# E2E access scopes shop kind";
+    const END = "# End E2E access scopes shop kind";
+    expect(run.indexOf(START)).toBeLessThan(run.indexOf("# E2E access scopes gate"));
+    const cases: [Record<string, string>, string][] = [
+      [{ E2E_SHOP: PLANTED_E2E, ALLOWED_DEV_STORE: PLANTED_ALLOWED, E2E_SHOP_DOMAIN: PLANTED_E2E }, "shop_kind=e2e"],
+      // fallback selection (E2E_SHOP unset): not a known identity
+      [{ ALLOWED_DEV_STORE: PLANTED_ALLOWED, E2E_SHOP_DOMAIN: PLANTED_DOMAIN }, "shop_kind=unknown"],
+      [{ E2E_SHOP: PLANTED_E2E, E2E_SHOP_DOMAIN: PLANTED_E2E }, "shop_kind=unknown"],
+      [{ E2E_SHOP: PLANTED_E2E, ALLOWED_DEV_STORE: PLANTED_ALLOWED, E2E_SHOP_DOMAIN: PLANTED_DOMAIN }, "shop_kind=unknown"],
+      [{ E2E_SHOP: PLANTED_E2E, ALLOWED_DEV_STORE: PLANTED_E2E, E2E_SHOP_DOMAIN: PLANTED_E2E }, "shop_kind=unknown"],
+    ];
+    for (const [env, want] of cases) {
+      const r = runSnippet(run, START, END, { env });
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe(want);
       expectSafe(r.stdout);
     }
   });

@@ -88,6 +88,7 @@ const DB_TEST_PATTERNS = [
   // Service DB tests (*-db.test.ts pattern plus gating.test.ts)
   "app/services/__tests__/*-db.test.ts",
   "app/services/__tests__/gating.test.ts",
+  "app/services/__tests__/billing-plan-state-db.test.ts",
   "app/services/__tests__/reminders-catchup-db.test.ts",
   "app/services/__tests__/reminders-uninstalled-db.test.ts",
   "app/services/__tests__/reminder-optout-db.test.ts",
@@ -103,6 +104,7 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
   "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
   "app/services/drain/__tests__/drain-guard-db.test.ts",
+  "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
@@ -123,6 +125,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
   "app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts",
+  "app/routes/__tests__/webhooks.compliance.customers.test.ts",
 
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",
@@ -140,6 +143,7 @@ const DB_TEST_PATTERNS = [
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
   "scripts/__tests__/refresh-offline-token.test.ts",
   "scripts/ci/__tests__/backfill-dry-run-preflight.test.ts",
+  "scripts/ci/__tests__/shop-identity-labels-db.test.ts",
   "scripts/__tests__/e2e-bank-import.test.ts",
 
   // Reviewer demo DB tests
@@ -147,6 +151,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm-reimport pin DB tests
   "tests/integration/confirm-reimport-pin-db.test.ts",
+
+  // Ingestion paths DB tests
+  "tests/integration/ingestion-paths-db.test.ts",
 ];
 
 export default defineConfig({

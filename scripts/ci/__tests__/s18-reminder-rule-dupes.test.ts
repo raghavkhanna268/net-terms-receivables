@@ -2,11 +2,13 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import { checkSql } from "../check-readonly-columns";
+import { SHOP_LABELS_CTE, stripShopLabelsCte } from "../shop-labels";
 
 /**
  * scripts/readonly/s18-reminder-rule-dupes.sql: counts for the duplicate
- * ReminderRule bug (same shopId, offsetDays, channel), per shop_idx. Must stay
- * read-only, print only counts/enums/booleans/ids (never raw shop or rule ids),
+ * ReminderRule bug (same shopId, offsetDays, channel), per shop_kind identity
+ * label. Must stay read-only, print only counts/enums/booleans (never raw shop
+ * or rule ids, never a domain),
  * select no text columns, and be runnable from prod-readonly-query.yml.
  */
 
@@ -17,6 +19,9 @@ const code = sql
   .split("\n")
   .filter((l) => !l.trimStart().startsWith("--"))
   .join("\n");
+// the canonical shop_labels CTE is the only place that reads s.domain and
+// :'allowed' / :'e2e' (pinned by shop-identity-labels.test.ts)
+const codeNoLabels = stripShopLabelsCte(code);
 const sqlOnly = code
   .split("\n")
   .filter((l) => !/^\\(set ON_ERROR_STOP 1|echo '[^']*')$/.test(l.trim()))
@@ -28,7 +33,7 @@ describe("s18-reminder-rule-dupes.sql", () => {
     const { violations, columns } = checkSql(rel, sql);
     expect(violations).toEqual([]);
     expect(columns).toEqual([
-      { column: "shop_idx", kind: "id", via: "derived" },
+      { column: "shop_kind", kind: "enum", via: "derived" },
       { column: "has_shop", kind: "boolean", via: "derived" },
       { column: "offset_days", kind: "enum", via: "derived" },
       { column: "channel", kind: "enum", via: "derived" },
@@ -46,17 +51,19 @@ describe("s18-reminder-rule-dupes.sql", () => {
     ]);
   });
 
-  it("is read-only, rolls back and uses no psql variables", () => {
+  it("is read-only, rolls back and uses no psql variables outside shop_labels", () => {
     expect(code).toMatch(/BEGIN TRANSACTION READ ONLY;/);
     expect(code.trimEnd()).toMatch(/ROLLBACK;$/);
     expect(sqlOnly).not.toMatch(
       /\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|COPY|CALL|DO|SET|COMMIT|nextval|setval|pgmq)\b/i,
     );
-    // no psql variables (:'x' / :x); the ::TEXT cast is not one
-    expect(code).not.toMatch(/(?<!:):(?!:)['"]?[a-z_]+/i);
+    // no psql variables (:'x' / :x) besides the shop_labels CTE; the ::TEXT
+    // cast is not one
+    expect(code).toContain(SHOP_LABELS_CTE);
+    expect(codeNoLabels).not.toMatch(/(?<!:):(?!:)['"]?[a-z_]+/i);
   });
 
-  it("groups by (shopId, offsetDays, channel) with HAVING COUNT(*) > 1 and ranks shops like s12-hold-coverage", () => {
+  it("groups by (shopId, offsetDays, channel) with HAVING COUNT(*) > 1 and labels shops like s12-hold-coverage", () => {
     const groupBys = code.match(
       /GROUP BY r\."shopId", r\."offsetDays", r\.channel\s+HAVING COUNT\(\*\) > 1/g,
     );
@@ -71,20 +78,23 @@ describe("s18-reminder-rule-dupes.sql", () => {
     expect(code).toMatch(
       /COUNT\(DISTINCT rl\."ruleId"\) AS dup_rules_with_logs/,
     );
-    expect(code).toMatch(/DENSE_RANK\(\) OVER \(ORDER BY s\.id\) AS shop_idx/);
+    expect(code).toContain(`WITH ${SHOP_LABELS_CTE},\ngrp AS (`);
+    expect(code).toMatch(/LEFT JOIN shop_labels sl ON sl\.shop_id = g\.grp_shop/);
+    expect(code).not.toMatch(/shop_idx|DENSE_RANK/);
     const hold = fs.readFileSync(
       path.join(root, "scripts/readonly/s12-hold-coverage.sql"),
       "utf8",
     );
-    expect(hold).toMatch(/DENSE_RANK\(\) OVER \(ORDER BY s\.id\) AS shop_idx/);
+    expect(hold).toContain(SHOP_LABELS_CTE);
+    expect(hold).not.toMatch(/shop_idx|DENSE_RANK/);
   });
 
   it("never prints raw ids or text columns", () => {
-    // the exact output column list is pinned above (shop_idx is the only id);
+    // the exact output column list is pinned above (no id columns at all);
     // the only ::TEXT values are the guarded offset/channel passthroughs
     const { columns } = checkSql(rel, sql);
     expect(columns.filter((c) => c.kind === "id").map((c) => c.column)).toEqual(
-      ["shop_idx"],
+      [],
     );
     expect(code).toMatch(
       /CASE WHEN g\.grp_offset::TEXT ~ '\^-\?\[0-9\]\{1,4\}\$' THEN g\.grp_offset::TEXT END AS offset_days/,
@@ -101,7 +111,7 @@ describe("s18-reminder-rule-dupes.sql", () => {
       "timezone",
       "currency",
     ]) {
-      expect(code).not.toMatch(new RegExp(`\\.${col}\\b`, "i"));
+      expect(codeNoLabels).not.toMatch(new RegExp(`\\.${col}\\b`, "i"));
     }
   });
 
