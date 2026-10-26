@@ -1521,7 +1521,7 @@ describe("onboarding check optimization", () => {
     });
   });
 
-  it("error in onboarding check propagates (not silently caught by Promise.all)", async () => {
+  it("DB error in onboarding check fails open, no redirect", async () => {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT id, currency, timezone FROM")) {
@@ -1538,7 +1538,9 @@ describe("onboarding check optimization", () => {
 
     const { loader } = await import("../app._index");
     const result = await loader(createOnboardingLoaderArgs(false) as never);
-    
+
+    expect(result).not.toBeInstanceOf(Response);
     expect(result.data).toBeDefined();
+    expect(result.data.dashboardData).toBeDefined();
   });
 });
