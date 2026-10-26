@@ -228,7 +228,7 @@ describe("#292 G1: start_sync blocks non-INR and allows after recovery", () => {
   let mockGraphql: ReturnType<typeof vi.fn>;
   let sqlCalls: Array<{ query: string; values: unknown[] }>;
 
-  function createActionArgs(shopCurrency: string): ActionFunctionArgs {
+  function createActionArgs(_shopCurrency: string): ActionFunctionArgs {
     const formData = new FormData();
     formData.set("_action", "start_sync");
 
