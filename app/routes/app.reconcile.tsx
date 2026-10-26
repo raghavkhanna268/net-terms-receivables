@@ -131,7 +131,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   if (!shop) {
     return {
       shopCurrency: "INR",
-      currencySupported: false,
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -1033,7 +1032,6 @@ export default function ReconcilePage() {
   const loaderData = useLoaderData<typeof loader>();
   const {
     shopCurrency,
-    currencySupported,
     payments,
     matches,
     selectedPayment,
@@ -1044,8 +1042,7 @@ export default function ReconcilePage() {
   } = loaderData;
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
-  // G7: Disable actions for non-INR or unknown shops
-  const actionsDisabled = isSubmitting || !currencySupported;
+  const actionsDisabled = isSubmitting;
 
   // #292: When currency not supported, show only the banner
   if ("notSupported" in loaderData && loaderData.notSupported) {
@@ -1062,16 +1059,6 @@ export default function ReconcilePage() {
 
   return (
     <s-page heading="Payment Reconciliation">
-      {/* G7: Currency not supported banner */}
-      {!currencySupported && (
-        <s-section>
-          <s-banner tone="critical" heading="Currency Not Supported">
-            Payment reconciliation is only available for INR stores. Your store
-            currency ({!shopCurrency || shopCurrency === "XXX" ? "unknown" : shopCurrency}) is not supported.
-          </s-banner>
-        </s-section>
-      )}
-
       {error && (
         <s-section>
           <s-banner tone="critical" heading="Error">
