@@ -8,16 +8,16 @@
 
 ## 1. Detection
 
-### 1.1 Sentry Error Monitoring
+### 1.1 Error Monitoring
 
-Sentry is initialised in the Cloudflare Workers entry point via `wrapWithSentry()`:
+The Sentry integration code exists (`workers/app.ts:15`, `app/lib/sentry.ts`) but error monitoring is not enabled in production (no DSN configured), so no events are sent.
 
-- **Initialisation:** `workers/app.ts:16` wraps the worker handler with Sentry
+- **Initialisation:** `workers/app.ts:15` wraps the worker handler with `wrapWithSentry()`
 - **Configuration:** `app/lib/sentry.ts:173-199` configures the Sentry SDK with:
   - `dataCollection` set to restrictive mode (lines 19-31)
   - `beforeSend` / `beforeSendTransaction` scrubbing hooks (lines 140-150)
 
-Sentry captures:
+When enabled, Sentry captures:
 - Uncaught exceptions from request handlers
 - SSR render errors via `handleError` in `app/entry.server.tsx:12-23`
 - Manually captured exceptions via `captureExceptionWithTags` (e.g., `app/entry.server.tsx:22`)
