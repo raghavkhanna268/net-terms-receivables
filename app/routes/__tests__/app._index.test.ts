@@ -788,7 +788,7 @@ describe("S21 over-limit banner using buildOverLimitBannerState helper", () => {
  * T4 Tests: newAccountsPausedBanner loader behavior with flag on/off and usage error.
  */
 describe("T4 newAccountsPausedBanner loader tests", () => {
-  const TEST_SHOP = "t4-banner.myshopify.com";
+  const TEST_SHOP = "test-t4-banner.myshopify.com";
   const TEST_SHOP_ID = "shop-t4-banner";
 
   function createLoaderArgs() {
