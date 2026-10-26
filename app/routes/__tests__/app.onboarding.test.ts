@@ -351,7 +351,7 @@ describe("app.onboarding", () => {
                     node: {
                       id: "gid://shopify/Validation/123",
                       shopifyFunction: { handle: "credit-check-validation" },
-                      title: "Net Terms Credit Check",
+                      title: "Termwise Credit Check",
                       enabled: true,
                     },
                   }],
@@ -369,7 +369,7 @@ describe("app.onboarding", () => {
                     node: {
                       id: "gid://shopify/PaymentCustomization/456",
                       shopifyFunction: { handle: "hide-terms-payment" },
-                      title: "Net Terms Payment Hide",
+                      title: "Termwise Payment Hide",
                       enabled: true,
                     },
                   }],

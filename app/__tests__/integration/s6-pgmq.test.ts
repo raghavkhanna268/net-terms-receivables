@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 
 /**
  * Integration tests for S6 pgmq queue operations.
@@ -37,6 +38,9 @@ describeWithDb("S6 pgmq Queue Operations", () => {
       // Queues may not exist if migration hasn't run
     }
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"test-" + TEST_SUFFIX + "%"}`;
+
+    await assertNoQueueLeftovers(sql, [testShopPattern], "s6-pgmq.test.ts");
+
     await sql.end();
   });
 

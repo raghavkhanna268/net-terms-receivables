@@ -1,10 +1,10 @@
-# App Store Listing — Net Terms Receivables
+# App Store Listing — Termwise: Net Terms & Credit
 
 ---
 
 ## App Name
 
-**Net Terms Receivables**
+**Termwise: Net Terms & Credit**
 
 ---
 
@@ -185,7 +185,7 @@ Write scopes imply read access per [Shopify Access Scopes](https://shopify.dev/d
 
 ### Protected Customer Data
 
-The app accesses **Level 1 + Name + Email** protected customer fields.
+The app accesses **Level 2 (protected customer fields: Name, Email only)**.
 
 | Field | Accessed | Purpose |
 |-------|----------|---------|

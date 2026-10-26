@@ -68,13 +68,10 @@ vi.mock("~/services/compliance", () => ({
 }));
 
 const mockGraphql = vi.fn();
-const mockUnauthenticatedAdmin = vi.fn();
-vi.mock("~/shopify.server", () => ({
-  getShopifyApp: () => ({
-    unauthenticated: {
-      admin: mockUnauthenticatedAdmin,
-    },
-  }),
+const mockAdmin = { graphql: mockGraphql };
+const mockGetOfflineAdminContext = vi.fn();
+vi.mock("~/lib/offline-admin.server", () => ({
+  getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
 }));
 
 function createMockActionArgs(
@@ -102,15 +99,21 @@ describe("webhooks.compliance", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Set required env vars for getOfflineAdminContext and webhook verification
+    process.env = {
+      ...originalEnv,
+      SHOPIFY_API_KEY: "test-api-key",
+      SHOPIFY_API_SECRET: "test-secret",
+    };
     mockDeleteAllForShop.mockResolvedValue(0);
     mockRecordWebhookReceipt.mockResolvedValue(true);
     mockParseTriggeredAt.mockReturnValue(null);
     mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
-    // Mock unauthenticated.admin to return shop email
+    // Mock getOfflineAdminContext to return admin client with shop email
     mockGraphql.mockResolvedValue({
       json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
     });
-    mockUnauthenticatedAdmin.mockResolvedValue({ admin: { graphql: mockGraphql } });
+    mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
     mockDeleteShop.mockResolvedValue({
       deleted: true,
       shopId: "shop-123",
@@ -146,7 +149,6 @@ describe("webhooks.compliance", () => {
     mockPersistDataRequest.mockResolvedValue({ id: "dr-1", alreadyExists: false });
     mockPurgeExpiredDataRequests.mockResolvedValue(0);
     mockSendDataRequestNotification.mockResolvedValue({ sent: false, skippedReason: "no_api_key" });
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
   });
 
   afterEach(() => {
@@ -491,7 +493,12 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockUnauthenticatedAdmin).toHaveBeenCalledWith("test-shop.myshopify.com");
+      expect(mockGetOfflineAdminContext).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-shop.myshopify.com",
+        "test-api-key",
+        "test-secret"
+      );
       expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
         "test-shop.myshopify.com",
         "owner@shop.com",
@@ -532,10 +539,48 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
     });
 
+    it("skips email when getOfflineAdminContext throws (DB/lock error)", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Mock getOfflineAdminContext throwing (DB error, lock error, rethrown unexpected error)
+      mockGetOfflineAdminContext.mockRejectedValueOnce(new Error("DB connection failed"));
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const payload = {
+        shop_domain: "test-shop.myshopify.com",
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-shop.myshopify.com",
+        topic: "customers/data_request",
+        webhookId: "test-webhook",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      // Must return 200 even when getOfflineAdminContext throws
+      expect(response.status).toBe(200);
+      expect(mockPersistDataRequest).toHaveBeenCalled();
+      expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("data_request_email_skipped")
+      );
+      consoleSpy.mockRestore();
+    });
+
     it("skips email when shop email cannot be fetched", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Mock admin API failure
-      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("No session"));
+      mockGetOfflineAdminContext.mockResolvedValueOnce({ success: false, errorCode: "no_session", retryable: false });
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       const payload = {
@@ -1229,7 +1274,7 @@ describe("webhooks.compliance", () => {
 
     it("CUSTOMERS_DATA_REQUEST email skipped (no shop email) path logs no shop domain", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("No session"));
+      mockGetOfflineAdminContext.mockResolvedValueOnce({ success: false, errorCode: "no_session", retryable: false });
 
       const payload = {
         shop_domain: TEST_SHOP,
