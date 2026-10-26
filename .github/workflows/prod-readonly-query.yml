@@ -21,6 +21,7 @@ on:
         type: choice
         options:
           - canary-orders-backstop
+          - g3-shop-config-currency-counts
           - hold-audit-s12
           - offline-session-preflight
           - post-drain-aggregates
