@@ -2064,6 +2064,8 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe("shop_not_found");
       expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
     });
 
     it("COMPANIES_UPDATE with no_session returns shop_not_found when uninstalledAt is set", async () => {
@@ -2101,6 +2103,8 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe("shop_not_found");
       expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
     });
 
     it("COMPANIES_CREATE with no_session returns original error when Shop is installed", async () => {
@@ -2138,6 +2142,139 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe("No session found");
       expect(result.retryable).toBe(false);
+    });
+
+    it("Shop query receives the correct shop domain", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const sqlCalls: unknown[] = [];
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation((...args: unknown[]) => {
+          sqlCalls.push(args);
+          return Promise.resolve([]);
+        }),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const shopDomain = "test-domain-check.myshopify.com";
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: shopDomain,
+        webhookId: "wh-domain-check",
+        resourceGid: "gid://shopify/Company/domain-check",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      await handler!(mockSql as never, message);
+
+      // Verify the Shop query was called with the correct domain
+      expect(mockSql).toHaveBeenCalled();
+      const shopQuery = sqlCalls.find((call) =>
+        JSON.stringify(call).includes("uninstalledAt")
+      );
+      expect(shopQuery).toBeDefined();
+      expect(JSON.stringify(shopQuery)).toContain(shopDomain);
+    });
+
+    it("non-no_session error does NOT trigger Shop check (behaviour unchanged)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "GraphQL query error: schema validation failed",
+        errorCode: "graphql_error",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      const sqlCalls: unknown[] = [];
+      const mockSql = Object.assign(
+        vi.fn().mockImplementation((...args: unknown[]) => {
+          sqlCalls.push(args);
+          return Promise.resolve([]);
+        }),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: "test-graphql-error.myshopify.com",
+        webhookId: "wh-graphql-error",
+        resourceGid: "gid://shopify/Company/graphql-err",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(mockSql as never, message);
+
+      // Should return the original error unchanged
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("GraphQL query error: schema validation failed");
+      expect(result.retryable).toBe(false);
+
+      // Shop query should NOT have been called (only isWebhookProcessed query)
+      const shopQuery = sqlCalls.find((call) =>
+        JSON.stringify(call).includes("uninstalledAt")
+      );
+      expect(shopQuery).toBeUndefined();
+    });
+
+    it("Shop query that throws returns original no_session error (fail-open)", async () => {
+      const mockAdminGraphQL = (await import("../admin-client.server"))
+        .adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockResolvedValueOnce({
+        success: false,
+        error: "No session found",
+        errorCode: "no_session",
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../processor.server");
+      const handler = getSyncHandler("COMPANIES_CREATE");
+
+      const { isWebhookProcessed } = await import("~/services/sync/company.server");
+      const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+      mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+      // Shop query throws an error
+      const mockSql = Object.assign(
+        vi.fn().mockRejectedValue(new Error("Database connection failed")),
+        { json: vi.fn((v: unknown) => v) }
+      );
+
+      const message = {
+        topic: "COMPANIES_CREATE",
+        shop: "test-db-error.myshopify.com",
+        webhookId: "wh-db-error",
+        resourceGid: "gid://shopify/Company/db-err",
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      // When Shop query throws, the error propagates and the handler fails
+      // This is "fail-open": the message stays in queue for retry rather than
+      // being incorrectly labelled as shop_not_found
+      await expect(handler!(mockSql as never, message)).rejects.toThrow(
+        "Database connection failed"
+      );
     });
   });
 
@@ -2177,6 +2314,8 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe("shop_not_found");
       expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
     });
 
     it("COMPANY_LOCATIONS_UPDATE with no_session returns shop_not_found when uninstalledAt is set", async () => {
@@ -2214,6 +2353,8 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toBe("shop_not_found");
       expect(result.errorCode).toBe("shop_not_found");
+      // S1: retryable should not be false (omitted from shop_not_found result)
+      expect(result.retryable).toBeUndefined();
     });
 
     it("COMPANY_LOCATIONS_CREATE with no_session returns original error when Shop is installed", async () => {
@@ -2253,7 +2394,7 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
       expect(result.retryable).toBe(false);
     });
 
-    it("COMPANY_LOCATIONS_DELETE does NOT check Shop row (skip path)", async () => {
+    it("COMPANY_LOCATIONS_DELETE does NOT run Shop query (S2: assert no Shop check)", async () => {
       const { getSyncHandler } = await import("../processor.server");
       const handler = getSyncHandler("COMPANY_LOCATIONS_DELETE");
 
@@ -2271,8 +2412,12 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
         skipReason: "Company location deleted; BuyerAccount preserved for financial history",
       });
 
+      const sqlCalls: unknown[] = [];
       const mockSql = Object.assign(
-        vi.fn().mockResolvedValue([]),
+        vi.fn().mockImplementation((...args: unknown[]) => {
+          sqlCalls.push(args);
+          return Promise.resolve([]);
+        }),
         { json: vi.fn((v: unknown) => v) }
       );
 
@@ -2288,6 +2433,12 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("skipped");
+
+      // S2: Verify NO Shop query ran (no SELECT "uninstalledAt" FROM "Shop")
+      const shopQuery = sqlCalls.find((call) =>
+        JSON.stringify(call).includes("uninstalledAt")
+      );
+      expect(shopQuery).toBeUndefined();
     });
   });
 });
