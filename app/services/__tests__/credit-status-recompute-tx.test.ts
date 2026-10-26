@@ -92,7 +92,7 @@ describe("enqueueCreditStatusRecompute tx handle", () => {
 
     const result = await enqueueCreditStatusRecompute(
       mockSql as never,
-      "missing.myshopify.com",
+      "fake-missing.myshopify.com",
       "buyer-123",
       "invoice_change",
     );
