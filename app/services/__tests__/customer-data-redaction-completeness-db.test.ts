@@ -4,7 +4,7 @@
  * This test verifies that:
  * 1. generateCustomerDataExport includes data from ALL tables that hold customer data
  * 2. redactCustomer clears/anonymizes ALL customer PII across all tables
- * 3. Neither operation leaks PII to logs
+ * 3. Neither operation leaks PII to logs (regression guard)
  * 4. Cross-customer and cross-shop isolation is maintained
  *
  * Uses real database operations against the test DB.
@@ -26,47 +26,45 @@ import {
   generateCustomerDataExport,
   redactCustomer,
 } from "../compliance/compliance.server";
-import { customerGid, orderGid, draftOrderGid } from "../../../tests/helpers/gid";
+import { safeLog } from "~/lib/log.server";
+import { customerGid, orderGid, draftOrderGid, companyGid, companyLocationGid } from "../../../tests/helpers/gid";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 /**
- * PINNED LIST: Tables that hold customer data.
+ * PINNED LIST: Tables whose data generateCustomerDataExport MUST include.
  *
- * This is the source-of-truth list of tables with customer-identifying data.
- * The coverage guard will fail if a new table with a customer FK or customer
- * ID column appears that isn't in this list.
- *
- * Tables linked via FK chain (e.g., Match → Invoice → BuyerAccount → customerId)
- * are included because they contain data attributable to a specific customer.
+ * Each entry has a reason matching the actual code behavior in main.
  */
-const CUSTOMER_DATA_TABLES = [
-  "s8_tagged_customers",
-  "s8_draft_orders",
-  "s22_data_requests",
-  "BuyerAccount",
-  "PayerAlias",
-  "Invoice",
-  "Match",
-  "Payment",
-  "ReminderLog",
-] as const;
+const EXPORT_MUST_CONTAIN: Record<string, string> = {
+  s8_tagged_customers: "taggedCustomer field: email, displayName, tags, tagActive, createdAt",
+  s8_draft_orders: "draftOrders array: draft orders linked via buyer_account_id to customer's BuyerAccount",
+  BuyerAccount: "buyerAccount field: the TAGGED_CUSTOMER account, plus b2bMainContactAccounts for COMPANY accounts where customer is main contact",
+  Invoice: "invoices array: all invoices for the customer's BuyerAccount",
+  Match: "paymentMatches array: match metadata (amount, state) for customer's invoices",
+};
 
 /**
- * PINNED LIST: PII fields that redactCustomer must clear or anonymize.
+ * PINNED LIST: Tables with customer links that are NOT in the export.
  *
- * Based on current product decision and code behavior:
- * - BuyerAccount: name, customerId, mainContactEmail, mainContactName, mainContactCustomerId
- * - s8_tagged_customers: email, display_name
- * - Payment: narration, payerText
- *
- * Name fields are anonymized to generic values.
- * Email fields are cleared to NULL.
- * Customer IDs are modified to mark as redacted.
- * Payment narration is replaced with [REDACTED].
- * PayerText is cleared to NULL.
+ * Each entry has a reason why it's excluded from export but may be touched by redaction.
  */
+const REDACTION_ONLY_OR_NOT_CUSTOMER_DATA: Record<string, string> = {
+  Payment: "Intentionally excluded from export - narration/payerText may contain third-party PII from bank statements; redactCustomer clears them",
+  PayerAlias: "Implementation detail - learned payer keys from matching; not customer data for export; deleted on redaction",
+  ReminderLog: "Operational data - reminder send history linked via Invoice; not customer PII; preserved on redaction",
+  s22_data_requests: "Meta table - tracks data request itself, not customer data to export; deleted on redaction to remove stored export",
+};
+
+/**
+ * PINNED LIST: All tables with customer-identifying data.
+ * Union of EXPORT_MUST_CONTAIN and REDACTION_ONLY_OR_NOT_CUSTOMER_DATA.
+ */
+const CUSTOMER_DATA_TABLES = [
+  ...Object.keys(EXPORT_MUST_CONTAIN),
+  ...Object.keys(REDACTION_ONLY_OR_NOT_CUSTOMER_DATA),
+] as const;
 
 describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness", () => {
   let sql: ReturnType<typeof postgres>;
@@ -104,6 +102,10 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
   const ACCOUNT_B_ID = `acc-b-${TEST_SUFFIX}`;
   const ACCOUNT_C_ID = `acc-c-${TEST_SUFFIX}`;
   const ACCOUNT_D_ID = `acc-d-${TEST_SUFFIX}`;
+  // B2B company account where customer A is the main contact
+  const ACCOUNT_B2B_A_CONTACT_ID = `acc-b2b-a-contact-${TEST_SUFFIX}`;
+  // B2B company account in shop 2 (must stay untouched)
+  const ACCOUNT_B2B_SHOP2_ID = `acc-b2b-shop2-${TEST_SUFFIX}`;
   const IMPORT_1_ID = `import-1-${TEST_SUFFIX}`;
   const IMPORT_2_ID = `import-2-${TEST_SUFFIX}`;
 
@@ -136,7 +138,7 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
         (${IMPORT_2_ID}, ${SHOP_2_ID}, 'test', 'shop2.csv', 10, NOW())
     `;
 
-    // Create BuyerAccounts for all customers
+    // Create BuyerAccounts for tagged customers
     await sql`
       INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "customerId", "createdAt", "updatedAt")
       VALUES
@@ -144,6 +146,36 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
         (${ACCOUNT_B_ID}, ${SHOP_1_ID}, 'TAGGED_CUSTOMER', ${PII.B.name}, ${CUSTOMER_B_GID}, NOW(), NOW()),
         (${ACCOUNT_C_ID}, ${SHOP_2_ID}, 'TAGGED_CUSTOMER', ${PII.C.name}, ${CUSTOMER_C_GID}, NOW(), NOW()),
         (${ACCOUNT_D_ID}, ${SHOP_2_ID}, 'TAGGED_CUSTOMER', ${PII.D.name}, ${CUSTOMER_D_GID}, NOW(), NOW())
+    `;
+
+    // Create B2B company account in shop 1 where customer A is the main contact
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, name, "companyId", "companyLocationId",
+        "mainContactEmail", "mainContactName", "mainContactCustomerId",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${ACCOUNT_B2B_A_CONTACT_ID}, ${SHOP_1_ID}, 'COMPANY', 'Acme Corp Location 1',
+        ${companyGid(999001)}, ${companyLocationGid(999001)},
+        ${PII.A.email}, ${PII.A.name}, ${CUSTOMER_A_GID},
+        NOW(), NOW()
+      )
+    `;
+
+    // Create B2B company account in shop 2 (must stay untouched by shop 1 redaction)
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, name, "companyId", "companyLocationId",
+        "mainContactEmail", "mainContactName", "mainContactCustomerId",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${ACCOUNT_B2B_SHOP2_ID}, ${SHOP_2_ID}, 'COMPANY', 'Shop2 Corp Location 1',
+        ${companyGid(999002)}, ${companyLocationGid(999002)},
+        ${PII.C.email}, ${PII.C.name}, ${CUSTOMER_C_GID},
+        NOW(), NOW()
+      )
     `;
 
     // Create ReminderRules for testing ReminderLogs
@@ -161,7 +193,7 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
     await sql`DELETE FROM "Match" WHERE "shopId" IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM "Payment" WHERE "shopId" IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
-    await sql`DELETE FROM "PayerAlias" WHERE "buyerAccountId" IN (${ACCOUNT_A_ID}, ${ACCOUNT_B_ID}, ${ACCOUNT_C_ID}, ${ACCOUNT_D_ID})`;
+    await sql`DELETE FROM "PayerAlias" WHERE "buyerAccountId" IN (${ACCOUNT_A_ID}, ${ACCOUNT_B_ID}, ${ACCOUNT_C_ID}, ${ACCOUNT_D_ID}, ${ACCOUNT_B2B_A_CONTACT_ID}, ${ACCOUNT_B2B_SHOP2_ID})`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM s22_data_requests WHERE shop_id IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
@@ -178,7 +210,7 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
     await sql`DELETE FROM "Match" WHERE "shopId" IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM "Payment" WHERE "shopId" IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
-    await sql`DELETE FROM "PayerAlias" WHERE "buyerAccountId" IN (${ACCOUNT_A_ID}, ${ACCOUNT_B_ID}, ${ACCOUNT_C_ID}, ${ACCOUNT_D_ID})`;
+    await sql`DELETE FROM "PayerAlias" WHERE "buyerAccountId" IN (${ACCOUNT_A_ID}, ${ACCOUNT_B_ID}, ${ACCOUNT_C_ID}, ${ACCOUNT_D_ID}, ${ACCOUNT_B2B_A_CONTACT_ID}, ${ACCOUNT_B2B_SHOP2_ID})`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
     await sql`DELETE FROM s22_data_requests WHERE shop_id IN (${SHOP_1_ID}, ${SHOP_2_ID})`;
@@ -211,6 +243,22 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
           "mainContactEmail" = NULL, "mainContactName" = NULL, "mainContactCustomerId" = NULL,
           "updatedAt" = NOW()
       WHERE id = ${ACCOUNT_D_ID}
+    `;
+    // Reset B2B account with A as main contact
+    await sql`
+      UPDATE "BuyerAccount"
+      SET name = 'Acme Corp Location 1',
+          "mainContactEmail" = ${PII.A.email}, "mainContactName" = ${PII.A.name}, "mainContactCustomerId" = ${CUSTOMER_A_GID},
+          "updatedAt" = NOW()
+      WHERE id = ${ACCOUNT_B2B_A_CONTACT_ID}
+    `;
+    // Reset B2B account in shop 2
+    await sql`
+      UPDATE "BuyerAccount"
+      SET name = 'Shop2 Corp Location 1',
+          "mainContactEmail" = ${PII.C.email}, "mainContactName" = ${PII.C.name}, "mainContactCustomerId" = ${CUSTOMER_C_GID},
+          "updatedAt" = NOW()
+      WHERE id = ${ACCOUNT_B2B_SHOP2_ID}
     `;
 
     // Spy on console methods
@@ -400,13 +448,66 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
     );
   }
 
+  /**
+   * Capture full-row JSON snapshot of all of B's rows across all tables.
+   */
+  async function snapshotCustomerBRows(): Promise<{
+    account: unknown;
+    tagged: unknown[];
+    invoices: unknown[];
+    payments: unknown[];
+    matches: unknown[];
+  }> {
+    const [account] = await sql`SELECT to_jsonb(t) as row FROM "BuyerAccount" t WHERE id = ${ACCOUNT_B_ID}`;
+    const tagged = await sql`SELECT to_jsonb(t) as row FROM s8_tagged_customers t WHERE shop_id = ${SHOP_1_ID} AND customer_id = ${CUSTOMER_B_GID}`;
+    const invoices = await sql`SELECT to_jsonb(t) as row FROM "Invoice" t WHERE "buyerAccountId" = ${ACCOUNT_B_ID}`;
+    const payments = await sql`SELECT to_jsonb(t) as row FROM "Payment" t WHERE "shopId" = ${SHOP_1_ID} AND id IN (
+      SELECT m."paymentId" FROM "Match" m JOIN "Invoice" i ON m."invoiceId" = i.id WHERE i."buyerAccountId" = ${ACCOUNT_B_ID}
+    )`;
+    const matches = await sql`SELECT to_jsonb(t) as row FROM "Match" t WHERE t."invoiceId" IN (
+      SELECT id FROM "Invoice" WHERE "buyerAccountId" = ${ACCOUNT_B_ID}
+    )`;
+    return {
+      account: account?.row,
+      tagged: tagged.map((r) => r.row),
+      invoices: invoices.map((r) => r.row),
+      payments: payments.map((r) => r.row),
+      matches: matches.map((r) => r.row),
+    };
+  }
+
+  /**
+   * Capture full-row JSON snapshot of all of shop 2's customer-related rows.
+   */
+  async function snapshotShop2Rows(): Promise<{
+    accounts: unknown[];
+    tagged: unknown[];
+    invoices: unknown[];
+    payments: unknown[];
+    matches: unknown[];
+    draftOrders: unknown[];
+    dataRequests: unknown[];
+  }> {
+    const accounts = await sql`SELECT to_jsonb(t) as row FROM "BuyerAccount" t WHERE "shopId" = ${SHOP_2_ID}`;
+    const tagged = await sql`SELECT to_jsonb(t) as row FROM s8_tagged_customers t WHERE shop_id = ${SHOP_2_ID}`;
+    const invoices = await sql`SELECT to_jsonb(t) as row FROM "Invoice" t WHERE "shopId" = ${SHOP_2_ID}`;
+    const payments = await sql`SELECT to_jsonb(t) as row FROM "Payment" t WHERE "shopId" = ${SHOP_2_ID}`;
+    const matches = await sql`SELECT to_jsonb(t) as row FROM "Match" t WHERE "shopId" = ${SHOP_2_ID}`;
+    const draftOrders = await sql`SELECT to_jsonb(t) as row FROM s8_draft_orders t WHERE shop_id = ${SHOP_2_ID}`;
+    const dataRequests = await sql`SELECT to_jsonb(t) as row FROM s22_data_requests t WHERE shop_id = ${SHOP_2_ID}`;
+    return {
+      accounts: accounts.map((r) => r.row),
+      tagged: tagged.map((r) => r.row),
+      invoices: invoices.map((r) => r.row),
+      payments: payments.map((r) => r.row),
+      matches: matches.map((r) => r.row),
+      draftOrders: draftOrders.map((r) => r.row),
+      dataRequests: dataRequests.map((r) => r.row),
+    };
+  }
+
   describe("Coverage Guard", () => {
     it("fails if a new table with customer FK or customer ID column exists that is not in CUSTOMER_DATA_TABLES", async () => {
-      // Query information_schema for tables with:
-      // 1. FK constraints referencing BuyerAccount (which has customerId)
-      // 2. FK constraints referencing s8_tagged_customers
-      // 3. Columns named customer_id, customerId, customer_gid, or similar
-
       // Find tables with FK to BuyerAccount
       const fkToBuyerAccount = await sql<{ table_name: string }[]>`
         SELECT DISTINCT tc.table_name
@@ -461,7 +562,7 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       const uncoveredTables: string[] = [];
 
       for (const table of allCustomerTables) {
-        if (!pinnedSet.has(table as (typeof CUSTOMER_DATA_TABLES)[number])) {
+        if (!pinnedSet.has(table)) {
           uncoveredTables.push(table);
         }
       }
@@ -472,12 +573,25 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
           `Add them to CUSTOMER_DATA_TABLES or confirm they don't need export/redaction.`
       ).toHaveLength(0);
     });
+
+    it("positive control: discovery query finds known customer tables BuyerAccount and s8_tagged_customers", async () => {
+      // This ensures the information_schema queries actually work
+      const tablesWithCustomerCols = await sql<{ table_name: string }[]>`
+        SELECT DISTINCT table_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND column_name IN ('customer_id', 'customerId', 'mainContactCustomerId')
+      `;
+
+      const tableNames = tablesWithCustomerCols.map((r) => r.table_name);
+      expect(tableNames).toContain("BuyerAccount");
+      expect(tableNames).toContain("s8_tagged_customers");
+    });
   });
 
   describe("Case 1: generateCustomerDataExport completeness", () => {
-    it("includes data from EVERY table that holds customer A's data", async () => {
+    it("includes data from EVERY EXPORT_MUST_CONTAIN table with A's seeded rows", async () => {
       const seededA = await seedCustomerAData();
-      await seedCustomerBData();
 
       const requestId = `req-export-${TEST_SUFFIX}`;
       const exportResult = await generateCustomerDataExport(
@@ -487,35 +601,41 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
         requestId
       );
 
-      // Verify export contains data from all customer tables
+      // Verify export contains data from all EXPORT_MUST_CONTAIN tables
       expect(exportResult.customerGid).toBe(CUSTOMER_A_GID);
 
       // s8_tagged_customers
       expect(exportResult.data.taggedCustomer).not.toBeNull();
       expect(exportResult.data.taggedCustomer?.email).toBe(PII.A.email);
       expect(exportResult.data.taggedCustomer?.displayName).toBe(PII.A.name);
+      expect(exportResult.data.taggedCustomer?.tags).toEqual(["net-terms"]);
 
-      // BuyerAccount
+      // BuyerAccount (TAGGED_CUSTOMER account)
       expect(exportResult.data.buyerAccount).not.toBeNull();
+      expect(exportResult.data.buyerAccount?.id).toBe(ACCOUNT_A_ID);
       expect(exportResult.data.buyerAccount?.name).toBe(PII.A.name);
 
+      // BuyerAccount (b2bMainContactAccounts - COMPANY accounts where A is main contact)
+      expect(exportResult.data.b2bMainContactAccounts.length).toBe(1);
+      expect(exportResult.data.b2bMainContactAccounts[0].id).toBe(ACCOUNT_B2B_A_CONTACT_ID);
+      expect(exportResult.data.b2bMainContactAccounts[0].mainContactEmail).toBe(PII.A.email);
+      expect(exportResult.data.b2bMainContactAccounts[0].mainContactName).toBe(PII.A.name);
+      expect(exportResult.data.b2bMainContactAccounts[0].mainContactCustomerId).toBe(CUSTOMER_A_GID);
+
       // s8_draft_orders
-      expect(exportResult.data.draftOrders.length).toBeGreaterThanOrEqual(1);
+      expect(exportResult.data.draftOrders.length).toBe(1);
+      expect(exportResult.data.draftOrders[0].id).toBe(seededA.draftOrderId);
       expect(exportResult.data.draftOrders[0].name).toBe("#D1");
 
       // Invoice
-      expect(exportResult.data.invoices.length).toBeGreaterThanOrEqual(1);
-      expect(exportResult.data.invoices.some((inv) => inv.id === seededA.invoiceId)).toBe(true);
+      expect(exportResult.data.invoices.length).toBe(1);
+      expect(exportResult.data.invoices[0].id).toBe(seededA.invoiceId);
+      expect(exportResult.data.invoices[0].name).toBe("#INV-A1");
 
       // Match (via paymentMatches)
-      expect(exportResult.data.paymentMatches.length).toBeGreaterThanOrEqual(1);
-      expect(exportResult.data.paymentMatches.some((m) => m.id === seededA.matchId)).toBe(true);
-
-      // NOTE: The current export does NOT include:
-      // - Payment narration/payerText (intentionally excluded as it may contain third-party PII)
-      // - ReminderLog (linked via Invoice but not directly customer data)
-      // - PayerAlias (learned payer keys, implementation detail)
-      // These are handled by redaction, not export
+      expect(exportResult.data.paymentMatches.length).toBe(1);
+      expect(exportResult.data.paymentMatches[0].id).toBe(seededA.matchId);
+      expect(exportResult.data.paymentMatches[0].invoiceId).toBe(seededA.invoiceId);
     });
 
     it("export contains NOTHING from customer B (same shop, different customer)", async () => {
@@ -573,27 +693,17 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
     it("clears or anonymizes all PII fields for customer A in every table", async () => {
       const seededA = await seedCustomerAData();
 
-      // Capture B's state BEFORE redaction (for byte-for-byte comparison)
-      const seededB = await seedCustomerBData();
-      const bPaymentBefore = await sql<{ narration: string; payerText: string | null }[]>`
-        SELECT narration, "payerText" FROM "Payment" WHERE id = ${seededB.paymentId}
-      `;
-      const bAccountBefore = await sql<{ name: string; customerId: string }[]>`
-        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_B_ID}
-      `;
-      const bTaggedBefore = await sql<{ email: string | null; display_name: string | null }[]>`
-        SELECT email, display_name FROM s8_tagged_customers WHERE shop_id = ${SHOP_1_ID} AND customer_id = ${CUSTOMER_B_GID}
-      `;
-
       // Perform redaction
       const result = await redactCustomer(sql, SHOP_1_ID, CUSTOMER_A_GID);
 
       // Verify return counts
       expect(result.taggedCustomersDeleted).toBe(1);
       expect(result.buyerAccountAnonymized).toBe(true);
-      expect(result.paymentsRedacted).toBeGreaterThanOrEqual(1);
-      expect(result.payerAliasesDeleted).toBeGreaterThanOrEqual(1);
-      expect(result.dataRequestsDeleted).toBeGreaterThanOrEqual(1);
+      expect(result.paymentsRedacted).toBe(1);
+      expect(result.payerAliasesDeleted).toBe(1);
+      expect(result.dataRequestsDeleted).toBe(1);
+      expect(result.draftOrdersDeleted).toBe(1);
+      expect(result.b2bMainContactsRedacted).toBe(1);
 
       // Verify BuyerAccount anonymized
       const [accountA] = await sql<{ name: string; customerId: string }[]>`
@@ -601,6 +711,19 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       `;
       expect(accountA.name).toBe("Redacted Customer");
       expect(accountA.customerId).toContain("_redacted_");
+
+      // Verify B2B account mainContact fields nulled
+      const [b2bAccount] = await sql<{
+        mainContactEmail: string | null;
+        mainContactName: string | null;
+        mainContactCustomerId: string | null;
+      }[]>`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE id = ${ACCOUNT_B2B_A_CONTACT_ID}
+      `;
+      expect(b2bAccount.mainContactEmail).toBeNull();
+      expect(b2bAccount.mainContactName).toBeNull();
+      expect(b2bAccount.mainContactCustomerId).toBeNull();
 
       // Verify Payment PII redacted
       const [paymentA] = await sql<{ narration: string; payerText: string | null; amount: string; rail: string }[]>`
@@ -648,96 +771,99 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       `;
       expect(matchA).toHaveLength(1);
       expect(matchA[0].amount).toBe("5000.00");
-
-      // B is byte-for-byte untouched
-      const bPaymentAfter = await sql<{ narration: string; payerText: string | null }[]>`
-        SELECT narration, "payerText" FROM "Payment" WHERE id = ${seededB.paymentId}
-      `;
-      expect(bPaymentAfter[0].narration).toBe(bPaymentBefore[0].narration);
-      expect(bPaymentAfter[0].payerText).toBe(bPaymentBefore[0].payerText);
-
-      const bAccountAfter = await sql<{ name: string; customerId: string }[]>`
-        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_B_ID}
-      `;
-      expect(bAccountAfter[0].name).toBe(bAccountBefore[0].name);
-      expect(bAccountAfter[0].customerId).toBe(bAccountBefore[0].customerId);
-
-      const bTaggedAfter = await sql<{ email: string | null; display_name: string | null }[]>`
-        SELECT email, display_name FROM s8_tagged_customers WHERE shop_id = ${SHOP_1_ID} AND customer_id = ${CUSTOMER_B_GID}
-      `;
-      expect(bTaggedAfter).toHaveLength(1);
-      expect(bTaggedAfter[0].email).toBe(bTaggedBefore[0].email);
-      expect(bTaggedAfter[0].display_name).toBe(bTaggedBefore[0].display_name);
     });
 
-    it("shop 2 is completely untouched after redacting customer A in shop 1", async () => {
+    it("customer B is byte-for-byte untouched (full-row snapshots)", async () => {
       await seedCustomerAData();
-      const seededC = await seedCustomerCData();
+      await seedCustomerBData();
 
-      // Capture shop 2 state before
-      const cPaymentBefore = await sql<{ narration: string; payerText: string | null }[]>`
-        SELECT narration, "payerText" FROM "Payment" WHERE id = ${seededC.paymentId}
-      `;
-      const cAccountBefore = await sql<{ name: string; customerId: string }[]>`
-        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_C_ID}
-      `;
+      // Capture B's full-row state BEFORE redaction
+      const bBefore = await snapshotCustomerBRows();
+
+      // Redact A
+      await redactCustomer(sql, SHOP_1_ID, CUSTOMER_A_GID);
+
+      // Capture B's full-row state AFTER redaction
+      const bAfter = await snapshotCustomerBRows();
+
+      // All of B's rows must be byte-for-byte identical
+      expect(bAfter.account).toEqual(bBefore.account);
+      expect(bAfter.tagged).toEqual(bBefore.tagged);
+      expect(bAfter.invoices).toEqual(bBefore.invoices);
+      expect(bAfter.payments).toEqual(bBefore.payments);
+      expect(bAfter.matches).toEqual(bBefore.matches);
+    });
+
+    it("shop 2 is completely untouched (full-row snapshots)", async () => {
+      await seedCustomerAData();
+      await seedCustomerCData();
+
+      // Capture shop 2's full-row state BEFORE redaction
+      const shop2Before = await snapshotShop2Rows();
 
       // Redact A in shop 1
       await redactCustomer(sql, SHOP_1_ID, CUSTOMER_A_GID);
 
-      // Shop 2 unchanged
-      const cPaymentAfter = await sql<{ narration: string; payerText: string | null }[]>`
-        SELECT narration, "payerText" FROM "Payment" WHERE id = ${seededC.paymentId}
-      `;
-      expect(cPaymentAfter[0].narration).toBe(cPaymentBefore[0].narration);
-      expect(cPaymentAfter[0].payerText).toBe(cPaymentBefore[0].payerText);
+      // Capture shop 2's full-row state AFTER redaction
+      const shop2After = await snapshotShop2Rows();
 
-      const cAccountAfter = await sql<{ name: string; customerId: string }[]>`
-        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_C_ID}
-      `;
-      expect(cAccountAfter[0].name).toBe(cAccountBefore[0].name);
-      expect(cAccountAfter[0].customerId).toBe(cAccountBefore[0].customerId);
-
-      const cTaggedAfter = await sql<{ email: string | null }[]>`
-        SELECT email FROM s8_tagged_customers WHERE shop_id = ${SHOP_2_ID} AND customer_id = ${CUSTOMER_C_GID}
-      `;
-      expect(cTaggedAfter).toHaveLength(1);
+      // All of shop 2's rows must be byte-for-byte identical
+      expect(shop2After.accounts).toEqual(shop2Before.accounts);
+      expect(shop2After.tagged).toEqual(shop2Before.tagged);
+      expect(shop2After.invoices).toEqual(shop2Before.invoices);
+      expect(shop2After.payments).toEqual(shop2Before.payments);
+      expect(shop2After.matches).toEqual(shop2Before.matches);
+      expect(shop2After.draftOrders).toEqual(shop2Before.draftOrders);
+      expect(shop2After.dataRequests).toEqual(shop2Before.dataRequests);
     });
 
-    it("second redaction run is idempotent: same end state, no error, no extra rows", async () => {
+    it("second redaction run is idempotent: all counts 0, row counts unchanged", async () => {
       await seedCustomerAData();
 
       // First redaction
       const result1 = await redactCustomer(sql, SHOP_1_ID, CUSTOMER_A_GID);
       expect(result1.buyerAccountAnonymized).toBe(true);
+      expect(result1.taggedCustomersDeleted).toBe(1);
+      expect(result1.draftOrdersDeleted).toBe(1);
+      expect(result1.dataRequestsDeleted).toBe(1);
+      expect(result1.payerAliasesDeleted).toBe(1);
+      expect(result1.paymentsRedacted).toBe(1);
+      expect(result1.b2bMainContactsRedacted).toBe(1);
 
-      // Capture state after first redaction
-      const [accountAfter1] = await sql<{ name: string; customerId: string }[]>`
-        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
-      `;
-      const taggedAfter1 = await sql<{ id: string }[]>`
-        SELECT id FROM s8_tagged_customers WHERE shop_id = ${SHOP_1_ID} AND customer_id = ${CUSTOMER_A_GID}
-      `;
+      // Capture row counts after first redaction
+      const taggedCount1 = await sql`SELECT COUNT(*) as cnt FROM s8_tagged_customers WHERE shop_id = ${SHOP_1_ID}`;
+      const draftCount1 = await sql`SELECT COUNT(*) as cnt FROM s8_draft_orders WHERE shop_id = ${SHOP_1_ID}`;
+      const dataReqCount1 = await sql`SELECT COUNT(*) as cnt FROM s22_data_requests WHERE shop_id = ${SHOP_1_ID}`;
+      const aliasCount1 = await sql`SELECT COUNT(*) as cnt FROM "PayerAlias" WHERE "buyerAccountId" = ${ACCOUNT_A_ID}`;
+      const invoiceCount1 = await sql`SELECT COUNT(*) as cnt FROM "Invoice" WHERE "shopId" = ${SHOP_1_ID}`;
+      const matchCount1 = await sql`SELECT COUNT(*) as cnt FROM "Match" WHERE "shopId" = ${SHOP_1_ID}`;
 
       // Second redaction
       const result2 = await redactCustomer(sql, SHOP_1_ID, CUSTOMER_A_GID);
 
-      // Should report no changes (already redacted)
+      // Should report ALL zeros (already redacted)
       expect(result2.buyerAccountAnonymized).toBe(false);
       expect(result2.taggedCustomersDeleted).toBe(0);
+      expect(result2.draftOrdersDeleted).toBe(0);
+      expect(result2.dataRequestsDeleted).toBe(0);
+      expect(result2.payerAliasesDeleted).toBe(0);
       expect(result2.paymentsRedacted).toBe(0);
+      expect(result2.b2bMainContactsRedacted).toBe(0);
 
-      // State unchanged
-      const [accountAfter2] = await sql<{ name: string; customerId: string }[]>`
-        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
-      `;
-      expect(accountAfter2.name).toBe(accountAfter1.name);
-      expect(accountAfter2.customerId).toBe(accountAfter1.customerId);
+      // Row counts unchanged
+      const taggedCount2 = await sql`SELECT COUNT(*) as cnt FROM s8_tagged_customers WHERE shop_id = ${SHOP_1_ID}`;
+      const draftCount2 = await sql`SELECT COUNT(*) as cnt FROM s8_draft_orders WHERE shop_id = ${SHOP_1_ID}`;
+      const dataReqCount2 = await sql`SELECT COUNT(*) as cnt FROM s22_data_requests WHERE shop_id = ${SHOP_1_ID}`;
+      const aliasCount2 = await sql`SELECT COUNT(*) as cnt FROM "PayerAlias" WHERE "buyerAccountId" = ${ACCOUNT_A_ID}`;
+      const invoiceCount2 = await sql`SELECT COUNT(*) as cnt FROM "Invoice" WHERE "shopId" = ${SHOP_1_ID}`;
+      const matchCount2 = await sql`SELECT COUNT(*) as cnt FROM "Match" WHERE "shopId" = ${SHOP_1_ID}`;
 
-      const taggedAfter2 = await sql<{ id: string }[]>`
-        SELECT id FROM s8_tagged_customers WHERE shop_id = ${SHOP_1_ID} AND customer_id = ${CUSTOMER_A_GID}
-      `;
-      expect(taggedAfter2).toHaveLength(taggedAfter1.length);
+      expect(taggedCount2[0].cnt).toBe(taggedCount1[0].cnt);
+      expect(draftCount2[0].cnt).toBe(draftCount1[0].cnt);
+      expect(dataReqCount2[0].cnt).toBe(dataReqCount1[0].cnt);
+      expect(aliasCount2[0].cnt).toBe(aliasCount1[0].cnt);
+      expect(invoiceCount2[0].cnt).toBe(invoiceCount1[0].cnt);
+      expect(matchCount2[0].cnt).toBe(matchCount1[0].cnt);
     });
 
     it("financial amounts on invoices, payments and matches are retained after redaction", async () => {
@@ -766,8 +892,18 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
     });
   });
 
-  describe("Case 3: No PII in logs", () => {
-    it("generateCustomerDataExport logs contain no PII (names, emails, webhookId)", async () => {
+  describe("Case 3: No PII in logs if logging is added (regression guard)", () => {
+    it("positive control: console spy captures real safeLog output", () => {
+      // Prove the spy works by calling safeLog with an allowlisted code
+      safeLog("info", "test_positive_control", { shopId: "test-shop-id", count: 42 });
+
+      const allOutput = getAllConsoleOutput();
+      expect(allOutput.length).toBeGreaterThan(0);
+      expect(allOutput.some((line) => line.includes("test_positive_control"))).toBe(true);
+      expect(allOutput.some((line) => line.includes("test-shop-id"))).toBe(true);
+    });
+
+    it("generateCustomerDataExport logs contain no PII (names, emails)", async () => {
       await seedCustomerAData();
       await seedCustomerBData();
 
@@ -784,15 +920,11 @@ describeWithDb("Sequential DB: Customer Data Export and Redaction Completeness",
       expect(allOutput).not.toContain(PII.A.email);
       expect(allOutput).not.toContain(PII.B.email);
 
-      // No shop domain (would be redacted)
+      // No shop domain (would be redacted by safeLog)
       expect(allOutput).not.toContain(SHOP_1_DOMAIN);
-
-      // Should only contain allowlisted codes and shopHash
-      // Note: We don't check for specific log codes as the export function
-      // may not log anything, which is fine
     });
 
-    it("redactCustomer logs contain no PII (names, emails, webhookId)", async () => {
+    it("redactCustomer logs contain no PII (names, emails)", async () => {
       await seedCustomerAData();
       await seedCustomerBData();
 
