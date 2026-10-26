@@ -428,8 +428,8 @@ describe("Module-level merchant info cache", () => {
   });
 });
 
-describe("Unsubscribe flow (chained proof)", () => {
-  it("generates and verifies token, simulating opt-out recording", () => {
+describe("Unsubscribe token functions", () => {
+  it("generates and verifies unsubscribe token correctly", () => {
     const shopId = "shop-unsub-test";
     const buyerAccountId = "buyer-unsub-test";
 
@@ -441,43 +441,17 @@ describe("Unsubscribe flow (chained proof)", () => {
     expect(payload).not.toBeNull();
     expect(payload!.shopId).toBe(shopId);
     expect(payload!.buyerAccountId).toBe(buyerAccountId);
-
-    const mockOptOutStore = new Map<string, { shopId: string; buyerAccountId: string; source: string }>();
-
-    const recordOptOut = (s: string, b: string, source: string) => {
-      mockOptOutStore.set(`${s}:${b}`, { shopId: s, buyerAccountId: b, source });
-    };
-
-    recordOptOut(payload!.shopId, payload!.buyerAccountId, "link");
-
-    expect(mockOptOutStore.has(`${shopId}:${buyerAccountId}`)).toBe(true);
-    expect(mockOptOutStore.get(`${shopId}:${buyerAccountId}`)?.source).toBe("link");
-
-    const isOptedOut = (s: string, b: string) => mockOptOutStore.has(`${s}:${b}`);
-    expect(isOptedOut(shopId, buyerAccountId)).toBe(true);
   });
 
-  it("skipped_opted_out path when buyer is opted out", () => {
-    const mockOptOutStore = new Set<string>();
-    mockOptOutStore.add("shop-123:buyer-456");
+  it("returns null for invalid token", () => {
+    const payload = verifyUnsubscribeToken("invalid-token", FAKE_SECRET);
+    expect(payload).toBeNull();
+  });
 
-    const isOptedOut = (shopId: string, buyerAccountId: string) =>
-      mockOptOutStore.has(`${shopId}:${buyerAccountId}`);
-
-    const mockReminderLogs: { shopId: string; ruleId: string; invoiceId: string; status: string }[] = [];
-
-    const recordSkippedOptedOut = (shopId: string, ruleId: string, invoiceId: string) => {
-      mockReminderLogs.push({ shopId, ruleId, invoiceId, status: "skipped_opted_out" });
-    };
-
-    const shouldSend = !isOptedOut("shop-123", "buyer-456");
-    if (!shouldSend) {
-      recordSkippedOptedOut("shop-123", "rule-789", "invoice-001");
-    }
-
-    expect(shouldSend).toBe(false);
-    expect(mockReminderLogs).toHaveLength(1);
-    expect(mockReminderLogs[0].status).toBe("skipped_opted_out");
+  it("returns null for wrong secret", () => {
+    const token = generateUnsubscribeToken("shop-1", "buyer-1", FAKE_SECRET);
+    const payload = verifyUnsubscribeToken(token!, "wrong-secret");
+    expect(payload).toBeNull();
   });
 });
 
@@ -861,6 +835,35 @@ describe("Real sendPaymentReminder path", () => {
     expect(mockShopifyGraphQLQueue).toHaveBeenCalledTimes(1);
     expect(_getMerchantInfoCacheSizeForTests()).toBe(1);
   });
+
+  it("opted-out buyer: skips send, no shopifyGraphQLQueue call, no Resend fetch", async () => {
+    const { sendPaymentReminder } = await import("../reminders.server");
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    mockSql.clearMockResults();
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Test Buyer" }]);
+    mockSql.setMockResult("buyer_opted_out", [{ optedOut: true }]);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-real-test",
+      "inv-real-test",
+      "rule-optout",
+      0,
+      "Asia/Kolkata",
+      validEnv
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toBe("Buyer opted out of reminders");
+
+    expect(mockShopifyGraphQLQueue).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });
 
 describe("Real sendCatchupReminder path", () => {
@@ -1076,5 +1079,36 @@ describe("Real sendCatchupReminder path", () => {
 
     expect(mockShopifyGraphQLQueue).toHaveBeenCalledTimes(1);
     expect(_getMerchantInfoCacheSizeForTests()).toBe(1);
+  });
+
+  it("opted-out buyer: skips send, no shopifyGraphQLQueue call, no Resend fetch", async () => {
+    const { sendCatchupReminder } = await import("../reminders.server");
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    mockSql.clearMockResults();
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Catchup Buyer" }]);
+    mockSql.setMockResult("log_status", [{ status: "delayed", firstCappedAt: new Date("2026-10-25T10:00:00Z") }]);
+    mockSql.setMockResult("buyer_opted_out", [{ optedOut: true }]);
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-catchup-test",
+      "inv-catchup-test",
+      "rule-catchup-optout",
+      "log-catchup-optout",
+      0,
+      "Asia/Kolkata",
+      validEnv
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toBe("Buyer opted out of reminders");
+
+    expect(mockShopifyGraphQLQueue).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
