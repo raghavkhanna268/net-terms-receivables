@@ -1279,8 +1279,10 @@ export async function seedCompanies(state: SeedState): Promise<void> {
     let wasAdopted = false;
 
     // If no externalId match, try adoption via contact email or name
+    // Also try legacy email for migration from .example to @example.com
     if (!existing && !state.dryRun) {
-      const adoptionResult = await findCompanyForAdoption(state, seed);
+      const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+      const adoptionResult = await findCompanyForAdoption(state, seed, legacyEmail);
       
       if (adoptionResult && "ambiguous" in adoptionResult) {
         // Multiple candidates - skip and log
@@ -1687,8 +1689,9 @@ export async function adoptCompany(
 
 /**
  * Try to find an existing company for adoption using fallback matching:
- * 1. First by contact email
- * 2. Then by exact name (only if that company has the seed's contact)
+ * 1. First by contact email (new format)
+ * 2. Then by legacy contact email (if provided, for migration)
+ * 3. Then by exact name (only if that company has the seed's contact)
  * 
  * Returns:
  * - { company, matchType } if exactly one match found
@@ -1697,13 +1700,14 @@ export async function adoptCompany(
  */
 export async function findCompanyForAdoption(
   state: SeedState,
-  seed: { name: string; contact: { email: string } }
+  seed: { name: string; contact: { email: string } },
+  legacyEmail?: string
 ): Promise<
-  | { company: CompanyCandidate; matchType: "email" | "name" }
+  | { company: CompanyCandidate; matchType: "email" | "name" | "legacy_email" }
   | { ambiguous: true; candidates: CompanyCandidate[] }
   | null
 > {
-  // Try contact email first
+  // Try contact email first (new format)
   const emailMatches = await findCompaniesByContactEmail(state, seed.contact.email);
   
   if (emailMatches.length === 1) {
@@ -1714,15 +1718,32 @@ export async function findCompanyForAdoption(
     return { ambiguous: true, candidates: emailMatches };
   }
   
-  // Fall back to name match (only if company has the seed's contact)
+  // Try legacy email if provided (for migration from .example to @example.com)
+  if (legacyEmail) {
+    const legacyMatches = await findCompaniesByContactEmail(state, legacyEmail);
+    
+    if (legacyMatches.length === 1) {
+      return { company: legacyMatches[0], matchType: "legacy_email" };
+    }
+    
+    if (legacyMatches.length > 1) {
+      return { ambiguous: true, candidates: legacyMatches };
+    }
+  }
+  
+  // Fall back to name match (only if company has the seed's contact or legacy email)
   const nameMatches = await findCompaniesByName(state, seed.name);
   
   // P3b: Filter to only companies that have the seed's contact email (check ALL contacts)
+  // Also accept legacy email for migration
   const seedEmailLower = seed.contact.email.toLowerCase();
+  const legacyEmailLower = legacyEmail?.toLowerCase();
   const nameMatchesWithContact = nameMatches.filter(c => {
-    // Check _allContactEmails if available (from name search), otherwise fall back to contactEmail
     const emails = c._allContactEmails ?? (c.contactEmail ? [c.contactEmail] : []);
-    return emails.some(email => email.toLowerCase() === seedEmailLower);
+    return emails.some(email => {
+      const emailLower = email.toLowerCase();
+      return emailLower === seedEmailLower || (legacyEmailLower && emailLower === legacyEmailLower);
+    });
   });
   
   if (nameMatchesWithContact.length === 1) {
@@ -2164,7 +2185,9 @@ export async function createCompanyWithLocations(
     console.log(`    ⚠️  Contact email already taken for ${externalId}, attempting recovery...`);
     
     // Find company by contact email and adopt it
-    const adoptionResult = await findCompanyForAdoption(state, seed);
+    // Also try legacy email for migration from .example to @example.com
+    const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+    const adoptionResult = await findCompanyForAdoption(state, seed, legacyEmail);
     
     if (adoptionResult && "ambiguous" in adoptionResult) {
       console.error(`    ❌ Cannot recover: multiple companies with same contact email`);
@@ -4384,7 +4407,6 @@ export async function main(): Promise<void> {
   console.log(`      Locations:        ${state.createdCount.locations}`);
   console.log(`      Role assignments: ${state.createdCount.roleAssignments}`);
   console.log(`      Orders:           ${state.createdCount.orders}`);
-  console.log(`      Customers:        ${state.createdCount.customers}`);
 
   if (state.updatedCount.customers > 0) {
     console.log("    Updated:");

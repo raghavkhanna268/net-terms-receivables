@@ -17,6 +17,7 @@ import {
   ensureTaggedCustomer,
   seedTaggedCustomerOrders,
   migrateCustomerEmails,
+  findCompanyForAdoption,
   COMPANY_SEEDS,
   REVIEWER_DEMO_COMPANY_SEED,
   TAGGED_CUSTOMER_SEEDS,
@@ -777,6 +778,101 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
     expect(computeExitCode(state)).toBe(0);
   });
 
+  it("customerUpdate input id equals contact customer's id, not company id", async () => {
+    const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
+    const newEmail = seedEmail("company-1");
+    const companyId = "gid://shopify/Company/company-1";
+    const customerId = "gid://shopify/Customer/company-1";
+    let customerUpdateInput: Record<string, unknown> | null = null;
+
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
+      const body = init?.body ?? "";
+
+      if (body.includes("companies(")) {
+        const queryMatch = body.match(/external_id:'([^']+)'/);
+        const searchId = queryMatch?.[1] ?? "";
+        if (searchId === "ntr-seed-company-1") {
+          return createCompanyResponse("company-1", legacyEmail);
+        }
+        return createEmptyCompaniesResponse();
+      }
+
+      if (body.includes("customerUpdate")) {
+        const parsed = JSON.parse(body);
+        customerUpdateInput = parsed.variables?.input;
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              customerUpdate: {
+                customer: { id: customerId, email: newEmail },
+                userErrors: [],
+              },
+            },
+          }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: null }) };
+    });
+
+    await migrateCustomerEmails(state);
+
+    expect(customerUpdateInput).not.toBeNull();
+    expect(customerUpdateInput?.id).toBe(customerId);
+    expect(customerUpdateInput?.id).not.toBe(companyId);
+  });
+
+  it("hand-edited email (not legacy, not new) does not trigger customerUpdate", async () => {
+    const handEditedEmail = "custom-user@company.com";
+    let customerUpdateCalled = false;
+
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
+      const body = init?.body ?? "";
+
+      if (body.includes("companies(")) {
+        const queryMatch = body.match(/external_id:'([^']+)'/);
+        const searchId = queryMatch?.[1] ?? "";
+        if (searchId === "ntr-seed-company-1") {
+          return createCompanyResponse("company-1", handEditedEmail);
+        }
+        return createEmptyCompaniesResponse();
+      }
+
+      if (body.includes("customerUpdate")) {
+        customerUpdateCalled = true;
+      }
+
+      return { ok: true, json: async () => ({ data: null }) };
+    });
+
+    await migrateCustomerEmails(state);
+
+    expect(customerUpdateCalled).toBe(false);
+    expect(state.updatedCount.customers).toBe(0);
+    expect(state.unchangedCount.customers).toBe(0);
+    expect(computeExitCode(state)).toBe(0);
+  });
+
+  it("dry run sends no customerUpdate request", async () => {
+    const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
+    let customerUpdateCalled = false;
+    let anyFetchCalled = false;
+
+    state.dryRun = true;
+
+    globalThis.fetch = vi.fn().mockImplementation(async () => {
+      anyFetchCalled = true;
+      return { ok: true, json: async () => ({ data: null }) };
+    });
+
+    await migrateCustomerEmails(state);
+
+    expect(customerUpdateCalled).toBe(false);
+    expect(anyFetchCalled).toBe(false);
+    expect(state.updatedCount.customers).toBe(0);
+  });
+
   it("second run where customer already has new email makes no mutations, exits 0", async () => {
     const newEmail = seedEmail("company-1");
     let customerUpdateCalled = false;
@@ -887,5 +983,142 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
     expect(allLogOutput).not.toContain("gid://");
 
     logSpy.mockRestore();
+  });
+});
+
+describe("findCompanyForAdoption with legacy email", () => {
+  let state: SeedState;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    state = createEmptyState();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function createMockFetch(options: {
+    customersWithEmail?: Record<string, { id: string; email: string }[]>;
+    companiesWithContacts?: Array<{
+      id: string;
+      name: string;
+      externalId: string | null;
+      contacts: Array<{ customerId: string; email: string }>;
+    }>;
+  }) {
+    return vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
+      const body = init?.body ?? "";
+
+      if (body.includes("customers(")) {
+        const emailMatch = body.match(/email:'([^']+)'/);
+        const searchEmail = emailMatch?.[1] ?? "";
+        const matches = options.customersWithEmail?.[searchEmail] ?? [];
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: matches,
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companies(") && !body.includes("external_id:") && !body.includes("name:")) {
+        const companies = options.companiesWithContacts ?? [];
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: companies.map(c => ({
+                  id: c.id,
+                  name: c.name,
+                  externalId: c.externalId,
+                  contacts: {
+                    edges: c.contacts.map(contact => ({
+                      node: {
+                        customer: { id: contact.customerId, email: contact.email },
+                      },
+                    })),
+                  },
+                })),
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: null }) };
+    });
+  }
+
+  it("finds company by legacy email with matchType legacy_email, no companyCreate called", async () => {
+    const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
+    const newEmail = seedEmail("company-1");
+    let companyCreateCalled = false;
+
+    const baseFetch = createMockFetch({
+      customersWithEmail: {
+        [legacyEmail]: [{ id: "gid://shopify/Customer/legacy", email: legacyEmail }],
+      },
+      companiesWithContacts: [{
+        id: "gid://shopify/Company/existing",
+        name: "ACME Wholesale",
+        externalId: null,
+        contacts: [{ customerId: "gid://shopify/Customer/legacy", email: legacyEmail }],
+      }],
+    });
+
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string, init: { body?: string }) => {
+      const body = init?.body ?? "";
+      if (body.includes("companyCreate")) {
+        companyCreateCalled = true;
+      }
+      return baseFetch(url, init);
+    });
+
+    const seed = { name: "ACME Wholesale", contact: { email: newEmail } };
+    const result = await findCompanyForAdoption(state, seed, legacyEmail);
+
+    expect(result).not.toBeNull();
+    expect("company" in result!).toBe(true);
+    if ("company" in result!) {
+      expect(result.matchType).toBe("legacy_email");
+      expect(result.company.id).toBe("gid://shopify/Company/existing");
+    }
+    expect(companyCreateCalled).toBe(false);
+  });
+
+  it("prefers new email match over legacy email match", async () => {
+    const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
+    const newEmail = seedEmail("company-1");
+
+    globalThis.fetch = createMockFetch({
+      customersWithEmail: {
+        [newEmail]: [{ id: "gid://shopify/Customer/new", email: newEmail }],
+        [legacyEmail]: [{ id: "gid://shopify/Customer/legacy", email: legacyEmail }],
+      },
+      companiesWithContacts: [{
+        id: "gid://shopify/Company/new-email-match",
+        name: "ACME Wholesale",
+        externalId: "ntr-seed-company-1",
+        contacts: [{ customerId: "gid://shopify/Customer/new", email: newEmail }],
+      }],
+    });
+
+    const seed = { name: "ACME Wholesale", contact: { email: newEmail } };
+    const result = await findCompanyForAdoption(state, seed, legacyEmail);
+
+    expect(result).not.toBeNull();
+    expect("company" in result!).toBe(true);
+    if ("company" in result!) {
+      expect(result.matchType).toBe("email");
+    }
   });
 });
