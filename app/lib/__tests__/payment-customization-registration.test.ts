@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
 import { ensurePaymentCustomization } from "../payment-customization-registration.server";
+import * as logServer from "../log.server";
 
 interface AdminGraphqlClient {
   graphql: (
@@ -14,6 +15,7 @@ describe("payment-customization-registration", () => {
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let safeLogSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     mockGraphql = vi.fn();
@@ -21,12 +23,14 @@ describe("payment-customization-registration", () => {
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    safeLogSpy = vi.spyOn(logServer, "safeLog").mockImplementation(() => {});
   });
 
   afterEach(() => {
     consoleWarnSpy.mockRestore();
     consoleLogSpy.mockRestore();
     consoleErrorSpy.mockRestore();
+    safeLogSpy.mockRestore();
   });
 
   describe("ensurePaymentCustomization", () => {
@@ -57,8 +61,8 @@ describe("payment-customization-registration", () => {
       expect(result.titleUpdate).toBe("skipped");
       expect(result.errCode).toBeUndefined();
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -112,8 +116,8 @@ describe("payment-customization-registration", () => {
           title: "Termwise Payment Hide",
         },
       });
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -143,8 +147,8 @@ describe("payment-customization-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -187,8 +191,13 @@ describe("payment-customization-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
       expect(result.errCode).toBeDefined();
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "payment_customization.title_update_failed",
+        { err: result.errCode },
+      );
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -224,8 +233,13 @@ describe("payment-customization-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
       expect(result.errCode).toBeDefined();
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "payment_customization.title_update_failed",
+        { err: result.errCode },
+      );
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -257,8 +271,13 @@ describe("payment-customization-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
       expect(result.errCode).toBeDefined();
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "payment_customization.title_update_failed",
+        { err: result.errCode },
+      );
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -295,8 +314,8 @@ describe("payment-customization-registration", () => {
       expect(result.created).toBe(true);
       expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -349,8 +368,8 @@ describe("payment-customization-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(3);
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -426,8 +445,8 @@ describe("payment-customization-registration", () => {
           title: "Termwise Payment Hide",
         },
       });
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -498,8 +517,8 @@ describe("payment-customization-registration", () => {
       expect(result2.created).toBe(false);
       expect(result1.titleUpdate).toBe("skipped");
       expect(result2.titleUpdate).toBe("skipped");
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });

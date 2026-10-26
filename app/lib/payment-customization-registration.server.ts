@@ -9,7 +9,7 @@
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/paymentCustomizationUpdate
  */
 
-import { toErrorCode } from "./log.server";
+import { safeLog, toErrorCode } from "./log.server";
 
 /**
  * Minimal type for the admin GraphQL client.
@@ -149,13 +149,14 @@ export interface EnsurePaymentCustomizationResult {
 }
 
 /**
- * Try to update the payment customization title. Returns the outcome without logging.
- * Caller is responsible for logging if needed.
+ * Try to update the payment customization title. Logs failures via safeLog.
  */
 async function tryUpdateTitle(
   admin: AdminGraphqlClient,
   id: string,
 ): Promise<{ outcome: TitleUpdateOutcome; errCode?: string }> {
+  let errCode: string | undefined;
+
   try {
     const updateResult = await admin.graphql(PAYMENT_CUSTOMIZATION_UPDATE_MUTATION, {
       variables: { id, title: PAYMENT_CUSTOMIZATION_TITLE },
@@ -163,26 +164,22 @@ async function tryUpdateTitle(
     const updateData = (await updateResult.json()) as PaymentCustomizationUpdateResult;
 
     if (updateData.errors?.length) {
-      return {
-        outcome: "failed",
-        errCode: toErrorCode({ message: updateData.errors[0].message }),
-      };
-    }
-    if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
-      return {
-        outcome: "failed",
-        errCode: toErrorCode({
-          message: updateData.data.paymentCustomizationUpdate.userErrors[0].message,
-        }),
-      };
-    }
-    if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
+      errCode = toErrorCode({ message: updateData.errors[0].message });
+    } else if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
+      errCode = toErrorCode({
+        message: updateData.data.paymentCustomizationUpdate.userErrors[0].message,
+      });
+    } else if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
       return { outcome: "updated" };
+    } else {
+      errCode = "no_customization_returned";
     }
-    return { outcome: "failed", errCode: "no_customization_returned" };
   } catch (error) {
-    return { outcome: "failed", errCode: toErrorCode(error) };
+    errCode = toErrorCode(error);
   }
+
+  safeLog("warn", "payment_customization.title_update_failed", { err: errCode });
+  return { outcome: "failed", errCode };
 }
 
 /**
