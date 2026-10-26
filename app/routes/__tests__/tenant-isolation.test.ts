@@ -167,11 +167,11 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", name, "orderId",
-        total, outstanding, currency, status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        total, outstanding, "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES
-        (${INVOICE_A_ID}, ${SHOP_A_ID}, ${BUYER_A_ID}, 'INV-A-001', ${"order-a-" + TEST_SUFFIX}, 10000.00, 10000.00, 'INR', 'open', NOW(), NOW() + interval '30 days', NOW(), NOW()),
-        (${INVOICE_B_ID}, ${SHOP_B_ID}, ${BUYER_B_ID}, 'INV-B-001', ${"order-b-" + TEST_SUFFIX}, ${SHOP_B_INVOICE_AMOUNT}, ${SHOP_B_INVOICE_AMOUNT}, 'INR', 'open', NOW(), NOW() + interval '30 days', NOW(), NOW())
+        (${INVOICE_A_ID}, ${SHOP_A_ID}, ${BUYER_A_ID}, 'INV-A-001', ${"order-a-" + TEST_SUFFIX}, 10000.00, 10000.00, NOW(), NOW() + interval '30 days', NOW(), NOW()),
+        (${INVOICE_B_ID}, ${SHOP_B_ID}, ${BUYER_B_ID}, 'INV-B-001', ${"order-b-" + TEST_SUFFIX}, ${SHOP_B_INVOICE_AMOUNT}, ${SHOP_B_INVOICE_AMOUNT}, NOW(), NOW() + interval '30 days', NOW(), NOW())
     `;
 
     await sql`
@@ -814,7 +814,7 @@ describeWithDb("Tenant Isolation - PLAN_GATING_ENFORCED=false", () => {
   });
 
   it("app._index loads normally with no billing redirect when PLAN_GATING_ENFORCED=false", async () => {
-    const url = new URL("https://example.com/app");
+    const url = new URL("https://example.com/app?skipOnboarding=true");
     const args = {
       request: new Request(url),
       context: createMockContext(),
