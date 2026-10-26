@@ -1,19 +1,18 @@
 # Privacy Policy — Net Terms Receivables
 
-**Effective Date:** [TBD: effective date]
+**Effective Date:** 2026-10-25
 
-**Last Updated:** [TBD: effective date]
+**Last Updated:** 2026-10-25
 
 ---
 
 ## 1. Introduction
 
-Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wholesale merchants manage net-terms invoices, track credit limits, and match bank transfer payments. This Privacy Policy describes what data we collect, why we collect it, how we use it, and your rights.
+Net Terms Receivables ("the App", "we", "us") is a Shopify app built for Indian merchants with INR (Indian rupee) stores, helping them manage net-terms invoices, track credit limits, and match bank transfer payments. This Privacy Policy describes what data we collect, why we collect it, how we use it, and your rights.
 
-**Legal Entity and Contact:**
-- [TBD: legal entity] — Company name, address, and registration details
-- **Contact Email:** [TBD: contact email]
-- **Data Protection Officer:** [TBD: legal entity] (if applicable)
+**Owner/Operator:** Raghav Khanna, individual developer, India
+
+**Contact:** raghavkhanna468@gmail.com
 
 ---
 
@@ -126,14 +125,14 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 ## 5. Subprocessors
 
-| Subprocessor | Purpose | Location | DPA |
-|--------------|---------|----------|-----|
-| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | [TBD: DPA] |
-| Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | [TBD: DPA] |
-| Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
-| Functional Software, Inc. | Error monitoring (Sentry) | [TBD] | [Sentry DPA](https://sentry.io/legal/dpa/) |
+| Subprocessor | Purpose | Location |
+|--------------|---------|----------|
+| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) |
+| Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | AWS ap-south-1 (Mumbai, India) |
+| Resend, Inc. | Email delivery (data request notifications, payment reminders) | Tokyo, Japan (ap-northeast-1) data region |
 
-**Note:** Sentry is only active when error monitoring is enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
+**Not in use; will be listed here before it is enabled:**
+- Functional Software, Inc. (Sentry error monitoring)
 
 **Resend data handling:**
 
@@ -160,8 +159,10 @@ Resend is only used when email delivery is configured; emails are not sent other
 
 | Data Category | Retention Period | Deletion Trigger |
 |---------------|------------------|------------------|
+| Access Logs | Until 48 hours after uninstall (shop/redact) | Automatic cascade. An automatic 1-year deletion is planned and will be stated here once it is active. |
 | OAuth Sessions | Until logout, expiry, or uninstall | App uninstall webhook or session expiry |
-| Shop and Account Data | Until 48 hours after uninstall | Shop redact webhook (sent by Shopify 48h after uninstall) |
+| Shop and Account Data | Until 48 hours after uninstall (shop/redact) | Shop redact webhook (sent by Shopify 48h after uninstall) |
+| Payment and Financial Records | Until 48 hours after uninstall (shop/redact) | Deleted on Shopify's shop/redact request |
 | Tagged Customer Data | Until customer erasure or shop redact | Compliance webhooks |
 | B2B Main Contact (email, name, customer ID) | Until customer erasure or shop redact | Nulled on customer erasure when mainContactCustomerId matches; deleted with account on shop redact |
 | Invoices | Retained (no customer-identifying fields) | Buyer relationship anonymized on customer erasure |
@@ -212,7 +213,7 @@ When a customer requests their data:
 
 **Data delivery:**
 - **Primary:** In-admin download via data requests page (creates download, marks as downloaded on success)
-- **Notification:** Email to shop owner via Resend API (if configured)
+- **Notification:** Email to shop owner via Resend API
 - **Retention:** Exports are retained for **30 days** (data minimisation), then purged automatically
 
 **Shopify compliance deadline:** Per [Shopify compliance webhook documentation](https://shopify.dev/docs/apps/build/privacy-law-compliance#customers-data_request), merchants must provide the customer's data within **30 days** of receiving the request. Our 30-day export retention ensures exports remain available for the full compliance window.
@@ -292,8 +293,8 @@ We may update this Privacy Policy from time to time. Material changes will be co
 ## 11. Contact
 
 For privacy inquiries:
-- **Email:** [TBD: contact email]
-- **Address:** [TBD: legal entity]
+- **Email:** raghavkhanna468@gmail.com
+- **Owner/Operator:** Raghav Khanna, individual developer, India
 
 ---
 
