@@ -28,6 +28,7 @@ import {
   type InferDueDateResult,
   type TagRule,
 } from "./due-date";
+import { normalizeTag } from "./tag-normalizer";
 
 /**
  * Financial statuses that qualify an order for Invoice creation.
@@ -355,10 +356,10 @@ function findMatchingTagRule(
 ): TagRule | undefined {
   if (customerTags.length === 0 || tagRules.length === 0) return undefined;
 
-  const normalizedTags = customerTags.map((t) => t.toLowerCase().trim());
+  const normalizedTags = customerTags.map((t) => normalizeTag(t));
 
   return tagRules.find((rule) =>
-    normalizedTags.includes(rule.tag.toLowerCase().trim())
+    normalizedTags.includes(normalizeTag(rule.tag))
   );
 }
 

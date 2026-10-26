@@ -42,6 +42,7 @@ import { decideNewAccountGate, isGatingEnforced } from "../gating.server";
 import { getPlanByShopId } from "../plan.server";
 import { planLimit } from "~/lib/entitlements";
 import { safeLog, shopHash } from "~/lib/log.server";
+import { normalizeTag } from "~/lib/tag-normalizer";
 
 /**
  * PII write mode for customer sync.
@@ -700,7 +701,7 @@ export function findMatchingTagRule(
   tagRules: Array<{ tag: string; defaultTermsDays: number }>
 ): { tag: string; defaultTermsDays: number } | undefined {
   return tagRules.find((rule) =>
-    customerTags.some((tag) => tag.toLowerCase() === rule.tag.toLowerCase())
+    customerTags.some((tag) => normalizeTag(tag) === normalizeTag(rule.tag))
   );
 }
 
