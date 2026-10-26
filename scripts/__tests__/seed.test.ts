@@ -653,11 +653,20 @@ describe("Preflight Checks", () => {
   });
 
   it("fetchPaymentTermsTemplates requires Net 15, 30, 60 templates", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const state = createMockState({ paymentTermsTemplates: [] });
     const result = await fetchPaymentTermsTemplates(state);
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+    logSpy.mockRestore();
 
     expect(result).toBe(true);
     expect(state.paymentTermsTemplates.length).toBe(3);
+    // Public output: a count only, no template GIDs or names
+    expect(output).toContain("templates_found=3");
+    expect(output).not.toContain("gid://");
+    for (const t of state.paymentTermsTemplates) {
+      expect(output).not.toContain(t.name);
+    }
     
     const dueDays = state.paymentTermsTemplates.map(t => t.dueInDays);
     expect(dueDays).toContain(15);
@@ -3776,15 +3785,89 @@ describe("company adoption", () => {
     const { reportDuplicates } = await import("../seed");
     const state = createMockState();
 
-    await reportDuplicates(state);
+    const rows = await reportDuplicates(state);
 
     const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
     
-    // Should report the duplicate
-    expect(output).toContain("Companies with same name");
-    expect(output).toContain("gid://company/dup");
-    expect(output).toContain("[no externalId]");
+    // Should report the duplicate as counts/booleans for seed company index 1
+    expect(rows[0]).toEqual({
+      companyIdx: 1,
+      foundByExternalId: true,
+      sameNameCount: 2,
+      sameContactEmailCount: 0,
+      customersWithEmailCount: 0,
+      extraCompanies: 1,
+      duplicate: true,
+    });
+    expect(output).toContain(
+      "company_idx=1 found_by_external_id=true same_name_count=2 same_contact_email_count=0 customers_with_email_count=0 extra_companies=1 duplicate=true",
+    );
+    expect(output).toMatch(new RegExp(`companies_checked=${COMPANY_SEEDS.length} duplicates_total=\\d+ extra_companies_total=\\d+`));
+
+    // Public-output rule: no GIDs, seed externalIds, names or emails
+    expect(output).not.toContain("gid://");
+    expect(output).not.toContain("ntr-seed-");
+    expect(output).not.toContain(SEED_PREFIX);
+    expect(output).not.toContain(externalId);
+    for (const s of COMPANY_SEEDS) {
+      expect(output).not.toContain(s.name);
+      expect(output).not.toContain(s.contact.email);
+    }
+    // Every report line is key=value counts/booleans only
+    const reportLines = output.split("\n").filter((l) => l.includes("company_idx="));
+    expect(reportLines).toHaveLength(COMPANY_SEEDS.length);
+    for (const line of reportLines) {
+      expect(line.trim()).toMatch(/^(\w+=(\d+|true|false))( \w+=(\d+|true|false))*$/);
+    }
     
+    logSpy.mockRestore();
+  });
+
+  it("report-duplicates: ambiguous customers and shopify GIDs never reach the output", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const empty = {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { companies: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+        extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+      }),
+    } as Response;
+    global.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      const query = body.query as string;
+      const variables = body.variables as Record<string, unknown> | undefined;
+      if (query.includes("customers") && variables?.query?.toString().includes("email")) {
+        const email = /email:'([^']*)'/.exec(variables.query.toString())?.[1] ?? "";
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [
+                  { id: "gid://shopify/Customer/1001", email },
+                  { id: "gid://shopify/Customer/1002", email },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+            extensions: { cost: { throttleStatus: { currentlyAvailable: 1000, restoreRate: 50, maximumAvailable: 2000 } } },
+          }),
+        } as Response;
+      }
+      return empty;
+    });
+
+    const { reportDuplicates } = await import("../seed");
+    const rows = await reportDuplicates(createMockState());
+    const output = logSpy.mock.calls.map(c => c.join(" ")).join("\n");
+
+    expect(rows.every((r) => r.foundByExternalId === false)).toBe(true);
+    expect(rows.every((r) => r.customersWithEmailCount === 2 && r.duplicate)).toBe(true);
+    expect(output).toContain(`companies_checked=${COMPANY_SEEDS.length} duplicates_total=${COMPANY_SEEDS.length} extra_companies_total=0`);
+    expect(output).not.toContain("gid://");
+    expect(output).not.toContain("ntr-seed-");
     logSpy.mockRestore();
   });
 

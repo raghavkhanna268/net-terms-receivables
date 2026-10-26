@@ -704,10 +704,7 @@ export async function fetchPaymentTermsTemplates(state: SeedState): Promise<bool
     return false;
   }
 
-  console.log(`  ✅ Found ${state.paymentTermsTemplates.length} templates:`);
-  for (const t of state.paymentTermsTemplates) {
-    console.log(`     - ${t.name} (${t.paymentTermsType}${t.dueInDays ? `, ${t.dueInDays} days` : ""})`);
-  }
+  console.log(`  ✅ templates_found=${state.paymentTermsTemplates.length}`);
 
   // Verify we have the required NET templates
   for (const loc of LOCATION_TERMS) {
@@ -1425,7 +1422,7 @@ export async function findCompanyByExternalId(
     cursor = response.data?.companies.pageInfo?.endCursor ?? undefined;
   }
   
-  console.log(`  ⚠️  Search for company with externalId "${externalId}" exceeded ${MAX_SEARCH_PAGES} pages`);
+  console.log(`  ⚠️  Search for company by externalId exceeded ${MAX_SEARCH_PAGES} pages`);
   return null;
 }
 
@@ -1866,72 +1863,89 @@ async function continueWithExistingCompany(
 }
 
 /**
- * Report potential duplicates for each seed company.
- * Lists companies with the same name or same contact email.
- * Read-only mode - no mutations.
+ * Per-seed-company result of the duplicate check. Counts and booleans only.
  */
-export async function reportDuplicates(state: SeedState): Promise<void> {
+export interface DuplicateReportRow {
+  companyIdx: number;
+  foundByExternalId: boolean;
+  sameNameCount: number;
+  sameContactEmailCount: number;
+  customersWithEmailCount: number;
+  /** Distinct companies matching by name or contact email, other than the seed company itself. */
+  extraCompanies: number;
+  duplicate: boolean;
+}
+
+/**
+ * Format one duplicate-report line. Public-output rule: counts, booleans and
+ * the 1-based seed company index only (no GIDs, externalIds, names or emails).
+ */
+export function formatDuplicateReportRow(row: DuplicateReportRow): string {
+  return (
+    `  company_idx=${row.companyIdx}` +
+    ` found_by_external_id=${row.foundByExternalId}` +
+    ` same_name_count=${row.sameNameCount}` +
+    ` same_contact_email_count=${row.sameContactEmailCount}` +
+    ` customers_with_email_count=${row.customersWithEmailCount}` +
+    ` extra_companies=${row.extraCompanies}` +
+    ` duplicate=${row.duplicate}`
+  );
+}
+
+/**
+ * Report potential duplicates for each seed company.
+ * Checks companies with the same name or same contact email, and customers
+ * with the same email. Read-only mode - no mutations.
+ *
+ * Output lands in public Actions logs, so it prints counts and booleans only,
+ * per seed company index (COMPANY_SEEDS order, 1-based). A seed company is a
+ * duplicate when another company matches it by name or contact email, or when
+ * more than one customer has its contact email.
+ */
+export async function reportDuplicates(state: SeedState): Promise<DuplicateReportRow[]> {
   console.log("\n🔍 Checking for potential duplicates...");
-  console.log("   (Read-only mode - no changes will be made)\n");
-  
-  for (const seed of COMPANY_SEEDS) {
+  console.log("   (Read-only mode - no changes will be made; counts and booleans only)\n");
+
+  const rows: DuplicateReportRow[] = [];
+  for (const [i, seed] of COMPANY_SEEDS.entries()) {
     const externalId = `${SEED_PREFIX}${seed.key}`;
-    console.log(`  ${externalId}:`);
-    
-    // Check for existing company with seed externalId
+
     const existing = await findCompanyByExternalId(state, externalId);
-    if (existing) {
-      console.log(`    ✓ Found by externalId: ${existing.id}`);
-    } else {
-      console.log(`    ○ No company with externalId: ${externalId}`);
-    }
-    
-    // Find companies with same name
     const nameMatches = await findCompaniesByName(state, seed.name);
-    if (nameMatches.length > 0) {
-      console.log(`    Companies with same name (${nameMatches.length}):`);
-      for (const match of nameMatches) {
-        const externalIdStr = match.externalId ? ` [externalId: ${match.externalId}]` : " [no externalId]";
-        console.log(`      - ${match.id}${externalIdStr}`);
-      }
-    } else {
-      console.log(`    ○ No companies with matching name`);
-    }
-    
-    // Find companies with same contact email
     const emailMatches = await findCompaniesByContactEmail(state, seed.contact.email);
-    if (emailMatches.length > 0) {
-      console.log(`    Companies with same contact email (${emailMatches.length}):`);
-      for (const match of emailMatches) {
-        const externalIdStr = match.externalId ? ` [externalId: ${match.externalId}]` : " [no externalId]";
-        console.log(`      - ${match.id}${externalIdStr}`);
-      }
-    } else {
-      console.log(`    ○ No companies with matching contact email`);
-    }
-    
-    // Find customers with same email (may cause TAKEN error even if no company exists)
     const customerLookup = await findCustomersByEmail(state, seed.contact.email);
-    if (customerLookup) {
-      if (customerLookup.ambiguous === true) {
-        console.log(`    ⚠️  Multiple customers with matching email (${customerLookup.customerIds.length}):`);
-        for (const customerId of customerLookup.customerIds) {
-          console.log(`      - ${customerId}`);
-        }
-      } else {
-        console.log(`    Customers with matching email (1):`);
-        console.log(`      - ${customerLookup.customer.id}`);
-      }
-    } else {
-      console.log(`    ○ No customers with matching email`);
+
+    const extraIds = new Set<string>();
+    for (const m of [...nameMatches, ...emailMatches]) {
+      if (!existing || m.id !== existing.id) extraIds.add(m.id);
     }
-    
-    console.log();
+    const customersWithEmailCount = !customerLookup
+      ? 0
+      : customerLookup.ambiguous === true
+        ? customerLookup.customerIds.length
+        : 1;
+
+    const row: DuplicateReportRow = {
+      companyIdx: i + 1,
+      foundByExternalId: existing !== null,
+      sameNameCount: nameMatches.length,
+      sameContactEmailCount: emailMatches.length,
+      customersWithEmailCount,
+      extraCompanies: extraIds.size,
+      duplicate: extraIds.size > 0 || customersWithEmailCount > 1,
+    };
+    rows.push(row);
+    console.log(formatDuplicateReportRow(row));
   }
-  
-  console.log("  Duplicate check complete. Review the output above.");
-  console.log("  To clean up duplicates, use Shopify Admin or the API manually.");
+
+  const duplicates = rows.filter((r) => r.duplicate).length;
+  const extraTotal = rows.reduce((n, r) => n + r.extraCompanies, 0);
+  console.log(
+    `\n  companies_checked=${rows.length} duplicates_total=${duplicates} extra_companies_total=${extraTotal}`,
+  );
+  console.log("  Duplicate check complete. To clean up duplicates, use Shopify Admin or the API manually.");
   console.log("  Never delete automatically - always verify first.");
+  return rows;
 }
 
 /**
