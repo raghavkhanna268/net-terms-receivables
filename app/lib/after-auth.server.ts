@@ -169,9 +169,10 @@ interface ClearUninstalledResult {
  * that had permanent sync failures before uninstall.
  *
  * #294: Also sets metafieldSyncedAt = NULL and syncPending = true for all
- * BuyerAccount rows in the reinstalled shop. This ensures the daily resync
- * sweep (Part 3) re-pushes the credit_status metafield, since Shopify wipes
- * app-owned metafield values on uninstall.
+ * BuyerAccount rows in the reinstalled shop. This makes the accounts eligible
+ * for the daily resync sweep (Part 3), which re-pushes the credit_status
+ * metafield. Part 3 is capped at 100 accounts per run across all shops.
+ * Shopify wipes app-owned metafield values on uninstall.
  *
  * #293: Also closes all open s6_bulk_operations rows (all origins: reconcile,
  * manual, webhook) so getInitialSyncState returns not_started and the merchant

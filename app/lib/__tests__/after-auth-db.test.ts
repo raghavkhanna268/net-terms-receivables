@@ -1311,6 +1311,7 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
         SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending"
         FROM "BuyerAccount" WHERE "shopId" = ${shopId} ORDER BY name
       `;
+      expect(afterReinstall).toHaveLength(2);
       for (const account of afterReinstall) {
         expect(account.metafieldSyncErrorCode).toBeNull();
         expect(account.metafieldSyncErrorAt).toBeNull();
@@ -1408,6 +1409,49 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
       expect(existingAccount.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
       expect(existingAccount.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
       expect(existingAccount.syncPending).toBe(false);
+    });
+
+    it("upsertShopOnAuth reinstall leaves another installed shop's accounts unchanged", async () => {
+      const TEST_SHOP_REINSTALL = `test-reinstall-scope-${TEST_SUFFIX}.myshopify.com`;
+      const TEST_SHOP_OTHER = `test-other-scope-${TEST_SUFFIX}.myshopify.com`;
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
+
+      const [{ id: reinstallShopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_REINSTALL}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+        RETURNING id
+      `;
+
+      const [{ id: otherShopId }] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${TEST_SHOP_OTHER}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
+        RETURNING id
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${reinstallShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/reinstall-scope', 'gid://shopify/CompanyLocation/reinstall-scope',
+           'Reinstall Shop Account', 'OK', false, ${syncedAt}, NOW(), NOW()),
+          (${otherShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/other-scope', 'gid://shopify/CompanyLocation/other-scope',
+           'Other Shop Account', 'OK', false, ${syncedAt}, NOW(), NOW())
+      `;
+
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP_REINSTALL, 'America/New_York', 'INR');
+
+      const [otherShopAccount] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${otherShopId}
+      `;
+
+      expect(otherShopAccount.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(otherShopAccount.syncPending).toBe(false);
     });
   });
 });
@@ -2227,7 +2271,9 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
     });
     // Clean queue for this shop
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${TEST_SHOP_DOMAIN}, ${CONTROL_SHOP_DOMAIN})`;
-    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:%'}`;
+    // Scope dedupe key cleanup to this test's own account IDs (shared DB)
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + testAccountId + '%'}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_resync:' + testAccountManualHoldId + '%'}`;
   });
 
   afterEach(() => {
@@ -2235,6 +2281,15 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
   });
 
   it("end-to-end: reinstall reset → Part 3 sweep → recompute → metafield written", async () => {
+    // Self-contained: ensure shop is uninstalled with accounts that have metafieldSyncedAt set
+    const recentSyncedAt = new Date(Date.now() - 60 * 60 * 1000);
+    await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${testShopId}`;
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "metafieldSyncedAt" = ${recentSyncedAt}, "syncPending" = false
+      WHERE "shopId" = ${testShopId}
+    `;
+
     // Step 1: Run reinstall reset
     const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
     const resetResult = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
@@ -2250,6 +2305,7 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
       FROM "BuyerAccount" WHERE "shopId" = ${testShopId}
       ORDER BY id
     `;
+    expect(afterReset).toHaveLength(2);
     for (const acc of afterReset) {
       expect(acc.metafieldSyncedAt).toBeNull();
       expect(acc.syncPending).toBe(true);
@@ -2269,14 +2325,14 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
     // Step 2: Run the daily sweep (Part 3)
     await sql`SELECT enqueue_credit_status_recomputes()`;
 
-    // Verify messages were enqueued for the test accounts
+    // Verify messages were enqueued for the target accounts (filter by buyerAccountId,
+    // not exact global count, because the sweep's 100 cap is shared across all shops)
     const queuedMsgs = await sql<{ buyer_account_id: string }[]>`
       SELECT message->>'buyerAccountId' AS buyer_account_id
       FROM pgmq.q_s6_sync
-      WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+      WHERE message->>'buyerAccountId' IN (${testAccountId}, ${testAccountManualHoldId})
         AND message->>'source' = 'daily_sweep'
     `;
-    expect(queuedMsgs.length).toBe(2);
     const queuedAccountIds = queuedMsgs.map(m => m.buyer_account_id);
     expect(queuedAccountIds).toContain(testAccountId);
     expect(queuedAccountIds).toContain(testAccountManualHoldId);
@@ -2330,6 +2386,7 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
       FROM "BuyerAccount" WHERE "shopId" = ${testShopId}
       ORDER BY id
     `;
+    expect(finalState).toHaveLength(2);
     for (const acc of finalState) {
       expect(acc.metafieldSyncedAt).not.toBeNull();
       expect(acc.syncPending).toBe(false);
@@ -2348,17 +2405,24 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
   });
 
   it("second call is idempotent: no further changes after successful resync", async () => {
-    // Reset state: set syncPending=true, metafieldSyncedAt=NULL (simulate reinstall already done)
+    // Self-contained: ensure shop is uninstalled with accounts that have metafieldSyncedAt set
+    const recentSyncedAt = new Date(Date.now() - 60 * 60 * 1000);
+    await sql`UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE id = ${testShopId}`;
     await sql`
       UPDATE "BuyerAccount"
-      SET "syncPending" = true, "metafieldSyncedAt" = NULL
+      SET "metafieldSyncedAt" = ${recentSyncedAt}, "syncPending" = false
       WHERE id = ${testAccountId}
     `;
+
+    // Run reinstall reset
+    const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
+    const resetResult = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
+    expect(resetResult.wasReinstalled).toBe(true);
 
     // Run sweep
     await sql`SELECT enqueue_credit_status_recomputes()`;
 
-    // Process message
+    // Process message for the test account
     const { getSyncHandler } = await import("../../services/drain/processor.server");
     const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
     const [msg] = await sql<{ msg_id: string; message: Record<string, unknown> }[]>`
@@ -2367,6 +2431,7 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
       WHERE message->>'buyerAccountId' = ${testAccountId}
       LIMIT 1
     `;
+    expect(msg).toBeDefined();
 
     await sql`
       UPDATE pgmq.q_s6_sync
@@ -2385,10 +2450,9 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
     expect(afterFirst.syncPending).toBe(false);
     expect(afterFirst.metafieldSyncedAt).not.toBeNull();
 
-    // Run reinstall reset again - should be no-op because shop is now installed
-    const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
-    const resetResult = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
-    expect(resetResult.wasReinstalled).toBe(false);
+    // Run reinstall reset again - should be no-op because shop is now installed (uninstalledAt=NULL)
+    const resetResult2 = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_DOMAIN);
+    expect(resetResult2.wasReinstalled).toBe(false);
 
     // Account should be unchanged
     const [afterSecondReset] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
@@ -2400,330 +2464,3 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
   });
 });
 
-/**
- * #294: Mutation tests.
- *
- * Each mutation must fail a test (paste verbatim 'Tests' lines).
- * Tests cover both clearUninstalledAtAndMetafieldErrors and upsertShopOnAuth.
- */
-describeWithDb("#294: mutation tests for reinstall reset (DB)", () => {
-  let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-294mut";
-
-  beforeAll(async () => {
-    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-  });
-
-  afterAll(async () => {
-    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
-      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
-    )`;
-    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
-    await sql.end();
-  });
-
-  beforeEach(async () => {
-    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (
-      SELECT id FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}
-    )`;
-    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
-  });
-
-  describe("clearUninstalledAtAndMetafieldErrors mutation coverage", () => {
-    it("mutation (a): drop metafieldSyncedAt clear - test must fail if only syncPending is set", async () => {
-      const TEST_SHOP = `test-mut-a-clear-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: shopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/mut-a', 'gid://shopify/CompanyLocation/mut-a',
-          'Mutation A Account', 'OK', false, ${syncedAt},
-          NOW(), NOW()
-        )
-      `;
-
-      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
-
-      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-      `;
-
-      expect(after.metafieldSyncedAt).toBeNull();
-    });
-
-    it("mutation (b): drop syncPending=true - test must fail if only metafieldSyncedAt is cleared", async () => {
-      const TEST_SHOP = `test-mut-b-clear-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: shopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/mut-b', 'gid://shopify/CompanyLocation/mut-b',
-          'Mutation B Account', 'OK', false, ${syncedAt},
-          NOW(), NOW()
-        )
-      `;
-
-      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
-
-      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-      `;
-
-      expect(after.syncPending).toBe(true);
-    });
-
-    it("mutation (c): drop shop scope - test must fail if other shop's accounts are affected", async () => {
-      const TEST_SHOP_A = `test-mut-c-a-${TEST_SUFFIX}.myshopify.com`;
-      const TEST_SHOP_B = `test-mut-c-b-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: shopAId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP_A}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
-        RETURNING id
-      `;
-
-      const [{ id: shopBId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP_B}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES
-          (${shopAId}, 'COMPANY'::"AccountKind",
-           'gid://shopify/Company/mut-c-a', 'gid://shopify/CompanyLocation/mut-c-a',
-           'Shop A Account', 'OK', false, ${syncedAt}, NOW(), NOW()),
-          (${shopBId}, 'COMPANY'::"AccountKind",
-           'gid://shopify/Company/mut-c-b', 'gid://shopify/CompanyLocation/mut-c-b',
-           'Shop B Account', 'OK', false, ${syncedAt}, NOW(), NOW())
-      `;
-
-      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
-      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP_A);
-
-      const [shopBAccount] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${shopBId}
-      `;
-
-      expect(shopBAccount.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
-      expect(shopBAccount.syncPending).toBe(false);
-    });
-
-    it("mutation (d): drop reinstall gate - test must fail if re-auth resets markers", async () => {
-      const TEST_SHOP = `test-mut-d-clear-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: shopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/mut-d', 'gid://shopify/CompanyLocation/mut-d',
-          'Mutation D Account', 'OK', false, ${syncedAt},
-          NOW(), NOW()
-        )
-      `;
-
-      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("../after-auth.server");
-      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
-
-      expect(result.wasReinstalled).toBe(false);
-
-      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-      `;
-
-      expect(after.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
-      expect(after.syncPending).toBe(false);
-    });
-  });
-
-  describe("upsertShopOnAuth mutation coverage", () => {
-    it("mutation (a): drop metafieldSyncedAt clear - test must fail if only syncPending is set", async () => {
-      const TEST_SHOP = `test-mut-a-upsert-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: shopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/upsert-a', 'gid://shopify/CompanyLocation/upsert-a',
-          'Upsert Mutation A Account', 'OK', false, ${syncedAt},
-          NOW(), NOW()
-        )
-      `;
-
-      const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, 'America/New_York', 'INR');
-
-      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-      `;
-
-      expect(after.metafieldSyncedAt).toBeNull();
-    });
-
-    it("mutation (b): drop syncPending=true - test must fail if only metafieldSyncedAt is cleared", async () => {
-      const TEST_SHOP = `test-mut-b-upsert-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: shopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/upsert-b', 'gid://shopify/CompanyLocation/upsert-b',
-          'Upsert Mutation B Account', 'OK', false, ${syncedAt},
-          NOW(), NOW()
-        )
-      `;
-
-      const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, 'America/New_York', 'INR');
-
-      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-      `;
-
-      expect(after.syncPending).toBe(true);
-    });
-
-    it("mutation (c): drop shop scope - test must fail if other shop's accounts are affected", async () => {
-      const TEST_SHOP_REINSTALL = `test-mut-c-reinstall-${TEST_SUFFIX}.myshopify.com`;
-      const TEST_SHOP_OTHER = `test-mut-c-other-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: reinstallShopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP_REINSTALL}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
-        RETURNING id
-      `;
-
-      const [{ id: otherShopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP_OTHER}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES
-          (${reinstallShopId}, 'COMPANY'::"AccountKind",
-           'gid://shopify/Company/upsert-c-r', 'gid://shopify/CompanyLocation/upsert-c-r',
-           'Reinstall Shop Account', 'OK', false, ${syncedAt}, NOW(), NOW()),
-          (${otherShopId}, 'COMPANY'::"AccountKind",
-           'gid://shopify/Company/upsert-c-o', 'gid://shopify/CompanyLocation/upsert-c-o',
-           'Other Shop Account', 'OK', false, ${syncedAt}, NOW(), NOW())
-      `;
-
-      const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP_REINSTALL, 'America/New_York', 'INR');
-
-      const [otherShopAccount] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${otherShopId}
-      `;
-
-      expect(otherShopAccount.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
-      expect(otherShopAccount.syncPending).toBe(false);
-    });
-
-    it("mutation (d): drop reinstall gate - test must fail if re-auth resets markers", async () => {
-      const TEST_SHOP = `test-mut-d-upsert-${TEST_SUFFIX}.myshopify.com`;
-      const syncedAt = new Date("2026-10-14T10:00:00Z");
-
-      const [{ id: shopId }] = await sql<{ id: string }[]>`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-        VALUES (${TEST_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW())
-        RETURNING id
-      `;
-
-      await sql`
-        INSERT INTO "BuyerAccount" (
-          "shopId", kind, "companyId", "companyLocationId", name,
-          "holdState", "syncPending", "metafieldSyncedAt",
-          "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/upsert-d', 'gid://shopify/CompanyLocation/upsert-d',
-          'Upsert Mutation D Account', 'OK', false, ${syncedAt},
-          NOW(), NOW()
-        )
-      `;
-
-      const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, 'America/Los_Angeles', 'INR');
-
-      const [after] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
-        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-      `;
-
-      expect(after.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
-      expect(after.syncPending).toBe(false);
-    });
-  });
-});
