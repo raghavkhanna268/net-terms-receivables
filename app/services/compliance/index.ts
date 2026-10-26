@@ -6,6 +6,7 @@ export {
   deleteShop,
   deleteProcessedWebhooksViaReceipts,
   purgePgmqMessages,
+  purgeReceiptsAndProcessedWebhooks,
   redactCustomer,
   generateCustomerDataExport,
   persistDataRequest,
@@ -19,4 +20,7 @@ export {
   markShopUninstalled,
 } from "./compliance.server";
 
-export type { DataRequestEmailResult } from "./compliance.server";
+export type {
+  DataRequestEmailResult,
+  PurgeReceiptsResult,
+} from "./compliance.server";

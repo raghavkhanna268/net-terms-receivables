@@ -31,8 +31,9 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
   deleteShop,
-  deleteProcessedWebhooksViaReceipts,
+  purgeReceiptsAndProcessedWebhooks,
 } from "~/services/compliance/compliance.server";
+import { recordWebhookReceipt } from "~/lib/webhook-receipts.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -960,7 +961,7 @@ describeWithDb("shop/redact complete DB deletion", () => {
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id = ${falsePositive}`;
   });
 
-  it("app/uninstalled: deleteProcessedWebhooksViaReceipts deletes receipt-linked rows, leaves others", async () => {
+  it("app/uninstalled: purgeReceiptsAndProcessedWebhooks deletes receipt-linked rows, leaves others", async () => {
     const UNINST_SUFFIX = `uninst-${TEST_SUFFIX}`;
     const UNINST_SHOP_ID = `shop-uninst-${UNINST_SUFFIX}`;
     const UNINST_DOMAIN = `test-uninst-${UNINST_SUFFIX}.myshopify.com`;
@@ -976,23 +977,19 @@ describeWithDb("shop/redact complete DB deletion", () => {
         (${UNINST_SHOP_B_ID}, ${UNINST_DOMAIN_B}, 'INR', ${now}, ${now})
     `;
 
-    // Seed webhook_receipts for both shops
+    // Seed webhook_receipts via production helper
     const shopifyWhIdA = `shopify-wh-uninst-a-${UNINST_SUFFIX}`;
     const shopifyWhIdA2 = `shopify-wh-uninst-a2-${UNINST_SUFFIX}`;
     const shopifyWhIdB = `shopify-wh-uninst-b-${UNINST_SUFFIX}`;
-    await sql`
-      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
-      VALUES
-        (${UNINST_DOMAIN}, ${shopifyWhIdA}, 'ORDERS_CREATE', ${now}),
-        (${UNINST_DOMAIN}, ${shopifyWhIdA2}, 'ORDERS_UPDATE', ${now}),
-        (${UNINST_DOMAIN_B}, ${shopifyWhIdB}, 'ORDERS_CREATE', ${now})
-    `;
+    expect(await recordWebhookReceipt(sql, UNINST_DOMAIN, shopifyWhIdA, "ORDERS_CREATE", now)).toBe(true);
+    expect(await recordWebhookReceipt(sql, UNINST_DOMAIN, shopifyWhIdA2, "ORDERS_UPDATE", now)).toBe(true);
+    expect(await recordWebhookReceipt(sql, UNINST_DOMAIN_B, shopifyWhIdB, "ORDERS_CREATE", now)).toBe(true);
 
     // Seed s6_processed_webhooks rows:
     // - Two linked to Shop A's receipts (should be deleted)
     // - One linked to Shop B's receipt (should survive)
     // - One reconcile id for Shop A (should survive - uninstall doesn't delete reconcile ids)
-    // - One orphan Shopify webhook id not in any receipt (should survive)
+    // - One orphan Shopify webhook id not in any receipt (should survive - TTL-only by design)
     const reconcileA = `reconcile:${UNINST_DOMAIN}:2026-10-25:companies`;
     const orphanWhId = `shopify-wh-orphan-uninst-${UNINST_SUFFIX}`;
     await sql`
@@ -1017,16 +1014,11 @@ describeWithDb("shop/redact complete DB deletion", () => {
     expect(parseInt(beforeCounts.targets, 10)).toBe(2);
     expect(parseInt(beforeCounts.survivors, 10)).toBe(3);
 
-    // Simulate app/uninstalled: run helper + receipts delete in one transaction
-    const { processedDeleted, receiptsDeleted } = await sql.begin(async (tx) => {
-      const pwCount = await deleteProcessedWebhooksViaReceipts(tx, UNINST_DOMAIN);
-      const rcptResult = await tx`
-        DELETE FROM webhook_receipts WHERE shop = ${UNINST_DOMAIN}
-      `;
-      return { processedDeleted: pwCount, receiptsDeleted: rcptResult.count };
-    });
+    // Call the real purge function used by app/uninstalled route
+    const { processedWebhooksDeleted, receiptsDeleted } =
+      await purgeReceiptsAndProcessedWebhooks(sql, UNINST_DOMAIN);
 
-    expect(processedDeleted).toBe(2);
+    expect(processedWebhooksDeleted).toBe(2);
     expect(receiptsDeleted).toBe(2);
 
     // Verify targets are deleted
@@ -1065,15 +1057,13 @@ describeWithDb("shop/redact complete DB deletion", () => {
       VALUES (${REINST_SHOP_ID}, ${REINST_DOMAIN}, 'INR', ${now}, ${now})
     `;
 
-    // Simulate initial webhooks: create receipts and processed webhook rows
+    // Simulate initial webhooks: seed receipts via production helper
     const initialWhId1 = `shopify-wh-reinst-init1-${REINST_SUFFIX}`;
     const initialWhId2 = `shopify-wh-reinst-init2-${REINST_SUFFIX}`;
-    await sql`
-      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
-      VALUES
-        (${REINST_DOMAIN}, ${initialWhId1}, 'ORDERS_CREATE', ${now}),
-        (${REINST_DOMAIN}, ${initialWhId2}, 'ORDERS_UPDATE', ${now})
-    `;
+    expect(await recordWebhookReceipt(sql, REINST_DOMAIN, initialWhId1, "ORDERS_CREATE", now)).toBe(true);
+    expect(await recordWebhookReceipt(sql, REINST_DOMAIN, initialWhId2, "ORDERS_UPDATE", now)).toBe(true);
+
+    // Seed processed webhook rows (simulates drain processing)
     await sql`
       INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
       VALUES
@@ -1090,16 +1080,10 @@ describeWithDb("shop/redact complete DB deletion", () => {
     expect(parseInt(initialCounts.receipts, 10)).toBe(2);
     expect(parseInt(initialCounts.processed, 10)).toBe(2);
 
-    // === Phase 2: Uninstall (simulates app/uninstalled webhook) ===
-    // This deletes receipts and their linked processed_webhooks in one transaction
-    const { processedDeleted, receiptsDeleted } = await sql.begin(async (tx) => {
-      const pwCount = await deleteProcessedWebhooksViaReceipts(tx, REINST_DOMAIN);
-      const rcptResult = await tx`
-        DELETE FROM webhook_receipts WHERE shop = ${REINST_DOMAIN}
-      `;
-      return { processedDeleted: pwCount, receiptsDeleted: rcptResult.count };
-    });
-    expect(processedDeleted).toBe(2);
+    // === Phase 2: Uninstall (calls the real purge function used by app/uninstalled route) ===
+    const { processedWebhooksDeleted, receiptsDeleted } =
+      await purgeReceiptsAndProcessedWebhooks(sql, REINST_DOMAIN);
+    expect(processedWebhooksDeleted).toBe(2);
     expect(receiptsDeleted).toBe(2);
 
     // Shop row still exists (full deletion is on shop/redact, 48h later)
@@ -1128,16 +1112,12 @@ describeWithDb("shop/redact complete DB deletion", () => {
     // creates a new receipt (since old one was deleted on uninstall).
     const redeliveredWhId = initialWhId1;
 
-    // Insert new receipts (simulates edge receipt recording)
-    await sql`
-      INSERT INTO webhook_receipts (shop, webhook_id, topic, received_at)
-      VALUES
-        (${REINST_DOMAIN}, ${newWhId1}, 'ORDERS_CREATE', ${now}),
-        (${REINST_DOMAIN}, ${newWhId2}, 'COMPANIES_UPDATE', ${now}),
-        (${REINST_DOMAIN}, ${redeliveredWhId}, 'ORDERS_CREATE', ${now})
-    `;
+    // Seed new receipts via production helper (simulates edge receipt recording)
+    expect(await recordWebhookReceipt(sql, REINST_DOMAIN, newWhId1, "ORDERS_CREATE", now)).toBe(true);
+    expect(await recordWebhookReceipt(sql, REINST_DOMAIN, newWhId2, "COMPANIES_UPDATE", now)).toBe(true);
+    expect(await recordWebhookReceipt(sql, REINST_DOMAIN, redeliveredWhId, "ORDERS_CREATE", now)).toBe(true);
 
-    // Insert processed webhook rows (simulates drain processing)
+    // Seed processed webhook rows (simulates drain processing)
     await sql`
       INSERT INTO s6_processed_webhooks (webhook_id, topic, resource_gid, processed_at)
       VALUES
