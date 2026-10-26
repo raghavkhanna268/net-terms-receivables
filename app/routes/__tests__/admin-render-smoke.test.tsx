@@ -8,23 +8,24 @@
  * (c) Non-INR shop (USD): currency-not-supported banner, no amounts
  *
  * Runs REAL loaders with mocked authenticate.admin boundary, then renders
- * components with loader data using @testing-library/react.
+ * components with loader data using renderToString.
  *
  * Asserts:
  * - No throw during load or render
  * - No 'undefined', 'NaN', or '[object' in rendered text
  * - Visible primary heading (s-page heading or h1)
- * - For INR shop: amounts render with ₹ and Indian grouping
- * - For non-INR shop: no ₹ or amount strings, currency banner visible
+ * - For INR shop: exact seeded amounts render with ₹ and Indian grouping
+ * - For non-INR shop: exact banner text present, no ₹ symbols on gated pages
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from "vitest";
 import { renderToString } from "react-dom/server";
 import { createElement, type ReactNode } from "react";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import * as fs from "fs";
 import * as path from "path";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -63,27 +64,37 @@ vi.mock("~/lib/recompute-enqueue.server", () => ({
   enqueueCreditStatusRecompute: vi.fn().mockResolvedValue(true),
 }));
 
-vi.mock("react-router", async () => {
-  return {
-    useLoaderData: vi.fn(),
-    useActionData: vi.fn(() => undefined),
-    useNavigation: vi.fn(() => ({ state: "idle", formData: null })),
-    useRevalidator: vi.fn(() => ({ state: "idle", revalidate: vi.fn() })),
-    useRouteError: vi.fn(() => null),
-    useFetcher: vi.fn(() => ({ state: "idle", data: null, submit: vi.fn() })),
-    isRouteErrorResponse: vi.fn(() => false),
-    data: vi.fn((d) => d),
-    Await: ({ resolve: _resolve, children: _children }: { resolve: Promise<unknown>; children: (data: unknown) => ReactNode }) => {
-      return null;
-    },
-    Outlet: () => null,
-    Form: ({ children, ...props }: { children: ReactNode; method?: string }) =>
-      createElement("form", props, children),
-  };
-});
+const mockUseLoaderData = vi.fn();
+const mockUseActionData = vi.fn(() => undefined);
+const mockUseNavigation = vi.fn(() => ({ state: "idle", formData: null }));
+const mockUseRevalidator = vi.fn(() => ({ state: "idle", revalidate: vi.fn() }));
+const mockUseFetcher = vi.fn(() => ({ state: "idle", data: null, submit: vi.fn() }));
 
-import { useLoaderData } from "react-router";
-const mockUseLoaderData = vi.mocked(useLoaderData);
+vi.mock("react-router", () => ({
+  useLoaderData: mockUseLoaderData,
+  useActionData: mockUseActionData,
+  useNavigation: mockUseNavigation,
+  useRevalidator: mockUseRevalidator,
+  useRouteError: vi.fn(() => null),
+  useFetcher: mockUseFetcher,
+  isRouteErrorResponse: vi.fn(() => false),
+  data: vi.fn((d) => d),
+  Await: ({
+    resolve,
+    children,
+  }: {
+    resolve: unknown;
+    children: (data: unknown) => ReactNode;
+  }) => {
+    if (resolve instanceof Promise) {
+      return null;
+    }
+    return children(resolve);
+  },
+  Outlet: () => null,
+  Form: ({ children, ...props }: { children: ReactNode; method?: string }) =>
+    createElement("form", props, children),
+}));
 
 const JUNK_PATTERNS = [/\bundefined\b/, /\bNaN\b/, /\[object\s/];
 
@@ -105,10 +116,6 @@ function hasRupeeSymbol(html: string): boolean {
   return html.includes("₹");
 }
 
-function hasCurrencyNotSupportedBanner(html: string): boolean {
-  return html.includes("Currency Not Supported");
-}
-
 function extractLoaderResult<T>(result: unknown): T {
   if (
     typeof result === "object" &&
@@ -122,32 +129,107 @@ function extractLoaderResult<T>(result: unknown): T {
   return result as T;
 }
 
+type ShopState = "fresh" | "inr" | "non_inr";
+
+interface RedirectExpectation {
+  location: string | RegExp;
+}
+
 interface RouteTestConfig {
   name: string;
   importPath: string;
   urlPath: string;
   hasParams?: Record<string, string>;
-  skipInState?: ("fresh" | "inr" | "non_inr")[];
-  skipReason?: string;
   resourceOnly?: boolean;
+  resourceOnlyReason?: string;
+  expectedRedirect?: Partial<Record<ShopState, RedirectExpectation>>;
+  currencyGateExempt?: boolean;
+  expectsSeededMoney?: boolean;
+  seededMoneyValues?: string[];
+  seededTextValues?: string[];
 }
 
 const APP_ROUTES: RouteTestConfig[] = [
-  { name: "app", importPath: "../app", urlPath: "/app", resourceOnly: true, skipReason: "Layout wrapper with Outlet, no page content to render" },
-  { name: "app._index", importPath: "../app._index", urlPath: "/app" },
-  { name: "app.onboarding", importPath: "../app.onboarding", urlPath: "/app/onboarding" },
-  { name: "app.welcome", importPath: "../app.welcome", urlPath: "/app/welcome", resourceOnly: true, skipReason: "Redirect-only route, no default export" },
-  { name: "app.plan", importPath: "../app.plan", urlPath: "/app/plan" },
-  { name: "app.reconcile", importPath: "../app.reconcile", urlPath: "/app/reconcile" },
-  { name: "app.imports", importPath: "../app.imports", urlPath: "/app/imports" },
-  { name: "app.settings.reminders", importPath: "../app.settings.reminders", urlPath: "/app/settings/reminders" },
-  { name: "app.tag-rules", importPath: "../app.tag-rules", urlPath: "/app/tag-rules" },
-  { name: "app.data-requests", importPath: "../app.data-requests", urlPath: "/app/data-requests" },
-  { name: "app.accounts.$id", importPath: "../app.accounts.$id", urlPath: "/app/accounts/BUYER_ID", hasParams: { id: "BUYER_ID" } },
-  { name: "app.data-requests.$id.download", importPath: "../app.data-requests.$id.download", urlPath: "/app/data-requests/REQ_ID/download", resourceOnly: true, skipReason: "Resource-only route (download handler), no default export" },
+  {
+    name: "app",
+    importPath: "../app",
+    urlPath: "/app",
+    resourceOnly: true,
+    resourceOnlyReason: "Layout wrapper with Outlet only, no page content to render independently",
+  },
+  {
+    name: "app._index",
+    importPath: "../app._index",
+    urlPath: "/app",
+    expectsSeededMoney: true,
+    seededMoneyValues: ["₹1,23,456.00"],
+    seededTextValues: ["Test Buyer Corp INR"],
+  },
+  {
+    name: "app.onboarding",
+    importPath: "../app.onboarding",
+    urlPath: "/app/onboarding",
+  },
+  {
+    name: "app.welcome",
+    importPath: "../app.welcome",
+    urlPath: "/app/welcome",
+    resourceOnly: true,
+    resourceOnlyReason: "Redirect-only route with no default export component",
+  },
+  {
+    name: "app.plan",
+    importPath: "../app.plan",
+    urlPath: "/app/plan",
+  },
+  {
+    name: "app.reconcile",
+    importPath: "../app.reconcile",
+    urlPath: "/app/reconcile",
+    expectsSeededMoney: true,
+    seededMoneyValues: ["₹1,23,456.00"],
+  },
+  {
+    name: "app.imports",
+    importPath: "../app.imports",
+    urlPath: "/app/imports",
+  },
+  {
+    name: "app.settings.reminders",
+    importPath: "../app.settings.reminders",
+    urlPath: "/app/settings/reminders",
+  },
+  {
+    name: "app.tag-rules",
+    importPath: "../app.tag-rules",
+    urlPath: "/app/tag-rules",
+  },
+  {
+    name: "app.data-requests",
+    importPath: "../app.data-requests",
+    urlPath: "/app/data-requests",
+    currencyGateExempt: true,
+  },
+  {
+    name: "app.accounts.$id",
+    importPath: "../app.accounts.$id",
+    urlPath: "/app/accounts/BUYER_ID",
+    hasParams: { id: "BUYER_ID" },
+    expectsSeededMoney: true,
+    seededMoneyValues: ["₹1,23,456.00"],
+    seededTextValues: ["Test Buyer Corp INR"],
+  },
+  {
+    name: "app.data-requests.$id.download",
+    importPath: "../app.data-requests.$id.download",
+    urlPath: "/app/data-requests/REQ_ID/download",
+    resourceOnly: true,
+    resourceOnlyReason: "Resource-only download handler route with no default export component",
+  },
 ];
 
-type ShopState = "fresh" | "inr" | "non_inr";
+const RESOURCE_ONLY_ROUTES = APP_ROUTES.filter((r) => r.resourceOnly);
+const TESTABLE_ROUTES = APP_ROUTES.filter((r) => !r.resourceOnly);
 
 describeWithDb("Admin Render Smoke Tests", () => {
   let sql: ReturnType<typeof postgres>;
@@ -170,6 +252,10 @@ describeWithDb("Admin Render Smoke Tests", () => {
   const INR_RULE_ID = `rule-inr-${TEST_SUFFIX}`;
   const INR_DATA_REQUEST_ID = `dr-inr-${TEST_SUFFIX}`;
 
+  const SEEDED_AMOUNT_RUPEES = 123456;
+  const SEEDED_AMOUNT_FORMATTED = "₹1,23,456.00";
+  const SEEDED_BUYER_NAME = "Test Buyer Corp INR";
+
   const mockGraphQL = vi.fn();
 
   function createMockContext(shopDomain: string) {
@@ -180,7 +266,9 @@ describeWithDb("Admin Render Smoke Tests", () => {
             session: { shop: shopDomain, accessToken: "test-token" },
             sessionToken: { sub: "12345" },
             admin: { graphql: mockGraphQL },
-            redirect: (url: string) => new Response(null, { status: 302, headers: { Location: url } }),
+            redirect: (url: string) => {
+              throw new Response(null, { status: 302, headers: { Location: url } });
+            },
           }),
         },
       },
@@ -208,18 +296,24 @@ describeWithDb("Admin Render Smoke Tests", () => {
 
   function getShopDomain(state: ShopState): string {
     switch (state) {
-      case "fresh": return FRESH_SHOP_DOMAIN;
-      case "inr": return INR_SHOP_DOMAIN;
-      case "non_inr": return NON_INR_SHOP_DOMAIN;
+      case "fresh":
+        return FRESH_SHOP_DOMAIN;
+      case "inr":
+        return INR_SHOP_DOMAIN;
+      case "non_inr":
+        return NON_INR_SHOP_DOMAIN;
     }
-  }
-
-  function _getBuyerId(state: ShopState): string {
-    return state === "inr" ? INR_BUYER_ID : `buyer-${state}-${TEST_SUFFIX}`;
   }
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestSql: () => sql,
+      getRequestWaitUntil: () => undefined,
+    }));
+
+    vi.stubEnv("PLAN_GATING_ENFORCED", "false");
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt", plan_cached_at)
@@ -238,7 +332,7 @@ describeWithDb("Admin Render Smoke Tests", () => {
       )
       VALUES (
         ${INR_BUYER_ID}, ${INR_SHOP_ID}, 'COMPANY', ${"co-inr-" + TEST_SUFFIX}, ${"loc-inr-" + TEST_SUFFIX}, 
-        'Test Buyer Corp INR', 12345600.00, 'OK', false, false, NULL, NULL, NOW(), NOW()
+        ${SEEDED_BUYER_NAME}, ${SEEDED_AMOUNT_RUPEES}, 'OK', false, false, NULL, NULL, NOW(), NOW()
       )
     `;
 
@@ -249,7 +343,7 @@ describeWithDb("Admin Render Smoke Tests", () => {
       )
       VALUES (
         ${INR_INVOICE_ID}, ${INR_SHOP_ID}, ${INR_BUYER_ID}, 'INV-2024-001', ${"order-inr-" + TEST_SUFFIX}, 
-        12345600.00, 12345600.00, NOW(), NOW() + interval '30 days', NOW(), NOW()
+        ${SEEDED_AMOUNT_RUPEES}, ${SEEDED_AMOUNT_RUPEES}, NOW(), NOW() + interval '30 days', NOW(), NOW()
       )
     `;
 
@@ -263,7 +357,7 @@ describeWithDb("Admin Render Smoke Tests", () => {
         id, "shopId", "importId", amount, utr, status, rail, narration, "valueDate", "createdAt", "updatedAt"
       )
       VALUES (
-        ${INR_PAYMENT_ID}, ${INR_SHOP_ID}, ${INR_IMPORT_ID}, 12345600.00, ${"UTR-INR-" + TEST_SUFFIX}, 
+        ${INR_PAYMENT_ID}, ${INR_SHOP_ID}, ${INR_IMPORT_ID}, ${SEEDED_AMOUNT_RUPEES}, ${"UTR-INR-" + TEST_SUFFIX}, 
         'unmatched', 'NEFT', 'Payment narration', NOW(), NOW(), NOW()
       )
     `;
@@ -274,7 +368,7 @@ describeWithDb("Admin Render Smoke Tests", () => {
       )
       VALUES (
         ${INR_MATCH_ID}, ${INR_SHOP_ID}, ${INR_PAYMENT_ID}, ${INR_INVOICE_ID}, 
-        12345600.00, 85, '[]'::jsonb, 'suggested', NOW(), NOW()
+        ${SEEDED_AMOUNT_RUPEES}, 85, '[]'::jsonb, 'suggested', NOW(), NOW()
       )
     `;
 
@@ -286,13 +380,23 @@ describeWithDb("Admin Render Smoke Tests", () => {
     await sql`
       INSERT INTO s22_data_requests (id, shop_id, customer_gid, request_id, status, received_at, expires_at, export_data)
       VALUES (
-        ${INR_DATA_REQUEST_ID}, ${INR_SHOP_ID}, 'cust-inr-1', 'req-inr-id', 'completed', 
+        ${INR_DATA_REQUEST_ID}, ${INR_SHOP_ID}, ${"cust-inr-" + TEST_SUFFIX}, ${"req-" + TEST_SUFFIX}, 'completed', 
         NOW(), NOW() + interval '30 days', '{"customerId": "cust-inr-1"}'::jsonb
       )
     `;
   });
 
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseLoaderData.mockReturnValue({});
+    mockUseActionData.mockReturnValue(undefined);
+    mockUseNavigation.mockReturnValue({ state: "idle", formData: null });
+    mockUseRevalidator.mockReturnValue({ state: "idle", revalidate: vi.fn() });
+    mockUseFetcher.mockReturnValue({ state: "idle", data: null, submit: vi.fn() });
+  });
+
   afterAll(async () => {
+    vi.unstubAllEnvs();
     await sql`DELETE FROM "Match" WHERE id = ${INR_MATCH_ID}`;
     await sql`DELETE FROM "Payment" WHERE id = ${INR_PAYMENT_ID}`;
     await sql`DELETE FROM "Invoice" WHERE id = ${INR_INVOICE_ID}`;
@@ -305,37 +409,19 @@ describeWithDb("Admin Render Smoke Tests", () => {
     await sql.end();
   });
 
-  beforeEach(async () => {
-    vi.resetModules();
-    vi.clearAllMocks();
-
-    vi.doMock("~/lib/request-context.server", () => ({
-      getRequestSql: () => sql,
-      getRequestWaitUntil: () => undefined,
-    }));
-
-    vi.stubEnv("PLAN_GATING_ENFORCED", "false");
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.clearAllMocks();
-  });
-
-  const testResults: { route: string; state: ShopState; status: "pass" | "skip"; reason?: string }[] = [];
-
   describe("Route coverage guard", () => {
     const ROUTES_DIR = path.join(__dirname, "..");
 
     it("all app.* routes with default export are in the test table", () => {
-      const routeFiles = fs.readdirSync(ROUTES_DIR)
-        .filter(f => f.startsWith("app.") && f.endsWith(".tsx") && !f.includes("test"));
+      const routeFiles = fs
+        .readdirSync(ROUTES_DIR)
+        .filter((f) => f.startsWith("app.") && f.endsWith(".tsx") && !f.includes("test"));
 
       const missing: string[] = [];
 
       for (const routeFile of routeFiles) {
         const routeName = routeFile.replace(".tsx", "");
-        const inTable = APP_ROUTES.some(r => r.name === routeName);
+        const inTable = APP_ROUTES.some((r) => r.name === routeName);
         if (!inTable) {
           const content = fs.readFileSync(path.join(ROUTES_DIR, routeFile), "utf-8");
           const hasDefaultExport = /export\s+default\s+/.test(content);
@@ -351,30 +437,41 @@ describeWithDb("Admin Render Smoke Tests", () => {
       ).toHaveLength(0);
     });
 
-    it("resource-only routes are explicitly marked with reasons", () => {
-      const resourceRoutes = APP_ROUTES.filter(r => r.resourceOnly);
-      for (const route of resourceRoutes) {
-        expect(route.skipReason, `${route.name} missing skipReason`).toBeTruthy();
+    it("resource-only routes are explicitly documented with reasons", () => {
+      for (const route of RESOURCE_ONLY_ROUTES) {
+        expect(
+          route.resourceOnlyReason,
+          `${route.name} marked resourceOnly but missing resourceOnlyReason`
+        ).toBeTruthy();
       }
+
+      expect(RESOURCE_ONLY_ROUTES.length).toBe(3);
+      expect(RESOURCE_ONLY_ROUTES.map((r) => r.name).sort()).toEqual([
+        "app",
+        "app.data-requests.$id.download",
+        "app.welcome",
+      ]);
     });
   });
 
-  for (const route of APP_ROUTES) {
-    if (route.resourceOnly) {
-      it.skip(`${route.name} - ${route.skipReason}`, () => {});
-      continue;
+  describe("Excluded by design (resource-only routes)", () => {
+    for (const route of RESOURCE_ONLY_ROUTES) {
+      it(`${route.name}: ${route.resourceOnlyReason}`, () => {
+        expect(route.resourceOnly).toBe(true);
+        expect(route.resourceOnlyReason).toBeTruthy();
+      });
     }
+  });
 
+  for (const route of TESTABLE_ROUTES) {
     describe(route.name, () => {
       for (const state of ["fresh", "inr", "non_inr"] as ShopState[]) {
-        const stateLabel = state === "fresh" ? "(a) Fresh install" : state === "inr" ? "(b) Seeded INR" : "(c) Non-INR (USD)";
-
-        if (route.skipInState?.includes(state)) {
-          it.skip(`${stateLabel}: ${route.skipReason}`, () => {
-            testResults.push({ route: route.name, state, status: "skip", reason: route.skipReason });
-          });
-          continue;
-        }
+        const stateLabel =
+          state === "fresh"
+            ? "(a) Fresh install"
+            : state === "inr"
+              ? "(b) Seeded INR"
+              : "(c) Non-INR (USD)";
 
         it(`${stateLabel}: loads and renders without errors`, async () => {
           const shopDomain = getShopDomain(state);
@@ -386,8 +483,8 @@ describeWithDb("Admin Render Smoke Tests", () => {
               urlPath = urlPath.replace("BUYER_ID", INR_BUYER_ID);
               params.id = INR_BUYER_ID;
             } else {
-              urlPath = urlPath.replace("BUYER_ID", "nonexistent-buyer");
-              params.id = "nonexistent-buyer";
+              urlPath = urlPath.replace("BUYER_ID", "nonexistent-buyer-" + TEST_SUFFIX);
+              params.id = "nonexistent-buyer-" + TEST_SUFFIX;
             }
           }
 
@@ -395,76 +492,145 @@ describeWithDb("Admin Render Smoke Tests", () => {
           const mod = await import(route.importPath);
 
           let loaderResult: unknown;
-          let loaderError: Error | null = null;
+          let redirectResponse: Response | null = null;
+
           try {
             loaderResult = await mod.loader(loaderArgs as never);
           } catch (err) {
             if (err instanceof Response && (err.status === 302 || err.status === 303)) {
-              testResults.push({ route: route.name, state, status: "pass" });
-              return;
+              redirectResponse = err;
+            } else {
+              throw new Error(
+                `Loader threw unexpected error for ${route.name} in state ${state}: ${err instanceof Error ? err.message : String(err)}`
+              );
             }
-            loaderError = err as Error;
           }
 
-          if (loaderError) {
-            testResults.push({ route: route.name, state, status: "skip", reason: `Loader error: ${loaderError.message}` });
+          if (redirectResponse) {
+            const location = redirectResponse.headers.get("Location");
+            expect(
+              location,
+              `${route.name} redirected but no Location header in state ${state}`
+            ).toBeTruthy();
+
+            const expectedRedirect = route.expectedRedirect?.[state];
+            if (expectedRedirect) {
+              if (typeof expectedRedirect.location === "string") {
+                expect(location).toBe(expectedRedirect.location);
+              } else {
+                expect(location).toMatch(expectedRedirect.location);
+              }
+            }
             return;
           }
 
-          const data = extractLoaderResult(loaderResult);
+          const data = extractLoaderResult<Record<string, unknown>>(loaderResult);
+
+          if (data && typeof data === "object" && "dashboardData" in data) {
+            const dashboardDataPromise = data.dashboardData;
+            if (dashboardDataPromise instanceof Promise) {
+              const resolvedDashboardData = await dashboardDataPromise;
+              data.dashboardData = resolvedDashboardData;
+            }
+          }
+
           mockUseLoaderData.mockReturnValue(data);
 
           let html: string;
-          let renderError: Error | null = null;
           try {
             html = renderToString(createElement(mod.default));
           } catch (err) {
-            renderError = err as Error;
-            html = "";
-          }
-
-          if (renderError) {
-            testResults.push({ route: route.name, state, status: "skip", reason: `Render error: ${renderError.message}` });
-            return;
+            throw new Error(
+              `Render threw error for ${route.name} in state ${state}: ${err instanceof Error ? err.message : String(err)}`
+            );
           }
 
           const junkCheck = hasJunkText(html);
-          expect(junkCheck.found, `Found junk text: ${junkCheck.match}`).toBe(false);
+          expect(junkCheck.found, `Found junk text "${junkCheck.match}" in ${route.name}`).toBe(
+            false
+          );
 
-          expect(hasVisibleHeading(html), "Missing visible heading (s-page heading or h1)").toBe(true);
+          expect(
+            hasVisibleHeading(html),
+            `Missing visible heading (s-page heading or h1) in ${route.name}`
+          ).toBe(true);
 
           if (state === "non_inr") {
-            if (route.name === "app.data-requests") {
-              expect(hasCurrencyNotSupportedBanner(html)).toBe(false);
-            } else if (route.name !== "app.plan" && route.name !== "app.onboarding" && route.name !== "app.tag-rules" && route.name !== "app.settings.reminders") {
-              expect(hasCurrencyNotSupportedBanner(html) || !hasRupeeSymbol(html)).toBe(true);
+            if (route.currencyGateExempt) {
+              expect(
+                html.includes(CURRENCY_NOT_SUPPORTED_BANNER_COPY),
+                `${route.name} is currency-gate exempt but showed the banner`
+              ).toBe(false);
+            } else if (
+              route.name === "app._index" ||
+              route.name === "app.accounts.$id" ||
+              route.name === "app.reconcile" ||
+              route.name === "app.imports"
+            ) {
+              expect(
+                html.includes("Currency Not Supported") ||
+                  html.includes("currently supports INR only"),
+                `${route.name} should show currency banner in non-INR state`
+              ).toBe(true);
+
+              expect(
+                html.includes("Shopify admin → Settings → General → Store defaults"),
+                `${route.name} should include switch steps in currency banner`
+              ).toBe(true);
+
+              expect(
+                hasRupeeSymbol(html),
+                `${route.name} should NOT show ₹ symbol on currency-gated page in non-INR state`
+              ).toBe(false);
             }
           }
 
-          if (state === "inr" && route.name === "app.accounts.$id") {
-            expect(hasRupeeSymbol(html), "INR amounts should show ₹").toBe(true);
-            expect(html).toMatch(/₹[\d,]+\.\d{2}/);
+          if (state === "inr" && route.expectsSeededMoney) {
+            expect(
+              hasRupeeSymbol(html),
+              `${route.name} should show ₹ symbol for INR amounts in state ${state}`
+            ).toBe(true);
+
+            if (route.seededMoneyValues) {
+              for (const expectedAmount of route.seededMoneyValues) {
+                expect(
+                  html.includes(expectedAmount),
+                  `${route.name} should include exact seeded amount "${expectedAmount}" in state ${state}. ` +
+                    `This validates Indian grouping (lakhs/crores) format.`
+                ).toBe(true);
+              }
+            }
+
+            if (route.seededTextValues) {
+              for (const expectedText of route.seededTextValues) {
+                expect(
+                  html.includes(expectedText),
+                  `${route.name} should include seeded text "${expectedText}" proving loader data reached the component`
+                ).toBe(true);
+              }
+            }
           }
 
-          testResults.push({ route: route.name, state, status: "pass" });
+          if (state === "fresh") {
+            if (route.name === "app._index") {
+              const freshIndicators = [
+                "No outstanding invoices",
+                "No outstanding receivables",
+                "No buyer accounts",
+              ];
+              const hasFreshIndicator = freshIndicators.some((indicator) =>
+                html.includes(indicator)
+              );
+              expect(
+                hasFreshIndicator || !html.includes(SEEDED_AMOUNT_FORMATTED),
+                `${route.name} in fresh state should show empty state or not show seeded data`
+              ).toBe(true);
+            }
+          }
         });
       }
     });
   }
-
-  afterAll(() => {
-    console.log("\n=== Admin Render Smoke Test Results ===");
-    const passed = testResults.filter(r => r.status === "pass").length;
-    const skipped = testResults.filter(r => r.status === "skip").length;
-    console.log(`Passed: ${passed}, Skipped: ${skipped}`);
-
-    if (skipped > 0) {
-      console.log("\nSkipped tests:");
-      for (const r of testResults.filter(r => r.status === "skip")) {
-        console.log(`  - ${r.route} (${r.state}): ${r.reason}`);
-      }
-    }
-  });
 });
 
 describe("INR Amount Formatting", () => {
@@ -478,5 +644,15 @@ describe("INR Amount Formatting", () => {
     const { formatPaiseAmount } = await import("~/lib/aging");
     const result = formatPaiseAmount(12345600n, "USD");
     expect(result).toBe("$123,456.00");
+  });
+
+  it("Indian grouping for lakhs (10,00,000 paise = ₹10,000.00)", async () => {
+    const { formatPaiseAmount } = await import("~/lib/aging");
+    expect(formatPaiseAmount(1000000n, "INR")).toBe("₹10,000.00");
+  });
+
+  it("Indian grouping for crores", async () => {
+    const { formatPaiseAmount } = await import("~/lib/aging");
+    expect(formatPaiseAmount(10000000000n, "INR")).toBe("₹10,00,00,000.00");
   });
 });
