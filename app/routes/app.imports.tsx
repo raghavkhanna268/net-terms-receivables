@@ -27,6 +27,8 @@ import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
+import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 /**
  * Maximum rows per import request.
@@ -247,7 +249,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; currency: string }[]>`
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
@@ -256,6 +258,17 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopDomain,
       shopCurrency: "INR",
       maxImportRows: MAX_IMPORT_ROWS,
+      notSupported: false,
+    };
+  }
+
+  // #292: Check currency gate - if not supported, return minimal payload (no preview)
+  if (!isCurrencyGateOpen(shop.currency)) {
+    return {
+      shopDomain,
+      shopCurrency: getEffectiveCurrency(shop.currency),
+      maxImportRows: MAX_IMPORT_ROWS,
+      notSupported: true,
     };
   }
 
@@ -270,6 +283,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopDomain,
     shopCurrency: shop.currency ?? "INR",
     maxImportRows: MAX_IMPORT_ROWS,
+    notSupported: false,
   };
 };
 
@@ -293,7 +307,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { minDateIso, maxDateIso } = computeDateBounds(now);
 
   // Get shop ID and currency
-  const [shop] = await sql<{ id: string; currency: string }[]>`
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
@@ -304,8 +318,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     );
   }
 
-  // INR only for now (Indian bank statements)
-  if (shop.currency !== "INR") {
+  // #292: Check currency gate - INR only for bank imports
+  if (!isCurrencyGateOpen(shop.currency)) {
     return Response.json(
       { success: false, error: "Only INR currency is supported for bank imports" },
       { status: 400 }
@@ -753,8 +767,22 @@ function RailBadge({ rail }: { rail: string }) {
 }
 
 export default function ImportsPage() {
-  const { shopCurrency, maxImportRows } = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
+  const { shopCurrency, maxImportRows, notSupported } = loaderData;
   const fetcher = useFetcher<ImportResult>();
+
+  // #292: When currency not supported, show only the banner
+  if (notSupported) {
+    return (
+      <s-page heading="Import Bank Statement">
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
 
   const [status, setStatus] = useState<ParseStatus>("idle");
   const [fileName, setFileName] = useState<string | null>(null);

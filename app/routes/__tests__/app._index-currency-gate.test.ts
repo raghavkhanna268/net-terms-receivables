@@ -1,0 +1,203 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { LoaderFunctionArgs } from "react-router";
+
+/**
+ * #292: Currency gate tests for app._index loader.
+ *
+ * Tests verify that when a shop's currency is not supported (non-INR, NULL, XXX):
+ * - The loader returns notSupported: true
+ * - No money fields are present in the payload (agingTotals, buyerLedger, selectedBuyerInvoices)
+ * - Money queries are not run
+ */
+
+const createMockSqlFn = () =>
+  vi.fn().mockImplementation(() => Promise.resolve([]));
+
+const mockSql = Object.assign(createMockSqlFn(), {
+  json: vi.fn((v: unknown) => v),
+  array: vi.fn((arr: unknown[]) => arr),
+  unsafe: vi.fn((s: string) => s),
+  begin: vi.fn().mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
+    const txSql = Object.assign(createMockSqlFn(), {
+      json: vi.fn((v: unknown) => v),
+      array: vi.fn((arr: unknown[]) => arr),
+    });
+    return cb(txSql);
+  }),
+});
+
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => () => {}),
+}));
+
+vi.mock("~/services/plan.server", () => ({
+  resolvePlan: vi.fn().mockResolvedValue({
+    plan: { key: "free" },
+    subscriptionName: "Free",
+    isTest: false,
+  }),
+}));
+
+vi.mock("~/services/gating.server", () => ({
+  getUsageStats: vi.fn().mockResolvedValue({
+    companies: { current: 2, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
+  }),
+  isGatingEnforced: vi.fn().mockReturnValue(false),
+}));
+
+const mockGetShopAgingTotals = vi.fn();
+const mockGetBuyerLedger = vi.fn();
+const mockGetBuyerInvoices = vi.fn();
+
+vi.mock("~/lib/aging-queries.server", () => ({
+  getShopAgingTotals: mockGetShopAgingTotals,
+  getBuyerLedger: mockGetBuyerLedger,
+  getBuyerInvoices: mockGetBuyerInvoices,
+}));
+
+vi.mock("~/services/shop-currency-recovery.server", () => ({
+  checkAndRecoverCurrency: vi.fn().mockImplementation(
+    (_sql, _domain, storedCurrency) => Promise.resolve(storedCurrency)
+  ),
+}));
+
+vi.mock("~/services/access-log.server", () => ({
+  recordAccess: vi.fn(),
+  getActorFromSessionToken: vi.fn().mockReturnValue("test-actor"),
+}));
+
+const TEST_SHOP = "test-gate.myshopify.com";
+const TEST_SHOP_ID = "shop-gate-123";
+
+describe("#292 currency gate on /app loader", () => {
+  function createLoaderArgs(): LoaderFunctionArgs {
+    const url = new URL("https://example.com/app?skipOnboarding=true");
+    return {
+      request: new Request(url.toString()),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              sessionToken: "test-token",
+              redirect: vi.fn(),
+              admin: { graphql: vi.fn() },
+            }),
+          },
+        },
+        cloudflare: {
+          env: {},
+          ctx: { waitUntil: vi.fn() },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: { INR: "1000000" },
+      buckets: {
+        current: { byCurrency: { INR: "500000" } },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+    mockGetBuyerLedger.mockResolvedValue({ rows: [{ buyer_account_id: "b1" }], totalCount: 1 });
+    mockGetBuyerInvoices.mockResolvedValue({ rows: [], totalCount: 0 });
+  });
+
+  function setupSqlMock(storedCurrency: string | null) {
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([
+          { id: TEST_SHOP_ID, currency: storedCurrency, timezone: "Asia/Kolkata" },
+        ]);
+      }
+      if (query.includes("onboarding_dismissed_at")) {
+        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+  }
+
+  it("USD shop: notSupported=true, no money fields in payload, money queries not run", async () => {
+    setupSqlMock("USD");
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data as Record<string, unknown>;
+
+    expect(result.notSupported).toBe(true);
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("USD");
+    expect(result.agingTotals).toBeNull();
+    expect(result.buyerLedger).toBeNull();
+    expect(result.selectedBuyerInvoices).toBeNull();
+
+    expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
+    expect(mockGetBuyerLedger).not.toHaveBeenCalled();
+  });
+
+  it("XXX (unknown) shop: notSupported=true, no money fields, fail-closed", async () => {
+    setupSqlMock("XXX");
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data as Record<string, unknown>;
+
+    expect(result.notSupported).toBe(true);
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("XXX");
+    expect(result.agingTotals).toBeNull();
+    expect(result.buyerLedger).toBeNull();
+
+    expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
+  });
+
+  it("NULL currency: notSupported=true, no money fields, fail-closed", async () => {
+    setupSqlMock(null);
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data as Record<string, unknown>;
+
+    expect(result.notSupported).toBe(true);
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("XXX");
+    expect(result.agingTotals).toBeNull();
+    expect(result.buyerLedger).toBeNull();
+
+    expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
+  });
+
+  it("INR shop: currencySupported=true, money fields present, queries run", async () => {
+    setupSqlMock("INR");
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data as Record<string, unknown>;
+
+    expect(result.notSupported).toBeUndefined();
+    expect(result.currencySupported).toBe(true);
+    expect(result.shopCurrency).toBe("INR");
+    expect(result.agingTotals).not.toBeNull();
+    expect(result.buyerLedger).not.toBeNull();
+
+    expect(mockGetShopAgingTotals).toHaveBeenCalled();
+    expect(mockGetBuyerLedger).toHaveBeenCalled();
+  });
+});
