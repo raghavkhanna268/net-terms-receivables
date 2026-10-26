@@ -82,12 +82,16 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 - `hdfc-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 - `hdfc-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
 - `hdfc-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
+- `hdfc-synthetic.xls` - **BIFF8 .xls matching real HDFC export layout** (SYNTHETIC, generated)
+- `hdfc-synthetic.csv` - CSV twin of above with identical transactions (SYNTHETIC, generated)
 
 ### ICICI Fixtures
 - `icici-retail-synthetic.csv` - Standard retail savings format (SYNTHETIC)
 - `icici-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 - `icici-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
 - `icici-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
+- `icici-synthetic.xls` - **BIFF8 .xls matching real ICICI export layout** (SYNTHETIC, generated)
+- `icici-synthetic.csv` - CSV twin of above with identical transactions (SYNTHETIC, generated)
 
 ### SBI Fixtures (UNVERIFIED)
 - `sbi-retail-synthetic.csv` - Standard retail savings format (SYNTHETIC, UNVERIFIED LAYOUT)
@@ -107,6 +111,42 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 ### XLSX Generation
 XLSX fixtures are generated from CSV source files using `scripts/generate-xlsx-fixtures.ts`.
 Run `npx tsx scripts/generate-xlsx-fixtures.ts` to regenerate them after modifying CSV sources.
+
+### Real-Layout BIFF8 .xls Fixtures
+The `*-synthetic.xls` and matching `*-synthetic.csv` files are generated from real bank export layout specs.
+They reproduce the exact structure of actual HDFC and ICICI .xls exports including:
+
+**ICICI (`icici-synthetic.xls`):**
+- 12-row preamble with merges (title, account info, filters)
+- Header row at row 12 with Value Date BEFORE Transaction Date
+- Column order: spacer | S No. | Value Date | Transaction Date | Cheque Number | Transaction Remarks | Withdrawal Amount(INR) | Deposit Amount(INR) | Balance(INR) | spacer
+- All cells are TEXT (string) type with number format General
+- 0.00 on non-applicable amount side (never blank)
+- Narration overflow rows (col F only) for long narrations
+- Legend footer block with no blank separator
+
+**HDFC (`hdfc-synthetic.xls`):**
+- Bank banner row, two-column preamble block (rows 4-17)
+- Asterisk separator rows before/after header and after data
+- Header row at row 20 with exact HDFC column names
+- Mixed cell types: text for dates/narration/ref, NUMERIC for amounts
+- Blank (no cell) on non-applicable amount side (not 0.00)
+- Full footer: summary values row (numeric, no labels), Dr/Cr counts, generation line, end marker
+- Note: Summary-values row (numeric, no text label) triggers one expected ROW_PARSE_FAILED
+
+**Features covered by both:**
+- UPI credits and debits with various narration forms
+- VPA with hyphen (7-segment HDFC form)
+- VPA without @ (ICICI alphanumeric form)
+- Ref ≠ 0000+RRN case (HDFC)
+- 15-digit ref case (HDFC)
+- Card/ATW debits (HDFC)
+- CMS credits, ACH debits (ICICI)
+- Interest credits
+- Value Date ≠ Transaction/Date case
+- Narration overflow rows (ICICI mid-data and last-txn edge case)
+
+Generate with: `npx tsx scripts/fixtures/make-bank-xls.ts`
 
 ## Synthetic Data Generation Rules
 

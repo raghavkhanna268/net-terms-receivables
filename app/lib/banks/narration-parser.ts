@@ -111,12 +111,23 @@ function detectRail(textUpper: string): PaymentRail {
 function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "UPI" };
 
-  // First, try to find VPA in the entire text (handles hyphenated VPAs)
-  // Pattern: alphanumeric/dots/hyphens @ alphanumeric handle
-  // Must be bounded by non-VPA-like characters (allow hyphen as delimiter for HDFC dash-format)
-  const fullVpaMatch = text.match(/(?:^|[^a-zA-Z0-9._])([a-zA-Z0-9._]+(?:-\d+)?@[a-zA-Z0-9]+)(?:[^a-zA-Z0-9]|$)/);
-  if (fullVpaMatch) {
-    result.upiId = fullVpaMatch[1].toLowerCase();
+  // First, try to find hyphenated VPA (must NOT follow space to avoid capturing NAME-vpa)
+  // In HDFC format like "UPI-NAME-vpa@handle-...", we need to distinguish:
+  // - "9000000000-1@oksynt" (hyphen IS part of VPA - phone number format)
+  // - "synt-pay@oksynt" (hyphen IS part of VPA - name format)
+  // - "VENDOR-fakevendor@synthetic" (hyphen is NOT part of VPA - segment separator after space)
+  // By excluding space from lookbehind, we avoid capturing NAME-vpa patterns
+  const hyphenVpaMatch = text.match(/(?:^|[^a-zA-Z0-9._ ])([a-zA-Z0-9._]+-[a-zA-Z0-9]+@[a-zA-Z0-9]+)(?:[^a-zA-Z0-9]|$)/);
+  if (hyphenVpaMatch) {
+    result.upiId = hyphenVpaMatch[1].toLowerCase();
+  }
+
+  // If no hyphenated VPA found, try simple VPA (no hyphen in local part)
+  if (!result.upiId) {
+    const simpleVpaMatch = text.match(/(?:^|[^a-zA-Z0-9._])([a-zA-Z0-9._]+@[a-zA-Z0-9]+)(?:[^a-zA-Z0-9]|$)/);
+    if (simpleVpaMatch) {
+      result.upiId = simpleVpaMatch[1].toLowerCase();
+    }
   }
   
   // Split by separators for further analysis
