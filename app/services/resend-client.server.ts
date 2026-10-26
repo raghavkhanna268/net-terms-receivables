@@ -22,6 +22,7 @@
 import {
   parseRecipientAllowlist,
   filterRecipients,
+  isAllowlistEnforced,
   type RecipientAllowlist,
 } from "./recipient-allowlist.server";
 
@@ -61,6 +62,7 @@ export interface ResendEmailParams {
 export interface ResendEnv {
   RESEND_API_KEY?: string;
   RESEND_TEST_RECIPIENTS?: string;
+  RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string;
 }
 
 /**
@@ -75,19 +77,22 @@ function getAllowlist(env: ResendEnv): RecipientAllowlist {
 /**
  * Filter all recipient fields (to, cc, bcc) through the allowlist.
  * Returns the filtered params and counts.
+ *
+ * When RESEND_RECIPIENT_ALLOWLIST_ENFORCED is "false", all recipients pass through unchanged.
  */
 function filterAllRecipients(
   params: ResendEmailParams,
-  allowlist: RecipientAllowlist
+  allowlist: RecipientAllowlist,
+  env: ResendEnv = {}
 ): {
   filteredParams: ResendEmailParams;
   totalSkipped: number;
   totalAllowed: number;
   hasAnyRecipient: boolean;
 } {
-  const toResult = filterRecipients(params.to, allowlist);
-  const ccResult = params.cc ? filterRecipients(params.cc, allowlist) : { allowed: [], skippedCount: 0 };
-  const bccResult = params.bcc ? filterRecipients(params.bcc, allowlist) : { allowed: [], skippedCount: 0 };
+  const toResult = filterRecipients(params.to, allowlist, env);
+  const ccResult = params.cc ? filterRecipients(params.cc, allowlist, env) : { allowed: [], skippedCount: 0 };
+  const bccResult = params.bcc ? filterRecipients(params.bcc, allowlist, env) : { allowed: [], skippedCount: 0 };
 
   const totalSkipped = toResult.skippedCount + ccResult.skippedCount + bccResult.skippedCount;
   const totalAllowed = toResult.allowed.length + ccResult.allowed.length + bccResult.allowed.length;
@@ -139,8 +144,9 @@ export async function sendViaResend(
   }
 
   const allowlist = getAllowlist(env);
+  const enforced = isAllowlistEnforced(env);
 
-  if (allowlist.size === 0) {
+  if (enforced && allowlist.size === 0) {
     const totalOriginal = params.to.length + (params.cc?.length ?? 0) + (params.bcc?.length ?? 0);
     return {
       sent: false,
@@ -152,7 +158,7 @@ export async function sendViaResend(
   }
 
   const { filteredParams, totalSkipped, hasAnyRecipient } =
-    filterAllRecipients(params, allowlist);
+    filterAllRecipients(params, allowlist, env);
 
   if (!hasAnyRecipient) {
     return {
