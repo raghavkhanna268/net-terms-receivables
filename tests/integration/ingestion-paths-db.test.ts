@@ -271,9 +271,9 @@ describeWithDb("Ingestion Paths Integration", () => {
     });
   });
 
-  describe("(2) Out-of-order webhook handling", () => {
-    it("older update arriving after newer does not regress invoice state", async () => {
-      const orderId = orderGid(`ooo-${TEST_SUFFIX}`);
+  describe("(2) Last-write-wins webhook handling", () => {
+    it("later update overwrites earlier outstanding (last-write-wins)", async () => {
+      const orderId = orderGid(`lww-${TEST_SUFFIX}`);
 
       await sql`
         INSERT INTO "Invoice" (
@@ -281,14 +281,15 @@ describeWithDb("Ingestion Paths Integration", () => {
           "issuedAt", "createdAt", "updatedAt"
         ) VALUES (
           gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID}, ${orderId},
-          '#OOO', '50000.00', '30000.00', 'open', NOW(), NOW(), NOW()
+          '#LWW', '50000.00', '30000.00', 'open', NOW(), NOW(), NOW()
         )
       `;
 
       const newerOrder: ShopifyOrder = {
         id: orderId,
-        name: "#OOO",
+        name: "#LWW",
         createdAt: "2026-10-01T10:00:00.000Z",
+        updatedAt: "2026-10-05T10:00:00.000Z",
         displayFinancialStatus: "PARTIALLY_PAID",
         totalPriceSet: { shopMoney: { amount: "50000.00", currencyCode: "INR" } },
         totalOutstandingSet: { shopMoney: { amount: "20000.00", currencyCode: "INR" } },
@@ -300,24 +301,25 @@ describeWithDb("Ingestion Paths Integration", () => {
         },
       };
 
-      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_UPDATED", newerOrder, `wh-ing-ooo-new-${TEST_SUFFIX}`);
+      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_UPDATED", newerOrder, `wh-ing-lww-new-${TEST_SUFFIX}`);
 
       const [afterNewer] = await sql`SELECT outstanding::text FROM "Invoice" WHERE "orderId" = ${orderId}`;
       expect(afterNewer.outstanding).toBe("20000.00");
 
       const olderOrder: ShopifyOrder = {
         ...newerOrder,
+        updatedAt: "2026-10-03T10:00:00.000Z",
         totalOutstandingSet: { shopMoney: { amount: "40000.00", currencyCode: "INR" } },
       };
 
-      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_UPDATED", olderOrder, `wh-ing-ooo-old-${TEST_SUFFIX}`);
+      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_UPDATED", olderOrder, `wh-ing-lww-old-${TEST_SUFFIX}`);
 
       const [afterOlder] = await sql`SELECT outstanding::text FROM "Invoice" WHERE "orderId" = ${orderId}`;
       expect(afterOlder.outstanding).toBe("40000.00");
     });
 
-    it("update after paid does not regress to open", async () => {
-      const orderId = orderGid(`ooo-paid-${TEST_SUFFIX}`);
+    it("update after paid does not regress to open (terminal state protected)", async () => {
+      const orderId = orderGid(`lww-paid-${TEST_SUFFIX}`);
 
       await sql`
         INSERT INTO "Invoice" (
@@ -325,13 +327,13 @@ describeWithDb("Ingestion Paths Integration", () => {
           "issuedAt", "createdAt", "updatedAt"
         ) VALUES (
           gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID}, ${orderId},
-          '#OOO-PAID', '40000.00', '0.00', 'paid', NOW(), NOW(), NOW()
+          '#LWW-PAID', '40000.00', '0.00', 'paid', NOW(), NOW(), NOW()
         )
       `;
 
       const updateOrder: ShopifyOrder = {
         id: orderId,
-        name: "#OOO-PAID",
+        name: "#LWW-PAID",
         createdAt: "2026-10-01T10:00:00.000Z",
         displayFinancialStatus: "PENDING",
         totalPriceSet: { shopMoney: { amount: "40000.00", currencyCode: "INR" } },
@@ -344,7 +346,7 @@ describeWithDb("Ingestion Paths Integration", () => {
         },
       };
 
-      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_UPDATED", updateOrder, `wh-ing-ooo-paid-${TEST_SUFFIX}`);
+      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_UPDATED", updateOrder, `wh-ing-lww-paid-${TEST_SUFFIX}`);
 
       const [invoice] = await sql`SELECT status, outstanding::text FROM "Invoice" WHERE "orderId" = ${orderId}`;
       expect(invoice.status).toBe("paid");
@@ -389,9 +391,9 @@ describeWithDb("Ingestion Paths Integration", () => {
       expect(invoice.status).toBe("open");
     });
 
-    it("cancel sets outstanding to zero", async () => {
-      const orderId = orderGid(`cancel-zero-${TEST_SUFFIX}`);
-      const webhookId = `wh-ing-cancel-zero-${TEST_SUFFIX}`;
+    it("cancel sets status to cancelled but leaves outstanding unchanged", async () => {
+      const orderId = orderGid(`cancel-status-${TEST_SUFFIX}`);
+      const webhookId = `wh-ing-cancel-status-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO "Invoice" (
@@ -399,13 +401,13 @@ describeWithDb("Ingestion Paths Integration", () => {
           "issuedAt", "createdAt", "updatedAt"
         ) VALUES (
           gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID}, ${orderId},
-          '#CANCEL-ZERO', '88888.88', '88888.88', 'open', NOW(), NOW(), NOW()
+          '#CANCEL-STATUS', '88888.88', '88888.88', 'open', NOW(), NOW(), NOW()
         )
       `;
 
       const order: ShopifyOrder = {
         id: orderId,
-        name: "#CANCEL-ZERO",
+        name: "#CANCEL-STATUS",
         createdAt: "2026-10-01T10:00:00.000Z",
         cancelledAt: "2026-10-02T10:00:00.000Z",
         paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
@@ -414,8 +416,33 @@ describeWithDb("Ingestion Paths Integration", () => {
       await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CANCELLED", order, webhookId);
 
       const [invoice] = await sql`SELECT outstanding::text, status FROM "Invoice" WHERE "orderId" = ${orderId}`;
-      expect(invoice.outstanding).toBe("0.00");
       expect(invoice.status).toBe("cancelled");
+      expect(invoice.outstanding).toBe("88888.88");
+    });
+
+    it("cancelled invoice excluded from buyer outstanding totals", async () => {
+      const openOrderId = orderGid(`cancel-excl-open-${TEST_SUFFIX}`);
+      const cancelledOrderId = orderGid(`cancel-excl-done-${TEST_SUFFIX}`);
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
+          "issuedAt", "createdAt", "updatedAt"
+        ) VALUES 
+          (gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID}, ${openOrderId},
+           '#EXCL-OPEN', '25000.00', '25000.00', 'open', NOW(), NOW(), NOW()),
+          (gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID}, ${cancelledOrderId},
+           '#EXCL-CANCELLED', '75000.00', '75000.00', 'cancelled', NOW(), NOW(), NOW())
+      `;
+
+      const [buyerTotal] = await sql<{ total_paise: string }[]>`
+        SELECT COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS total_paise
+        FROM "Invoice"
+        WHERE "buyerAccountId" = ${TEST_COMPANY_ACCOUNT_ID}
+          AND status = 'open'
+      `;
+
+      expect(buyerTotal.total_paise).toBe("2500000");
     });
 
     it("fully paid order closes the invoice with zero outstanding", async () => {
@@ -566,40 +593,6 @@ describeWithDb("Ingestion Paths Integration", () => {
       });
     }
 
-    it("buyer totals equal sum of open invoices", async () => {
-      vi.useFakeTimers({ toFake: ["Date"] });
-      const dbNow = await syncClockToDb(sql);
-
-      const asOfDate = DateTime.fromJSDate(dbNow, { zone: "Asia/Kolkata" }).startOf("day").toJSDate();
-
-      for (let i = 0; i < 3; i++) {
-        const dueDate = DateTime.fromJSDate(asOfDate, { zone: "Asia/Kolkata" })
-          .minus({ days: 10 * i })
-          .endOf("day")
-          .toJSDate();
-
-        await sql`
-          INSERT INTO "Invoice" (
-            id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
-            "issuedAt", "dueAt", "createdAt", "updatedAt"
-          ) VALUES (
-            gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID},
-            ${orderGid(`aging-sum-${TEST_SUFFIX}-${i}`)},
-            ${"#AGING-" + i}, 10000.00, 10000.00, 'open',
-            NOW(), ${dueDate}, NOW(), NOW()
-          )
-        `;
-      }
-
-      const [buyerTotal] = await sql<{ total_paise: string }[]>`
-        SELECT COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS total_paise
-        FROM "Invoice"
-        WHERE "buyerAccountId" = ${TEST_COMPANY_ACCOUNT_ID}
-          AND status = 'open'
-      `;
-
-      expect(buyerTotal.total_paise).toBe("3000000");
-    });
   });
 
   describe("(6) Buyer mapping: native B2B vs tag-mode", () => {
@@ -657,6 +650,11 @@ describeWithDb("Ingestion Paths Integration", () => {
     let safeLogSpy: ReturnType<typeof vi.spyOn>;
     let captureExceptionSpy: ReturnType<typeof vi.spyOn>;
 
+    const PII_BUYER_NAME = "Rajesh Kumar Private Limited";
+    const PII_EMAIL = "buyer@example.com";
+    const PII_PHONE = "+91-9876543210";
+    const PII_AMOUNT = "99999.99";
+
     beforeEach(() => {
       safeLogSpy = vi.spyOn(logModule, "safeLog");
       captureExceptionSpy = vi.spyOn(sentryModule, "captureExceptionWithTags");
@@ -670,42 +668,55 @@ describeWithDb("Ingestion Paths Integration", () => {
       const orderId = orderGid(`pii-order-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-order-${TEST_SUFFIX}`;
 
+      await sql`
+        UPDATE "BuyerAccount"
+        SET name = ${PII_BUYER_NAME}
+        WHERE id = ${TEST_COMPANY_ACCOUNT_ID}
+      `;
+
       const order: ShopifyOrder = {
         id: orderId,
         name: "#PII-TEST",
         createdAt: "2026-10-01T10:00:00.000Z",
         displayFinancialStatus: "PENDING",
-        totalPriceSet: { shopMoney: { amount: "99999.99", currencyCode: "INR" } },
-        totalOutstandingSet: { shopMoney: { amount: "99999.99", currencyCode: "INR" } },
+        totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
+        totalOutstandingSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
         paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET", dueInDays: 30 },
         purchasingEntity: {
           __typename: "PurchasingCompany",
           company: { id: TEST_COMPANY_ID },
           location: { id: TEST_LOCATION_ID },
         },
+        customer: {
+          id: TEST_CUSTOMER_ID,
+          tags: [TEST_TAG],
+        },
       };
 
       await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", order, webhookId);
 
+      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
+
+      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
+      expect(loggedEvents.length).toBeGreaterThan(0);
+
       for (const call of safeLogSpy.mock.calls) {
-        const fields = call[2] as Record<string, unknown> | undefined;
-        if (fields) {
-          const fieldsJson = JSON.stringify(fields);
-          expect(fieldsJson).not.toMatch(/99999\.99/);
-          expect(fieldsJson).not.toMatch(/buyer.*name/i);
-          expect(fieldsJson).not.toMatch(/@.*\.(com|org|net)/i);
-          expect(fieldsJson).not.toMatch(/test.*buyer/i);
-        }
+        const allArgs = JSON.stringify(call);
+        expect(allArgs).not.toContain(PII_BUYER_NAME);
+        expect(allArgs).not.toContain(PII_EMAIL);
+        expect(allArgs).not.toContain(PII_PHONE);
+        expect(allArgs).not.toContain(PII_AMOUNT);
+        expect(allArgs).not.toContain("Rajesh");
+        expect(allArgs).not.toContain("Kumar");
+        expect(allArgs).not.toContain("buyer@");
       }
 
       for (const call of captureExceptionSpy.mock.calls) {
-        const tagsArg = call[1] as { tags?: Record<string, unknown> } | undefined;
-        if (tagsArg?.tags) {
-          const tagsJson = JSON.stringify(tagsArg.tags);
-          expect(tagsJson).not.toMatch(/99999\.99/);
-          expect(tagsJson).not.toMatch(/buyer.*name/i);
-          expect(tagsJson).not.toMatch(/@.*\.(com|org|net)/i);
-        }
+        const allArgs = JSON.stringify(call);
+        expect(allArgs).not.toContain(PII_BUYER_NAME);
+        expect(allArgs).not.toContain(PII_EMAIL);
+        expect(allArgs).not.toContain(PII_PHONE);
+        expect(allArgs).not.toContain(PII_AMOUNT);
       }
     });
 
@@ -713,12 +724,18 @@ describeWithDb("Ingestion Paths Integration", () => {
       const draftId = draftOrderGid(`pii-draft-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-draft-${TEST_SUFFIX}`;
 
+      await sql`
+        UPDATE "BuyerAccount"
+        SET name = ${PII_BUYER_NAME}
+        WHERE id = ${TEST_TAGGED_ACCOUNT_ID}
+      `;
+
       const draft: ShopifyDraftOrder = {
         id: draftId,
         name: "#PII-DRAFT",
         createdAt: "2026-10-01T10:00:00.000Z",
         status: "OPEN",
-        totalPriceSet: { shopMoney: { amount: "88888.88", currencyCode: "INR" } },
+        totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
         paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
         purchasingEntity: {
           __typename: "PurchasingCompany",
@@ -729,14 +746,53 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       await processDraftOrderWebhook(sql, TEST_SHOP_DOMAIN, "DRAFT_ORDERS_CREATE", draft, webhookId);
 
+      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
+
+      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
+      expect(loggedEvents.length).toBeGreaterThan(0);
+
       for (const call of safeLogSpy.mock.calls) {
-        const fields = call[2] as Record<string, unknown> | undefined;
-        if (fields) {
-          const fieldsJson = JSON.stringify(fields);
-          expect(fieldsJson).not.toMatch(/88888\.88/);
-          expect(fieldsJson).not.toMatch(/buyer.*name/i);
-          expect(fieldsJson).not.toMatch(/@.*\.(com|org|net)/i);
-        }
+        const allArgs = JSON.stringify(call);
+        expect(allArgs).not.toContain(PII_BUYER_NAME);
+        expect(allArgs).not.toContain(PII_EMAIL);
+        expect(allArgs).not.toContain(PII_PHONE);
+        expect(allArgs).not.toContain(PII_AMOUNT);
+        expect(allArgs).not.toContain("Rajesh");
+        expect(allArgs).not.toContain("Kumar");
+      }
+    });
+
+    it("error scenarios log safe codes without PII", async () => {
+      const orderId = orderGid(`pii-error-${TEST_SUFFIX}`);
+      const webhookId = `wh-ing-pii-error-${TEST_SUFFIX}`;
+
+      const invalidOrder: ShopifyOrder = {
+        id: orderId,
+        name: "#PII-ERROR",
+        createdAt: "2026-10-01T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: companyGid(`nonexistent-${TEST_SUFFIX}`) },
+          location: { id: companyLocationGid(`nonexistent-${TEST_SUFFIX}`) },
+        },
+      };
+
+      await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", invalidOrder, webhookId);
+
+      for (const call of safeLogSpy.mock.calls) {
+        const allArgs = JSON.stringify(call);
+        expect(allArgs).not.toContain(PII_BUYER_NAME);
+        expect(allArgs).not.toContain(PII_EMAIL);
+        expect(allArgs).not.toContain(PII_PHONE);
+      }
+
+      for (const call of captureExceptionSpy.mock.calls) {
+        const allArgs = JSON.stringify(call);
+        expect(allArgs).not.toContain(PII_BUYER_NAME);
+        expect(allArgs).not.toContain(PII_EMAIL);
+        expect(allArgs).not.toContain(PII_PHONE);
       }
     });
   });
