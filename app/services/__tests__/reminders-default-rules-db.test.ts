@@ -393,7 +393,6 @@ describeWithDb("Sequential DB", () => {
       sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
       const [pgNow] = await sql<{ now: Date }[]>`SELECT NOW() AS now`;
-      const pgNowMs = pgNow.now.getTime();
 
       let foundTz: string | null = null;
       for (const tz of CANDIDATE_ZONES) {
