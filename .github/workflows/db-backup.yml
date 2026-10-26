@@ -18,7 +18,7 @@
 # host is IPv6-only without Supabase's IPv4 add-on, which GitHub-hosted
 # runners cannot reach.
 #
-# Retention: no automatic deletion here (see restore.md, "Retention").
+# Retention: 30-day rolling retention with keep-newest-7 (see restore.md).
 
 name: DB Backup
 
@@ -26,6 +26,15 @@ on:
   schedule:
     - cron: '0 21 * * *'
   workflow_dispatch:
+    inputs:
+      prune_mode:
+        description: 'Retention pruning mode (dry_run prints counts only; delete removes eligible objects)'
+        required: false
+        default: 'dry_run'
+        type: choice
+        options:
+          - dry_run
+          - delete
 
 permissions:
   contents: read
@@ -200,3 +209,64 @@ jobs:
           echo "duration_seconds=$((SECONDS - START))"
           echo "object_date=${STAMP}"
           echo "backup_success=true"
+
+  prune:
+    name: Prune old backups (30-day retention)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: backup
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout (prune script)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/ops/prune-backups.ts
+            package.json
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check required secrets
+        id: secrets
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_ENDPOINT; do
+            if [ -z "${!name:-}" ]; then
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "prune_skipped=true reason=secrets_missing missing_count=${missing}"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Prune eligible backups
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          # Scheduled runs always use dry_run until explicitly changed.
+          # workflow_dispatch can override via inputs.prune_mode.
+          MODE="${{ inputs.prune_mode || 'dry_run' }}"
+          if [ "$MODE" = "delete" ]; then
+            npx --yes tsx scripts/ops/prune-backups.ts --delete
+          else
+            npx --yes tsx scripts/ops/prune-backups.ts
+          fi
