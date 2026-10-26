@@ -1603,16 +1603,12 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     const resultEnabled = await hasNewerStageDueToday(sql, TEST_SHOP_ID, invoiceId, 0, "Asia/Kolkata");
     expect(resultEnabled).toBe(true);
 
-    await sql`ALTER TABLE s18_shop_reminder_settings DISABLE TRIGGER s18_shop_reminder_settings_updated_at`;
-    await sql`UPDATE s18_shop_reminder_settings SET enabled = false, updated_at = NOW() WHERE shop_id = ${TEST_SHOP_ID}`;
-    await sql`ALTER TABLE s18_shop_reminder_settings ENABLE TRIGGER s18_shop_reminder_settings_updated_at`;
+    await sql`UPDATE s18_shop_reminder_settings SET enabled = false WHERE shop_id = ${TEST_SHOP_ID}`;
 
     const resultDisabled = await hasNewerStageDueToday(sql, TEST_SHOP_ID, invoiceId, 0, "Asia/Kolkata");
     expect(resultDisabled).toBe(false);
 
-    await sql`ALTER TABLE s18_shop_reminder_settings DISABLE TRIGGER s18_shop_reminder_settings_updated_at`;
-    await sql`UPDATE s18_shop_reminder_settings SET enabled = true, updated_at = NOW() WHERE shop_id = ${TEST_SHOP_ID}`;
-    await sql`ALTER TABLE s18_shop_reminder_settings ENABLE TRIGGER s18_shop_reminder_settings_updated_at`;
+    await sql`UPDATE s18_shop_reminder_settings SET enabled = true WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "ReminderRule" WHERE id = ${rule2Id}`;
   });
 
