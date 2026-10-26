@@ -1529,8 +1529,8 @@ jobs:
             '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, input_query_null: $input_query_null, input_query_length: $input_query_length, iq_has_credit_status: $iq_has_credit_status, iq_has_dollar_app: $iq_has_dollar_app, iq_has_app_prefix: $iq_has_app_prefix, iq_has_metafield: $iq_has_metafield}'
 
           # Cross-check via shopifyFunctions(apiType: cart_checkout_validation), read-only.
-          # Prints a count, function ids and per-function booleans/integers only; never
-          # titles or query text. has_credit_status is "unknown" when inputQuery is null.
+          # Prints a count, ordinal indices and per-function booleans/integers only; never
+          # GIDs, titles or query text. has_credit_status is "unknown" when inputQuery is null.
           # Soft-fails (warning) so it can't break the step.
           echo ""
           echo "S12 shopifyFunctions cross-check (read-only):"

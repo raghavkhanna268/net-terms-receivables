@@ -52,12 +52,29 @@ const SENSITIVE_PATTERNS = {
   myshopify_domain: /[a-z0-9-]+\.myshopify\.com/gi,
   hostname_like: /(?<![a-zA-Z0-9_/.-])(?!(?:true|false|null|unknown|error|ok|skipped)\b)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:com|io|net|org|dev|co|app)(?![a-zA-Z0-9_.-])/gi,
   money_pattern: /\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:paise|cents|Paise|Cents)/g,
+  json_money_value: /"(?:limit|exposure|amount|balance|total|outstanding|paise|cents)[_a-z]*"\s*:\s*(?:"?\d+(?:\.\d+)?"?)/gi,
 };
+
+const BARE_NUMERIC_SAFE_KEYS = new Set([
+  "timestamp", "epoch", "expires", "expires_at", "age_sec", "queue_length",
+  "total_ever", "count", "function_count", "fixture_idx", "function_idx",
+  "input_query_length", "schema_version", "schemaVersion", "oldest_msg_age_sec",
+  "newest_msg_age_sec", "pending", "total_messages", "jobid",
+]);
 
 interface OutputViolation {
   pattern: string;
   match: string;
   line: string;
+}
+
+function getKeyForValue(line: string, valueIndex: number): string | null {
+  const beforeValue = line.slice(0, valueIndex);
+  const keyMatch = beforeValue.match(/"([a-zA-Z_][a-zA-Z0-9_]*)"\s*:\s*$/);
+  if (keyMatch) return keyMatch[1].toLowerCase();
+  const eqMatch = beforeValue.match(/([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*$/);
+  if (eqMatch) return eqMatch[1].toLowerCase();
+  return null;
 }
 
 function checkOutputForViolations(output: string): OutputViolation[] {
@@ -77,8 +94,8 @@ function checkOutputForViolations(output: string): OutputViolation[] {
           continue;
         }
         if (patternName === "bare_numeric_id") {
-          const context = line.slice(Math.max(0, match.index - 20), match.index + matchedValue.length + 20);
-          if (/timestamp|epoch|expires|age_sec|queue_length|total_ever|count/i.test(context)) {
+          const key = getKeyForValue(line, match.index);
+          if (key && BARE_NUMERIC_SAFE_KEYS.has(key)) {
             continue;
           }
         }
@@ -177,6 +194,71 @@ function runSnippet(
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe("checkOutputForViolations", () => {
+  it("flags Shopify GIDs", () => {
+    const v = checkOutputForViolations('{"id":"gid://shopify/Customer/1234567890123"}');
+    expect(v.length).toBeGreaterThan(0);
+    expect(v.some(x => x.pattern === "shopify_gid")).toBe(true);
+  });
+
+  it("flags bare 13-digit numeric IDs not on safe keys", () => {
+    const v = checkOutputForViolations('{"id":7489123456789}');
+    expect(v.length).toBeGreaterThan(0);
+    expect(v.some(x => x.pattern === "bare_numeric_id")).toBe(true);
+  });
+
+  it("flags myshopify.com domains", () => {
+    const v = checkOutputForViolations('shop: foo-bar.myshopify.com');
+    expect(v.length).toBeGreaterThan(0);
+    expect(v.some(x => x.pattern === "myshopify_domain")).toBe(true);
+  });
+
+  it("flags other hostname-like tokens", () => {
+    const v = checkOutputForViolations('endpoint: acmecorp.io');
+    expect(v.length).toBeGreaterThan(0);
+    expect(v.some(x => x.pattern === "hostname_like")).toBe(true);
+  });
+
+  it("flags JSON money values on money-like keys", () => {
+    const v1 = checkOutputForViolations('{"limitPaise":500000}');
+    expect(v1.length).toBeGreaterThan(0);
+    expect(v1.some(x => x.pattern === "json_money_value")).toBe(true);
+
+    const v2 = checkOutputForViolations('{"exposurePaise":"125000"}');
+    expect(v2.length).toBeGreaterThan(0);
+    expect(v2.some(x => x.pattern === "json_money_value")).toBe(true);
+
+    const v3 = checkOutputForViolations('{"amount":"1250.00"}');
+    expect(v3.length).toBeGreaterThan(0);
+    expect(v3.some(x => x.pattern === "json_money_value")).toBe(true);
+  });
+
+  it("flags bare numeric IDs even when count key is nearby but not the value's own key", () => {
+    const v = checkOutputForViolations('{"function_count":2,"id":7489123456789}');
+    expect(v.length).toBeGreaterThan(0);
+    expect(v.some(x => x.pattern === "bare_numeric_id" && x.match === "7489123456789")).toBe(true);
+  });
+
+  it("exempts bare numeric IDs on safe keys like function_count", () => {
+    const v = checkOutputForViolations('{"function_count":1234567890123}');
+    expect(v.filter(x => x.pattern === "bare_numeric_id")).toHaveLength(0);
+  });
+
+  it("returns zero violations for clean output with counts, enums, booleans, timestamps, cuids", () => {
+    const cleanLines = [
+      '{"fixture_idx":1,"kind":"COMPANY_LOCATION","hold_state":"HELD","manual_hold":false}',
+      '{"exists":true,"enabled":true,"blockOnFailure":false,"function_handle_match":true}',
+      '{"function_idx":1,"handle_is_credit_check_validation":true,"input_query_null":false}',
+      'e2e_offline_session_expires_at=2026-10-25T12:00:00Z',
+      'seed_fixture_accounts: 5',
+      'e2e_installed_shop_count=2',
+      'status: ok',
+    ].join("\n");
+    const v = checkOutputForViolations(cleanLines);
+    expect(v).toHaveLength(0);
+  });
+});
 
 describe("prod-diagnostics output masking", () => {
   let workflow: Workflow;
