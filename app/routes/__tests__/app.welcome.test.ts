@@ -255,7 +255,60 @@ describe("/app/welcome Route", () => {
       expect(e).toBeInstanceOf(Response);
     }
 
-    expect(redirectMock).toHaveBeenCalledWith("/app");
+    expect(redirectMock).toHaveBeenCalledWith("/app?plan_handle=&charge_id=");
+  });
+
+  it("redirect target includes empty plan_handle and charge_id to prevent double refresh", async () => {
+    const { resolvePlan } = await import("~/services/plan.server");
+    const { getRequestSql } = await import("~/lib/request-context.server");
+
+    const mockSql = vi.fn();
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "starter" } });
+
+    let capturedRedirectPath = "";
+    const redirectMock = vi.fn((path: string) => {
+      capturedRedirectPath = path;
+      throw new Response(null, {
+        status: 302,
+        headers: { Location: path },
+      });
+    });
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: TEST_SHOP },
+            redirect: redirectMock,
+          }),
+        },
+      },
+    };
+
+    const { loader } = await import("../app.welcome");
+    const request = new Request(
+      "https://example.com/app/welcome?plan_handle=starter&charge_id=123456"
+    );
+
+    try {
+      await loader({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/app/welcome",
+      });
+    } catch {
+      // Expected redirect throw
+    }
+
+    const url = new URL(capturedRedirectPath, "https://example.com");
+    expect(url.pathname).toBe("/app");
+    expect(url.searchParams.has("plan_handle")).toBe(true);
+    expect(url.searchParams.get("plan_handle")).toBe("");
+    expect(url.searchParams.has("charge_id")).toBe(true);
+    expect(url.searchParams.get("charge_id")).toBe("");
   });
 });
 
