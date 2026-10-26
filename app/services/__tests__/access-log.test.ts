@@ -178,7 +178,7 @@ describe("access-log.server", () => {
         const session = {
           onlineAccessInfo: {
             associated_user: {
-              id: "staff@shop.myshopify.com" as unknown as number,
+              id: "staff@example.invalid" as unknown as number,
             },
           },
         };
@@ -249,6 +249,61 @@ describe("access-log.server", () => {
           },
         };
         expect(getActorFromSessionToken(undefined, session)).toBe("123456789012345678901234");
+      });
+
+      it("returns 'unknown' for zero number id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: 0,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for zero string id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "0",
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for string id with leading zeros", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "00123",
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for float id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: 1.5,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for unsafe integer id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: 2 ** 53 + 2,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
       });
     });
   });
