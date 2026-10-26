@@ -212,7 +212,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           taggedCustomersDeletedCount: counts.taggedCustomersDeleted,
           draftOrdersDeletedCount: counts.draftOrdersDeleted,
           dataRequestsDeletedCount: counts.dataRequestsDeleted,
-          payerAliasesDeletedCount: counts.payerAliasesDeleted,
           accountAnonymizedCount: counts.buyerAccountAnonymized ? 1 : 0,
           paymentsRedactedCount: counts.paymentsRedacted,
         });
