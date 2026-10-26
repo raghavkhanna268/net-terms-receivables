@@ -21,7 +21,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash } from "~/lib/log.server";
-import { NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY, validateCurrencyCode } from "~/lib/shop-currency.server";
+import { NO_CURRENCY_SENTINEL, validateCurrencyCode } from "~/lib/shop-currency.server";
 import { writeShopConfigMetafield } from "./shop-config.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "~/lib/shop-currency-guard.server";
 
