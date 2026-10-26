@@ -32,7 +32,7 @@
  * only used for oldest-due-first allocation preference, not scoring.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { parseBankStatement } from "../../app/lib/banks/index.js";
@@ -60,7 +60,8 @@ const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
  * - Invoice #1001: ₹10,000.00 outstanding (matches row 1 exactly)
  * - Invoice #1002: ₹6,000.00 outstanding (for partial/name suggestion on row 2)
  *
- * Due dates use Date.now() to remain in the future relative to the test run.
+ * Due dates are set to November 2026 to be in the same window as the statement dates.
+ * Clock is pinned to 2026-10-20 via vi.setSystemTime for deterministic behavior.
  */
 const SYNTHETIC_BUYER: BuyerForScoring = {
   id: "buyer-synthetic-review",
@@ -76,7 +77,7 @@ const SYNTHETIC_INVOICES: InvoiceForScoring[] = [
     orderId: "gid://shopify/Order/1001",
     outstandingPaise: 1000000n, // ₹10,000.00
     buyerAccountId: SYNTHETIC_BUYER.id,
-    dueAt: new Date(Date.now() + 35 * 24 * 60 * 60 * 1000), // ~35 days from now
+    dueAt: new Date("2026-11-30"),
   },
   {
     id: "invoice-1002",
@@ -84,7 +85,7 @@ const SYNTHETIC_INVOICES: InvoiceForScoring[] = [
     orderId: "gid://shopify/Order/1002",
     outstandingPaise: 500000n, // ₹5,000.00 (v3: was ₹6,000)
     buyerAccountId: SYNTHETIC_BUYER.id,
-    dueAt: new Date(Date.now() + 50 * 24 * 60 * 60 * 1000), // ~50 days from now
+    dueAt: new Date("2026-12-15"),
   },
 ];
 
@@ -107,6 +108,15 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
   let parseResult: ParseResult;
   let credits: NormalisedTxn[];
   let debits: NormalisedTxn[];
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-20T00:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   beforeAll(async () => {
     const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic.csv"));
