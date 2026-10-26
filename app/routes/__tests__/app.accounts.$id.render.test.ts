@@ -290,4 +290,120 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).not.toContain("Upgrade your plan");
     });
   });
+
+  describe("copy polish: breadcrumbs and badges", () => {
+    it("renders breadcrumb with href='/app' for normal account state", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: false,
+      });
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain('href="/app"');
+      expect(html).toContain("Back to Dashboard");
+      expect(html).not.toMatch(/href="\/"\s/);
+    });
+
+    it("renders breadcrumb with href='/app' for notSupported currency state", () => {
+      const loaderData = {
+        notSupported: true,
+        shopCurrency: "USD",
+        account: null,
+        creditStatus: null,
+        companyTotals: null,
+        invoices: { rows: [], totalCount: 0 },
+        gatingEnforced: false,
+        reminderOptOut: null,
+        upgradeUrl: null,
+        newAccountsPausedBanner: {
+          show: false,
+          heading: "",
+          bodyText: "",
+          upgradeUrl: null,
+        },
+        error: null,
+      };
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain('href="/app"');
+      expect(html).toContain("Back to Dashboard");
+      expect(html).not.toMatch(/href="\/"\s/);
+      expect(html).toContain("Currency Not Supported");
+    });
+
+    it("renders 'Credit check paused' badge for BYPASS holdState", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: false,
+      });
+      const bypassCreditStatus = {
+        creditLimitAmount: 100000,
+        creditLimitPaise: "10000000",
+        exposurePaise: "5000000",
+        draftExposurePaise: "0",
+        availableCreditPaise: "5000000",
+        currency: "INR",
+        holdState: "BYPASS" as const,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        isOnHold: false,
+        holdReasonDisplay: null,
+        isOverLimit: false,
+        isOverdue: false,
+        utilizationPercent: 50,
+        syncPending: false,
+        syncErrorCode: null,
+        syncState: "synced" as const,
+        hasDeadLetteredSync: false,
+        syncErrorInfo: null,
+      };
+      mockUseLoaderData.mockReturnValue({ ...loaderData, creditStatus: bypassCreditStatus });
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain("Credit check paused");
+      expect(html).not.toContain("Bypass Active");
+      expect(html).not.toContain(">Bypass<");
+    });
+
+    it("renders 'Credit check paused' badge with info tone", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: false,
+      });
+      const bypassCreditStatus = {
+        creditLimitAmount: 100000,
+        creditLimitPaise: "10000000",
+        exposurePaise: "5000000",
+        draftExposurePaise: "0",
+        availableCreditPaise: "5000000",
+        currency: "INR",
+        holdState: "BYPASS" as const,
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        isOnHold: false,
+        holdReasonDisplay: null,
+        isOverLimit: false,
+        isOverdue: false,
+        utilizationPercent: 50,
+        syncPending: false,
+        syncErrorCode: null,
+        syncState: "synced" as const,
+        hasDeadLetteredSync: false,
+        syncErrorInfo: null,
+      };
+      mockUseLoaderData.mockReturnValue({ ...loaderData, creditStatus: bypassCreditStatus });
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain('tone="info"');
+      expect(html).toContain("Credit check paused");
+    });
+  });
 });

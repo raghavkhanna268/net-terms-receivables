@@ -367,7 +367,7 @@ describe("Reminder Settings Route", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("email provider is configured");
+      expect(result.error).toBe("Email reminders aren't available yet");
     });
 
     it("blocks enabling when only RESEND_FROM is set (real isReminderSendingEnabled)", async () => {
@@ -401,7 +401,7 @@ describe("Reminder Settings Route", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("email provider is configured");
+      expect(result.error).toBe("Email reminders aren't available yet");
     });
 
     it("allows disabling even when provider is not configured", async () => {
@@ -1969,8 +1969,8 @@ describe("Opted-out buyer helper text", () => {
     const html = renderToString(createElement(RemindersSettingsPage));
 
     // Check the VERBATIM helper text
-    expect(html).toContain("The buyer unsubscribed from reminder emails");
-    expect(html).toContain("Only you can turn reminders back on for them");
+    expect(html).toContain("These buyers unsubscribed from reminder emails");
+    expect(html).toContain("Only you can turn reminders back on for them, from the buyer");
   });
 
   it("renders the skippedOptedOut count in status section", async () => {
