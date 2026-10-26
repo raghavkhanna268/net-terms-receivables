@@ -306,7 +306,9 @@ async function buildReconcileMutation(
       SELECT id FROM "Shop" WHERE domain = ${shop}
     `;
     if (!shopRow) {
-      return null;
+      // #239 PR1: Return distinct value for shop_not_found to avoid triggering
+      // the "no tag rules" skip path which writes a domain-bearing processed id.
+      return "shop_not_found";
     }
 
     const tagRules = await getTagRules(sql, shopRow.id);
@@ -395,6 +397,19 @@ export async function startReconcileBulkOperation(
   }
 
   const mutation = await buildReconcileMutation(sql, shop, kind);
+
+  // #239 PR1: Shop not found returns distinct error instead of being treated as "no tag rules"
+  if (mutation === "shop_not_found") {
+    if (chainKey) {
+      await releaseReconcileStageClaim(sql, chainKey, kind, shop);
+    }
+    return {
+      success: false,
+      action: "skipped",
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
+    };
+  }
 
   if (!mutation) {
     // Release claim since we're skipping (no mutation to run)

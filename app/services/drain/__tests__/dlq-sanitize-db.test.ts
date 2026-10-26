@@ -450,7 +450,8 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(allOutput).toContain("dlq_sanitized_shop_not_found");
   });
 
-  it("draft_orders shop_not_found keeps FULL message in DLQ (uncovered topic)", async () => {
+  // #239 PR1: With the drain guard, messages for missing shops are deleted (not DLQ'd)
+  it("draft_orders shop_not_found deletes message via drain guard (not DLQ)", async () => {
     const webhookId = `wh-draft-${testContext.suffix}`;
     const message = {
       shop: testContext.missingShopDomain,
@@ -465,22 +466,31 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    await driveUntilDeadLettered(webhookId, 1);
+    const { runDrain } = await import("~/services/drain/processor.server");
+    await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 1 });
 
-    const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
-      SELECT message, error
-      FROM s6_dead_letter
+    // Message should be deleted, not in queue
+    const [queueRow] = await sqlRef<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
       WHERE message->>'webhookId' = ${webhookId}
     `;
+    expect(parseInt(queueRow.count, 10)).toBe(0);
 
-    expect(dlqRow).toBeDefined();
-    expect(dlqRow!.message.sanitized).toBeUndefined();
-    expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
-    expect(dlqRow!.message.topic).toBe("DRAFT_ORDERS_CREATE");
-    expect(dlqRow!.message.webhookId).toBe(webhookId);
+    // Message should NOT be in DLQ
+    const [dlqRow] = await sqlRef<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM s6_dead_letter
+      WHERE message->>'webhookId' = ${webhookId}
+    `;
+    expect(parseInt(dlqRow.count, 10)).toBe(0);
+
+    // Verify drain_shop_missing_deleted was logged
+    const consoleOutput = getAllConsoleOutput();
+    const allOutput = consoleOutput.join("\n");
+    expect(allOutput).toContain("drain_shop_missing_deleted");
   });
 
-  it("customers shop_not_found keeps FULL message in DLQ (uncovered topic)", async () => {
+  // #239 PR1: With the drain guard, messages for missing shops are deleted (not DLQ'd)
+  it("customers shop_not_found deletes message via drain guard (not DLQ)", async () => {
     const webhookId = `wh-cust-${testContext.suffix}`;
     const message = {
       shop: testContext.missingShopDomain,
@@ -495,18 +505,27 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
     `;
 
-    await driveUntilDeadLettered(webhookId, 1);
+    const { runDrain } = await import("~/services/drain/processor.server");
+    await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 1 });
 
-    const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
-      SELECT message
-      FROM s6_dead_letter
+    // Message should be deleted, not in queue
+    const [queueRow] = await sqlRef<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
       WHERE message->>'webhookId' = ${webhookId}
     `;
+    expect(parseInt(queueRow.count, 10)).toBe(0);
 
-    expect(dlqRow).toBeDefined();
-    expect(dlqRow!.message.sanitized).toBeUndefined();
-    expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
-    expect(dlqRow!.message.topic).toBe("CUSTOMERS_CREATE");
+    // Message should NOT be in DLQ
+    const [dlqRow] = await sqlRef<[{ count: string }]>`
+      SELECT COUNT(*)::text as count FROM s6_dead_letter
+      WHERE message->>'webhookId' = ${webhookId}
+    `;
+    expect(parseInt(dlqRow.count, 10)).toBe(0);
+
+    // Verify drain_shop_missing_deleted was logged
+    const consoleOutput = getAllConsoleOutput();
+    const allOutput = consoleOutput.join("\n");
+    expect(allOutput).toContain("drain_shop_missing_deleted");
   });
 
   it("non-shop error keeps full message unchanged", async () => {

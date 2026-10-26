@@ -1310,6 +1310,43 @@ async function processSyncQueue(
     const shopFound = shopCurrencies.has(msg.message.shop);
     // Fail closed: NULL/"" or unsupported currency treated as non-INR
     const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
+
+    // #239 PR1: Drain guard for redacted shops. If the batch lookup didn't find the shop,
+    // re-check with FOR SHARE to serialize with deleteShop's FOR UPDATE. If the Shop row
+    // is definitively absent, delete the message (not archive, not DLQ) to prevent
+    // post-redact data from being written or retained. DB errors stay retryable.
+    // The check and delete run in one transaction to prevent a reinstall between them.
+    if (!shopFound) {
+      try {
+        const deleted = await sql.begin(async (tx) => {
+          const [shopRow] = await tx<[{ id: string }?]>`
+            SELECT id FROM "Shop" WHERE domain = ${msg.message.shop} FOR SHARE
+          `;
+          if (!shopRow) {
+            // Shop row is definitively absent - delete the message
+            await tx`SELECT pgmq.delete(${S6_QUEUES.SYNC}, ${msg.msg_id}::bigint)`;
+            return true;
+          }
+          // Shop exists (possibly uninstalled) - let handlers deal with it as today
+          return false;
+        });
+        if (deleted) {
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "sync",
+            topic: msg.message.topic,
+            msg_id: msg.msg_id,
+            count: 1,
+          });
+          result.skipped++;
+          continue;
+        }
+      } catch {
+        // DB error during the check - stay retryable, don't delete
+        // The message remains in the queue for natural retry via VT expiry
+        result.failed++;
+        continue;
+      }
+    }
     
     if (isNonInr && !TERMINAL_TOPICS.has(msg.message.topic)) {
       // G8: Non-INR shop, non-terminal topic - skip (don't import new amounts)
@@ -1547,6 +1584,43 @@ async function processBulkQueue(
     const shopFound = shopCurrencies.has(msg.message.shop);
     // Fail closed: NULL/"" or unsupported currency treated as non-INR
     const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
+
+    // #239 PR1: Drain guard for redacted shops. If the batch lookup didn't find the shop,
+    // re-check with FOR SHARE to serialize with deleteShop's FOR UPDATE. If the Shop row
+    // is definitively absent, delete the message (not archive, not DLQ) to prevent
+    // post-redact data from being written or retained. DB errors stay retryable.
+    // The check and delete run in one transaction to prevent a reinstall between them.
+    if (!shopFound) {
+      try {
+        const deleted = await sql.begin(async (tx) => {
+          const [shopRow] = await tx<[{ id: string }?]>`
+            SELECT id FROM "Shop" WHERE domain = ${msg.message.shop} FOR SHARE
+          `;
+          if (!shopRow) {
+            // Shop row is definitively absent - delete the message
+            await tx`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+            return true;
+          }
+          // Shop exists (possibly uninstalled) - let handlers deal with it as today
+          return false;
+        });
+        if (deleted) {
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "bulk",
+            topic: msg.message.topic,
+            msg_id: msg.msg_id,
+            count: 1,
+          });
+          result.skipped++;
+          continue;
+        }
+      } catch {
+        // DB error during the check - stay retryable, don't delete
+        // The message remains in the queue for natural retry via VT expiry
+        result.failed++;
+        continue;
+      }
+    }
     
     if (isNonInr) {
       // G8: Bulk queue has no terminal topics - all non-INR are skipped
@@ -1558,7 +1632,6 @@ async function processBulkQueue(
       );
       continue;
     }
-    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
 
     // Skip already-sanitized messages (re-enqueued by hand)
     if ((msg.message as Record<string, unknown>).sanitized === true) {

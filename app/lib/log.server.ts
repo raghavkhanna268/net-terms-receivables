@@ -34,6 +34,7 @@ const ALLOWED_KEY_PATTERNS: RegExp[] = [
   /^operationId$/,
   /^messageId$/,
   /^msgId$/,
+  /^msg_id$/,
   /Id$/,
   /Gid$/,
   /^topic$/,
