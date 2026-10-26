@@ -111,15 +111,21 @@ export function PlanBanner({
   // 'Upgrade to Add More' only shows when at limit (which already includes gatingEnforced check)
   const showUpgradeCta = companiesAtLimit;
 
+  // Hide "Plan: No Plan" label unless gating is enforced
+  // When gating is off, showing "No Plan" is confusing since limits don't apply
+  const showPlanLabel = planKey !== "none" || gatingEnforced;
+
   return (
     <s-stack>
-      <s-paragraph>
-        <s-text type="strong">Plan: </s-text>
-        <s-text>
-          {displayPlanName}
-          {isTest && " (Test)"}
-        </s-text>
-      </s-paragraph>
+      {showPlanLabel && (
+        <s-paragraph>
+          <s-text type="strong">Plan: </s-text>
+          <s-text>
+            {displayPlanName}
+            {isTest && " (Test)"}
+          </s-text>
+        </s-paragraph>
+      )}
       {!usageUnavailable && (
         <s-paragraph>
           <s-text type="strong">Usage: </s-text>
