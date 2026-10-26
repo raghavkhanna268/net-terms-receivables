@@ -406,4 +406,30 @@ describe("Reconcile page href validation", () => {
 
     expect(html).toContain("Confirmed");
   });
+
+  it("empty state does not mention 'manually reconcile' (no such UI exists)", () => {
+    const loaderData = {
+      ...buildLoaderData({ notSupported: false, shopCurrency: "INR" }),
+      selectedPayment: {
+        payment: {
+          id: "pay-synth-005",
+          amountPaise: "100000",
+          narration: "Payment with no matches",
+          payerText: null,
+          utr: null,
+          rail: null,
+          valueDate: "2024-01-15T00:00:00.000Z",
+          importFileName: "statement.csv",
+        },
+        matches: [],
+      },
+    };
+    mockUseLoaderData.mockReturnValue(loaderData);
+
+    const html = renderToString(createElement(ReconcilePage));
+
+    expect(html).toContain("No matches found");
+    expect(html).toContain("run the matcher again");
+    expect(html).not.toContain("manually reconcile");
+  });
 });

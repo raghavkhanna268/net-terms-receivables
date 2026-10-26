@@ -206,7 +206,7 @@ export default function PlanPage() {
                 <s-text type="strong">Plan: </s-text>
                 <s-text>
                   {displayPlanName}
-                  {isTest && <s-badge tone="info">Test</s-badge>}
+                  {isTest && <s-badge tone="info">Test charge</s-badge>}
                 </s-text>
               </s-paragraph>
             </s-stack>
@@ -281,7 +281,7 @@ export default function PlanPage() {
             <s-section heading="Plan Status">
               <s-banner tone="success" heading="Unlimited Plan">
                 <s-text>
-                  You&apos;re on the Unlimited plan with unlimited buyer accounts and priority support.
+                  You&apos;re on the Unlimited plan with unlimited buyer accounts.
                 </s-text>
               </s-banner>
             </s-section>

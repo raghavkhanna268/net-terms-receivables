@@ -985,3 +985,98 @@ describe("Plan Gating sidebar visibility", () => {
     expect(html).not.toContain("All features are available");
   });
 });
+
+/**
+ * Copy polish tests for plan page.
+ *
+ * Verifies:
+ * - Unlimited plan banner does not claim "priority support"
+ * - Test charge badge shows "Test charge" (not just "Test")
+ */
+describe("Plan page copy polish", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("Unlimited plan banner does not mention priority support", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "unlimited", name: "Unlimited", isTest: false },
+          usage: { companies: { current: 100, limit: -1 }, importsThisMonth: { current: 10, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: null,
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("Unlimited Plan");
+    expect(html).toContain("unlimited buyer accounts");
+    expect(html).not.toContain("priority support");
+  });
+
+  it("shows 'Test charge' badge (not just 'Test') when isTest is true", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "growth", name: "Growth", isTest: true },
+          usage: { companies: { current: 50, limit: 100 }, importsThisMonth: { current: 5, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("Test charge");
+    expect(html).not.toMatch(/>Test</);
+  });
+
+  it("does not show Test charge badge when isTest is false", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "growth", name: "Growth", isTest: false },
+          usage: { companies: { current: 50, limit: 100 }, importsThisMonth: { current: 5, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).not.toContain("Test charge");
+  });
+});

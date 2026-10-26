@@ -611,7 +611,7 @@ function PaymentDetailView({
           <s-empty-state heading="No matches found">
             <s-text slot="subheading">
               No invoice matches were found for this payment. You can run the
-              matcher again or manually reconcile.
+              matcher again after new invoices are created.
             </s-text>
           </s-empty-state>
         ) : (
