@@ -261,9 +261,14 @@ describeWithDb("drain: in-flight message for a redacted shop (#239)", () => {
 
     expect(redactTriggered.done).toBe(true);
 
-    // The 2 sync messages (ORDERS_UPDATED and COMPANY_LOCATIONS_DELETE) were read
-    // under VT before redact, so moveToDeadLetter returns false for them.
-    expect(totalAlreadyGone, "deadLetterAlreadyGoneCount for shop A's leaked messages").toBe(2);
+    // Shop A had two sync messages read under VT before deleteShop ran:
+    // - ORDERS_UPDATED: With #239 extension, no_session + missing/uninstalled Shop
+    //   is ACKed (success:true), so it tries to archive. But deleteShop already
+    //   purged the queue, so pgmq.archive finds nothing. Not counted as already-gone.
+    // - COMPANY_LOCATIONS_DELETE: DELETE topic doesn't have no_session check, so it
+    //   fails and tries to DLQ. Since deleteShop purged q_s6_sync first,
+    //   moveToDeadLetter returns false → deadLetterAlreadyGoneCount=1.
+    expect(totalAlreadyGone, "deadLetterAlreadyGoneCount for shop A's leaked messages").toBe(1);
 
     const countsAfter_A = await getShopCounts(sqlRef, A.domain, A.id);
     expect(countsAfter_A.Shop, "Shop A should be deleted").toBe(0);
