@@ -75,8 +75,13 @@ interface LoaderResult {
 /**
  * Helper to extract loader data from result.
  * The loader returns data() which wraps the response.
+ *
+ * With the streaming/deferred data refactor, some fields are now in
+ * `dashboardData` which is a promise. This helper resolves the promise
+ * and merges the data for backward compatibility with existing tests.
  */
-function extractLoaderData(result: unknown): LoaderResult {
+async function extractLoaderData(result: unknown): Promise<LoaderResult> {
+  let data: Record<string, unknown>;
   if (
     typeof result === "object" &&
     result !== null &&
@@ -84,9 +89,17 @@ function extractLoaderData(result: unknown): LoaderResult {
     (result as { type: string }).type === "DataWithResponseInit" &&
     "data" in result
   ) {
-    return (result as { data: LoaderResult }).data;
+    data = (result as { data: Record<string, unknown> }).data;
+  } else {
+    data = result as Record<string, unknown>;
   }
-  return result as LoaderResult;
+
+  if (data.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+    const dashboardData = await (data.dashboardData as Promise<Record<string, unknown>>);
+    return { ...data, ...dashboardData } as unknown as LoaderResult;
+  }
+
+  return data as unknown as LoaderResult;
 }
 
 // Mock SQL client
@@ -223,7 +236,7 @@ describe("app._index loader", () => {
   describe("empty state", () => {
     it("returns empty aging totals when no invoices exist", async () => {
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toEqual({
         totalByCurrency: {},
@@ -258,7 +271,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency).toEqual({ INR: "10000000" });
       expect(result.agingTotals?.overdueByCurrency).toEqual({ INR: "5000000" });
@@ -280,7 +293,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency.INR).toBe("10000000");
       expect(result.agingTotals?.totalByCurrency.USD).toBe("5000000");
@@ -423,7 +436,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.buyerLedger?.rows).toHaveLength(1);
       expect(result.buyerLedger?.rows[0].buyer_name).toBe("Acme Corp");
@@ -502,7 +515,7 @@ describe("app._index loader", () => {
       mockGetShopAgingTotals.mockRejectedValue(new Error("Database error"));
 
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.error).toBe("Failed to load aging data. Please try again.");
       expect(result.agingTotals).toBeNull();
@@ -513,7 +526,9 @@ describe("app._index loader", () => {
       mockGetShopAgingTotals.mockRejectedValue(new Error("Database connection failed"));
 
       const { loader } = await import("../app._index");
-      await loader(createLoaderArgs());
+      // With streaming, the error logging happens in the deferred dashboardData promise.
+      // We need to await extractLoaderData to trigger the error logging.
+      await extractLoaderData(await loader(createLoaderArgs()));
 
       const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
       // safeLog outputs JSON with "event" field
@@ -529,7 +544,7 @@ describe("app._index loader", () => {
       mockSql.mockImplementation(() => Promise.resolve([]));
 
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toBeNull();
       expect(result.buyerLedger).toBeNull();
@@ -539,7 +554,7 @@ describe("app._index loader", () => {
   describe("shop metadata", () => {
     it("returns shop domain and currency", async () => {
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.shopDomain).toBe(TEST_SHOP);
       expect(result.shopCurrency).toBe("INR");
@@ -550,7 +565,7 @@ describe("app._index loader", () => {
   describe("over-limit account filter", () => {
     it("defaults onlyOverLimit to false when no query param", async () => {
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
     });
@@ -643,7 +658,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       // overLimitCount is from SQL (2), not from current page (which has 0 gated)
       expect(result.overLimitCount).toBe(2);
@@ -745,7 +760,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = extractLoaderData(await loader(createLoaderArgs()));
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
       expect(result.buyerLedger?.rows).toHaveLength(2);
@@ -864,7 +879,7 @@ describe("T4 newAccountsPausedBanner loader tests", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = extractLoaderData(await loader(createLoaderArgs()));
+    const result = await extractLoaderData(await loader(createLoaderArgs()));
 
     expect(mockGetUsageStats).toHaveBeenCalledOnce();
     expect(result.usage).toEqual({
@@ -882,7 +897,7 @@ describe("T4 newAccountsPausedBanner loader tests", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = extractLoaderData(await loader(createLoaderArgs()));
+    const result = await extractLoaderData(await loader(createLoaderArgs()));
 
     expect(mockGetUsageStats).toHaveBeenCalledOnce();
     expect(result.gatingEnforced).toBe(true);
@@ -895,7 +910,7 @@ describe("T4 newAccountsPausedBanner loader tests", () => {
     mockGetUsageStats.mockRejectedValue(new Error("Database error"));
 
     const { loader } = await import("../app._index");
-    const result = extractLoaderData(await loader(createLoaderArgs()));
+    const result = await extractLoaderData(await loader(createLoaderArgs()));
 
     expect(mockGetUsageStats).toHaveBeenCalledOnce();
     expect(result.usage).toBeNull();
