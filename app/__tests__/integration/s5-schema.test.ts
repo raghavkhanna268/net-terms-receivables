@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { syncClockToDb } from "../../../tests/helpers/db-clock";
 import postgres from "postgres";
 import type {
   ShopRow,
@@ -1436,20 +1437,29 @@ describeWithDb("S5 Data Model Schema", () => {
   });
 
   describe("updatedAt Trigger", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("sets updatedAt on update", async () => {
-      const now = new Date();
+      const dbNow = await syncClockToDb(sql);
       const shopId = `shop-trigger-${TEST_SUFFIX}`;
 
+      // Seed updatedAt as NOW() - 1 minute so trigger-set value is definitely later
       await sql`
         INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
-        VALUES (${shopId}, ${`trigger-${TEST_SUFFIX}.myshopify.com`}, ${now}, ${now})
+        VALUES (${shopId}, ${`trigger-${TEST_SUFFIX}.myshopify.com`}, NOW() - INTERVAL '1 minute', NOW() - INTERVAL '1 minute')
       `;
 
       const [beforeUpdate] = await sql<ShopRow[]>`SELECT * FROM "Shop" WHERE id = ${shopId}`;
       const originalUpdatedAt = beforeUpdate.updatedAt;
 
-      // Wait a bit to ensure timestamp differs
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Verify original is in the past relative to DB NOW()
+      expect(originalUpdatedAt.getTime()).toBeLessThan(dbNow.getTime());
 
       await sql`UPDATE "Shop" SET plan = 'premium' WHERE id = ${shopId}`;
 
