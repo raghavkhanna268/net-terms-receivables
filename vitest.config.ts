@@ -125,6 +125,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
   "app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts",
+  "app/routes/__tests__/merchant-form-validation-db.test.ts",
   "app/routes/__tests__/webhooks.compliance.customers.test.ts",
 
   // Lib DB tests
