@@ -69,6 +69,13 @@ vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
 }));
 
+vi.mock("~/services/plan-welcome.server", () => ({
+  processPlanWelcome: vi.fn().mockResolvedValue({
+    refreshed: false,
+    skipped: true,
+  }),
+}));
+
 const TEST_SHOP = "test-shop.myshopify.com";
 const TEST_SHOP_ID = "shop-123";
 
