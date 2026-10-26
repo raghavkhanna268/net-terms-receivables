@@ -16,29 +16,11 @@ import {
   getGatedAccountCount,
   isGatingEnforced,
 } from "~/services/gating.server";
-import {
-  type PlanKey,
-  type FeatureKey,
-  ALL_PLAN_KEYS,
-  ALL_FEATURE_KEYS,
-  getPlanConfig,
-  planHasFeature,
-  planLimit,
-} from "~/lib/entitlements";
-import {
-  PLAN_DISPLAY_NAMES,
-  FEATURE_DISPLAY_NAMES,
-} from "~/components/UpgradePrompt";
+import type { PlanKey } from "~/lib/entitlements";
+import { PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
 import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
 import { safeLog, toErrorCode } from "~/lib/log.server";
-
-const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
-  aging_dashboard: "Track outstanding receivables with aging buckets",
-  unlimited_imports: "Import unlimited bank statements per month",
-  matching: "Automatic matching of payments to invoices",
-  reminders: "Send payment reminders to buyers",
-  credit_holds: "Automatic credit holds for overdue accounts",
-};
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
@@ -90,7 +72,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     },
     gatedCount,
     gatingEnforced,
-    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
+    upgradeUrl: (() => {
+      const handle = getAppHandle();
+      if (handle === null) {
+        safeLog("warn", "plan_url_app_handle_missing", {});
+        return null;
+      }
+      return buildPlanSelectionUrl(shopDomain, handle);
+    })(),
     error,
   };
 };
@@ -134,86 +123,13 @@ export function UsageDisplay({
   );
 }
 
-function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey }) {
-  return (
-    <s-table>
-      <s-table-header-row>
-        <s-table-header listSlot="primary">Feature</s-table-header>
-        {ALL_PLAN_KEYS.map((planKey) => (
-          <s-table-header listSlot="labeled" key={planKey}>
-            {PLAN_DISPLAY_NAMES[planKey]}
-            {planKey === currentPlanKey && " ✓"}
-          </s-table-header>
-        ))}
-      </s-table-header-row>
-      <s-table-body>
-        {ALL_FEATURE_KEYS.map((feature) => (
-          <s-table-row key={feature}>
-            <s-table-cell>
-              <s-text type="strong">{FEATURE_DISPLAY_NAMES[feature]}</s-text>
-              <br />
-              <s-text>{FEATURE_DESCRIPTIONS[feature]}</s-text>
-            </s-table-cell>
-            {ALL_PLAN_KEYS.map((planKey) => {
-              const plan = getPlanConfig(planKey);
-              const hasFeature = planHasFeature(plan, feature);
-              return (
-                <s-table-cell key={`${feature}-${planKey}`}>
-                  {hasFeature ? (
-                    <s-text tone="success">✓</s-text>
-                  ) : (
-                    <s-text>—</s-text>
-                  )}
-                </s-table-cell>
-              );
-            })}
-          </s-table-row>
-        ))}
-        <s-table-row>
-          <s-table-cell>
-            <s-text type="strong">Company Limit</s-text>
-            <br />
-            <s-text>Maximum buyer accounts</s-text>
-          </s-table-cell>
-          {ALL_PLAN_KEYS.map((planKey) => {
-            const plan = getPlanConfig(planKey);
-            const limit = planLimit(plan, "companies");
-            return (
-              <s-table-cell key={`companies-${planKey}`}>
-                <s-text>{formatLimit(limit)}</s-text>
-              </s-table-cell>
-            );
-          })}
-        </s-table-row>
-        <s-table-row>
-          <s-table-cell>
-            <s-text type="strong">Monthly Import Limit</s-text>
-            <br />
-            <s-text>Bank statement imports per month</s-text>
-          </s-table-cell>
-          {ALL_PLAN_KEYS.map((planKey) => {
-            const plan = getPlanConfig(planKey);
-            const limit = planLimit(plan, "importsPerMonth");
-            return (
-              <s-table-cell key={`imports-${planKey}`}>
-                <s-text>{formatLimit(limit)}</s-text>
-              </s-table-cell>
-            );
-          })}
-        </s-table-row>
-      </s-table-body>
-    </s-table>
-  );
-}
-
 export default function PlanPage() {
   const {
-    storeHandle,
     plan,
     usage,
     gatedCount,
     gatingEnforced,
-    appHandle,
+    upgradeUrl,
     error,
   } = useLoaderData<typeof loader>();
 
@@ -222,15 +138,15 @@ export default function PlanPage() {
   const isTest = plan?.isTest ?? false;
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
 
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
-
   const companiesUsed = usage.companies.current;
   const companiesLimit = usage.companies.limit;
-  const companiesAtLimit = companiesLimit !== -1 && companiesUsed >= companiesLimit;
+  // Plan-limit checks only apply when gating is enforced
+  // With none=0, every shop would show "at limit" if we didn't gate this
+  const companiesAtLimit = gatingEnforced && companiesLimit !== -1 && companiesUsed >= companiesLimit;
 
   const importsUsed = usage.importsThisMonth.current;
   const importsLimit = usage.importsThisMonth.limit;
-  const importsAtLimit = importsLimit !== -1 && importsUsed >= importsLimit;
+  const importsAtLimit = gatingEnforced && importsLimit !== -1 && importsUsed >= importsLimit;
 
   const canUpgrade = planKey !== "unlimited";
   const hasLimitReached = companiesAtLimit || importsAtLimit;
@@ -312,9 +228,11 @@ export default function PlanPage() {
                   </s-paragraph>
                 )}
 
-                <s-button href={upgradeUrl} target="_top" variant="primary">
-                  View Plans & Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="primary">
+                    View Plans & Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-section>
           )}
@@ -328,11 +246,6 @@ export default function PlanPage() {
               </s-banner>
             </s-section>
           )}
-
-          {/* Feature Comparison */}
-          <s-section heading="Plan Comparison">
-            <FeatureComparisonTable currentPlanKey={planKey} />
-          </s-section>
         </>
       )}
 

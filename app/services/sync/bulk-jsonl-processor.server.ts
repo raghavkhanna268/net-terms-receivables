@@ -23,7 +23,8 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { BulkMessage } from "~/lib/pgmq.server";
 import type { SyncResult } from "./types";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { SUPPORTED_SHOP_CURRENCY } from "~/lib/shop-currency.server";
 import {
   parseCompanyBulkJsonl,
   parseOrderBulkJsonl,
@@ -458,6 +459,7 @@ async function processCompanyLines(
 export async function processOrderLines(
   sql: Sql,
   shopId: string,
+  shopDomain: string,
   lines: string[],
   context?: EligibilityContext
 ): Promise<number> {
@@ -467,6 +469,22 @@ export async function processOrderLines(
   if (errors.length > 0) {
     console.warn(`[bulk-jsonl] ${errors.length} parse errors in orders batch`);
   }
+
+  // #292: Filter out orders with missing or non-INR currency (fail-closed)
+  // Orders created before shop switched to INR should not be stored as INR amounts
+  // Orders without currency code are also skipped
+  const skippedOrders = orders.filter((o) => {
+    const currency = o.totalPriceSet?.shopMoney?.currencyCode;
+    return !currency || currency !== SUPPORTED_SHOP_CURRENCY;
+  });
+  if (skippedOrders.length > 0) {
+    const hash = await shopHash(shopDomain);
+    safeLog("info", "drain_skip_non_inr_order", { shopHash: hash, count: skippedOrders.length });
+  }
+  const inrOrders = orders.filter((o) => {
+    const currency = o.totalPriceSet?.shopMoney?.currencyCode;
+    return currency && currency === SUPPORTED_SHOP_CURRENCY;
+  });
 
   if (attachedChildCount > 0 || orphanChildCount > 0) {
     console.log(`[bulk-jsonl] PaymentSchedule children: ${attachedChildCount} attached, ${orphanChildCount} orphaned`);
@@ -525,13 +543,13 @@ export async function processOrderLines(
     }
   }
 
-  if (orders.length === 0) {
+  if (inrOrders.length === 0) {
     return orphansUpdated;
   }
 
   // Batch lookup: find existing invoices with their buyer account IDs, merchant overrides, and status (P2 fix)
   // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
-  const orderIds = orders.map((o) => o.id);
+  const orderIds = inrOrders.map((o) => o.id);
   const existingInvoices = await sql<{
     orderId: string;
     buyerAccountId: string;
@@ -549,9 +567,9 @@ export async function processOrderLines(
   const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i]));
 
   // Separate orders into existing and new for different processing paths
-  const ordersWithExisting: typeof orders = [];
-  const ordersWithoutExisting: typeof orders = [];
-  for (const order of orders) {
+  const ordersWithExisting: typeof inrOrders = [];
+  const ordersWithoutExisting: typeof inrOrders = [];
+  for (const order of inrOrders) {
     if (existingByOrderId.has(order.id)) {
       ordersWithExisting.push(order);
     } else {
@@ -831,7 +849,7 @@ async function processLines(
     case "companies":
       return await processCompanyLines(sql, shopId, lines);
     case "orders":
-      return await processOrderLines(sql, shopId, lines);
+      return await processOrderLines(sql, shopId, shop, lines);
     case "customers":
       return await processCustomerLines(sql, shop, lines);
     default:

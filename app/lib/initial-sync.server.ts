@@ -31,6 +31,7 @@ import type { Sql } from "./db-light.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
+import { isShopCurrencySupported } from "./shop-currency.server";
 import {
   recoverStaleBulkOperationsForShop,
   STALE_THRESHOLD_MINUTES,
@@ -238,6 +239,14 @@ export async function enqueueInitialSync(
   sql: Sql,
   shopDomain: string
 ): Promise<{ enqueued: boolean; reason?: string }> {
+  // #292: Check shop currency before allowing sync
+  const [shopRow] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  if (!isShopCurrencySupported(shopRow?.currency)) {
+    return { enqueued: false, reason: "unsupported_currency" };
+  }
+
   if (await hasManualSyncQueued(sql, shopDomain)) {
     return { enqueued: false, reason: "already_queued" };
   }

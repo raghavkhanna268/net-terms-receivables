@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 
 /**
@@ -11,18 +13,89 @@ import type { LoaderFunctionArgs } from "react-router";
  * 4. Error handling
  */
 
+/**
+ * Type for the loader result data.
+ */
+interface LoaderResult {
+  shopName: string;
+  shopDomain: string;
+  storeHandle: string;
+  shopCurrency: string;
+  plan: { key: string; name: string; isTest: boolean } | null;
+  usage: {
+    companies: { current: number; limit: number };
+    importsThisMonth: { current: number; limit: number };
+  };
+  appHandle: string;
+  gatingEnforced: boolean;
+  agingTotals: {
+    totalByCurrency: Record<string, string>;
+    buckets: Record<string, { byCurrency: Record<string, string> }>;
+    overdueByCurrency: Record<string, string>;
+    oldestOverdueDays: number | null;
+  } | null;
+  buyerLedger: {
+    rows: Array<{
+      buyer_account_id: string;
+      buyer_name: string;
+      credit_limit_paise: string | null;
+      hold_state: string;
+      currency: string;
+      outstanding_paise: string;
+      overdue_paise: string;
+      oldest_overdue_days: number | null;
+      is_gated: boolean;
+    }>;
+    totalCount: number;
+  } | null;
+  selectedBuyerInvoices: {
+    rows: Array<unknown>;
+    totalCount: number;
+    buyerName: string;
+  } | null;
+  selectedBuyerId: string | null;
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalCount: number;
+  };
+  sortBy: string;
+  sortOrder: string;
+  onlyOverLimit: boolean;
+  overLimitCount: number;
+  error: string | null;
+}
+
+/**
+ * Helper to extract loader data from result.
+ * The loader returns data() which wraps the response.
+ */
+function extractLoaderData(result: unknown): LoaderResult {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: LoaderResult }).data;
+  }
+  return result as LoaderResult;
+}
+
 // Mock SQL client
 const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 
 // Mock modules
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 vi.mock("~/services/plan.server", () => ({
   resolvePlan: vi.fn().mockResolvedValue({
-    plan: { key: "free" },
-    subscriptionName: "Free",
+    plan: { key: "none" },
+    subscriptionName: null,
     isTest: false,
   }),
 }));
@@ -141,7 +214,7 @@ describe("app._index loader", () => {
   describe("empty state", () => {
     it("returns empty aging totals when no invoices exist", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toEqual({
         totalByCurrency: {},
@@ -176,7 +249,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency).toEqual({ INR: "10000000" });
       expect(result.agingTotals?.overdueByCurrency).toEqual({ INR: "5000000" });
@@ -198,7 +271,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency.INR).toBe("10000000");
       expect(result.agingTotals?.totalByCurrency.USD).toBe("5000000");
@@ -341,7 +414,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.buyerLedger?.rows).toHaveLength(1);
       expect(result.buyerLedger?.rows[0].buyer_name).toBe("Acme Corp");
@@ -384,7 +457,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ buyer: "buyer-1" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ buyer: "buyer-1" })));
 
       expect(mockGetBuyerInvoices).toHaveBeenCalledWith(
         expect.anything(),
@@ -409,7 +482,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ buyer: "buyer-unknown" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ buyer: "buyer-unknown" })));
 
       expect(result.selectedBuyerInvoices?.buyerName).toBe("Test Buyer");
     });
@@ -420,7 +493,7 @@ describe("app._index loader", () => {
       mockGetShopAgingTotals.mockRejectedValue(new Error("Database error"));
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.error).toBe("Failed to load aging data. Please try again.");
       expect(result.agingTotals).toBeNull();
@@ -447,7 +520,7 @@ describe("app._index loader", () => {
       mockSql.mockImplementation(() => Promise.resolve([]));
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toBeNull();
       expect(result.buyerLedger).toBeNull();
@@ -457,7 +530,7 @@ describe("app._index loader", () => {
   describe("shop metadata", () => {
     it("returns shop domain and currency", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.shopDomain).toBe(TEST_SHOP);
       expect(result.shopCurrency).toBe("INR");
@@ -468,7 +541,7 @@ describe("app._index loader", () => {
   describe("over-limit account filter", () => {
     it("defaults onlyOverLimit to false when no query param", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
     });
@@ -515,7 +588,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ overlimit: "true" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ overlimit: "true" })));
 
       expect(result.onlyOverLimit).toBe(true);
     });
@@ -561,7 +634,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       // overLimitCount is from SQL (2), not from current page (which has 0 gated)
       expect(result.overLimitCount).toBe(2);
@@ -623,7 +696,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ overlimit: "true" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ overlimit: "true" })));
 
       expect(result.onlyOverLimit).toBe(true);
       expect(result.buyerLedger?.rows).toHaveLength(2);
@@ -663,7 +736,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
       expect(result.buyerLedger?.rows).toHaveLength(2);
@@ -801,7 +874,7 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs() as never);
+    const result = await extractLoaderData(await loader(createLoaderArgs() as never));
 
     expect(result.buyerLedger?.rows).toHaveLength(2);
 
@@ -845,8 +918,146 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs() as never);
+    const result = await extractLoaderData(await loader(createLoaderArgs() as never));
 
     expect(result.overLimitCount).toBe(1);
+  });
+});
+
+/**
+ * Render tests for BuyerLedgerTable (T1 plan-limit gating).
+ *
+ * Verifies that all accounts are rendered (no hiding) regardless of gating,
+ * and that "over plan limit" badges only appear when gating is enforced.
+ */
+describe("BuyerLedgerTable render tests (T1)", () => {
+  const baseLedgerRows = [
+    {
+      buyer_account_id: "acct-1",
+      buyer_name: "Buyer One Corp",
+      currency: "INR",
+      outstanding_paise: "1000000",
+      overdue_paise: "0",
+      credit_limit_paise: "5000000",
+      oldest_overdue_days: null,
+      hold_state: "OK" as const,
+      is_gated: false,
+    },
+    {
+      buyer_account_id: "acct-2",
+      buyer_name: "Buyer Two Ltd",
+      currency: "INR",
+      outstanding_paise: "2000000",
+      overdue_paise: "500000",
+      credit_limit_paise: "3000000",
+      oldest_overdue_days: 15,
+      hold_state: "NEAR_LIMIT" as const,
+      is_gated: true, // This account is over the plan limit
+    },
+    {
+      buyer_account_id: "acct-3",
+      buyer_name: "Buyer Three Inc",
+      currency: "INR",
+      outstanding_paise: "500000",
+      overdue_paise: "0",
+      credit_limit_paise: null,
+      oldest_overdue_days: null,
+      hold_state: "OK" as const,
+      is_gated: true, // This account is also over the plan limit
+    },
+  ];
+
+  const baseTableProps = {
+    rows: baseLedgerRows,
+    sortBy: "name",
+    sortOrder: "asc" as const,
+    page: 1,
+    totalCount: 3,
+    pageSize: 20,
+    onlyOverLimit: false,
+    onNextPage: "?page=2",
+    onPreviousPage: "?page=0",
+  };
+
+  it("gating OFF, none plan over limit: renders ALL account rows, no 'over plan limit' badges", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: false,
+      })
+    );
+
+    // All 3 accounts are rendered (check buyer names)
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // Count rendered accounts - each has its buyer_name in the output
+    // This verifies no accounts are hidden (all 3 from input are shown)
+    expect(baseLedgerRows.every(row => html.includes(row.buyer_name))).toBe(true);
+
+    // No "over plan limit" badge when gating is OFF
+    expect(html).not.toContain("over plan limit");
+  });
+
+  it("gating OFF, starter plan over limit: renders ALL account rows, no badges", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    // Same test but conceptually for a paid plan over its limit
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: false,
+      })
+    );
+
+    // All 3 accounts are rendered
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // Verify count matches input - all accounts rendered, none hidden
+    const inputCount = baseLedgerRows.length;
+    const renderedCount = baseLedgerRows.filter(row => html.includes(row.buyer_name)).length;
+    expect(renderedCount).toBe(inputCount);
+
+    // No "over plan limit" badge
+    expect(html).not.toContain("over plan limit");
+    expect(html).not.toContain("Limit Reached");
+  });
+
+  it("gating ON, none plan over limit: renders ALL accounts, shows 'over plan limit' badges on gated rows", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: true,
+      })
+    );
+
+    // All 3 accounts are still rendered (gating doesn't hide accounts)
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // "over plan limit" badges ARE shown for gated accounts (2 of them)
+    const badgeCount = (html.match(/over plan limit/g) || []).length;
+    expect(badgeCount).toBe(2); // Two accounts have is_gated: true
+  });
+
+  it("empty rows: renders empty state, not hidden accounts", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        rows: [],
+        totalCount: 0,
+        gatingEnforced: false,
+      })
+    );
+
+    // Empty state message, not "hidden" accounts
+    expect(html).toContain("No outstanding invoices");
+    expect(html).toContain("All your buyers have paid their invoices");
   });
 });

@@ -28,6 +28,7 @@ import { useLoaderData, useActionData, Form, useNavigation } from "react-router"
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import {
   getBuyerOptOutStatus,
   setBuyerOptOut,
@@ -47,6 +48,8 @@ import {
 import { buildAccountOverLimitBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
 import { getSyncErrorInfo, type SyncErrorInfo } from "~/lib/sync-error-info";
+import { safeLog } from "~/lib/log.server";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -74,7 +77,7 @@ interface LoaderData {
     defaultTermsSource: "explicit" | "tag" | null;
     isGated: boolean;
   } | null;
-  upgradeUrl: string;
+  upgradeUrl: string | null;
   creditStatus: {
     creditLimitAmount: number | null;
     creditLimitPaise: string | null;
@@ -140,14 +143,19 @@ interface ActionData {
 
 export const loader = async ({ request, context, params }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
   const accountId = params.id;
 
-  const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const appHandle = process.env.APP_HANDLE ?? "net-terms-receivables";
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
+  const upgradeUrl = (() => {
+    const handle = getAppHandle();
+    if (handle === null) {
+      safeLog("warn", "plan_url_app_handle_missing", {});
+      return null;
+    }
+    return buildPlanSelectionUrl(shopDomain, handle);
+  })();
 
   if (!accountId) {
     return {
@@ -327,6 +335,14 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       }
     : null;
 
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSessionToken(sessionToken, session),
+    action: "accounts_detail",
+    recordType: "BuyerAccount",
+    recordId: accountId,
+  });
+
   return {
     account,
     creditStatus,
@@ -387,7 +403,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
           success: false,
           upgradeRequired: true,
           code: "plan_limit_account_gated",
-          error: "This account is over your plan limit. Upgrade to edit credit limits.",
+          error: "This account was added after you reached your plan limit. Upgrade your plan to manage credit limits for this account.",
         } satisfies ActionData,
         { status: 403 }
       );
@@ -639,9 +655,11 @@ export default function AccountPage() {
                   {bannerState.bodyText}
                   {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
                 </s-text>
-                <s-button href={upgradeUrl} target="_top" variant="secondary">
-                  Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="secondary">
+                    Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-banner>
           </s-section>
@@ -869,9 +887,11 @@ export default function AccountPage() {
                   Credit limit and account detail editing requires an upgrade. Holds still
                   work on all plans.
                 </s-text>
-                <s-button href={upgradeUrl} target="_top" variant="secondary">
-                  Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="secondary">
+                    Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-banner>
             <Form method="post">

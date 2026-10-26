@@ -379,7 +379,7 @@ describeWithDb("reinstall sync reset (DB-backed)", () => {
         `;
 
         const { upsertShopOnAuth } = await import("../after-auth.server");
-        await upsertShopOnAuth(sql, TEST_SHOP_2, "America/New_York");
+        await upsertShopOnAuth(sql, TEST_SHOP_2, "America/New_York", "INR");
 
         const [op] = await sql<{ closed_at: Date | null; closed_reason: string | null }[]>`
           SELECT closed_at, closed_reason FROM s6_bulk_operations

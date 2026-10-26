@@ -19,6 +19,7 @@ const mockSql = Object.assign(vi.fn(), {
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 vi.mock("~/services/gating.server", () => ({
@@ -742,6 +743,16 @@ describe("app.accounts.$id loader syncState", () => {
   });
 
   describe("upgradeUrl in loader", () => {
+    const originalAppHandle = process.env.APP_HANDLE;
+
+    beforeEach(() => {
+      process.env.APP_HANDLE = "net-terms-receivables-1";
+    });
+
+    afterEach(() => {
+      process.env.APP_HANDLE = originalAppHandle;
+    });
+
     it("returns upgradeUrl in loader data", async () => {
       setupBaseMocks({ syncPending: false });
 

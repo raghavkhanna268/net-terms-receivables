@@ -90,11 +90,10 @@ WITH _msgs AS (
   ) m
   WHERE m.msg_id = ANY (string_to_array(:'msg_ids', ',')::bigint[])
 )
+-- QA 2 audit: invoice_id and buyer_account_id removed; use the boolean checks instead.
 SELECT m.msg_id,
        (i.id IS NOT NULL)              AS invoice_exists,
-       i.id                            AS invoice_id,
        (i."buyerAccountId" IS NOT NULL) AS has_buyer_account,
-       i."buyerAccountId"              AS buyer_account_id,
        ba."holdState"::text            AS hold_state,
        ba."manualHold"                 AS manual_hold,
        ba.bypass                       AS bypass,
