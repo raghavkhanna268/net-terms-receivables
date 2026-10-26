@@ -109,6 +109,7 @@ describe("DashboardErrorBanner (#290 P1: error handling)", () => {
     const html = renderToString(React.createElement(DashboardErrorBanner));
 
     expect(html).toContain("Data unavailable");
-    expect(html).toContain("Unable to load");
+    expect(html).toContain("load receivables");
+    expect(html).toContain("Select Retry to try again");
   });
 });
