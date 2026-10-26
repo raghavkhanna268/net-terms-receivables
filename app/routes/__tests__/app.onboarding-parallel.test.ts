@@ -742,6 +742,16 @@ describe("Server-Timing header", () => {
       // Assert at least one app_home_timing record was emitted
       expect(timingEvents.length).toBeGreaterThan(0);
 
+      // Assert each expected stage appears by name (or its _cold variant)
+      const foundStages = new Set(timingEvents.map(e => e.stage));
+      const hasShopLookup = foundStages.has("shop_lookup") || foundStages.has("shop_lookup_cold");
+      const hasOnboardingChecks = foundStages.has("onboarding_checks") || foundStages.has("onboarding_checks_cold");
+      const hasLoaderTotal = foundStages.has("loader_total") || foundStages.has("loader_total_cold");
+
+      expect(hasShopLookup).toBe(true);
+      expect(hasOnboardingChecks).toBe(true);
+      expect(hasLoaderTotal).toBe(true);
+
       // Assert every stage value is in ALLOWED_STAGES
       for (const event of timingEvents) {
         expect(ALLOWED_STAGES.has(event.stage)).toBe(true);
