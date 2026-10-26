@@ -154,6 +154,7 @@ Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 4.
 
 Privacy policy URL: <APP_URL>/privacy (live)
 
+Spec: URL must be accessible without authentication.
 Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "Privacy policy")
 
 ---
