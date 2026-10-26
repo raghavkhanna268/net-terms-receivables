@@ -1,15 +1,17 @@
 # Sentry live check
 #
 # Sends ONE synthetic Sentry event (fixed message "ntr-sentry-smoke", tag
-# smoke_id=<run id>) and checks through the Sentry API that it arrived.
+# smoke_id=<run id>). Delivery is confirmed from the ingest response (HTTP 200
+# plus a returned event id). The current SENTRY_AUTH_TOKEN cannot read events
+# (403), so there is NO API-side read confirmation (api_read=unavailable).
 #
 # SAFETY (Actions logs are public):
 #   - Manual trigger only (workflow_dispatch), main branch only, no inputs
 #   - No PII, shop, user or request data in the event (scripts/ops/sentry-smoke.ts)
 #   - Output is one line of booleans/counts/enums only:
-#       sent=<bool> arrived=<bool> event_count=<n>
-#       sent=true arrived=unknown scope_gap=<enum>  (token cannot read events; exits 0)
-#   - The DSN, host, key, org/project ids and event ids are never printed
+#       sent=<bool> ingest_ok=<bool> event_id_returned=<bool> api_read=unavailable
+#       (api_read=ok adds arrived=<bool> event_count=<n> if the token can read)
+#   - The DSN, host, key, org/project ids and the event id are never printed
 
 name: Sentry Smoke
 

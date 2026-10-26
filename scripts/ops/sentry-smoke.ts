@@ -9,14 +9,17 @@
  *   environment, and the tag smoke_id=<github.run_id>. No PII, no shop data,
  *   no request data, no user, no server_name.
  * - Output is ONE line of booleans/counts/enums:
- *     sent=<bool> arrived=<bool> event_count=<n>
- *     sent=true arrived=unknown scope_gap=<enum>     (token cannot read events)
- *     sent=<bool> arrived=unknown api_error=<enum>   (other API failure)
- *   The DSN, its host, key, org/project ids and event ids are never printed.
+ *     sent=<bool> ingest_ok=<bool> event_id_returned=<bool> api_read=unavailable
+ *     sent=<bool> ingest_ok=<bool> event_id_returned=<bool> api_read=ok arrived=<bool> event_count=<n>
+ *   plus api_error=<enum> on failures. The DSN, its host, key, org/project ids
+ *   and the event id are never printed (only whether an id was returned).
  *   Errors are reported as fixed enums only (no error messages, no URLs).
+ * - When the auth token cannot read events (401/403), delivery is confirmed
+ *   from the ingest response only (HTTP 200 + returned event id). That is NOT
+ *   an API-side read confirmation.
  *
- * Exit codes: 0 when arrived=true or when the only problem is a read-scope gap;
- * 1 otherwise (not sent, not arrived, API error, bad config).
+ * Exit codes: 0 when ingest returned 200 with an event id and the API read
+ * either confirmed arrival or is unavailable; 1 otherwise.
  *
  * Usage:
  *   node --experimental-strip-types scripts/ops/sentry-smoke.ts
@@ -118,18 +121,35 @@ export function eventsSearchUrl(apiBase: string, org: string, projectId: string,
   return `${apiBase.replace(/\/+$/, "")}/api/0/organizations/${encodeURIComponent(org)}/events/?${q.toString()}`;
 }
 
-export function formatResult(r: {
+export type ApiRead = "ok" | "unavailable" | "error" | "skipped";
+
+export interface SmokeResult {
   sent: boolean;
-  arrived: boolean | "unknown";
+  ingestOk: boolean;
+  eventIdReturned: boolean;
+  apiRead: ApiRead;
+  arrived?: boolean;
   eventCount?: number;
-  scopeGap?: string;
   apiError?: string;
-}): string {
-  let line = `sent=${r.sent} arrived=${r.arrived}`;
-  if (r.arrived !== "unknown") line += ` event_count=${r.eventCount ?? 0}`;
-  if (r.scopeGap) line += ` scope_gap=${r.scopeGap}`;
+}
+
+/**
+ * One line of booleans/counts/enums only. The event id is NEVER printed;
+ * only whether one came back.
+ */
+export function formatResult(r: SmokeResult): string {
+  let line =
+    `sent=${r.sent} ingest_ok=${r.ingestOk} event_id_returned=${r.eventIdReturned} api_read=${r.apiRead}`;
+  if (r.apiRead === "ok") line += ` arrived=${r.arrived ?? false} event_count=${r.eventCount ?? 0}`;
   if (r.apiError) line += ` api_error=${r.apiError}`;
   return line;
+}
+
+/** True when the ingest response body is {"id": "<32 hex>"}. */
+export function hasReturnedEventId(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const id = (body as { id?: unknown }).id;
+  return typeof id === "string" && /^[0-9a-f]{32}$/i.test(id.replace(/-/g, ""));
 }
 
 function countRows(body: unknown): number {
@@ -145,19 +165,22 @@ export async function run(deps: RunDeps): Promise<number> {
   const smokeId = deps.env.SMOKE_ID?.trim();
   const org = deps.env.SENTRY_ORG?.trim() || DEFAULT_ORG;
   const apiBase = deps.env.SENTRY_API_BASE?.trim() || DEFAULT_API_BASE;
+  const base = { sent: false, ingestOk: false, eventIdReturned: false, apiRead: "skipped" as ApiRead };
 
   if (!dsn) {
-    deps.log(formatResult({ sent: false, arrived: "unknown", apiError: "dsn_invalid" }));
+    deps.log(formatResult({ ...base, apiError: "dsn_invalid" }));
     return 1;
   }
   if (!isValidSmokeId(smokeId)) {
-    deps.log(formatResult({ sent: false, arrived: "unknown", apiError: "smoke_id_invalid" }));
+    deps.log(formatResult({ ...base, apiError: "smoke_id_invalid" }));
     return 1;
   }
 
-  // 1) Send
+  // 1) Send. Delivery is confirmed from the ingest response: HTTP 200 plus a
+  //    returned event id (never printed).
   const eventId = deps.randomId();
-  let sent = false;
+  let ingestOk = false;
+  let eventIdReturned = false;
   try {
     const res = await deps.fetch(envelopeUrl(dsn), {
       method: "POST",
@@ -167,22 +190,33 @@ export async function run(deps: RunDeps): Promise<number> {
       },
       body: buildEnvelope(eventId, smokeId, deps.now()),
     });
-    sent = res.status === 200;
-    if (!sent) {
-      deps.log(formatResult({ sent: false, arrived: "unknown", apiError: `ingest_http_${res.status}` }));
+    ingestOk = res.status === 200;
+    if (ingestOk) {
+      try {
+        eventIdReturned = hasReturnedEventId(await res.json());
+      } catch {
+        eventIdReturned = false;
+      }
+    }
+    if (!ingestOk) {
+      deps.log(formatResult({ ...base, sent: true, apiError: `ingest_http_${res.status}` }));
       return 1;
     }
   } catch {
-    deps.log(formatResult({ sent: false, arrived: "unknown", apiError: "ingest_network" }));
+    deps.log(formatResult({ ...base, apiError: "ingest_network" }));
     return 1;
   }
 
+  const sentOk = { sent: true, ingestOk, eventIdReturned };
+  const deliveryCode = eventIdReturned ? 0 : 1;
+
   if (!token) {
-    deps.log(formatResult({ sent, arrived: "unknown", scopeGap: "auth_token_missing" }));
-    return 0;
+    deps.log(formatResult({ ...sentOk, apiRead: "unavailable" }));
+    return deliveryCode;
   }
 
-  // 2) Poll
+  // 2) Optional API-side read. If the token cannot read events (401/403),
+  //    report api_read=unavailable and rely on the ingest confirmation.
   const url = eventsSearchUrl(apiBase, org, dsn.projectId, smokeId);
   for (let i = 0; i < POLL_ATTEMPTS; i++) {
     await deps.sleep(POLL_INTERVAL_MS);
@@ -196,23 +230,23 @@ export async function run(deps: RunDeps): Promise<number> {
       continue; // transient network error; retry
     }
     if (status === 401 || status === 403) {
-      deps.log(formatResult({ sent, arrived: "unknown", scopeGap: status === 401 ? "token_unauthorized" : "event_read_forbidden" }));
-      return 0;
+      deps.log(formatResult({ ...sentOk, apiRead: "unavailable" }));
+      return deliveryCode;
     }
     if (status === 200) {
       const n = countRows(body);
       if (n > 0) {
-        deps.log(formatResult({ sent, arrived: true, eventCount: n }));
+        deps.log(formatResult({ ...sentOk, apiRead: "ok", arrived: true, eventCount: n }));
         return 0;
       }
       continue;
     }
     if (status === 429 || status >= 500) continue;
-    deps.log(formatResult({ sent, arrived: "unknown", apiError: `search_http_${status}` }));
+    deps.log(formatResult({ ...sentOk, apiRead: "error", apiError: `search_http_${status}` }));
     return 1;
   }
 
-  deps.log(formatResult({ sent, arrived: false, eventCount: 0 }));
+  deps.log(formatResult({ ...sentOk, apiRead: "ok", arrived: false, eventCount: 0 }));
   return 1;
 }
 
@@ -230,7 +264,7 @@ if (isMain) {
   }).then(
     (code) => process.exit(code),
     () => {
-      console.log("sent=false arrived=unknown api_error=unexpected");
+      console.log("sent=false ingest_ok=false event_id_returned=false api_read=skipped api_error=unexpected");
       process.exit(1);
     },
   );

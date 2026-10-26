@@ -4,7 +4,8 @@
  * Verifies that:
  * - The synthetic event carries only the fixed message, environment and smoke_id tag
  * - Output is a single line of booleans/counts/enums (no DSN, host, key, ids)
- * - A 401/403 on the events read is reported as a scope gap and exits 0
+ * - Delivery is confirmed from the ingest response (200 + event id), id never printed
+ * - A 401/403 on the events read is reported as api_read=unavailable
  * - The workflow is workflow_dispatch-only, has no inputs, contents: read, pinned actions
  */
 import { describe, it, expect } from "vitest";
@@ -16,6 +17,7 @@ import {
   buildEnvelope,
   eventsSearchUrl,
   formatResult,
+  hasReturnedEventId,
   run,
   SMOKE_MESSAGE,
   type RunDeps,
@@ -30,7 +32,8 @@ const FAKE_EVENT_ID = "0123456789abcdef0123456789abcdef";
 const SMOKE_ID = "40300000001";
 
 const OUTPUT_RE =
-  /^sent=(true|false) arrived=(true|false|unknown)( event_count=\d+)?( scope_gap=[a-z_]+)?( api_error=[a-z_0-9]+)?$/;
+  /^sent=(true|false) ingest_ok=(true|false) event_id_returned=(true|false) api_read=(ok|unavailable|error|skipped)( arrived=(true|false) event_count=\d+)?( api_error=[a-z_0-9]+)?$/;
+const INGEST_OK = { status: 200, body: { id: FAKE_EVENT_ID } };
 
 type Resp = { status: number; body?: unknown } | "throw";
 
@@ -57,7 +60,7 @@ function makeDeps(responses: Resp[], env: Record<string, string | undefined> = {
 function expectSafeOutput(lines: string[]) {
   expect(lines).toHaveLength(1);
   expect(lines[0]).toMatch(OUTPUT_RE);
-  for (const secret of [FAKE_KEY, FAKE_HOST, FAKE_PROJECT, FAKE_TOKEN, FAKE_EVENT_ID, "termwise", "sentry.io"]) {
+  for (const secret of [FAKE_KEY, FAKE_HOST, FAKE_PROJECT, FAKE_TOKEN, FAKE_EVENT_ID, "termwise", "net-terms-app", "sentry.io"]) {
     expect(lines[0]).not.toContain(secret);
   }
 }
@@ -102,52 +105,72 @@ describe("sentry-smoke: synthetic event has no PII", () => {
 });
 
 describe("sentry-smoke: run() output is booleans/counts only", () => {
-  it("arrived=true with event_count when the search finds it", async () => {
-    const { deps, lines, calls } = makeDeps([{ status: 200 }, { status: 200, body: { data: [] } }, { status: 200, body: { data: [{ id: "x" }] } }]);
+  it("api read ok: arrived=true with event_count", async () => {
+    const { deps, lines, calls } = makeDeps([INGEST_OK, { status: 200, body: { data: [] } }, { status: 200, body: { data: [{ id: "x" }] } }]);
     expect(await run(deps)).toBe(0);
-    expect(lines).toEqual(["sent=true arrived=true event_count=1"]);
+    expect(lines).toEqual(["sent=true ingest_ok=true event_id_returned=true api_read=ok arrived=true event_count=1"]);
     expectSafeOutput(lines);
     expect(calls[0].init?.headers?.["X-Sentry-Auth"]).toContain(`sentry_key=${FAKE_KEY}`);
   });
-  it("403 on read -> arrived=unknown scope_gap, exit 0", async () => {
-    const { deps, lines } = makeDeps([{ status: 200 }, { status: 403 }]);
+  it("403 on read -> api_read=unavailable, delivery from ingest, exit 0", async () => {
+    const { deps, lines } = makeDeps([INGEST_OK, { status: 403 }]);
     expect(await run(deps)).toBe(0);
-    expect(lines).toEqual(["sent=true arrived=unknown scope_gap=event_read_forbidden"]);
+    expect(lines).toEqual(["sent=true ingest_ok=true event_id_returned=true api_read=unavailable"]);
     expectSafeOutput(lines);
   });
-  it("401 on read -> scope_gap=token_unauthorized, exit 0", async () => {
-    const { deps, lines } = makeDeps([{ status: 200 }, { status: 401 }]);
+  it("401 on read -> api_read=unavailable, exit 0", async () => {
+    const { deps, lines } = makeDeps([INGEST_OK, { status: 401 }]);
     expect(await run(deps)).toBe(0);
-    expect(lines[0]).toBe("sent=true arrived=unknown scope_gap=token_unauthorized");
+    expect(lines[0]).toBe("sent=true ingest_ok=true event_id_returned=true api_read=unavailable");
   });
-  it("never found -> arrived=false event_count=0, exit 1", async () => {
-    const { deps, lines } = makeDeps([{ status: 200 }, { status: 200, body: { data: [] } }]);
+  it("ingest 200 without an event id -> event_id_returned=false, exit 1", async () => {
+    const { deps, lines } = makeDeps([{ status: 200, body: {} }, { status: 403 }]);
     expect(await run(deps)).toBe(1);
-    expect(lines).toEqual(["sent=true arrived=false event_count=0"]);
+    expect(lines).toEqual(["sent=true ingest_ok=true event_id_returned=false api_read=unavailable"]);
   });
-  it("ingest rejected -> sent=false, exit 1", async () => {
+  it("no auth token -> api_read=unavailable, ingest decides", async () => {
+    const { deps, lines, calls } = makeDeps([INGEST_OK], { SENTRY_AUTH_TOKEN: "" });
+    expect(await run(deps)).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(lines).toEqual(["sent=true ingest_ok=true event_id_returned=true api_read=unavailable"]);
+  });
+  it("api read ok but never found -> arrived=false event_count=0, exit 1", async () => {
+    const { deps, lines } = makeDeps([INGEST_OK, { status: 200, body: { data: [] } }]);
+    expect(await run(deps)).toBe(1);
+    expect(lines).toEqual(["sent=true ingest_ok=true event_id_returned=true api_read=ok arrived=false event_count=0"]);
+  });
+  it("ingest rejected -> ingest_ok=false, exit 1", async () => {
     const { deps, lines } = makeDeps([{ status: 401 }]);
     expect(await run(deps)).toBe(1);
-    expect(lines).toEqual(["sent=false arrived=unknown api_error=ingest_http_401"]);
+    expect(lines).toEqual(["sent=true ingest_ok=false event_id_returned=false api_read=skipped api_error=ingest_http_401"]);
+    expectSafeOutput(lines);
   });
   it("network errors never leak the URL", async () => {
     const { deps, lines } = makeDeps(["throw"]);
     expect(await run(deps)).toBe(1);
-    expect(lines).toEqual(["sent=false arrived=unknown api_error=ingest_network"]);
+    expect(lines).toEqual(["sent=false ingest_ok=false event_id_returned=false api_read=skipped api_error=ingest_network"]);
     expectSafeOutput(lines);
   });
   it("invalid DSN or smoke id fails closed without sending", async () => {
-    const a = makeDeps([{ status: 200 }], { SENTRY_DSN: "garbage" });
+    const a = makeDeps([INGEST_OK], { SENTRY_DSN: "garbage" });
     expect(await run(a.deps)).toBe(1);
     expect(a.calls).toHaveLength(0);
-    const b = makeDeps([{ status: 200 }], { SMOKE_ID: "abc; rm" });
+    const b = makeDeps([INGEST_OK], { SMOKE_ID: "abc; rm" });
     expect(await run(b.deps)).toBe(1);
     expect(b.calls).toHaveLength(0);
     expectSafeOutput(a.lines);
     expectSafeOutput(b.lines);
   });
-  it("formatResult omits event_count when unknown", () => {
-    expect(formatResult({ sent: true, arrived: "unknown", scopeGap: "event_read_forbidden" })).toMatch(OUTPUT_RE);
+  it("hasReturnedEventId accepts only a 32-hex id", () => {
+    expect(hasReturnedEventId({ id: FAKE_EVENT_ID })).toBe(true);
+    expect(hasReturnedEventId({ id: "" })).toBe(false);
+    expect(hasReturnedEventId({ id: "<script>" })).toBe(false);
+    expect(hasReturnedEventId(null)).toBe(false);
+  });
+  it("formatResult never includes the event id", () => {
+    const l = formatResult({ sent: true, ingestOk: true, eventIdReturned: true, apiRead: "unavailable" });
+    expect(l).toMatch(OUTPUT_RE);
+    expect(l).not.toContain(FAKE_EVENT_ID);
   });
 });
 
