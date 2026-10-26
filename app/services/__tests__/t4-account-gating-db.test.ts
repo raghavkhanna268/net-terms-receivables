@@ -226,7 +226,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
         SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -313,7 +314,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
         SHOP_DOMAIN,
         "COMPANY_LOCATIONS_UPDATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -366,7 +368,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
         SHOP_DOMAIN,
         "COMPANY_LOCATIONS_UPDATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -443,7 +446,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
         });
       }
 
-      const mappedAccounts = newLocations.map((loc) => mapCompanyLocationToBuyerAccount(SHOP_ID, loc));
+      const mappedAccounts = newLocations.map((loc) => mapCompanyLocationToBuyerAccount(SHOP_ID, loc, {}));
 
       const upsertCount = await bulkUpsertBuyerAccounts(sql, mappedAccounts);
       expect(upsertCount).toBe(10);
@@ -566,14 +569,16 @@ describeWithDb("T4 account-count gating (DB)", () => {
             SHOP_DOMAIN,
             "COMPANY_LOCATIONS_CREATE",
             location1,
-            `webhook-concurrent-1-${TEST_SUFFIX}`
+            `webhook-concurrent-1-${TEST_SUFFIX}`,
+            {}
           ),
           processCompanyLocationWebhook(
             sql2,
             SHOP_DOMAIN,
             "COMPANY_LOCATIONS_CREATE",
             location2,
-            `webhook-concurrent-2-${TEST_SUFFIX}`
+            `webhook-concurrent-2-${TEST_SUFFIX}`,
+            {}
           ),
         ]);
 
@@ -1171,7 +1176,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
         SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -1272,7 +1278,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
         SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
 
       expect(result.success).toBe(true);

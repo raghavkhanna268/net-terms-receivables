@@ -53,7 +53,7 @@ export {
 
 // Bulk operation queries and registration
 export {
-  BULK_COMPANIES_QUERY,
+  getBulkCompaniesQuery,
   BULK_ORDERS_QUERY,
   BULK_OPERATION_STATUS_QUERY,
   getCompaniesExportMutation,

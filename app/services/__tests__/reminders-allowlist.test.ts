@@ -81,6 +81,14 @@ function createMockSql() {
       return mockResults.get("sent_today") ?? [{ sentToday: false }];
     }
 
+    if (query.includes("FROM \"ReminderLog\"") && query.includes("status")) {
+      return mockResults.get("log_status") ?? [{ status: "delayed" }];
+    }
+
+    if (query.includes("UPDATE \"ReminderLog\"") && query.includes("SET status")) {
+      return [];
+    }
+
     // #292: Shop currency query for INR-only guard
     if (query.includes("currency") && query.includes("\"Shop\"") && query.includes("WHERE id")) {
       return mockResults.get("shop_currency") ?? [{ currency: "INR" }];
@@ -434,6 +442,266 @@ describe("sendPaymentReminder - allowlist", () => {
     const allLogs = [...consoleLogOutput, ...consoleInfoOutput].join("\n");
 
     expect(allLogs).toContain("reminder_send_skipped");
+    expect(allLogs).toContain("recipient_allowlist_empty");
+  });
+
+  it("sends with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is 'false'", async () => {
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("invoice", [getMockInvoice()]);
+    mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-123" }),
+    });
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("sent");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is unset", async () => {
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("invoice", [getMockInvoice()]);
+    mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+
+    const envWithoutEnforced = { ...validEnv, RESEND_TEST_RECIPIENTS: "" };
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      envWithoutEnforced
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("empty or not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput].join("\n");
+    expect(allLogs).toContain("recipient_allowlist_empty");
+  });
+
+  it("blocks with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is 'False' (wrong case)", async () => {
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("invoice", [getMockInvoice()]);
+    mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-123",
+      "inv-123",
+      "rule-123",
+      0,
+      "Asia/Kolkata",
+      { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "False" }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("empty or not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput].join("\n");
+    expect(allLogs).toContain("recipient_allowlist_empty");
+  });
+});
+
+describe("sendCatchupReminder - allowlist enforcement (Gate 11c)", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleLogOutput: string[] = [];
+  let consoleInfoOutput: string[] = [];
+
+  const validEnv = {
+    RESEND_API_KEY: "re_test_1234",
+    RESEND_FROM: "noreply@test-example.com",
+    REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+    SHOPIFY_APP_URL: "https://app.example.com",
+    RESEND_TEST_RECIPIENTS: "",
+  };
+
+  const getMockDelayedInvoice = () => ({
+    invoiceId: "inv-delayed-123",
+    shopId: "shop-catchup-123",
+    shopDomain: "test-catchup-shop.myshopify.com",
+    shopTimezone: "Asia/Kolkata",
+    invoiceName: "#2001",
+    total: "2000.00",
+    outstanding: "2000.00",
+    currency: "INR",
+    dueAt: new Date("2026-10-20T00:00:00+05:30"),
+    issuedAt: new Date("2026-10-10T00:00:00+05:30"),
+    status: "open",
+    buyerAccountId: "buyer-catchup-123",
+    customerId: "gid://shopify/Customer/789",
+    shopUninstalledAt: null,
+    buyerAccountGatedAt: null,
+    delayedRuleId: "rule-delayed-123",
+    delayedOffsetDays: 3,
+    delayedStageLabel: "3 days overdue",
+    logId: "delayed-log-123",
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleLogOutput = [];
+    consoleInfoOutput = [];
+
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogOutput.push(args.map(String).join(" "));
+    });
+    vi.spyOn(console, "info").mockImplementation((...args) => {
+      consoleInfoOutput.push(args.map(String).join(" "));
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it("sends with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is 'false'", async () => {
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendCatchupReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+    mockSql.setMockResult("invoice", [getMockDelayedInvoice()]);
+    mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+    mockSql.setMockResult("settings", [{ enabled: true }]);
+    mockSql.setMockResult("rule", [{ enabled: true, offsetDays: 3, stageLabel: "3 days overdue" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-catchup-123" }),
+    });
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-catchup-123",
+      "inv-delayed-123",
+      "rule-delayed-123",
+      "log-123",
+      3,
+      "Asia/Kolkata",
+      { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("sent");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is unset", async () => {
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendCatchupReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+    mockSql.setMockResult("invoice", [getMockDelayedInvoice()]);
+    mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+    mockSql.setMockResult("settings", [{ enabled: true }]);
+    mockSql.setMockResult("rule", [{ enabled: true, offsetDays: 3, stageLabel: "3 days overdue" }]);
+
+    const envWithoutEnforced = { ...validEnv, RESEND_TEST_RECIPIENTS: "" };
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-catchup-123",
+      "inv-delayed-123",
+      "rule-delayed-123",
+      "log-123",
+      3,
+      "Asia/Kolkata",
+      envWithoutEnforced
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("empty or not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput].join("\n");
+    expect(allLogs).toContain("recipient_allowlist_empty");
+  });
+
+  it("blocks with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is 'False' (wrong case)", async () => {
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendCatchupReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+    mockSql.setMockResult("invoice", [getMockDelayedInvoice()]);
+    mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+    mockSql.setMockResult("settings", [{ enabled: true }]);
+    mockSql.setMockResult("rule", [{ enabled: true, offsetDays: 3, stageLabel: "3 days overdue" }]);
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-catchup-123",
+      "inv-delayed-123",
+      "rule-delayed-123",
+      "log-123",
+      3,
+      "Asia/Kolkata",
+      { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "False" }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toContain("empty or not configured");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput].join("\n");
     expect(allLogs).toContain("recipient_allowlist_empty");
   });
 });
