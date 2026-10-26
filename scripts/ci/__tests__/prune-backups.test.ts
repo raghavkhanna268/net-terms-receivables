@@ -7,16 +7,22 @@
  * - Keep-newest-7 holds even when all objects are >30 days old
  * - Only >30d objects beyond the newest 7 are eligible for deletion
  * - Dry-run deletes nothing (tested via selection logic returning empty action)
+ * - Sanity floor blocks deletion when state is unhealthy
+ * - newest_age_hours is calculated correctly
  */
 import { describe, it, expect } from "vitest";
 import {
   validatePrefix,
   validateBucket,
   selectForDeletion,
+  checkSanityFloor,
+  getNewestAgeHours,
   BUCKET,
   PREFIX,
   RETENTION_DAYS,
   KEEP_NEWEST,
+  MIN_TOTAL_FOR_DELETE,
+  MAX_NEWEST_AGE_HOURS,
   type S3Object,
 } from "../../ops/prune-backups.js";
 
@@ -297,5 +303,174 @@ describe("prune-backups: edge cases", () => {
     expect(PREFIX).toBe("db/");
     expect(RETENTION_DAYS).toBe(30);
     expect(KEEP_NEWEST).toBe(7);
+    expect(MIN_TOTAL_FOR_DELETE).toBe(8);
+    expect(MAX_NEWEST_AGE_HOURS).toBe(48);
+  });
+});
+
+describe("prune-backups: newest age calculation", () => {
+  it("returns 0 for empty object list", () => {
+    const nowMs = Date.now();
+    expect(getNewestAgeHours([], nowMs)).toBe(0);
+  });
+
+  it("calculates age of newest object correctly", () => {
+    const nowMs = Date.now();
+    const objects: S3Object[] = [
+      makeObject("db/2026/10/net-terms-old.dump.age", 5, nowMs),
+      makeObject("db/2026/10/net-terms-newer.dump.age", 2, nowMs),
+      makeObject("db/2026/10/net-terms-newest.dump.age", 1, nowMs),
+    ];
+
+    const ageHours = getNewestAgeHours(objects, nowMs);
+    expect(ageHours).toBe(24); // 1 day = 24 hours
+  });
+
+  it("handles objects created less than an hour ago", () => {
+    const nowMs = Date.now();
+    const recentObject: S3Object = {
+      Key: "db/2026/10/net-terms-recent.dump.age",
+      LastModified: new Date(nowMs - 30 * 60 * 1000).toISOString(), // 30 minutes ago
+    };
+
+    const ageHours = getNewestAgeHours([recentObject], nowMs);
+    expect(ageHours).toBe(0); // Less than 1 hour
+  });
+
+  it("returns correct hours for multi-day age", () => {
+    const nowMs = Date.now();
+    const objects: S3Object[] = [
+      makeObject("db/2026/10/net-terms-a.dump.age", 3, nowMs), // 3 days = 72 hours
+    ];
+
+    const ageHours = getNewestAgeHours(objects, nowMs);
+    expect(ageHours).toBe(72);
+  });
+});
+
+describe("prune-backups: sanity floor checks", () => {
+  it("blocks deletion when total objects below minimum", () => {
+    const result = checkSanityFloor(
+      5,   // totalCount - below minimum of 8
+      2,   // eligibleCount
+      10,  // newestAgeHours - healthy
+      MIN_TOTAL_FOR_DELETE,
+      KEEP_NEWEST,
+      MAX_NEWEST_AGE_HOURS
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("total_below_minimum");
+    expect(result.reason).toContain("total=5");
+    expect(result.reason).toContain("min=8");
+  });
+
+  it("blocks deletion when eligible would leave fewer than keep-newest", () => {
+    const result = checkSanityFloor(
+      10,  // totalCount
+      5,   // eligibleCount - would leave only 5 (below 7)
+      10,  // newestAgeHours - healthy
+      MIN_TOTAL_FOR_DELETE,
+      KEEP_NEWEST,
+      MAX_NEWEST_AGE_HOURS
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("would_leave_below_keep_newest");
+    expect(result.reason).toContain("after=5");
+    expect(result.reason).toContain("min=7");
+  });
+
+  it("blocks deletion when newest backup is too old (stalled job)", () => {
+    const result = checkSanityFloor(
+      15,  // totalCount - healthy
+      3,   // eligibleCount - healthy
+      72,  // newestAgeHours - 3 days old, exceeds 48h max
+      MIN_TOTAL_FOR_DELETE,
+      KEEP_NEWEST,
+      MAX_NEWEST_AGE_HOURS
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("newest_too_old");
+    expect(result.reason).toContain("age_hours=72");
+    expect(result.reason).toContain("max=48");
+  });
+
+  it("allows deletion when all sanity checks pass", () => {
+    const result = checkSanityFloor(
+      15,  // totalCount - healthy (>= 8)
+      5,   // eligibleCount - healthy (leaves 10, which is >= 7)
+      12,  // newestAgeHours - healthy (<= 48)
+      MIN_TOTAL_FOR_DELETE,
+      KEEP_NEWEST,
+      MAX_NEWEST_AGE_HOURS
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBeUndefined();
+  });
+
+  it("allows deletion at exact minimum thresholds", () => {
+    const result = checkSanityFloor(
+      8,   // totalCount - exactly at minimum
+      1,   // eligibleCount - leaves exactly 7
+      48,  // newestAgeHours - exactly at max
+      MIN_TOTAL_FOR_DELETE,
+      KEEP_NEWEST,
+      MAX_NEWEST_AGE_HOURS
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("blocks when eligible equals total minus keep-newest plus one", () => {
+    // 10 total, eligible = 4 would leave 6 (below 7)
+    const result = checkSanityFloor(
+      10,
+      4,
+      10,
+      MIN_TOTAL_FOR_DELETE,
+      KEEP_NEWEST,
+      MAX_NEWEST_AGE_HOURS
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("would_leave_below_keep_newest");
+  });
+});
+
+describe("prune-backups: delete mode exit codes", () => {
+  it("selection returns correct eligible count for exit code check", () => {
+    const nowMs = Date.now();
+    const objects: S3Object[] = [];
+
+    // 10 objects, all old enough to be eligible
+    for (let i = 0; i < 10; i++) {
+      objects.push(makeObject(`db/2026/09/net-terms-backup-${i}.dump.age`, 40 + i, nowMs));
+    }
+
+    const toDelete = selectForDeletion(objects, RETENTION_DAYS, KEEP_NEWEST, nowMs);
+
+    // 10 total, keep 7, eligible = 3
+    expect(toDelete.length).toBe(3);
+
+    // In delete mode, if deletedCount < eligibleCount, main() should return 1
+    // This verifies the selection returns the correct count to compare against
+  });
+
+  it("returns empty eligible list when nothing to delete", () => {
+    const nowMs = Date.now();
+    const objects: S3Object[] = [];
+
+    // All objects within 30 days
+    for (let i = 0; i < 10; i++) {
+      objects.push(makeObject(`db/2026/10/net-terms-backup-${i}.dump.age`, i + 1, nowMs));
+    }
+
+    const toDelete = selectForDeletion(objects, RETENTION_DAYS, KEEP_NEWEST, nowMs);
+
+    // Nothing eligible = deletedCount (0) equals eligibleCount (0), so no error
+    expect(toDelete.length).toBe(0);
   });
 });

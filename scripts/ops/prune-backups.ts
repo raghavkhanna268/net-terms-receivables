@@ -1,4 +1,3 @@
-#!/usr/bin/env npx tsx
 /**
  * Prune old database backups from R2 with 30-day rolling retention.
  *
@@ -7,13 +6,17 @@
  * - Strict prefix guard: exits non-zero if any listed key doesn't start with `db/`
  * - Always keeps the newest 7 backups regardless of age
  * - Deletes only objects older than 30 days
+ * - Sanity floor: refuses to delete if total < 8, if eligible would leave < 7,
+ *   or if newest backup > 48h old (signals stalled backup job)
  * - Dry-run is default: prints counts only, never prints keys or sizes
+ * - Exit non-zero if deleted < eligible in delete mode (partial failure)
  *
  * Usage:
- *   npx tsx scripts/ops/prune-backups.ts [--delete]
+ *   node --experimental-strip-types scripts/ops/prune-backups.ts
  *
  * Environment:
  *   R2_BUCKET, R2_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+ *   PRUNE_MODE: 'dry_run' (default) or 'delete'
  */
 
 import { spawnSync } from "child_process";
@@ -26,6 +29,8 @@ export const BUCKET = "ntr-db-backups";
 export const PREFIX = "db/";
 export const RETENTION_DAYS = 30;
 export const KEEP_NEWEST = 7;
+export const MIN_TOTAL_FOR_DELETE = 8;
+export const MAX_NEWEST_AGE_HOURS = 48;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -41,6 +46,12 @@ export interface PruneResult {
   eligibleCount: number;
   keptCount: number;
   deletedCount: number;
+  newestAgeHours: number;
+}
+
+export interface SanityCheckResult {
+  ok: boolean;
+  reason?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +76,67 @@ export function validatePrefix(objects: S3Object[], expectedPrefix: string): boo
  */
 export function validateBucket(bucket: string, expected: string): boolean {
   return bucket === expected;
+}
+
+/**
+ * Calculates the age of the newest object in hours.
+ * Returns 0 if no objects exist.
+ */
+export function getNewestAgeHours(objects: S3Object[], nowMs: number): number {
+  if (objects.length === 0) {
+    return 0;
+  }
+
+  let newestMs = 0;
+  for (const obj of objects) {
+    const objMs = new Date(obj.LastModified).getTime();
+    if (objMs > newestMs) {
+      newestMs = objMs;
+    }
+  }
+
+  const ageMs = nowMs - newestMs;
+  return Math.floor(ageMs / (60 * 60 * 1000));
+}
+
+/**
+ * Sanity floor check before allowing deletions.
+ * Prevents destructive operations when the backup state looks unhealthy.
+ */
+export function checkSanityFloor(
+  totalCount: number,
+  eligibleCount: number,
+  newestAgeHours: number,
+  minTotal: number,
+  keepNewest: number,
+  maxNewestAgeHours: number
+): SanityCheckResult {
+  // Refuse if total objects < minimum threshold
+  if (totalCount < minTotal) {
+    return {
+      ok: false,
+      reason: "total_below_minimum total=" + totalCount + " min=" + minTotal,
+    };
+  }
+
+  // Refuse if eligible would leave fewer than keep-newest threshold
+  const afterDelete = totalCount - eligibleCount;
+  if (afterDelete < keepNewest) {
+    return {
+      ok: false,
+      reason: "would_leave_below_keep_newest after=" + afterDelete + " min=" + keepNewest,
+    };
+  }
+
+  // Refuse if newest backup is too old (signals stalled backup job)
+  if (newestAgeHours > maxNewestAgeHours) {
+    return {
+      ok: false,
+      reason: "newest_too_old age_hours=" + newestAgeHours + " max=" + maxNewestAgeHours,
+    };
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -175,8 +247,9 @@ function deleteObject(bucket: string, key: string, endpoint: string): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function main(): Promise<number> {
-  const args = process.argv.slice(2);
-  const deleteMode = args.includes("--delete");
+  // Read mode from environment (set by workflow), default to dry_run
+  const pruneMode = process.env.PRUNE_MODE ?? "dry_run";
+  const deleteMode = pruneMode === "delete";
 
   // Check required environment variables
   const bucket = process.env.R2_BUCKET;
@@ -210,36 +283,69 @@ export async function main(): Promise<number> {
   // Calculate which objects to delete
   const nowMs = Date.now();
   const toDelete = selectForDeletion(objects, RETENTION_DAYS, KEEP_NEWEST, nowMs);
+  const newestAgeHours = getNewestAgeHours(objects, nowMs);
 
   const result: PruneResult = {
     totalCount: objects.length,
     eligibleCount: toDelete.length,
     keptCount: objects.length - toDelete.length,
     deletedCount: 0,
+    newestAgeHours,
   };
 
   if (deleteMode) {
+    // Sanity floor check before deletion
+    const sanity = checkSanityFloor(
+      result.totalCount,
+      result.eligibleCount,
+      result.newestAgeHours,
+      MIN_TOTAL_FOR_DELETE,
+      KEEP_NEWEST,
+      MAX_NEWEST_AGE_HOURS
+    );
+
+    if (!sanity.ok) {
+      console.log(
+        "prune_mode=delete" +
+          " prune_blocked=true" +
+          " reason=" + sanity.reason +
+          " total=" + result.totalCount +
+          " eligible=" + result.eligibleCount +
+          " newest_age_hours=" + result.newestAgeHours
+      );
+      return 1;
+    }
+
     // Delete eligible objects
     for (const key of toDelete) {
       if (deleteObject(bucket, key, endpoint)) {
         result.deletedCount++;
       }
     }
+
     // Structured output: counts only (no keys, sizes, or shop data)
     console.log(
       "prune_mode=delete" +
         " total=" + result.totalCount +
         " eligible=" + result.eligibleCount +
         " kept=" + result.keptCount +
-        " deleted=" + result.deletedCount
+        " deleted=" + result.deletedCount +
+        " newest_age_hours=" + result.newestAgeHours
     );
+
+    // Exit non-zero if some deletions failed
+    if (result.deletedCount < result.eligibleCount) {
+      console.log("prune_error=true reason=partial_delete_failure");
+      return 1;
+    }
   } else {
     // Dry-run: print counts only
     console.log(
       "prune_mode=dry_run" +
         " total=" + result.totalCount +
         " eligible=" + result.eligibleCount +
-        " kept=" + result.keptCount
+        " kept=" + result.keptCount +
+        " newest_age_hours=" + result.newestAgeHours
     );
   }
 
