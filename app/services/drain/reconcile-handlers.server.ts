@@ -643,19 +643,29 @@ export async function enqueueReconcileOrders(
  *
  * Uses an aggregate table (shop, day, count) - no PII, no individual order IDs.
  *
+ * Guard (#239 PR2): Only inserts if the Shop row exists. The Shop FOR SHARE
+ * in the CTE serializes with deleteShop's leading FOR UPDATE, preventing
+ * residual writes after shop/redact completes.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
+ * @returns true if the counter was incremented, false if shop is missing
  */
 export async function incrementOrderRefetchNull(
   sql: Sql,
   shop: string
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO s10b_order_refetch_null (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, 1)
+    SELECT ${shop}, CURRENT_DATE, 1
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = s10b_order_refetch_null.count + 1
   `;
+  return result.count > 0;
 }
 
 /**
@@ -667,21 +677,31 @@ export async function incrementOrderRefetchNull(
  * Uses an aggregate table (shop, day, count) - no PII, no individual order IDs.
  * Best-effort: failures are logged but never fail the invoice write.
  *
+ * Guard (#239 PR2): Only inserts if the Shop row exists. The Shop FOR SHARE
+ * in the CTE serializes with deleteShop's leading FOR UPDATE, preventing
+ * residual writes after shop/redact completes.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
+ * @returns true if the counter was incremented, false if shop is missing
  */
 export async function incrementOrderOutstandingMissing(
   sql: Sql,
   shop: string,
   n: number = 1
-): Promise<void> {
-  if (n <= 0) return;
-  await sql`
+): Promise<boolean> {
+  if (n <= 0) return true;
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO order_outstanding_missing (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, ${n})
+    SELECT ${shop}, CURRENT_DATE, ${n}
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = order_outstanding_missing.count + ${n}
   `;
+  return result.count > 0;
 }
 
 /**

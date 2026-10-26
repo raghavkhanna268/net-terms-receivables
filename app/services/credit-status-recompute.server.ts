@@ -260,19 +260,22 @@ export async function recomputeCreditStatus(
  * Uses a deterministic dedupe key per account per day to prevent duplicate
  * messages from the daily cron job.
  *
+ * Guard (#239 PR2): Only enqueues if the Shop row exists. The Shop FOR SHARE
+ * in the transaction serializes with deleteShop's leading FOR UPDATE, preventing
+ * residual queue messages after shop/redact completes.
+ *
  * @param sql - Database connection
  * @param shopDomain - Shop domain (e.g., "store.myshopify.com")
  * @param buyerAccountId - Buyer account ID to recompute
  * @param source - Source of the recompute (for audit)
+ * @returns true if the message was enqueued, false if shop is missing
  */
 export async function enqueueCreditStatusRecompute(
   sql: Sql,
   shopDomain: string,
   buyerAccountId: string,
   source: "invoice_change" | "daily_sweep" | "manual",
-): Promise<void> {
-  // Deterministic dedupe key: account ID + date (for daily sweep deduplication)
-  // For event-driven, use a unique key per event
+): Promise<boolean> {
   const today = new Date().toISOString().split("T")[0];
   const dedupeKey =
     source === "daily_sweep"
@@ -288,9 +291,19 @@ export async function enqueueCreditStatusRecompute(
     resourceGid: buyerAccountId,
   };
 
-  await sql`
-    SELECT pgmq.send('s6_sync', ${sql.json(message)})
-  `;
+  const enqueued = await sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string }?]>`
+      SELECT id FROM "Shop" WHERE domain = ${shopDomain} FOR SHARE
+    `;
+    if (!shopRow) {
+      return false;
+    }
+
+    await tx`SELECT pgmq.send('s6_sync', ${tx.json(message)})`;
+    return true;
+  });
+
+  return enqueued;
 }
 
 /**
@@ -302,14 +315,16 @@ export async function enqueueCreditStatusRecompute(
  * - Invoice cancelled/voided
  * - Outstanding amount changed
  *
+ * Guard (#239 PR2): Only enqueues if the Shop row exists, via enqueueCreditStatusRecompute.
+ *
  * @param sql - Database connection
  * @param invoiceId - Invoice ID that changed
+ * @returns true if the message was enqueued, false if shop or invoice is missing
  */
 export async function enqueueRecomputeForInvoice(
   sql: Sql,
   invoiceId: string,
-): Promise<void> {
-  // Look up the invoice to get shop domain and buyer account
+): Promise<boolean> {
   const [invoice] = await sql<{
     buyerAccountId: string | null;
     shopDomain: string;
@@ -321,10 +336,10 @@ export async function enqueueRecomputeForInvoice(
   `;
 
   if (!invoice?.buyerAccountId) {
-    return;
+    return false;
   }
 
-  await enqueueCreditStatusRecompute(
+  return enqueueCreditStatusRecompute(
     sql,
     invoice.shopDomain,
     invoice.buyerAccountId,

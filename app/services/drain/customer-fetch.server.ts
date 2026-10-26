@@ -135,19 +135,29 @@ export async function fetchCustomerWithFallback(
  * Called when a customer fetch falls back to non-PII query due to ACCESS_DENIED.
  * Uses an aggregate table (shop, day, count) - no PII.
  *
+ * Guard (#239 PR2): Only inserts if the Shop row exists. The Shop FOR SHARE
+ * in the CTE serializes with deleteShop's leading FOR UPDATE, preventing
+ * residual writes after shop/redact completes.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
+ * @returns true if the counter was incremented, false if shop is missing
  */
 export async function incrementCustomerPiiAccessDeniedFallback(
   sql: Sql,
   shop: string
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO s10b_customer_pii_fallback (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, 1)
+    SELECT ${shop}, CURRENT_DATE, 1
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = s10b_customer_pii_fallback.count + 1
   `;
+  return result.count > 0;
 }
 
 /**
