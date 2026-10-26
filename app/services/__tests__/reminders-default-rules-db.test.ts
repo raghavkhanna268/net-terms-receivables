@@ -266,13 +266,14 @@ describeWithDb("Sequential DB", () => {
           (${RULE_B_ID}, ${SHOP_ID}, ${OFFSET_DAYS}, 'email'::"ReminderChannel", true, NOW(), NOW())
       `;
 
+      const CUSTOMER_ID = `gid://shopify/Customer/sibling-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO "BuyerAccount" (
-          id, "shopId", kind, name, "creditLimit", "holdState", bypass, "manualHold",
+          id, "shopId", kind, "customerId", name, "creditLimit", "holdState", bypass, "manualHold",
           "defaultTermsDays", "defaultTermsSource", "syncPending", "syncVersion", "createdAt", "updatedAt"
         )
         VALUES (
-          ${BUYER_ACCOUNT_ID}, ${SHOP_ID}, 'TAGGED_CUSTOMER', 'Test Buyer',
+          ${BUYER_ACCOUNT_ID}, ${SHOP_ID}, 'TAGGED_CUSTOMER', ${CUSTOMER_ID}, 'Test Buyer',
           100000.00, 'OK', false, false, 30, 'explicit', false, 1, NOW(), NOW()
         )
       `;
