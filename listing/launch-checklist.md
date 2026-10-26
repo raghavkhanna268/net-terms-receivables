@@ -49,7 +49,7 @@
 - [ ] **TBD** Screenshots (minimum 3) — Why open: not created
 - [ ] **TBD** Demo video (recommended) — Why open: not created
 - [ ] **TBD** App icon (square, meets Shopify requirements) — Why open: `listing/icon.png` is draft, pending Raghav's approval
-- [x] **Support contact email** — `raghavkhanna468@gmail.com` (#313, `docs/privacy.md:15`)
+- [x] **Support contact email**: set in the privacy policy (`docs/privacy.md:15`, #313)
 
 ### Scopes and Permissions
 
@@ -153,7 +153,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
   - [x] Create Sentry project (Raghav), DSN provided through a secure secret request (#390)
   - [x] Set `SENTRY_DSN` secret in Cloudflare Workers (DevOps) (#390)
   - **Steps:** [docs/launch-checklist/sentry-setup.md](../docs/launch-checklist/sentry-setup.md)
-  - [x] Verify errors are captured in dev store testing (#390 smoke run passed)
+  - [x] Verify errors are captured: test event captured by the manual Sentry smoke workflow (#390)
   - [ ] Release tags and source maps — Why open: in open PR #323
 
 ---

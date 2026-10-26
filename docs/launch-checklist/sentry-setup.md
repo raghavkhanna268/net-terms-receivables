@@ -139,5 +139,5 @@ When quota is exhausted, new events are dropped until the next billing cycle. To
 - [x] DevOps stores DSN as `wrangler secret SENTRY_DSN` (#390)
 - [ ] (Optional) Create Organization Auth Token for source maps — Why open: in open PR #323
 - [ ] (Optional) DevOps stores auth token as GitHub Actions secret `SENTRY_AUTH_TOKEN` — Why open: in open PR #323
-- [x] Verify `sendDefaultPii: false` in SDK config (`app/lib/sentry.ts`)
-- [x] Enable data scrubbing in Sentry dashboard for email/phone patterns (#390 smoke run passed)
+- [x] Restrictive SDK data collection: `dataCollection: RESTRICTIVE_DATA_COLLECTION` (replaces `sendDefaultPii` in @sentry/core 11.8) in `app/lib/sentry.ts`
+- [ ] Enable data scrubbing in Sentry dashboard for email/phone patterns — Why open: Sentry dashboard setting, not verifiable from the repo; in-code scrubbing is via beforeSend/beforeSendTransaction in `app/lib/sentry.ts`
