@@ -139,19 +139,65 @@ interface ValidationUpdateResult {
   errors?: Array<{ message: string }>;
 }
 
+export type TitleUpdateOutcome = "updated" | "skipped" | "failed";
+
+export interface EnsureValidationResult {
+  id: string;
+  created: boolean;
+  titleUpdate: TitleUpdateOutcome;
+  errCode?: string;
+}
+
+/**
+ * Try to update the validation title. Returns the outcome without logging.
+ * Caller is responsible for logging if needed.
+ */
+async function tryUpdateTitle(
+  admin: AdminGraphqlClient,
+  id: string,
+): Promise<{ outcome: TitleUpdateOutcome; errCode?: string }> {
+  try {
+    const updateResult = await admin.graphql(VALIDATION_UPDATE_MUTATION, {
+      variables: { id, title: VALIDATION_TITLE },
+    });
+    const updateData = (await updateResult.json()) as ValidationUpdateResult;
+
+    if (updateData.errors?.length) {
+      return {
+        outcome: "failed",
+        errCode: toErrorCode({ message: updateData.errors[0].message }),
+      };
+    }
+    if (updateData.data?.validationUpdate?.userErrors?.length) {
+      return {
+        outcome: "failed",
+        errCode: toErrorCode({
+          message: updateData.data.validationUpdate.userErrors[0].message,
+        }),
+      };
+    }
+    if (updateData.data?.validationUpdate?.validation) {
+      return { outcome: "updated" };
+    }
+    return { outcome: "failed", errCode: "no_validation_returned" };
+  } catch (error) {
+    return { outcome: "failed", errCode: toErrorCode(error) };
+  }
+}
+
 /**
  * Ensures the credit check validation function is registered for the shop.
  * This is idempotent - if the validation already exists (matched by handle), it returns the existing one.
  * If an existing validation has a different title, updates only the title (does not change enabled state,
- * blockOnFailure, or metafields). Update failures are logged but do not block the ensure flow.
+ * blockOnFailure, or metafields). Update failures do not block the ensure flow.
  *
  * @param admin - The Shopify Admin API context
- * @returns The validation ID (existing or newly created), creation flag, and title update count
+ * @returns The validation ID, creation flag, title update outcome, and error code if failed
  * @throws Error if registration fails (query or create errors)
  */
 export async function ensureValidation(
   admin: AdminGraphqlClient,
-): Promise<{ id: string; created: boolean; titleUpdateCount: number }> {
+): Promise<EnsureValidationResult> {
   const existingResult = await admin.graphql(VALIDATIONS_QUERY);
   const existingData = (await existingResult.json()) as ValidationsQueryResult;
 
@@ -168,28 +214,11 @@ export async function ensureValidation(
   if (existingValidation) {
     const node = existingValidation.node;
     if (node.title === VALIDATION_TITLE) {
-      return { id: node.id, created: false, titleUpdateCount: 0 };
+      return { id: node.id, created: false, titleUpdate: "skipped" };
     }
 
-    let titleUpdateCount = 0;
-    try {
-      const updateResult = await admin.graphql(VALIDATION_UPDATE_MUTATION, {
-        variables: { id: node.id, title: VALIDATION_TITLE },
-      });
-      const updateData = (await updateResult.json()) as ValidationUpdateResult;
-
-      if (updateData.errors?.length) {
-        console.warn(`[validation] title_update err=${toErrorCode({ message: updateData.errors[0].message })}`);
-      } else if (updateData.data?.validationUpdate?.userErrors?.length) {
-        console.warn(`[validation] title_update err=${toErrorCode({ message: updateData.data.validationUpdate.userErrors[0].message })}`);
-      } else if (updateData.data?.validationUpdate?.validation) {
-        titleUpdateCount = 1;
-      }
-    } catch (error) {
-      console.warn(`[validation] title_update err=${toErrorCode(error)}`);
-    }
-
-    return { id: node.id, created: false, titleUpdateCount };
+    const { outcome, errCode } = await tryUpdateTitle(admin, node.id);
+    return { id: node.id, created: false, titleUpdate: outcome, errCode };
   }
 
   const createResult = await admin.graphql(VALIDATION_CREATE_MUTATION, {
@@ -219,5 +248,5 @@ export async function ensureValidation(
     throw new Error("Validation creation returned no validation object");
   }
 
-  return { id: validation.id, created: true, titleUpdateCount: 0 };
+  return { id: validation.id, created: true, titleUpdate: "skipped" };
 }

@@ -12,15 +12,21 @@ describe("payment-customization-registration", () => {
   let mockGraphql: Mock;
   let mockAdmin: AdminGraphqlClient;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     mockGraphql = vi.fn();
     mockAdmin = { graphql: mockGraphql } as unknown as AdminGraphqlClient;
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     consoleWarnSpy.mockRestore();
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
   });
 
   describe("ensurePaymentCustomization", () => {
@@ -48,8 +54,12 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
-      expect(result.titleUpdateCount).toBe(0);
+      expect(result.titleUpdate).toBe("skipped");
+      expect(result.errCode).toBeUndefined();
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
     it("updates title when existing customization has old title", async () => {
@@ -90,7 +100,8 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
-      expect(result.titleUpdateCount).toBe(1);
+      expect(result.titleUpdate).toBe("updated");
+      expect(result.errCode).toBeUndefined();
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
 
       const updateCall = mockGraphql.mock.calls[1];
@@ -101,6 +112,9 @@ describe("payment-customization-registration", () => {
           title: "Termwise Payment Hide",
         },
       });
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
     it("skips update when title already matches (0 update calls)", async () => {
@@ -127,11 +141,14 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
-      expect(result.titleUpdateCount).toBe(0);
+      expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
-    it("does not block when title update fails (logs error code without title or GID)", async () => {
+    it("returns failed with errCode when title update has userErrors", async () => {
       mockGraphql.mockResolvedValueOnce({
         json: async () => ({
           data: {
@@ -168,17 +185,51 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
-      expect(result.titleUpdateCount).toBe(0);
-
-      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-      const warnCall = consoleWarnSpy.mock.calls[0][0];
-      expect(warnCall).toContain("[payment_customization] title_update err=");
-      expect(warnCall).not.toContain("Old Title");
-      expect(warnCall).not.toContain("Termwise Payment Hide");
-      expect(warnCall).not.toContain("gid://shopify/PaymentCustomization/123");
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBeDefined();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
-    it("does not block when title update throws (logs error code without title or GID)", async () => {
+    it("returns failed with errCode when title update has GraphQL errors", async () => {
+      mockGraphql.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            paymentCustomizations: {
+              edges: [
+                {
+                  node: {
+                    id: "gid://shopify/PaymentCustomization/123",
+                    shopifyFunction: { handle: "hide-terms-payment" },
+                    title: "Old Title",
+                    enabled: true,
+                  },
+                },
+              ],
+            },
+          },
+        }),
+      });
+
+      mockGraphql.mockResolvedValueOnce({
+        json: async () => ({
+          errors: [{ message: "Internal server error" }],
+        }),
+      });
+
+      const result = await ensurePaymentCustomization(mockAdmin);
+
+      expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBeDefined();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode when title update throws", async () => {
       mockGraphql.mockResolvedValueOnce({
         json: async () => ({
           data: {
@@ -204,13 +255,11 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
-      expect(result.titleUpdateCount).toBe(0);
-
-      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-      const warnCall = consoleWarnSpy.mock.calls[0][0];
-      expect(warnCall).toContain("[payment_customization] title_update err=");
-      expect(warnCall).not.toContain("Old Title");
-      expect(warnCall).not.toContain("gid://shopify/PaymentCustomization/123");
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBeDefined();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
     it("creates new customization when none exists", async () => {
@@ -244,11 +293,14 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/456");
       expect(result.created).toBe(true);
-      expect(result.titleUpdateCount).toBe(0);
+      expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
-    it("handles TAKEN error by re-querying (race condition) with matching title", async () => {
+    it("handles TAKEN error by re-querying with matching title", async () => {
       mockGraphql.mockResolvedValueOnce({
         json: async () => ({
           data: {
@@ -295,8 +347,11 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/789");
       expect(result.created).toBe(false);
-      expect(result.titleUpdateCount).toBe(0);
+      expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(3);
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
     it("handles TAKEN error by re-querying and updating old title", async () => {
@@ -360,7 +415,7 @@ describe("payment-customization-registration", () => {
 
       expect(result.id).toBe("gid://shopify/PaymentCustomization/789");
       expect(result.created).toBe(false);
-      expect(result.titleUpdateCount).toBe(1);
+      expect(result.titleUpdate).toBe("updated");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(4);
 
       const updateCall = mockGraphql.mock.calls[3];
@@ -371,6 +426,9 @@ describe("payment-customization-registration", () => {
           title: "Termwise Payment Hide",
         },
       });
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
     it("throws on query error", async () => {
@@ -438,8 +496,11 @@ describe("payment-customization-registration", () => {
       expect(result1.id).toBe(result2.id);
       expect(result1.created).toBe(false);
       expect(result2.created).toBe(false);
-      expect(result1.titleUpdateCount).toBe(0);
-      expect(result2.titleUpdateCount).toBe(0);
+      expect(result1.titleUpdate).toBe("skipped");
+      expect(result2.titleUpdate).toBe("skipped");
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });
 });

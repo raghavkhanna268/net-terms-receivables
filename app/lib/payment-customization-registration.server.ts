@@ -139,19 +139,80 @@ interface PaymentCustomizationUpdateResult {
   errors?: Array<{ message: string }>;
 }
 
+export type TitleUpdateOutcome = "updated" | "skipped" | "failed";
+
+export interface EnsurePaymentCustomizationResult {
+  id: string;
+  created: boolean;
+  titleUpdate: TitleUpdateOutcome;
+  errCode?: string;
+}
+
+/**
+ * Try to update the payment customization title. Returns the outcome without logging.
+ * Caller is responsible for logging if needed.
+ */
+async function tryUpdateTitle(
+  admin: AdminGraphqlClient,
+  id: string,
+): Promise<{ outcome: TitleUpdateOutcome; errCode?: string }> {
+  try {
+    const updateResult = await admin.graphql(PAYMENT_CUSTOMIZATION_UPDATE_MUTATION, {
+      variables: { id, title: PAYMENT_CUSTOMIZATION_TITLE },
+    });
+    const updateData = (await updateResult.json()) as PaymentCustomizationUpdateResult;
+
+    if (updateData.errors?.length) {
+      return {
+        outcome: "failed",
+        errCode: toErrorCode({ message: updateData.errors[0].message }),
+      };
+    }
+    if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
+      return {
+        outcome: "failed",
+        errCode: toErrorCode({
+          message: updateData.data.paymentCustomizationUpdate.userErrors[0].message,
+        }),
+      };
+    }
+    if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
+      return { outcome: "updated" };
+    }
+    return { outcome: "failed", errCode: "no_customization_returned" };
+  } catch (error) {
+    return { outcome: "failed", errCode: toErrorCode(error) };
+  }
+}
+
+/**
+ * Check title and update if needed. Returns the outcome.
+ */
+async function handleExistingCustomization(
+  admin: AdminGraphqlClient,
+  node: PaymentCustomizationNode,
+): Promise<EnsurePaymentCustomizationResult> {
+  if (node.title === PAYMENT_CUSTOMIZATION_TITLE) {
+    return { id: node.id, created: false, titleUpdate: "skipped" };
+  }
+
+  const { outcome, errCode } = await tryUpdateTitle(admin, node.id);
+  return { id: node.id, created: false, titleUpdate: outcome, errCode };
+}
+
 /**
  * Ensures the hide-terms-payment function is registered for the shop.
  * This is idempotent - if the customization already exists (matched by handle), it returns the existing one.
  * If an existing customization has a different title, updates only the title (does not change enabled state
- * or metafields). Update failures are logged but do not block the ensure flow.
+ * or metafields). Update failures do not block the ensure flow.
  *
  * @param admin - The Shopify Admin API context
- * @returns The payment customization ID (existing or newly created), creation flag, and title update count
+ * @returns The payment customization ID, creation flag, title update outcome, and error code if failed
  * @throws Error if registration fails (query or create errors)
  */
 export async function ensurePaymentCustomization(
   admin: AdminGraphqlClient,
-): Promise<{ id: string; created: boolean; titleUpdateCount: number }> {
+): Promise<EnsurePaymentCustomizationResult> {
   const existingResult = await admin.graphql(PAYMENT_CUSTOMIZATIONS_QUERY);
   const existingData = (await existingResult.json()) as PaymentCustomizationsQueryResult;
 
@@ -166,30 +227,7 @@ export async function ensurePaymentCustomization(
   );
 
   if (existingCustomization) {
-    const node = existingCustomization.node;
-    if (node.title === PAYMENT_CUSTOMIZATION_TITLE) {
-      return { id: node.id, created: false, titleUpdateCount: 0 };
-    }
-
-    let titleUpdateCount = 0;
-    try {
-      const updateResult = await admin.graphql(PAYMENT_CUSTOMIZATION_UPDATE_MUTATION, {
-        variables: { id: node.id, title: PAYMENT_CUSTOMIZATION_TITLE },
-      });
-      const updateData = (await updateResult.json()) as PaymentCustomizationUpdateResult;
-
-      if (updateData.errors?.length) {
-        console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.errors[0].message })}`);
-      } else if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
-        console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.data.paymentCustomizationUpdate.userErrors[0].message })}`);
-      } else if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
-        titleUpdateCount = 1;
-      }
-    } catch (error) {
-      console.warn(`[payment_customization] title_update err=${toErrorCode(error)}`);
-    }
-
-    return { id: node.id, created: false, titleUpdateCount };
+    return handleExistingCustomization(admin, existingCustomization.node);
   }
 
   const createResult = await admin.graphql(PAYMENT_CUSTOMIZATION_CREATE_MUTATION, {
@@ -217,30 +255,7 @@ export async function ensurePaymentCustomization(
         (edge) => edge.node.shopifyFunction.handle === PAYMENT_CUSTOMIZATION_FUNCTION_HANDLE,
       );
       if (existing) {
-        const node = existing.node;
-        if (node.title === PAYMENT_CUSTOMIZATION_TITLE) {
-          return { id: node.id, created: false, titleUpdateCount: 0 };
-        }
-
-        let titleUpdateCount = 0;
-        try {
-          const updateResult = await admin.graphql(PAYMENT_CUSTOMIZATION_UPDATE_MUTATION, {
-            variables: { id: node.id, title: PAYMENT_CUSTOMIZATION_TITLE },
-          });
-          const updateData = (await updateResult.json()) as PaymentCustomizationUpdateResult;
-
-          if (updateData.errors?.length) {
-            console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.errors[0].message })}`);
-          } else if (updateData.data?.paymentCustomizationUpdate?.userErrors?.length) {
-            console.warn(`[payment_customization] title_update err=${toErrorCode({ message: updateData.data.paymentCustomizationUpdate.userErrors[0].message })}`);
-          } else if (updateData.data?.paymentCustomizationUpdate?.paymentCustomization) {
-            titleUpdateCount = 1;
-          }
-        } catch (error) {
-          console.warn(`[payment_customization] title_update err=${toErrorCode(error)}`);
-        }
-
-        return { id: node.id, created: false, titleUpdateCount };
+        return handleExistingCustomization(admin, existing.node);
       }
     }
 
@@ -254,5 +269,5 @@ export async function ensurePaymentCustomization(
     throw new Error("Payment customization creation returned no customization object");
   }
 
-  return { id: customization.id, created: true, titleUpdateCount: 0 };
+  return { id: customization.id, created: true, titleUpdate: "skipped" };
 }
