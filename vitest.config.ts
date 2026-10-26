@@ -149,6 +149,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm-reimport pin DB tests
   "tests/integration/confirm-reimport-pin-db.test.ts",
+
+  // Ingestion paths DB tests
+  "tests/integration/ingestion-paths-db.test.ts",
 ];
 
 export default defineConfig({
