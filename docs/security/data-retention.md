@@ -70,9 +70,9 @@
 
 3. **pgmq queue tables:** Shop-scoped messages deleted by `deleteShop()` from `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 174-188 in `compliance.server.ts`).
 
-   Processed sync-queue messages are kept for 7 days for troubleshooting, then deleted.
+   Processed sync-queue messages are kept for 30 days for troubleshooting, then deleted.
 
-   Status: the purge function `public.pgmq_purge_archives_7d()` (`prisma/migrations/20261120000000_pgmq_archive_purge/migration.sql`) is defined but not scheduled yet; the nightly job is enabled only with the owner's OK. Until then the archive tables `pgmq.a_s6_sync` and `pgmq.a_s6_bulk` are not purged on a schedule.
+   Status: the purge function `public.pgmq_purge_archives_30d()` (`prisma/migrations/20261124000000_pgmq_archive_purge/migration.sql`) is defined but not scheduled yet; the nightly job is enabled only with the owner's OK. Until then the archive tables `pgmq.a_s6_sync` and `pgmq.a_s6_bulk` are not purged on a schedule.
 
 4. **AuditEvent:** Access events (`access.*` types) are purged after 365 days by the daily pg_cron job `audit_purge_access_events_365d` (03:30 UTC). Financial events (`match.*`, `invoice.*`, `account.*`) are not purged by schedule and are deleted only by the shop/redact FK cascade (`compliance.server.ts:230`, `prisma/migrations/20261022000001_s5_data_model/migration.sql:284`). See `prisma/migrations/20261115000000_access_event_purge/migration.sql`.
 

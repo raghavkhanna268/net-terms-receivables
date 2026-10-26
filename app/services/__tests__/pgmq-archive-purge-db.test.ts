@@ -1,6 +1,6 @@
 /**
- * DB integration tests for public.pgmq_purge_archives_7d()
- * (prisma/migrations/20261120000000_pgmq_archive_purge).
+ * DB integration tests for public.pgmq_purge_archives_30d()
+ * (prisma/migrations/20261124000000_pgmq_archive_purge).
  *
  * Every case runs inside a transaction that is rolled back, so no rows outside
  * the test are removed for good.
@@ -17,7 +17,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 class Rollback extends Error {}
 
-describeWithDb("pgmq archive 7-day purge (DB)", () => {
+describeWithDb("pgmq archive 30-day purge (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const BASE = 9_000_000_000_000 + Math.floor(Math.random() * 1_000_000) * 1000;
 
@@ -70,13 +70,13 @@ describeWithDb("pgmq archive 7-day purge (DB)", () => {
 
   it("is defined and not scheduled", async () => {
     const [fn] = await sql`
-      SELECT to_regprocedure('public.pgmq_purge_archives_7d(integer, integer)') IS NOT NULL AS ok`;
+      SELECT to_regprocedure('public.pgmq_purge_archives_30d(integer, integer)') IS NOT NULL AS ok`;
     expect(fn.ok).toBe(true);
     const [cron] = await sql`
       SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') AS has_cron`;
     if (cron.has_cron) {
       const jobs = await sql`
-        SELECT 1 FROM cron.job WHERE command ILIKE '%pgmq_purge_archives_7d%'`;
+        SELECT 1 FROM cron.job WHERE command ILIKE '%pgmq_purge_archives_30d%'`;
       expect(jobs).toHaveLength(0);
     }
   });
@@ -91,18 +91,18 @@ describeWithDb("pgmq archive 7-day purge (DB)", () => {
     );
   });
 
-  it("deletes only rows archived more than 7 days ago, in both archive tables", async () => {
+  it("deletes only rows archived more than 30 days ago, in both archive tables", async () => {
     const oldSync = [BASE + 1, BASE + 2];
     const youngSync = [BASE + 3];
     const oldBulk = [BASE + 11];
     const youngBulk = [BASE + 12];
     await inRollback(async (tx) => {
-      await seed(tx, "a_s6_sync", oldSync, 8);
-      await seed(tx, "a_s6_sync", youngSync, 6);
-      await seed(tx, "a_s6_bulk", oldBulk, 30);
-      await seed(tx, "a_s6_bulk", youngBulk, 1);
+      await seed(tx, "a_s6_sync", oldSync, 31);
+      await seed(tx, "a_s6_sync", youngSync, 29);
+      await seed(tx, "a_s6_bulk", oldBulk, 45);
+      await seed(tx, "a_s6_bulk", youngBulk, 8);
 
-      const [r] = await tx`SELECT public.pgmq_purge_archives_7d()::text AS n`;
+      const [r] = await tx`SELECT public.pgmq_purge_archives_30d()::text AS n`;
       expect(Number(r.n)).toBeGreaterThanOrEqual(3);
 
       expect(
@@ -119,21 +119,63 @@ describeWithDb("pgmq archive 7-day purge (DB)", () => {
     await inRollback(async (tx) => {
       // Clear any pre-existing old rows inside this rolled-back transaction so
       // the bound can be asserted exactly.
-      await tx`SELECT public.pgmq_purge_archives_7d(50000, 1000)`;
-      await seed(tx, "a_s6_sync", old, 10);
+      await tx`SELECT public.pgmq_purge_archives_30d(50000, 1000)`;
+      await seed(tx, "a_s6_sync", old, 40);
 
       const [r1] =
-        await tx`SELECT public.pgmq_purge_archives_7d(2, 1)::text AS n`;
+        await tx`SELECT public.pgmq_purge_archives_30d(2, 1)::text AS n`;
       expect(Number(r1.n)).toBe(2);
       expect(await present(tx, "a_s6_sync", old)).toHaveLength(3);
 
       const [r2] =
-        await tx`SELECT public.pgmq_purge_archives_7d(2, 10)::text AS n`;
+        await tx`SELECT public.pgmq_purge_archives_30d(2, 10)::text AS n`;
       expect(Number(r2.n)).toBe(3);
       expect(await present(tx, "a_s6_sync", old)).toEqual([]);
 
-      const [r3] = await tx`SELECT public.pgmq_purge_archives_7d()::text AS n`;
+      const [r3] = await tx`SELECT public.pgmq_purge_archives_30d()::text AS n`;
       expect(Number(r3.n)).toBe(0);
     });
+  });
+  it("anon and authenticated cannot execute it (EXECUTE revoked)", async () => {
+    const sig = "public.pgmq_purge_archives_30d(integer, integer)";
+    await inRollback(async (tx) => {
+      // CI Postgres has no Supabase roles; create them inside this rolled-back
+      // transaction so the check is meaningful there too.
+      for (const role of ["anon", "authenticated"]) {
+        const [r] =
+          await tx`SELECT COUNT(*)::int AS n FROM pg_catalog.pg_roles WHERE rolname = ${role}::name`;
+        if (r.n === 0) await tx.unsafe(`CREATE ROLE ${role} NOLOGIN`);
+      }
+      for (const role of ["anon", "authenticated"]) {
+        const [p] =
+          await tx`SELECT has_function_privilege(${role}::name, ${sig}::text, 'EXECUTE') AS ok`;
+        expect({ role, ok: p.ok }).toEqual({ role, ok: false });
+
+        let code: string | undefined;
+        await tx
+          .savepoint(async (sp) => {
+            await sp.unsafe(`SET LOCAL ROLE ${role}`);
+            await sp`SELECT public.pgmq_purge_archives_30d(1, 1)`;
+          })
+          .catch((e: { code?: string }) => {
+            code = e.code;
+          });
+        expect({ role, code }).toEqual({ role, code: "42501" });
+      }
+      // PUBLIC has no EXECUTE grant either.
+      const [acl] = await tx`
+        SELECT COUNT(*)::int AS n
+        FROM pg_catalog.pg_proc p, LATERAL pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
+        WHERE p.oid = ${sig}::text::regprocedure AND a.grantee = 0 AND a.privilege_type = 'EXECUTE'`;
+      expect(acl.n).toBe(0);
+    });
+  });
+
+  it("is defined with an empty search_path", async () => {
+    const [r] = await sql`
+      SELECT pg_catalog.array_to_string(proconfig, ',') AS cfg
+      FROM pg_catalog.pg_proc
+      WHERE oid = 'public.pgmq_purge_archives_30d(integer, integer)'::regprocedure`;
+    expect(r.cfg).toMatch(/^search_path=(""|)$/);
   });
 });
