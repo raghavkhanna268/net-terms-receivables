@@ -4,13 +4,27 @@
  *
  * Tests verify:
  * 1. Net terms days: valid values save; 0, negative, non-integer, huge are rejected with DB unchanged
- * 2. Credit limit input: validation for various formats including Indian grouping
+ * 2. Credit limit input: validation for various formats (credit-limit cases check validation and
+ *    the parsed payload via updateCreditStatus mock, not actual DB persistence)
  * 3. Reminder settings: enable/disable persist; offset bounds validation
  * 4. Onboarding 'configured' state matches what was saved
  * 5. Buyer account per-buyer overrides are shop-scoped; foreign account id gives error
  * 6. Actions reject GET, require session, with no DB write
  *
- * Mocks only authenticate.admin and getRequestSql (as other DB route tests do).
+ * Mocks:
+ * - authenticate.admin (Shopify session)
+ * - getRequestSql (request-context for DB connection)
+ * - gating.server (isAccountActive, isGatingEnforced, getUsageStats)
+ * - aging-queries.server (getBuyerInvoices)
+ * - credit-status.server (getCreditStatusDisplay, getCompanyTotals, updateCreditStatus)
+ * - reminder-optout.server (getBuyerOptOutStatus, setBuyerOptOut, clearBuyerOptOut)
+ * - plan-url (getAppHandle, buildPlanSelectionUrl)
+ * - reconcile-handlers.server (enqueueReconcileStage)
+ * - reminder-status.server (getReminderStatusCounts, getDelayedReminders, getShopSentTodayCount)
+ * - @shopify/shopify-app-react-router/server (boundary.headers)
+ * - Section 4 additionally mocks: initial-sync.server, shop-currency-recovery.server,
+ *   shop-currency.server, email-sender-config.server
+ *
  * Never mocks the code under test or log.server.
  */
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from "vitest";
@@ -159,7 +173,8 @@ describeWithDb("Merchant form validation (DB)", () => {
   });
 
   afterAll(async () => {
-    await sql`DELETE FROM "ReminderSettings" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+    await sql`DELETE FROM "ReminderRule" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+    await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "AccountSource" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
@@ -229,7 +244,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(saved).toBeDefined();
       expect(saved.defaultTermsDays).toBe(30);
 
-      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag}`;
+      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_A_ID}`;
     });
 
     it("net terms days = 0 is rejected with field error, DB unchanged", async () => {
@@ -391,7 +406,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       const data = extractActionData(result);
       expect(data.success).toBe(true);
 
-      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag}`;
+      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_A_ID}`;
     });
 
     it("boundary: net terms days = 365 (max) is accepted", async () => {
@@ -413,7 +428,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       const data = extractActionData(result);
       expect(data.success).toBe(true);
 
-      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag}`;
+      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_A_ID}`;
     });
   });
 
@@ -693,9 +708,9 @@ describeWithDb("Merchant form validation (DB)", () => {
 
     it("enable reminders persists to DB", async () => {
       await sql`
-        INSERT INTO "ReminderSettings" ("shopId", enabled, "createdAt", "updatedAt")
+        INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
         VALUES (${SHOP_A_ID}, false, NOW(), NOW())
-        ON CONFLICT ("shopId") DO UPDATE SET enabled = false
+        ON CONFLICT (shop_id) DO UPDATE SET enabled = false
       `;
 
       const formData = new FormData();
@@ -716,14 +731,14 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.message).toBe("Reminders enabled");
 
       const [settings] = await sql<{ enabled: boolean }[]>`
-        SELECT enabled FROM "ReminderSettings" WHERE "shopId" = ${SHOP_A_ID}
+        SELECT enabled FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}
       `;
       expect(settings.enabled).toBe(true);
     });
 
     it("disable reminders persists to DB", async () => {
       await sql`
-        UPDATE "ReminderSettings" SET enabled = true WHERE "shopId" = ${SHOP_A_ID}
+        UPDATE s18_shop_reminder_settings SET enabled = true WHERE shop_id = ${SHOP_A_ID}
       `;
 
       const formData = new FormData();
@@ -744,7 +759,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.message).toBe("Reminders disabled");
 
       const [settings] = await sql<{ enabled: boolean }[]>`
-        SELECT enabled FROM "ReminderSettings" WHERE "shopId" = ${SHOP_A_ID}
+        SELECT enabled FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}
       `;
       expect(settings.enabled).toBe(false);
     });
@@ -817,10 +832,18 @@ describeWithDb("Merchant form validation (DB)", () => {
       await sql`DELETE FROM "ReminderRule" WHERE id = ${ruleId}`;
     });
 
-    it("offset just outside OFFSET_MIN (-31) is rejected", async () => {
+    it("offset just outside OFFSET_MIN (-31) is rejected, DB unchanged", async () => {
+      const ruleId = `rule-oob-min-${TEST_SUFFIX}`;
+      const originalOffset = 5;
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${ruleId}, ${SHOP_A_ID}, ${originalOffset}, 'email', true, NOW(), NOW())
+        ON CONFLICT DO NOTHING
+      `;
+
       const formData = new FormData();
       formData.append("intent", "update_rule");
-      formData.append("ruleId", "any-rule");
+      formData.append("ruleId", ruleId);
       formData.append("offsetDays", "-31");
       formData.append("enabled", "true");
 
@@ -837,12 +860,27 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.success).toBe(false);
       expect(data.error).toContain("-30");
       expect(data.error).toContain("90");
+
+      const [rule] = await sql<{ offsetDays: number }[]>`
+        SELECT "offsetDays" FROM "ReminderRule" WHERE id = ${ruleId}
+      `;
+      expect(rule.offsetDays).toBe(originalOffset);
+
+      await sql`DELETE FROM "ReminderRule" WHERE id = ${ruleId} AND "shopId" = ${SHOP_A_ID}`;
     });
 
-    it("offset just outside OFFSET_MAX (91) is rejected", async () => {
+    it("offset just outside OFFSET_MAX (91) is rejected, DB unchanged", async () => {
+      const ruleId = `rule-oob-max-${TEST_SUFFIX}`;
+      const originalOffset = 10;
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${ruleId}, ${SHOP_A_ID}, ${originalOffset}, 'email', true, NOW(), NOW())
+        ON CONFLICT DO NOTHING
+      `;
+
       const formData = new FormData();
       formData.append("intent", "update_rule");
-      formData.append("ruleId", "any-rule");
+      formData.append("ruleId", ruleId);
       formData.append("offsetDays", "91");
       formData.append("enabled", "true");
 
@@ -859,32 +897,73 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.success).toBe(false);
       expect(data.error).toContain("-30");
       expect(data.error).toContain("90");
+
+      const [rule] = await sql<{ offsetDays: number }[]>`
+        SELECT "offsetDays" FROM "ReminderRule" WHERE id = ${ruleId}
+      `;
+      expect(rule.offsetDays).toBe(originalOffset);
+
+      await sql`DELETE FROM "ReminderRule" WHERE id = ${ruleId} AND "shopId" = ${SHOP_A_ID}`;
     });
   });
 
   describe("4. Onboarding configured state matches saved reminders", () => {
-    it("onboarding loader returns remindersEnabled matching DB state (enabled)", async () => {
+    const mockAdmin = {
+      graphql: vi.fn().mockImplementation(() =>
+        Promise.resolve({
+          json: () =>
+            Promise.resolve({
+              data: { validations: { edges: [] }, paymentCustomizations: { edges: [] }, metafieldDefinitions: { edges: [] } },
+            }),
+        })
+      ),
+    };
+
+    function createOnboardingLoaderArgs(shopDomain: string) {
+      return {
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: shopDomain },
+                admin: mockAdmin,
+              }),
+            },
+          },
+          cloudflare: { env: {} },
+        },
+        params: {},
+      } as never;
+    }
+
+    interface OnboardingLoaderData {
+      remindersEnabled?: boolean;
+      [key: string]: unknown;
+    }
+
+    function extractLoaderData(result: unknown): OnboardingLoaderData {
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        "data" in result
+      ) {
+        return (result as { data: OnboardingLoaderData }).data;
+      }
+      return result as OnboardingLoaderData;
+    }
+
+    it("onboarding loader returns remindersEnabled=true when DB has enabled=true", async () => {
       await sql`
-        UPDATE "ReminderSettings" SET enabled = true WHERE "shopId" = ${SHOP_A_ID}
+        INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+        VALUES (${SHOP_A_ID}, true, NOW(), NOW())
+        ON CONFLICT (shop_id) DO UPDATE SET enabled = true, updated_at = NOW()
       `;
 
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
         getRequestWaitUntil: () => undefined,
       }));
-
-      const mockAdmin = {
-        graphql: vi.fn().mockImplementation(() =>
-          Promise.resolve({
-            json: () =>
-              Promise.resolve({
-                data: { validations: { edges: [] }, paymentCustomizations: { edges: [] }, metafieldDefinitions: { edges: [] } },
-              }),
-          })
-        ),
-      };
-
-      vi.resetModules();
 
       vi.doMock("~/lib/initial-sync.server", () => ({
         getInitialSyncState: vi.fn().mockResolvedValue({ status: "done" }),
@@ -906,25 +985,55 @@ describeWithDb("Merchant form validation (DB)", () => {
         isEmailSendingConfigured: vi.fn().mockReturnValue(true),
       }));
 
-      const { loader } = await import("../app.onboarding");
-      const result = await loader({
-        request: new Request("https://example.com/app/onboarding"),
-        context: {
-          shopify: {
-            authenticate: {
-              admin: vi.fn().mockResolvedValue({
-                session: { shop: SHOP_A_DOMAIN },
-                admin: mockAdmin,
-              }),
-            },
-          },
-          cloudflare: { env: {} },
-        },
-        params: {},
-      } as never);
+      vi.resetModules();
 
-      const data = result && typeof result === "object" && "data" in result ? (result as { data: unknown }).data : result;
+      const { loader } = await import("../app.onboarding");
+      const result = await loader(createOnboardingLoaderArgs(SHOP_A_DOMAIN));
+
+      const data = extractLoaderData(result);
       expect(data).toBeDefined();
+      expect(data.remindersEnabled).toBe(true);
+    });
+
+    it("onboarding loader returns remindersEnabled=false when DB has enabled=false", async () => {
+      await sql`
+        UPDATE s18_shop_reminder_settings SET enabled = false, updated_at = NOW()
+        WHERE shop_id = ${SHOP_A_ID}
+      `;
+
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.doMock("~/lib/initial-sync.server", () => ({
+        getInitialSyncState: vi.fn().mockResolvedValue({ status: "done" }),
+        getInitialSyncStateWithRecovery: vi.fn().mockResolvedValue({ status: "done" }),
+        enqueueInitialSync: vi.fn(),
+        canStartSync: vi.fn().mockReturnValue(false),
+      }));
+
+      vi.doMock("~/services/shop-currency-recovery.server", () => ({
+        checkAndRecoverCurrency: vi.fn().mockResolvedValue({ currency: "INR", flipBlocked: false }),
+      }));
+
+      vi.doMock("~/lib/shop-currency.server", () => ({
+        isShopCurrencySupported: vi.fn().mockReturnValue(true),
+        NO_CURRENCY_SENTINEL: "__NO_CURRENCY__",
+      }));
+
+      vi.doMock("~/lib/email-sender-config.server", () => ({
+        isEmailSendingConfigured: vi.fn().mockReturnValue(true),
+      }));
+
+      vi.resetModules();
+
+      const { loader } = await import("../app.onboarding");
+      const result = await loader(createOnboardingLoaderArgs(SHOP_A_DOMAIN));
+
+      const data = extractLoaderData(result);
+      expect(data).toBeDefined();
+      expect(data.remindersEnabled).toBe(false);
     });
   });
 
@@ -1015,7 +1124,12 @@ describeWithDb("Merchant form validation (DB)", () => {
       );
     });
 
-    it("hold toggle update is shop-scoped", async () => {
+    it("hold toggle from shop A session on shop B's account is rejected, shop B unchanged", async () => {
+      const snapshotBefore = await sql<{ holdState: string; manualHold: boolean }[]>`
+        SELECT "holdState", "manualHold" FROM "BuyerAccount"
+        WHERE id = ${ACCOUNT_B_ID}
+      `;
+
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
         getRequestWaitUntil: () => undefined,
@@ -1025,7 +1139,6 @@ describeWithDb("Merchant form validation (DB)", () => {
       const creditStatusModule = await import("~/services/credit-status.server");
       const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
       mockUpdate.mockClear();
-      mockUpdate.mockResolvedValue({ success: true });
 
       const formData = new FormData();
       formData.set("_action", "updateCredit");
@@ -1034,19 +1147,60 @@ describeWithDb("Merchant form validation (DB)", () => {
       formData.set("holdReasonCode", "MANUAL_HOLD");
 
       const { action } = await import("../app.accounts.$id");
-      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_B_ID, formData) as never);
 
       const data = extractActionData(result);
-      expect(data.success).toBe(true);
-      expect(mockUpdate).toHaveBeenCalledWith(
-        expect.anything(),
-        ACCOUNT_A_ID,
-        expect.objectContaining({ manualHold: true, holdReasonCode: "MANUAL_HOLD" })
-      );
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Account not found");
+
+      expect(mockUpdate).not.toHaveBeenCalled();
+
+      const snapshotAfter = await sql<{ holdState: string; manualHold: boolean }[]>`
+        SELECT "holdState", "manualHold" FROM "BuyerAccount"
+        WHERE id = ${ACCOUNT_B_ID}
+      `;
+      expect(snapshotAfter).toEqual(snapshotBefore);
     });
   });
 
   describe("6. Session required and GET rejection", () => {
+    it("tag rules action rejects GET request with no AccountSource written", async () => {
+      const snapshotBefore = await sql<{ id: string }[]>`
+        SELECT id FROM "AccountSource" WHERE "shopId" = ${SHOP_A_ID}
+      `;
+
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const { action } = await import("../app.tag-rules");
+
+      await expect(
+        action({
+          request: new Request("https://example.com/app/tag-rules", {
+            method: "GET",
+          }),
+          context: {
+            shopify: {
+              authenticate: {
+                admin: vi.fn().mockResolvedValue({ session: { shop: SHOP_A_DOMAIN } }),
+              },
+            },
+          },
+          params: {},
+          url: new URL("https://example.com/app/tag-rules"),
+          pattern: "/app/tag-rules",
+        } as never)
+      ).rejects.toThrow();
+
+      const snapshotAfter = await sql<{ id: string }[]>`
+        SELECT id FROM "AccountSource" WHERE "shopId" = ${SHOP_A_ID}
+      `;
+      expect(snapshotAfter).toEqual(snapshotBefore);
+    });
+
     it("account action throws when session auth fails (simulating unauthenticated)", async () => {
       const formData = new FormData();
       formData.set("_action", "updateCredit");
