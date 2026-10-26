@@ -3443,6 +3443,175 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   });
 
   // ==========================================================================
+  // QA2 Regression: Stuck orders-stage ops don't block new reconcile runs
+  // Production scenario: INR shop with 2 terminal orders ops (failure_count=MAX)
+  // ==========================================================================
+  describe("QA2 Regression: stuck terminal ops don't block reconcile", () => {
+    it("recovery skips terminal orders ops, new RECONCILE_COMPANIES and RECONCILE_ORDERS create fresh ops", async () => {
+      const { findStrandedBulkOperations, recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      const { startReconcileBulkOperation } = await import("../reconcile-handlers.server");
+      const { adminGraphQL } = await import("../admin-client.server");
+      const { MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
+
+      const STUCK_SHOP_ID = `shop-stuck-orders-${TEST_SUFFIX}`;
+      const STUCK_SHOP_DOMAIN = `stuck-orders-${TEST_SUFFIX}.myshopify.com`;
+      const stuckOpId1 = `gid://shopify/BulkOperation/stuck-orders-1-${TEST_SUFFIX}`;
+      const stuckOpId2 = `gid://shopify/BulkOperation/stuck-orders-2-${TEST_SUFFIX}`;
+      
+      // Sync JS clock to DB NOW() (one-clock pattern)
+      const [{ now: dbNow }] = await sql<[{ now: Date }]>`SELECT NOW() as now`;
+      const twoHoursAgo = new Date(dbNow.getTime() - 2 * 60 * 60 * 1000);
+
+      try {
+        // Create INR shop
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${STUCK_SHOP_ID}, ${STUCK_SHOP_DOMAIN}, 'INR', ${dbNow}, ${dbNow})
+        `;
+
+        // Create 2 stuck orders-stage ops (origin='reconcile', failure_count=MAX, no completed_at/closed_at)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at,
+            finish_received_at, completed_at, closed_at, failure_count
+          )
+          VALUES 
+            (${stuckOpId1}, ${STUCK_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', ${twoHoursAgo},
+             ${twoHoursAgo}, NULL, NULL, ${MAX_FAILURE_COUNT}),
+            (${stuckOpId2}, ${STUCK_SHOP_DOMAIN}, 'orders', 'reconcile', 'orders', ${twoHoursAgo},
+             ${twoHoursAgo}, NULL, NULL, ${MAX_FAILURE_COUNT})
+        `;
+
+        // Verify initial state: 2 terminal ops
+        const [{ count: initialCount }] = await sql<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_bulk_operations
+          WHERE shop = ${STUCK_SHOP_DOMAIN}
+            AND reconcile_stage = 'orders'
+            AND failure_count = ${MAX_FAILURE_COUNT}
+            AND completed_at IS NULL
+            AND closed_at IS NULL
+        `;
+        expect(parseInt(initialCount, 10)).toBe(2);
+
+        // === Step 1: Run findStrandedBulkOperations - should NOT find either row ===
+        const stranded = await findStrandedBulkOperations(sql, 10);
+        const foundStuck1 = stranded.find((op) => op.bulk_operation_id === stuckOpId1);
+        const foundStuck2 = stranded.find((op) => op.bulk_operation_id === stuckOpId2);
+        expect(foundStuck1).toBeUndefined();
+        expect(foundStuck2).toBeUndefined();
+
+        // Verify rows are unchanged
+        const [stuckOp1After] = await sql<[{ failure_count: number; completed_at: Date | null; closed_at: Date | null }]>`
+          SELECT failure_count, completed_at, closed_at FROM s6_bulk_operations
+          WHERE bulk_operation_id = ${stuckOpId1}
+        `;
+        expect(stuckOp1After.failure_count).toBe(MAX_FAILURE_COUNT);
+        expect(stuckOp1After.completed_at).toBeNull();
+        expect(stuckOp1After.closed_at).toBeNull();
+
+        // === Step 2: Run recoverStaleBulkOperations - should NOT attempt either ===
+        const recoveryResult = await recoverStaleBulkOperations(sql, 60, 10);
+        const recoveredStuck1 = recoveryResult.attempts.find((a) => a.bulkOperationId === stuckOpId1);
+        const recoveredStuck2 = recoveryResult.attempts.find((a) => a.bulkOperationId === stuckOpId2);
+        expect(recoveredStuck1).toBeUndefined();
+        expect(recoveredStuck2).toBeUndefined();
+
+        // === Step 3: RECONCILE_COMPANIES with fresh-day key creates NEW op ===
+        // Mock adminGraphQL for bulkOperationRunQuery to return a new op id
+        const newCompaniesOpId = `gid://shopify/BulkOperation/new-companies-${TEST_SUFFIX}`;
+        vi.mocked(adminGraphQL).mockResolvedValueOnce({
+          success: true,
+          data: {
+            bulkOperationRunQuery: {
+              bulkOperation: {
+                id: newCompaniesOpId,
+                status: "CREATED",
+              },
+              userErrors: [],
+            },
+          },
+          retryable: false,
+        });
+
+        const freshDayKey = `${STUCK_SHOP_DOMAIN}:2026-10-26`;
+        const companiesWebhookId = `reconcile:${freshDayKey}:companies`;
+        const companiesResult = await startReconcileBulkOperation(sql, STUCK_SHOP_DOMAIN, "companies", companiesWebhookId);
+        
+        expect(companiesResult.success).toBe(true);
+        expect(companiesResult.action).toBe("created");
+
+        // Verify NEW companies op row was created
+        const [newCompaniesOp] = await sql<[{ bulk_operation_id: string; bulk_type: string; reconcile_stage: string } | undefined]>`
+          SELECT bulk_operation_id, bulk_type, reconcile_stage FROM s6_bulk_operations
+          WHERE bulk_operation_id = ${newCompaniesOpId}
+        `;
+        expect(newCompaniesOp).toBeDefined();
+        expect(newCompaniesOp!.bulk_type).toBe("companies");
+        expect(newCompaniesOp!.reconcile_stage).toBe("companies");
+
+        // === Step 4: RECONCILE_ORDERS with fresh-day key creates NEW op ===
+        const newOrdersOpId = `gid://shopify/BulkOperation/new-orders-${TEST_SUFFIX}`;
+        vi.mocked(adminGraphQL).mockResolvedValueOnce({
+          success: true,
+          data: {
+            bulkOperationRunQuery: {
+              bulkOperation: {
+                id: newOrdersOpId,
+                status: "CREATED",
+              },
+              userErrors: [],
+            },
+          },
+          retryable: false,
+        });
+
+        const ordersWebhookId = `reconcile:${freshDayKey}:orders`;
+        const ordersResult = await startReconcileBulkOperation(sql, STUCK_SHOP_DOMAIN, "orders", ordersWebhookId);
+
+        expect(ordersResult.success).toBe(true);
+        expect(ordersResult.action).toBe("created");
+
+        // Verify NEW orders op row was created
+        const [newOrdersOp] = await sql<[{ bulk_operation_id: string; bulk_type: string; reconcile_stage: string } | undefined]>`
+          SELECT bulk_operation_id, bulk_type, reconcile_stage FROM s6_bulk_operations
+          WHERE bulk_operation_id = ${newOrdersOpId}
+        `;
+        expect(newOrdersOp).toBeDefined();
+        expect(newOrdersOp!.bulk_type).toBe("orders");
+        expect(newOrdersOp!.reconcile_stage).toBe("orders");
+
+        // === Final verification: stuck rows are unchanged ===
+        const [finalStuckOp1] = await sql<[{ failure_count: number; completed_at: Date | null; closed_at: Date | null }]>`
+          SELECT failure_count, completed_at, closed_at FROM s6_bulk_operations
+          WHERE bulk_operation_id = ${stuckOpId1}
+        `;
+        const [finalStuckOp2] = await sql<[{ failure_count: number; completed_at: Date | null; closed_at: Date | null }]>`
+          SELECT failure_count, completed_at, closed_at FROM s6_bulk_operations
+          WHERE bulk_operation_id = ${stuckOpId2}
+        `;
+        expect(finalStuckOp1.failure_count).toBe(MAX_FAILURE_COUNT);
+        expect(finalStuckOp1.completed_at).toBeNull();
+        expect(finalStuckOp1.closed_at).toBeNull();
+        expect(finalStuckOp2.failure_count).toBe(MAX_FAILURE_COUNT);
+        expect(finalStuckOp2.completed_at).toBeNull();
+        expect(finalStuckOp2.closed_at).toBeNull();
+
+        // Total ops for this shop: 2 stuck + 2 new = 4
+        const [{ count: finalCount }] = await sql<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_bulk_operations
+          WHERE shop = ${STUCK_SHOP_DOMAIN}
+        `;
+        expect(parseInt(finalCount, 10)).toBe(4);
+      } finally {
+        vi.mocked(adminGraphQL).mockReset();
+        await sql`DELETE FROM s6_reconcile_stage_claims WHERE chain_key LIKE ${`${STUCK_SHOP_DOMAIN}%`}`;
+        await sql`DELETE FROM s6_bulk_operations WHERE shop = ${STUCK_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${STUCK_SHOP_ID}`;
+      }
+    });
+  });
+
+  // ==========================================================================
   // C16: Progress re-loaded after lease acquired - race handling
   // ==========================================================================
   describe("C16: progress re-loaded after lease acquired", () => {
