@@ -1,6 +1,6 @@
 # Request `read_all_orders` Scope
 
-**Status:** ⏳ **Requested** 25 Oct 22:13 IST; grant pending confirmation
+**Status:** ✅ **Appears granted** — Requested 25 Oct 22:12 IST. No pending state in the Partner Dashboard, scope is in released app version ci-40305655924-1, and dev-store session shows 9/9 scopes (Partner Dashboard state, 2026-10-26). No formal Shopify request status shown.
 
 This checklist guided the request for Shopify approval of the `read_all_orders` protected scope. This scope extends order access to orders older than 60 days.
 
@@ -86,16 +86,16 @@ Termwise is a B2B net-terms receivables management app for Shopify merchants. It
 
 ## After Approval
 
-**Request submitted:** 25 Oct 2026 22:13 IST — grant pending confirmation
+**Request submitted:** 25 Oct 2026 22:12 IST — appears granted (Partner Dashboard state, 2026-10-26: no pending state, scope in released version ci-40305655924-1, dev-store session shows 9/9 scopes)
 
-Post-approval steps (once grant is confirmed):
+Post-approval steps:
 
 1. ✅ Add `read_all_orders` to `shopify.app.toml` scopes (extends access from `write_orders` which implies `read_orders`)
 2. ✅ Update `wrangler.jsonc` SCOPES variable to match
 3. ✅ Run `scripts/check-scope-sync.ts` to verify sync
-4. ⏳ Deploy new app version with `shopify app deploy` (batched with next release)
-5. ⏳ Dev store must re-approve the scope after that release
-6. ⏳ Production merchants will approve when they next open the app after that release
+4. ✅ Deploy new app version with `shopify app deploy` (Partner Dashboard state, 2026-10-26: scope in released version ci-40305655924-1)
+5. ✅ Dev store re-approved the scope (Partner Dashboard state, 2026-10-26: dev-store session shows 9/9 scopes)
+6. ⏳ Production merchants will approve when they next open the app — Why open: no production merchants yet
 
 ## Data Minimization Evidence
 
@@ -123,7 +123,7 @@ See `docs/privacy.md` for the public privacy policy and `docs/privacy-implementa
 - [x] Find **Read all orders** card and click **Request access**
 - [x] Paste and customize the justification text above
 - [x] Submit the request (25 Oct 22:13 IST)
-- [ ] **Grant pending confirmation** — check API access request status in Partner Dashboard
+- [x] **Grant status** — Requested 25 Oct 22:12 IST. It appears granted: no pending state in the Partner Dashboard, the scope is in released app version ci-40305655924-1, and the dev-store session shows 9/9 scopes (2026-10-26). No formal Shopify request status is shown. (Partner Dashboard state, 2026-10-26)
 - [x] Create PR to add `read_all_orders` scope
-- [ ] Deploy release with scope change (batched with next release)
-- [ ] Dev store re-approves scope after release
+- [x] Deploy release with scope change (Partner Dashboard state, 2026-10-26: scope in released version ci-40305655924-1)
+- [x] Dev store re-approves scope after release (Partner Dashboard state, 2026-10-26: dev-store session shows 9/9 scopes)

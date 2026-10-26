@@ -21,12 +21,13 @@ The only difference between plans is the number of buyer accounts (companies) al
 
 ## Partner Dashboard Configuration
 
-Plans must be configured in the Shopify Partner Dashboard with these exact names (case-insensitive):
+Plans are configured in the Shopify Partner Dashboard with these exact names (case-insensitive):
 
-- **Free** - The default plan for shops without an active subscription
-- **Starter** - Entry-level paid plan
-- **Growth** - Mid-tier plan
-- **Scale** - Enterprise plan with unlimited accounts
+- **Starter** - Entry-level paid plan ($9/mo or $90/yr, up to 25 accounts)
+- **Growth** - Mid-tier plan ($19/mo or $190/yr, up to 100 accounts)
+- **Unlimited** - Top-tier plan ($29/mo or $290/yr, unlimited accounts)
+
+There is no free plan. Development and partner stores are free. 30-day trial on all plans. (Partner Dashboard state, 2026-10-26)
 
 The app matches subscription names case-insensitively, so "Growth", "growth", "GROWTH" all map to the growth plan.
 

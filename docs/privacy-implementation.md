@@ -280,7 +280,7 @@ When disabled or unset:
 - [ ] Complete Shopify Protected Customer Data (PCD) approval form
 - [ ] Fill in `[TBD: ...]` sections in `docs/privacy.md` with actual company details
 - [ ] Set up DPAs with Cloudflare and Supabase
-- [ ] Accept [Resend DPA](https://resend.com/legal/dpa) before enabling email notifications
+- [x] Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard.
 - [ ] Configure data retention policies for audit events
 - [ ] Decide on email delivery for data requests (currently in-admin only)
 - [ ] Verify CUSTOMER_PII_FIELDS flag is off in production until PCD approval
