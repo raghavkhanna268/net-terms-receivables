@@ -67,8 +67,8 @@ export interface BulkMessage extends Omit<BaseMessage, keyof BaseMessage> {
   enqueuedAt: string;
   /** Bulk operation GID */
   bulkOperationId: string;
-  /** Type of bulk operation (companies, orders, customers) */
-  bulkType: "companies" | "orders" | "customers";
+  /** Type of bulk operation (companies, orders, customers, draft_orders) */
+  bulkType: "companies" | "orders" | "customers" | "draft_orders";
   /** Allow additional string keys for JSON serialization */
   [key: string]: string;
 }
