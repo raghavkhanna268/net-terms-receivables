@@ -1,4 +1,8 @@
 /**
+ * @vitest-environment jsdom
+ */
+
+/**
  * Render tests for ReconcilePage component (#292 currency gate).
  *
  * Verifies that:
@@ -37,7 +41,7 @@ const mockUseLoaderData = vi.mocked(useLoaderData);
  */
 function buildLoaderData(overrides: {
   notSupported?: boolean;
-  shopCurrency?: string;
+  shopCurrency?: string | null;
   payments?: Array<{
     id: string;
     amountPaise: string;
@@ -92,8 +96,16 @@ describe("ReconcilePage render tests (#292 currency gate)", () => {
 
       // Action buttons render and are NOT disabled
       expect(html).toContain("Run Matcher");
-      // Check that the button has disabled="false" (not disabled="true" or disabled="")
-      expect(html).toContain('disabled="false"');
+
+      // Parse the HTML and check the button is not disabled using DOM query
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      const runMatcherButton = container.querySelector('s-button[type="submit"]');
+      expect(runMatcherButton).not.toBeNull();
+      // The button should not be disabled - check attribute is absent or explicitly "false"
+      const disabledAttr = runMatcherButton!.getAttribute("disabled");
+      expect(disabledAttr === null || disabledAttr === "false").toBe(true);
+      // Ensure it's not disabled="true" or disabled=""
       expect(html).not.toContain('disabled="true"');
       expect(html).not.toContain('disabled=""');
     });
@@ -160,7 +172,7 @@ describe("ReconcilePage render tests (#292 currency gate)", () => {
     it("renders currency banner for NULL currency shop", () => {
       const loaderData = buildLoaderData({
         notSupported: true,
-        shopCurrency: "XXX", // NULL becomes XXX sentinel
+        shopCurrency: null,
       });
       mockUseLoaderData.mockReturnValue(loaderData);
 
