@@ -494,7 +494,7 @@ describe("Reviewer demo seed flag gating", () => {
     expect(REVIEWER_DEMO_COMPANY_SEED.key).toBe("company-reviewer-demo");
     expect(REVIEWER_DEMO_COMPANY_SEED.name).toBe("Test Buyer Co");
     expect(REVIEWER_DEMO_COMPANY_SEED.city).toBe("Bengaluru");
-    expect(REVIEWER_DEMO_COMPANY_SEED.contact.email).toContain("@test-buyer.example");
+    expect(REVIEWER_DEMO_COMPANY_SEED.contact.email).toBe("ntr-seed-company-reviewer-demo@example.com");
   });
 
   it("REVIEWER_DEMO_ORDERS has correct amounts and names", () => {
