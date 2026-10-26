@@ -27,7 +27,7 @@ import { data } from "react-router";
 import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
+import { isAccountActive, isGatingEnforced, getUsageStats } from "~/services/gating.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import {
   getBuyerOptOutStatus,
@@ -45,10 +45,10 @@ import {
   formatPaiseAmount,
   buildOrderAdminUrl,
 } from "~/lib/aging";
-import { buildAccountOverLimitBannerState } from "~/lib/over-limit-banner";
+import { buildAccountOverLimitBannerState, buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
 import { getSyncErrorInfo, type SyncErrorInfo } from "~/lib/sync-error-info";
-import { safeLog } from "~/lib/log.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
@@ -132,6 +132,7 @@ interface LoaderData {
     optOutAt: string | null;
     optOutSource: "merchant" | "link" | null;
   } | null;
+  newAccountsPausedBanner: NewAccountsPausedBannerState;
   error: string | null;
 }
 
@@ -170,6 +171,12 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
       error: "Account ID is required",
     } satisfies LoaderData;
   }
@@ -187,6 +194,12 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
       error: "Shop not found",
     } satisfies LoaderData;
   }
@@ -203,6 +216,12 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: false,
       reminderOptOut: null,
       upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
       error: null,
     } satisfies LoaderData;
   }
@@ -237,6 +256,12 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
       error: "Account not found",
     } satisfies LoaderData;
   }
@@ -363,14 +388,40 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     recordId: accountId,
   });
 
+  const gatingEnforced = isGatingEnforced();
+
+  // Only call getUsageStats when gating is enforced (fail-soft on error)
+  let newAccountsPausedBanner: NewAccountsPausedBannerState = {
+    show: false,
+    heading: "",
+    bodyText: "",
+    upgradeUrl: null,
+  };
+
+  if (gatingEnforced) {
+    try {
+      const usage = await getUsageStats(sql, shop.id);
+      newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+        usage.companies.current,
+        usage.companies.limit,
+        gatingEnforced,
+        upgradeUrl
+      );
+    } catch (err) {
+      safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+      // Fail soft: no banner on error
+    }
+  }
+
   return {
     account,
     creditStatus,
     companyTotals,
     invoices,
-    gatingEnforced: isGatingEnforced(),
+    gatingEnforced,
     reminderOptOut,
     upgradeUrl,
+    newAccountsPausedBanner,
     error: null,
   } satisfies LoaderData;
 };
@@ -611,7 +662,7 @@ function InvoiceTable({
 
 export default function AccountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, error } = loaderData;
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, newAccountsPausedBanner, error } = loaderData;
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -655,6 +706,23 @@ export default function AccountPage() {
   return (
     <s-page heading={account.name}>
       <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
+
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
 
       {actionData?.success && actionData.action === "updateCredit" && (
         <s-section>
