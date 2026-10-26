@@ -662,7 +662,7 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
       await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "confirm-only-reconcile-db.test.ts:concurrent");
     });
 
-    it("concurrent confirms on 2 suggestions for same 10000 payment: total confirmed <= 10000, exactly 1 confirmed Match for that Payment", async () => {
+    it("concurrent confirms: consistency check - total confirmed <= 10000, exactly 1 confirmed Match (does not prove lock; see PR body)", async () => {
       const credits: SyntheticCredit[] = [
         {
           date: getUtcDateString(5),
