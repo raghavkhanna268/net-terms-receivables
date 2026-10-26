@@ -6,18 +6,19 @@
  * 1. Import synthetic credits via real import action (with valid NEFT UTRs)
  * 2. Confirm the suggested match, which stores the payer alias
  * 3. Re-import the same credits via real import action
+ * 4. (Separate) Explicit runMatcher to verify alias-boosted scores
  *
- * Assertions:
- * - Duplicate detection: second import returns 0 inserted, 3 duplicates
+ * Key behavior tested:
+ * - Duplicate detection: second import returns 0 inserted, 3 duplicates, matcher: null
  * - Payment count unchanged after re-import
  * - No new Match created for the confirmed payment
- * - Unconfirmed payments get alias-boosted scores from matcher re-run
+ * - Re-import with 0 inserted does NOT re-run matcher (old suggestions unchanged)
+ * - Alias-boosted scores (80/70) only happen when matcher runs (tested separately)
  * - High band (≥80) still only suggests, never auto-confirms
- * - Scores and bands are pinned exactly as main produces them today
  *
  * IMPORTANT: This test uses valid NEFT UTR format (HDFCN + 11 digits) so that:
  * - The ON CONFLICT ("shopId", utr) clause in app.imports.tsx:506 is exercised
- * - The test FAILS if that ON CONFLICT is removed (all 3 would insert twice)
+ * - The "re-import detects all 3 as duplicates" test FAILS if ON CONFLICT is removed
  *
  * This test uses the "Sequential DB" project via the *-db.test.ts naming pattern.
  * All data is FICTIONAL - no real bank data. Uses test- domains for isolation.
@@ -26,7 +27,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "../../app/lib/db-light.server.js";
-import { confirmMatch } from "../../app/services/matcher.server.js";
+import { confirmMatch, runMatcher } from "../../app/services/matcher.server.js";
 import { CONFIDENCE_THRESHOLD } from "../../app/lib/matching/score.js";
 import { normalizeNarrationForLookup } from "../../app/lib/matching/normalize.js";
 import { assertNoQueueLeftovers } from "../helpers/queue-leftovers.js";
@@ -353,9 +354,14 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
       const importPayload = makeImportPayload();
 
       const response = await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
-      expect(response.status).toBe(200);
-
       const data = (await response.json()) as ImportResult;
+      
+      // Debug: print error details if not 200
+      if (response.status !== 200) {
+        console.log("DEBUG 400 error:", JSON.stringify({ error: data.error, details: data.details, payload: importPayload }, null, 2));
+      }
+      
+      expect(response.status).toBe(200);
       expect(data.success).toBe(true);
       expect(data.counts?.inserted).toBe(3);
       expect(data.counts?.duplicates).toBe(0);
@@ -478,25 +484,20 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
     /**
      * CRITICAL ASSERTIONS for re-import via real import action:
      * 1. All 3 payments are duplicates (0 inserted, 3 duplicates)
-     *    - This exercises ON CONFLICT ("shopId", utr) in app.imports.tsx
+     *    - This exercises ON CONFLICT ("shopId", utr) in app.imports.tsx:506
      *    - If that clause is removed, this test FAILS (would insert 3 more)
-     * 2. Payment count unchanged (still 3)
-     * 3. No new Match for confirmed payment (row 2)
-     * 4. Matcher re-runs on unconfirmed payments, giving alias-boosted scores
-     * 5. High band (80) still only suggests, never auto-confirms
+     * 2. matcher: null (only runs when inserted > 0, per app.imports.tsx:525)
+     * 3. Payment count unchanged (still 3)
+     * 4. No new Match for confirmed payment (row 2)
+     * 5. Unconfirmed payments keep original scores (matcher didn't re-run)
      *
-     * PINNED SCORES - After confirm row 2 + re-import:
+     * PINNED STATE - After confirm row 2 + re-import (matcher not re-run):
      *
-     * | Row | UTR  | Amount  | Top Candidate | Score | Band   | State     |
-     * |-----|------|---------|---------------|-------|--------|-----------|
-     * | 1   | UTR1 | ₹10,000 | #1001         | 80    | high   | suggested |
-     * | 2   | UTR2 | ₹5,000  | #1002         | 58    | medium | confirmed |
-     * | 3   | UTR3 | ₹2,500  | #1002         | 70    | medium | suggested |
-     *
-     * Score breakdown (with alias):
-     * - invoice_ref: +30 (#1001/#1002 in narration)
-     * - amount_exact: +20 (row 1) / amount_partial: +10 (row 3)
-     * - payer_alias: +30 (confirmed alias match)
+     * | Row | UTR  | Amount  | Score | Band   | State     |
+     * |-----|------|---------|-------|--------|-----------|
+     * | 1   | UTR1 | ₹10,000 | 58    | medium | suggested | (unchanged)
+     * | 2   | UTR2 | ₹5,000  | 58    | medium | confirmed |
+     * | 3   | UTR3 | ₹2,500  | 48    | low    | suggested | (unchanged)
      */
     it("re-import detects all 3 as duplicates (exercises ON CONFLICT)", async () => {
       const importPayload = makeImportPayload();
@@ -580,41 +581,7 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
       expect(suggestedCount).toBe(0);
     });
 
-    it("unconfirmed payments get alias-boosted scores: 80 for row 1, 70 for row 3", async () => {
-      const importPayload = makeImportPayload();
-
-      // First import
-      await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
-
-      // Confirm row 2
-      let payments = await getPaymentsByUtr();
-      const p2 = payments.find((p) => p.utr === UTR2);
-      const m2 = await getMatchesForPayment(p2!.id, "suggested");
-      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
-
-      // Re-import (matcher runs on unconfirmed payments)
-      await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
-
-      payments = await getPaymentsByUtr();
-      const p1 = payments.find((p) => p.utr === UTR1);
-      const p3 = payments.find((p) => p.utr === UTR3);
-
-      const m1 = await getMatchesForPayment(p1!.id, "suggested");
-      const m3 = await getMatchesForPayment(p3!.id, "suggested");
-
-      expect(m1.length).toBeGreaterThan(0);
-      expect(m3.length).toBeGreaterThan(0);
-
-      expect(m1[0].invoiceName).toBe("#1001");
-      expect(m1[0].score).toBe(80);
-      expect(getConfidenceBand(m1[0].score)).toBe("high");
-
-      expect(m3[0].invoiceName).toBe("#1002");
-      expect(m3[0].score).toBe(70);
-      expect(getConfidenceBand(m3[0].score)).toBe("medium");
-    });
-
-    it("High band (80) still only suggests, never auto-confirms", async () => {
+    it("re-import with 0 inserted does not re-run matcher (suggestions unchanged)", async () => {
       const importPayload = makeImportPayload();
 
       // First import
@@ -626,26 +593,25 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
       const m2 = await getMatchesForPayment(p2!.id, "suggested");
       await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
-      // Re-import
+      // Capture scores before re-import
+      const p1 = payments.find((p) => p.utr === UTR1);
+      const p3 = payments.find((p) => p.utr === UTR3);
+      const m1Before = await getMatchesForPayment(p1!.id, "suggested");
+      const m3Before = await getMatchesForPayment(p3!.id, "suggested");
+
+      // Re-import (0 inserted = matcher does NOT run)
       const response = await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
       const data = (await response.json()) as ImportResult;
 
-      // Matcher reports high confidence matches
-      expect(data.matcher?.highConfidenceMatches).toBe(1);
+      // Verify matcher didn't run (null when 0 inserted)
+      expect(data.matcher).toBeNull();
 
-      // But they are still suggested, not confirmed
-      const p1 = payments.find((p) => p.utr === UTR1);
-      const m1 = await getMatchesForPayment(p1!.id, "suggested");
-      expect(m1.length).toBeGreaterThan(0);
-      expect(m1[0].score).toBe(80);
-      expect(m1[0].state).toBe("suggested");
+      // Suggestions should be unchanged (original scores, not alias-boosted)
+      const m1After = await getMatchesForPayment(p1!.id, "suggested");
+      const m3After = await getMatchesForPayment(p3!.id, "suggested");
 
-      // Total confirmed matches should still be 1 (only the manually confirmed one)
-      const confirmedMatches = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Match"
-        WHERE "shopId" = ${testShopId} AND state = 'confirmed'
-      `;
-      expect(parseInt(confirmedMatches[0].count, 10)).toBe(1);
+      expect(m1After[0].score).toBe(m1Before[0].score);
+      expect(m3After[0].score).toBe(m3Before[0].score);
     });
   });
 
@@ -661,13 +627,13 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
      * | UTR3 | 48    | low    | suggested |
      *
      * AFTER CONFIRM ROW 2 + RE-IMPORT:
-     * | UTR  | Score | Band   | State     |
-     * |------|-------|--------|-----------|
-     * | UTR1 | 80    | high   | suggested | (alias boost)
-     * | UTR2 | 58    | medium | confirmed | (unchanged)
-     * | UTR3 | 70    | medium | suggested | (alias boost)
+     * - Row 2 is confirmed (score 58)
+     * - Rows 1 and 3 keep original suggestions (58/48) because:
+     *   - Re-import detects all 3 as duplicates (0 inserted)
+     *   - Matcher only runs when inserted > 0
+     *   - Old suggestions remain unchanged
      */
-    it("E2E: pins scores and bands through confirm-then-re-import", async () => {
+    it("E2E: pins deduplication and confirm state through re-import", async () => {
       const importPayload = makeImportPayload();
 
       // First import
@@ -695,27 +661,23 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
       // Confirm row 2
       await confirmMatch(sql, testShopId, before2[0].id, "test-user");
 
-      // Re-import
+      // Re-import (all duplicates, matcher doesn't run)
       const secondResponse = await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
       const secondData = (await secondResponse.json()) as ImportResult;
       expect(secondData.counts?.inserted).toBe(0);
       expect(secondData.counts?.duplicates).toBe(3);
+      expect(secondData.matcher).toBeNull();
 
-      // Pin scores after re-import
-      const after1 = await getMatchesForPayment(p1!.id, "suggested");
+      // Verify row 2 confirm is unchanged
       const after2 = await getMatchesForPayment(p2!.id);
-      const after3 = await getMatchesForPayment(p3!.id, "suggested");
-
-      expect(after1[0].score).toBe(80);
-      expect(getConfidenceBand(after1[0].score)).toBe("high");
-      expect(after1[0].state).toBe("suggested");
-
       expect(after2.filter((m) => m.state === "confirmed").length).toBe(1);
       expect(after2.filter((m) => m.state === "confirmed")[0].score).toBe(58);
 
-      expect(after3[0].score).toBe(70);
-      expect(getConfidenceBand(after3[0].score)).toBe("medium");
-      expect(after3[0].state).toBe("suggested");
+      // Rows 1 and 3 keep original suggested scores (matcher didn't run)
+      const after1 = await getMatchesForPayment(p1!.id, "suggested");
+      const after3 = await getMatchesForPayment(p3!.id, "suggested");
+      expect(after1[0].score).toBe(58);
+      expect(after3[0].score).toBe(48);
     });
 
     it("audit event is created for confirmed match only", async () => {
@@ -732,6 +694,96 @@ describeWithDb("Confirm-then-re-import flow: synthetic NEFT credits", () => {
         WHERE "shopId" = ${testShopId} AND type = 'match.confirmed'
       `;
       expect(parseInt(auditCount.count, 10)).toBe(1);
+    });
+  });
+
+  describe("Alias-boosted scores (after explicit matcher run)", () => {
+    /**
+     * This tests what happens when the matcher runs AFTER an alias is created.
+     * The re-import flow doesn't trigger this (0 inserted = no matcher run),
+     * but a manual matcher run or a later import with new credits would.
+     *
+     * PINNED SCORES - After confirm row 2 + explicit matcher run:
+     *
+     * | UTR  | Amount  | Top Candidate | Score | Band   | State     |
+     * |------|---------|---------------|-------|--------|-----------|
+     * | UTR1 | ₹10,000 | #1001         | 80    | high   | suggested |
+     * | UTR2 | ₹5,000  | #1002         | 58    | medium | confirmed |
+     * | UTR3 | ₹2,500  | #1002         | 70    | medium | suggested |
+     *
+     * Score breakdown (with alias):
+     * - invoice_ref: +30 (#1001/#1002 in narration)
+     * - amount_exact: +20 (row 1) / amount_partial: +10 (row 3)
+     * - payer_alias: +30 (confirmed alias match)
+     */
+    it("explicit runMatcher after confirm gives alias-boosted 80/70 scores", async () => {
+      const importPayload = makeImportPayload();
+
+      // First import
+      await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+
+      const payments = await getPaymentsByUtr();
+      const p1 = payments.find((p) => p.utr === UTR1);
+      const p2 = payments.find((p) => p.utr === UTR2);
+      const p3 = payments.find((p) => p.utr === UTR3);
+
+      // Confirm row 2 (creates alias "test buyer")
+      const m2 = await getMatchesForPayment(p2!.id, "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
+
+      // Explicitly run matcher (simulates what would happen if matcher is triggered)
+      const matcherResult = await runMatcher(sql, testShopId);
+
+      // Matcher processes unconfirmed payments with alias
+      expect(matcherResult.paymentsProcessed).toBe(2);
+      expect(matcherResult.highConfidenceMatches).toBe(1);
+
+      // Pin alias-boosted scores
+      const m1 = await getMatchesForPayment(p1!.id, "suggested");
+      const m3 = await getMatchesForPayment(p3!.id, "suggested");
+
+      expect(m1.length).toBeGreaterThan(0);
+      expect(m3.length).toBeGreaterThan(0);
+
+      expect(m1[0].invoiceName).toBe("#1001");
+      expect(m1[0].score).toBe(80);
+      expect(getConfidenceBand(m1[0].score)).toBe("high");
+
+      expect(m3[0].invoiceName).toBe("#1002");
+      expect(m3[0].score).toBe(70);
+      expect(getConfidenceBand(m3[0].score)).toBe("medium");
+    });
+
+    it("High band (80) still only suggests, never auto-confirms", async () => {
+      const importPayload = makeImportPayload();
+
+      // First import
+      await callImportAction(sql, TEST_SHOP_DOMAIN, importPayload);
+
+      const payments = await getPaymentsByUtr();
+      const p1 = payments.find((p) => p.utr === UTR1);
+      const p2 = payments.find((p) => p.utr === UTR2);
+
+      // Confirm row 2
+      const m2 = await getMatchesForPayment(p2!.id, "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
+
+      // Explicitly run matcher
+      const matcherResult = await runMatcher(sql, testShopId);
+      expect(matcherResult.highConfidenceMatches).toBe(1);
+
+      // Row 1 has high score but is still suggested (not auto-confirmed)
+      const m1 = await getMatchesForPayment(p1!.id, "suggested");
+      expect(m1.length).toBeGreaterThan(0);
+      expect(m1[0].score).toBe(80);
+      expect(m1[0].state).toBe("suggested");
+
+      // Total confirmed matches should still be 1 (only the manually confirmed one)
+      const confirmedMatches = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM "Match"
+        WHERE "shopId" = ${testShopId} AND state = 'confirmed'
+      `;
+      expect(parseInt(confirmedMatches[0].count, 10)).toBe(1);
     });
   });
 });
