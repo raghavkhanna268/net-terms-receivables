@@ -209,7 +209,7 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       const [sendResult] = await sql1<[{ send: string }]>`
         SELECT pgmq.send('s6_sync', ${sql1.json(testMsg)})
       `;
-      const msgId = sendResult.send;
+      const _msgId = sendResult.send;
 
       let shopLockedGate = false;
       let moveToDeadLetterDone = false;
@@ -429,7 +429,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       const conn2Pid = await getPid(sql2);
 
       let forUpdateTaken = false;
-      let moveToDeadLetterStarted = false;
 
       const deleteShopPromise = sql1.begin(async (tx) => {
         const [lockedShop] = await tx<{ id: string }[]>`
@@ -450,8 +449,6 @@ describeWithDb("moveToDeadLetter + deleteShop race condition", () => {
       while (!forUpdateTaken) {
         await new Promise((r) => setTimeout(r, 10));
       }
-
-      moveToDeadLetterStarted = true;
 
       const resultPromise = simulateMoveToDeadLetter(
         sql2,
