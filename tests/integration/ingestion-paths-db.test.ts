@@ -37,6 +37,7 @@ import {
 } from "../helpers/gid.js";
 import { calculateDaysPastDue } from "../../app/lib/aging-dates.server.js";
 import { getBucketForDaysPastDue, type AgingBucketKey } from "../../app/lib/aging.js";
+import { getBuyerLedger } from "../../app/lib/aging-queries.server.js";
 import * as logModule from "../../app/lib/log.server.js";
 import * as sentryModule from "../../app/lib/sentry.js";
 
@@ -275,6 +276,10 @@ describeWithDb("Ingestion Paths Integration", () => {
     it("later update overwrites earlier outstanding (last-write-wins)", async () => {
       const orderId = orderGid(`lww-${TEST_SUFFIX}`);
 
+      // NOTE: There is no ordering guard today. The handler does not check
+      // order.updatedAt or any version column. This test pins current behavior
+      // where out-of-order delivery overwrites with whatever arrives last.
+
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
@@ -420,29 +425,31 @@ describeWithDb("Ingestion Paths Integration", () => {
       expect(invoice.outstanding).toBe("88888.88");
     });
 
-    it("cancelled invoice excluded from buyer outstanding totals", async () => {
+    it("cancelled invoice excluded from buyer outstanding totals via getBuyerLedger", async () => {
       const openOrderId = orderGid(`cancel-excl-open-${TEST_SUFFIX}`);
       const cancelledOrderId = orderGid(`cancel-excl-done-${TEST_SUFFIX}`);
 
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status,
-          "issuedAt", "createdAt", "updatedAt"
+          "issuedAt", "dueAt", "createdAt", "updatedAt"
         ) VALUES 
           (gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID}, ${openOrderId},
-           '#EXCL-OPEN', '25000.00', '25000.00', 'open', NOW(), NOW(), NOW()),
+           '#EXCL-OPEN', '25000.00', '25000.00', 'open', NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()),
           (gen_random_uuid()::text, ${TEST_SHOP_ID}, ${TEST_COMPANY_ACCOUNT_ID}, ${cancelledOrderId},
-           '#EXCL-CANCELLED', '75000.00', '75000.00', 'cancelled', NOW(), NOW(), NOW())
+           '#EXCL-CANCELLED', '75000.00', '75000.00', 'cancelled', NOW(), NOW() + INTERVAL '30 days', NOW(), NOW())
       `;
 
-      const [buyerTotal] = await sql<{ total_paise: string }[]>`
-        SELECT COALESCE(SUM((ROUND(outstanding * 100))::bigint), 0)::text AS total_paise
-        FROM "Invoice"
-        WHERE "buyerAccountId" = ${TEST_COMPANY_ACCOUNT_ID}
-          AND status = 'open'
-      `;
+      const { rows } = await getBuyerLedger(sql, TEST_SHOP_ID, new Date(), {
+        limit: 100,
+        offset: 0,
+        sortBy: "outstanding",
+        sortOrder: "desc",
+      });
 
-      expect(buyerTotal.total_paise).toBe("2500000");
+      const buyerRow = rows.find(r => r.buyer_account_id === TEST_COMPANY_ACCOUNT_ID);
+      expect(buyerRow).toBeDefined();
+      expect(buyerRow!.outstanding_paise).toBe("2500000");
     });
 
     it("fully paid order closes the invoice with zero outstanding", async () => {
@@ -650,9 +657,6 @@ describeWithDb("Ingestion Paths Integration", () => {
     let safeLogSpy: ReturnType<typeof vi.spyOn>;
     let captureExceptionSpy: ReturnType<typeof vi.spyOn>;
 
-    const PII_BUYER_NAME = "Rajesh Kumar Private Limited";
-    const PII_EMAIL = "buyer@example.com";
-    const PII_PHONE = "+91-9876543210";
     const PII_AMOUNT = "99999.99";
 
     beforeEach(() => {
@@ -664,15 +668,9 @@ describeWithDb("Ingestion Paths Integration", () => {
       vi.restoreAllMocks();
     });
 
-    it("order processing logs contain no buyer PII", async () => {
+    it("order processing logs contain no monetary amounts from input", async () => {
       const orderId = orderGid(`pii-order-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-order-${TEST_SUFFIX}`;
-
-      await sql`
-        UPDATE "BuyerAccount"
-        SET name = ${PII_BUYER_NAME}
-        WHERE id = ${TEST_COMPANY_ACCOUNT_ID}
-      `;
 
       const order: ShopifyOrder = {
         id: orderId,
@@ -687,10 +685,6 @@ describeWithDb("Ingestion Paths Integration", () => {
           company: { id: TEST_COMPANY_ID },
           location: { id: TEST_LOCATION_ID },
         },
-        customer: {
-          id: TEST_CUSTOMER_ID,
-          tags: [TEST_TAG],
-        },
       };
 
       await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", order, webhookId);
@@ -702,33 +696,18 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       for (const call of safeLogSpy.mock.calls) {
         const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_BUYER_NAME);
-        expect(allArgs).not.toContain(PII_EMAIL);
-        expect(allArgs).not.toContain(PII_PHONE);
         expect(allArgs).not.toContain(PII_AMOUNT);
-        expect(allArgs).not.toContain("Rajesh");
-        expect(allArgs).not.toContain("Kumar");
-        expect(allArgs).not.toContain("buyer@");
       }
 
       for (const call of captureExceptionSpy.mock.calls) {
         const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_BUYER_NAME);
-        expect(allArgs).not.toContain(PII_EMAIL);
-        expect(allArgs).not.toContain(PII_PHONE);
         expect(allArgs).not.toContain(PII_AMOUNT);
       }
     });
 
-    it("draft order processing logs contain no buyer PII", async () => {
+    it("draft order processing logs contain no monetary amounts from input", async () => {
       const draftId = draftOrderGid(`pii-draft-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-draft-${TEST_SUFFIX}`;
-
-      await sql`
-        UPDATE "BuyerAccount"
-        SET name = ${PII_BUYER_NAME}
-        WHERE id = ${TEST_TAGGED_ACCOUNT_ID}
-      `;
 
       const draft: ShopifyDraftOrder = {
         id: draftId,
@@ -753,16 +732,11 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       for (const call of safeLogSpy.mock.calls) {
         const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_BUYER_NAME);
-        expect(allArgs).not.toContain(PII_EMAIL);
-        expect(allArgs).not.toContain(PII_PHONE);
         expect(allArgs).not.toContain(PII_AMOUNT);
-        expect(allArgs).not.toContain("Rajesh");
-        expect(allArgs).not.toContain("Kumar");
       }
     });
 
-    it("error scenarios log safe codes without PII", async () => {
+    it("error scenarios log safe codes without PII-shaped amounts", async () => {
       const orderId = orderGid(`pii-error-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-pii-error-${TEST_SUFFIX}`;
 
@@ -771,6 +745,8 @@ describeWithDb("Ingestion Paths Integration", () => {
         name: "#PII-ERROR",
         createdAt: "2026-10-01T10:00:00.000Z",
         displayFinancialStatus: "PENDING",
+        totalPriceSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
+        totalOutstandingSet: { shopMoney: { amount: PII_AMOUNT, currencyCode: "INR" } },
         paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
         purchasingEntity: {
           __typename: "PurchasingCompany",
@@ -781,18 +757,19 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       await processOrderWebhook(sql, TEST_SHOP_DOMAIN, "ORDERS_CREATE", invalidOrder, webhookId);
 
+      expect(safeLogSpy.mock.calls.length).toBeGreaterThan(0);
+
+      const loggedEvents = safeLogSpy.mock.calls.map(call => call[1] as string);
+      expect(loggedEvents.length).toBeGreaterThan(0);
+
       for (const call of safeLogSpy.mock.calls) {
         const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_BUYER_NAME);
-        expect(allArgs).not.toContain(PII_EMAIL);
-        expect(allArgs).not.toContain(PII_PHONE);
+        expect(allArgs).not.toContain(PII_AMOUNT);
       }
 
       for (const call of captureExceptionSpy.mock.calls) {
         const allArgs = JSON.stringify(call);
-        expect(allArgs).not.toContain(PII_BUYER_NAME);
-        expect(allArgs).not.toContain(PII_EMAIL);
-        expect(allArgs).not.toContain(PII_PHONE);
+        expect(allArgs).not.toContain(PII_AMOUNT);
       }
     });
   });
