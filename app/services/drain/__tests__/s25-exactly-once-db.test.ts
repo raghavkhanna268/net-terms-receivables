@@ -2784,8 +2784,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       // Track fetch calls - should be 0 if re-check works
       let fetchCallCount = 0;
-      const originalFetch = globalThis.fetch;
-      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      vi.stubGlobal("fetch", async () => {
         fetchCallCount++;
         return new Response("", { status: 500 });
       });
