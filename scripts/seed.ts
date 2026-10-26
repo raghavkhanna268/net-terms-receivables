@@ -315,18 +315,21 @@ export const REVIEWER_DEMO_COMPANY_SEED = {
  * Reviewer demo order seeds.
  *
  * FOR THE THROWAWAY INR DEMO STORE ONLY - never the main dev store.
+ * Enabled via --reviewer-demo flag or SEED_REVIEWER_DEMO=1 env var.
  *
  * These orders have specific amounts matching the synthetic reviewer CSV:
- * - Order #1001: ₹10,000 - exact match for CSV row 1 (NEFT, ₹10,000)
- * - Order #1002: ₹5,000 - in 0.5x-2x range for CSV rows 2 and 3
+ * - First order: ₹10,000 - exact match for CSV row 1 (NEFT, ₹10,000)
+ * - Second order: ₹5,000 - in 0.5x-2x range for CSV rows 2 and 3
  *
- * Order names #1001/#1002 are chosen so the invoice_ref scoring works
- * when matching against the CSV narration "NEFT-SYNT0001-TEST BUYER CO-#1001".
+ * NOTE: Order names (e.g., #1001) are assigned by Shopify sequentially at
+ * creation time. We cannot guarantee specific order names. The seed logs
+ * the actual assigned order names for verification. The CSV's #1001 reference
+ * in the narration would only produce invoice_ref scoring if a seeded order
+ * happens to get that name (depends on store's order count).
  */
 export const REVIEWER_DEMO_ORDERS = [
   {
     orderKey: "reviewer-demo-1001",
-    displayName: "#1001",
     amountInr: 10000,
     productTitle: "Reviewer Demo Product A",
     daysAgo: 5,
@@ -334,7 +337,6 @@ export const REVIEWER_DEMO_ORDERS = [
   },
   {
     orderKey: "reviewer-demo-1002",
-    displayName: "#1002",
     amountInr: 5000,
     productTitle: "Reviewer Demo Product B",
     daysAgo: 5,
@@ -393,6 +395,7 @@ export interface SeedState {
   reset: boolean;
   resetApply: boolean;
   reportDuplicates: boolean;
+  reviewerDemo: boolean;
   currencyCode: string;
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
@@ -1796,7 +1799,7 @@ async function setMainContact(
 async function continueWithExistingCompany(
   state: SeedState,
   company: CompanyNode,
-  seed: (typeof COMPANY_SEEDS)[number],
+  seed: CompanySeed,
   externalId: string
 ): Promise<CompanyData | null> {
   const contactRoles = await fetchCompanyContactRoles(state, company.id);
@@ -2019,9 +2022,21 @@ export function buildCompanyCreateInputWithoutContact(
   };
 }
 
+/** Shape of a company seed (COMPANY_SEEDS or REVIEWER_DEMO_COMPANY_SEED) */
+export interface CompanySeed {
+  key: string;
+  name: string;
+  city: string;
+  contact: {
+    firstName: string;
+    lastName: string;
+    email: string;
+  };
+}
+
 export async function createCompanyWithLocations(
   state: SeedState,
-  seed: (typeof COMPANY_SEEDS)[number],
+  seed: CompanySeed,
   externalId: string
 ): Promise<CompanyData | null> {
   const firstLoc = LOCATION_TERMS[0];
@@ -3570,13 +3585,8 @@ export async function seedReviewerDemoCompany(state: SeedState): Promise<void> {
     state.createdCount.companies++;
     return;
   } else {
-    // Create the company - cast seed to expected type (same shape as COMPANY_SEEDS)
-    // The seed has the same runtime shape but different literal types for key/name
-    const companyData = await createCompanyWithLocations(
-      state,
-      seed as unknown as (typeof COMPANY_SEEDS)[number],
-      externalId
-    );
+    // Create the company
+    const companyData = await createCompanyWithLocations(state, seed, externalId);
     if (!companyData) {
       state.failedCount.companies++;
       state.errors.push(`Failed to create reviewer demo company: ${externalId}`);
@@ -3592,12 +3602,12 @@ export async function seedReviewerDemoCompany(state: SeedState): Promise<void> {
 
 /**
  * Seed the specific orders for the reviewer demo.
- * These have specific amounts and order names (#1001, #1002) to match
- * the synthetic reviewer CSV.
+ * These have specific amounts matching the synthetic reviewer CSV.
+ * Order names are assigned by Shopify and logged for verification.
  */
 async function seedReviewerDemoOrders(state: SeedState): Promise<void> {
   console.log("\n📝 Seeding reviewer demo orders...");
-  console.log("   Order names #1001/#1002 match CSV narration for invoice_ref scoring");
+  console.log("   (Order names are Shopify-assigned; logged below for reference)");
 
   const companyData = state.companies.get(REVIEWER_DEMO_COMPANY_SEED.key);
   if (!companyData) {
@@ -3876,13 +3886,14 @@ export function printDatabaseSeedSQL(state: SeedState): void {
 
 // -- Main --
 
-function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean } {
+function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean; reviewerDemo: boolean } {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
     reset: args.includes("--reset"),
     resetApply: args.includes("--apply"),
     reportDuplicatesMode: args.includes("--report-duplicates"),
+    reviewerDemo: args.includes("--reviewer-demo") || process.env.SEED_REVIEWER_DEMO === "1",
   };
 }
 
@@ -3930,7 +3941,7 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset, resetApply, reportDuplicatesMode } = parseArgs();
+  const { dryRun, reset, resetApply, reportDuplicatesMode, reviewerDemo } = parseArgs();
   const env = validateEnv();
 
   if (!env) {
@@ -3945,6 +3956,7 @@ export async function main(): Promise<void> {
     reset,
     resetApply,
     reportDuplicates: reportDuplicatesMode,
+    reviewerDemo,
     currencyCode: "",
     companies: new Map(),
     paymentTermsTemplates: [],
@@ -3969,6 +3981,9 @@ export async function main(): Promise<void> {
     : reset ? (resetApply ? "RESET + APPLY (will delete)" : "RESET (dry-run, use --apply to delete)") 
     : "SEED";
   console.log(`Mode: ${modeStr}`);
+  if (reviewerDemo) {
+    console.log(`Reviewer Demo: ENABLED (--reviewer-demo or SEED_REVIEWER_DEMO=1)`);
+  }
   console.log(`Database: ${env.databaseUrl ? "Connected" : "Not configured (will print SQL)"}`);
 
   // Preflight checks
@@ -4017,8 +4032,10 @@ export async function main(): Promise<void> {
   // Seed orders for tagged (non-B2B) customers
   await seedTaggedCustomerOrders(state);
 
-  // Seed reviewer demo company and orders (for throwaway INR demo store only)
-  await seedReviewerDemoCompany(state);
+  // Seed reviewer demo company and orders (opt-in via --reviewer-demo or SEED_REVIEWER_DEMO=1)
+  if (state.reviewerDemo) {
+    await seedReviewerDemoCompany(state);
+  }
 
   // Seed database for S9 inference
   await seedDatabase(state);

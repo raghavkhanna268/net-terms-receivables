@@ -75,6 +75,8 @@ import {
   getIndiaAddressInfo,
   INDIA_CITY_ADDRESS_INFO,
   computeExitCode,
+  REVIEWER_DEMO_COMPANY_SEED,
+  REVIEWER_DEMO_ORDERS,
   type SeedState,
   type GraphQLResponse,
   type UserError,
@@ -119,6 +121,7 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
     dryRun: false,
     reset: false,
     reportDuplicates: false,
+    reviewerDemo: false,
     currencyCode: "INR",
     companies: new Map(),
     paymentTermsTemplates: [
@@ -481,6 +484,64 @@ describe("Seed Script Constants", () => {
       // No FIXED terms - only NET via location templates
       expect(order).not.toHaveProperty("termsType");
     }
+  });
+});
+
+describe("Reviewer demo seed flag gating", () => {
+  it("REVIEWER_DEMO_COMPANY_SEED has correct shape", () => {
+    expect(REVIEWER_DEMO_COMPANY_SEED.key).toBe("company-reviewer-demo");
+    expect(REVIEWER_DEMO_COMPANY_SEED.name).toBe("Test Buyer Co");
+    expect(REVIEWER_DEMO_COMPANY_SEED.city).toBe("Bengaluru");
+    expect(REVIEWER_DEMO_COMPANY_SEED.contact.email).toContain("@test-buyer.example");
+  });
+
+  it("REVIEWER_DEMO_ORDERS has correct amounts", () => {
+    expect(REVIEWER_DEMO_ORDERS).toHaveLength(2);
+    expect(REVIEWER_DEMO_ORDERS[0].amountInr).toBe(10000);
+    expect(REVIEWER_DEMO_ORDERS[1].amountInr).toBe(5000);
+  });
+
+  it("seedReviewerDemoCompany is not called when reviewerDemo is false", async () => {
+    const state: SeedState = {
+      shop: "test.myshopify.com",
+      token: "test-token",
+      databaseUrl: null,
+      dryRun: true,
+      reset: false,
+      resetApply: false,
+      reportDuplicates: false,
+      reviewerDemo: false,
+      currencyCode: "INR",
+      companies: new Map(),
+      paymentTermsTemplates: [],
+      createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
+      unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+      adoptedCount: { companies: 0 },
+      driftedCount: { companies: 0 },
+      skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
+      skippedReasons: [],
+      deletedCount: { companies: 0, orders: 0 },
+      failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0 },
+      ordersWithShopifyTerms: 0,
+      ordersWithoutShopifyTerms: 0,
+      overdueOrdersCount: 0,
+      taggedCustomerOrdersCount: 0,
+      errors: [],
+    };
+
+    expect(state.reviewerDemo).toBe(false);
+  });
+
+  it("seedReviewerDemoCompany is gated by state.reviewerDemo in main()", () => {
+    const mainSource = readFileSync(resolve(__dirname, "../seed.ts"), "utf-8");
+    expect(mainSource).toContain("if (state.reviewerDemo)");
+    expect(mainSource).toContain("await seedReviewerDemoCompany(state);");
+  });
+
+  it("--reviewer-demo flag sets reviewerDemo true", () => {
+    const mainSource = readFileSync(resolve(__dirname, "../seed.ts"), "utf-8");
+    expect(mainSource).toContain('args.includes("--reviewer-demo")');
+    expect(mainSource).toContain('process.env.SEED_REVIEWER_DEMO === "1"');
   });
 });
 

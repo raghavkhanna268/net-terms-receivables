@@ -453,7 +453,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
 
   describe("summary of pinned match results", () => {
     /**
-     * Summary table of pinned match results:
+     * Summary table of pinned match results (unit-level with aliases):
      *
      * | Row | Ref      | Amount    | Dir | Score | Band   | Candidate    | Breakdown                                  |
      * |-----|----------|-----------|-----|-------|--------|--------------|-------------------------------------------|
@@ -471,11 +471,66 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      * - Row 1: Intent was "high confidence" but 60 < 80 threshold → medium band
      * - Row 2: Intent was "partial for #1002" but oldest-due preference → #1001
      * - Row 3: Intent was "stay unmatched" but scorer returns low-confidence → still suggests
+     *
+     * NOTE: This is UNIT-LEVEL scoring with pre-seeded aliases. For real app
+     * behavior (no aliases, amount window filtering), see:
+     * - tests/integration/review-csv-matcher-db.test.ts
      */
-    it("documents all rows with their pinned scores and breakdowns", () => {
-      expect(parseResult.transactions.length).toBe(4);
-      expect(credits.length).toBe(3);
-      expect(debits.length).toBe(1);
+    it("validates pinned scores from individual tests", () => {
+      const row1 = credits.find((c) => c.refNo === "SYNT0001")!;
+      const row2 = credits.find((c) => c.refNo === "SYNT0002")!;
+      const row3 = credits.find((c) => c.refNo === "SYNT0003")!;
+
+      const buyer: BuyerForScoring = {
+        id: "buyer-1",
+        name: "Test Buyer Co",
+        aliases: ["test buyer co"],
+        email: "test@test-buyer.example",
+      };
+
+      const invoices: InvoiceForScoring[] = [
+        {
+          id: "invoice-1001",
+          name: "#1001",
+          orderId: "gid://shopify/Order/1001",
+          outstandingPaise: 1000000n,
+          buyerAccountId: buyer.id,
+          dueAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        },
+        {
+          id: "invoice-1002",
+          name: "#1002",
+          orderId: "gid://shopify/Order/1002",
+          outstandingPaise: 500000n,
+          buyerAccountId: buyer.id,
+          dueAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
+        },
+      ];
+
+      const makePayment = (row: NormalisedTxn) => ({
+        id: `payment-${row.refNo}`,
+        amountPaise: BigInt(row.amountPaise),
+        narration: row.narration,
+        payerText: "TEST BUYER CO",
+        utr: row.parsed.utr ?? null,
+        rail: row.parsed.rail,
+      });
+
+      const r1 = scoreMultiInvoiceMatch(makePayment(row1), invoices, buyer);
+      const r2 = scoreMultiInvoiceMatch(makePayment(row2), invoices, buyer);
+      const r3 = scoreMultiInvoiceMatch(
+        { ...makePayment(row3), payerText: "UNRELATED TRADERS" },
+        invoices,
+        buyer
+      );
+
+      expect(r1!.allocations[0].score).toBe(60);
+      expect(r2!.allocations[0].score).toBe(20);
+      expect(r3!.allocations[0].score).toBe(10);
+
+      expect(getConfidenceBand(r1!.allocations[0].score)).toBe("medium");
+      expect(getConfidenceBand(r2!.allocations[0].score)).toBe("low");
+      expect(getConfidenceBand(r3!.allocations[0].score)).toBe("low");
     });
   });
 });
