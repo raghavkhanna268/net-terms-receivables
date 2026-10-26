@@ -33,23 +33,32 @@ topics once reconcile coverage exists.
 
 ### Coverage nuances
 
-**COMPANIES_\* topics:** The company handler has no Shop lookup, so companies
-never produce `shop_not_found`. They are listed as covered but cannot be sanitized.
+**COMPANIES_\* CREATE/UPDATE after uninstall:** When `adminGraphQL` fails with
+`no_session`, the handler checks the Shop row. If the Shop row is missing or
+`uninstalledAt` is set, the error is relabelled to `shop_not_found` and the
+message can be sanitized in the DLQ. If the Shop exists and is not uninstalled,
+the original `no_session` error is preserved (behaviour unchanged).
 
-**ORDER/LOCATION CREATE/UPDATE after uninstall:** These run `adminGraphQL` before
-the Shop lookup. After uninstall or redact, sessions are gone, so these fail with
-`No session found` (`retryable: false`). The DLQ reason becomes `non_retryable:...`,
-which is not sanitized. This PR does NOT relabel `no_session` as `shop_not_found`.
+**COMPANY_LOCATIONS_\* CREATE/UPDATE after uninstall:** Same as companies above.
+When `adminGraphQL` fails with `no_session`, the handler checks the Shop row and
+relabels to `shop_not_found` only when the Shop is missing or uninstalled.
 
-A follow-up (Part of #239) will add a Shop-row check on the no-session
-CREATE/UPDATE-after-uninstall path that sanitizes only when the Shop row is missing
-or `uninstalledAt` is set. This ships in the same pre-launch batch as the
-customers/draft-orders sanitize, after S8 PR-B.
+**ORDERS_\* CREATE/UPDATED/PAID/CANCELLED after uninstall:** When `adminGraphQL` fails
+with `no_session`, the handler checks the Shop row. If the Shop row is missing or
+`uninstalledAt` is set, the message is ACKed immediately (success:true, no DLQ entry,
+no retry, no recordBackstopFailure). This avoids DLQ pollution for post-uninstall
+webhooks. If the Shop exists and is not uninstalled, the original `no_session` error
+is preserved (behaviour unchanged).
 
 **What actually gets sanitized:**
+- `COMPANIES_CREATE`, `COMPANIES_UPDATE` when `no_session` and Shop row missing/uninstalled
+- `COMPANY_LOCATIONS_CREATE`, `COMPANY_LOCATIONS_UPDATE` when `no_session` and Shop row missing/uninstalled
 - `COMPANY_LOCATIONS_DELETE` when the Shop row is missing
-- `ORDERS_*` or location updates if a session still exists while the Shop row is missing
+- `ORDERS_*` only if a session still exists while the Shop row is already missing (rare)
 - Bulk `companies`/`orders` (Shop check runs first, gives `permanent:shop_not_found`)
+
+**What gets ACKed (no DLQ):**
+- `ORDERS_*` when `no_session` and Shop row missing/uninstalled (ACKed, not DLQ'd)
 
 ## Diagnosing DLQ Issues
 

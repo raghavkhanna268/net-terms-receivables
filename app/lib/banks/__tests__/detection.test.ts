@@ -418,6 +418,24 @@ describe("detection", () => {
       expect(result).toBeNull();
     });
 
+    it("finds ICICI real .xls Value-Date-first header", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["ICICI BANK"],
+          [],
+          // Blank A, headers B-I, blank J
+          ["", "S No.", "Value Date", "Transaction Date", "Cheque Number", "Transaction Remarks", "Withdrawal Amount(INR)", "Deposit Amount(INR)", "Balance(INR)", ""],
+          ["", "1", "15/10/2030", "15/10/2030", "", "UPI/SYNT VENDOR/vendor@ok/Remark/SYNT BANK/600000000001/SYNT001", "0.00", "1000.00", "1000.00", ""],
+        ],
+      };
+
+      const result = detectHeaderRow(sheet);
+      expect(result).not.toBeNull();
+      expect(result?.bank).toBe("ICICI");
+      expect(result?.row).toBe(2);
+    });
+
     it("finds SBI header row (UNVERIFIED)", () => {
       const sheet: SheetData = {
         name: "Sheet1",
@@ -510,6 +528,80 @@ describe("detection", () => {
 
       const footers = detectFooterRows(sheet, 1);
       expect(footers.has(2)).toBe(true);
+    });
+
+    it("detects ICICI Legends footer block", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["", "1", "15/10/2030", "15/10/2030", "", "UPI/SYNT/test@ok/SYNT BANK/600000000001/SYNT001", "0.00", "1000.00", "1000.00", ""],
+          ["", "Legends - Transaction Remarks Abbreviations"],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true);
+    });
+
+    it("detects HDFC asterisk separator rows", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "Transaction", "REF", "01/10/26", "", "1000", "101000"],
+          ["********", "**********************************", "************", "********", "******************", "******************", "******************"],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true);
+    });
+
+    it("detects HDFC end of statement marker", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "Transaction", "REF", "01/10/26", "", "1000", "101000"],
+          ["---  End Of Statement ---"],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true);
+    });
+
+    it("detects HDFC label-less summary values row after label row", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "Transaction", "REF", "01/10/26", "", "1000", "101000"],
+          ["Opening Balance", "", "", "", "Debits", "Credits", "Closing Bal"],
+          ["100000", "", "", "", "50000", "75000", "125000"],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true); // Label row
+      expect(footers.has(3)).toBe(true); // Values row (all numeric, after label)
+    });
+
+    it("does not mark narration continuation as footer trigger", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "UPI-SYNT VENDOR-test@ok-SYNT0001", "REF", "01/10/26", "", "1000", "101000"],
+          ["", "CONTINUATION TEXT HERE", "", "", "", "", ""],
+          ["02/10/26", "NEFT-SYNT CORP-SALARY", "REF2", "02/10/26", "", "5000", "96000"],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(false); // Continuation row should NOT be marked as footer
+      expect(footers.has(3)).toBe(false); // Next transaction should NOT be marked
     });
   });
 

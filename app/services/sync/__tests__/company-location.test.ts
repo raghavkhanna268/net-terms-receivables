@@ -70,7 +70,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        `wh-loc-${TEST_SUFFIX}-1`
+        `wh-loc-${TEST_SUFFIX}-1`,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -122,7 +123,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_UPDATE",
         location,
-        `wh-loc-${TEST_SUFFIX}-2`
+        `wh-loc-${TEST_SUFFIX}-2`,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -162,7 +164,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_DELETE",
         location,
-        `wh-loc-${TEST_SUFFIX}-3`
+        `wh-loc-${TEST_SUFFIX}-3`,
+        {}
       );
 
       expect(result.success).toBe(true);
@@ -191,7 +194,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
       expect(result1.action).toBe("created");
 
@@ -201,7 +205,8 @@ describeWithDb("CompanyLocation Sync", () => {
         TEST_SHOP_DOMAIN,
         "COMPANY_LOCATIONS_CREATE",
         location,
-        webhookId
+        webhookId,
+        {}
       );
       expect(result2.action).toBe("skipped");
       expect(result2.skipReason).toContain("idempotent");
@@ -225,7 +230,8 @@ describeWithDb("CompanyLocation Sync", () => {
         "test-unknown-shop.myshopify.com",
         "COMPANY_LOCATIONS_CREATE",
         location,
-        `wh-loc-${TEST_SUFFIX}-5`
+        `wh-loc-${TEST_SUFFIX}-5`,
+        {}
       );
 
       expect(result.success).toBe(false);
@@ -250,7 +256,7 @@ describeWithDb("CompanyLocation Sync", () => {
         },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.shopId).toBe("shop-id");
       expect(result.kind).toBe("COMPANY");
@@ -268,7 +274,7 @@ describeWithDb("CompanyLocation Sync", () => {
         company: { id: "gid://shopify/Company/456" },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.defaultTermsDays).toBeNull();
       expect(result.defaultTermsSource).toBeNull();
@@ -285,7 +291,7 @@ describeWithDb("CompanyLocation Sync", () => {
         },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.name).toBe("Billing Corp");
     });
@@ -297,9 +303,33 @@ describeWithDb("CompanyLocation Sync", () => {
         company: { id: "gid://shopify/Company/456" },
       };
 
-      const result = mapCompanyLocationToBuyerAccount("shop-id", location);
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
 
       expect(result.name).toBe("Location 999");
+    });
+
+    it("returns contactKnown=true by default", () => {
+      const location: ShopifyCompanyLocation = {
+        id: "gid://shopify/CompanyLocation/999",
+        name: "Test",
+        company: { id: "gid://shopify/Company/456" },
+      };
+
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {});
+
+      expect(result.contactKnown).toBe(true);
+    });
+
+    it("returns contactKnown=false when explicitly set (orphan locations)", () => {
+      const location: ShopifyCompanyLocation = {
+        id: "gid://shopify/CompanyLocation/999",
+        name: "Orphan",
+        company: { id: "gid://shopify/Company/456" },
+      };
+
+      const result = mapCompanyLocationToBuyerAccount("shop-id", location, {}, false);
+
+      expect(result.contactKnown).toBe(false);
     });
   });
 
@@ -310,12 +340,12 @@ describeWithDb("CompanyLocation Sync", () => {
           id: `gid://shopify/CompanyLocation/bulk-${TEST_SUFFIX}-1`,
           name: "Bulk 1",
           company: { id: `gid://shopify/Company/bulk-co-${TEST_SUFFIX}` },
-        }),
+        }, {}),
         mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
           id: `gid://shopify/CompanyLocation/bulk-${TEST_SUFFIX}-2`,
           name: "Bulk 2",
           company: { id: `gid://shopify/Company/bulk-co-${TEST_SUFFIX}` },
-        }),
+        }, {}),
       ];
 
       const count = await bulkUpsertBuyerAccounts(sql, accounts);
@@ -354,7 +384,7 @@ describeWithDb("CompanyLocation Sync", () => {
           id: locationId,
           name: "Updated via Bulk",
           company: { id: companyId },
-        }),
+        }, {}),
       ];
 
       await bulkUpsertBuyerAccounts(sql, accounts);
@@ -386,7 +416,7 @@ describeWithDb("CompanyLocation Sync", () => {
             id: newLocationId,
             name: "Over Limit Account",
             company: { id: newCompanyId },
-          }),
+          }, {}),
         ];
 
         await bulkUpsertBuyerAccounts(sql, accounts);
@@ -427,7 +457,7 @@ describeWithDb("CompanyLocation Sync", () => {
             id: newLocationId,
             name: "Not Gated Account",
             company: { id: newCompanyId },
-          }),
+          }, {}),
         ];
 
         await bulkUpsertBuyerAccounts(sql, accounts);
@@ -445,6 +475,443 @@ describeWithDb("CompanyLocation Sync", () => {
           delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
         }
       }
+    });
+
+    it("bulk with bad row rejects when flag off (main behavior)", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      
+      try {
+        const goodLocId1 = `gid://shopify/CompanyLocation/good1-${Date.now()}`;
+        const badLocId = `gid://shopify/CompanyLocation/bad-${Date.now()}`;
+        
+        // Non-existent shop - FK violation
+        const badShopId = `shop-nonexistent-${Date.now()}`;
+        
+        const accounts = [
+          mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+            id: goodLocId1,
+            name: "Good Account 1",
+            company: { id: `gid://shopify/Company/good1-${Date.now()}` },
+          }, {}),
+          mapCompanyLocationToBuyerAccount(badShopId, { // Non-existent shop - FK violation
+            id: badLocId,
+            name: "Bad Account",
+            company: { id: `gid://shopify/Company/bad-${Date.now()}` },
+          }, {}),
+        ];
+
+        // Flag off: errors propagate like main, so the call rejects on the bad row
+        await expect(bulkUpsertBuyerAccounts(sql, accounts)).rejects.toThrow();
+        
+        // The good account before the bad row was inserted (row-by-row processing)
+        const [good1] = await sql`
+          SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${goodLocId1}
+        `;
+        expect(good1).toBeDefined();
+        expect(good1.name).toBe("Good Account 1");
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
+  });
+
+  describe("B2B main contact PII handling", () => {
+    it("stores mainContact fields when CUSTOMER_PII_FIELDS=1", async () => {
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
+      const location: ShopifyCompanyLocation = {
+        id: `gid://shopify/CompanyLocation/pii-on-${TEST_SUFFIX}`,
+        name: "PII On Company",
+        company: {
+          id: `gid://shopify/Company/pii-on-co-${TEST_SUFFIX}`,
+          mainContact: {
+            customer: {
+              id: `gid://shopify/Customer/contact-${TEST_SUFFIX}`,
+              email: "contact@example.com",
+              displayName: "Contact Person",
+            },
+          },
+        },
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        `wh-pii-on-${TEST_SUFFIX}`,
+        { CUSTOMER_PII_FIELDS: "1" }
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(account.mainContactEmail).toBe("contact@example.com");
+      expect(account.mainContactName).toBe("Contact Person");
+      expect(account.mainContactCustomerId).toBe(`gid://shopify/Customer/contact-${TEST_SUFFIX}`);
+    });
+
+    it("nulls mainContact fields when CUSTOMER_PII_FIELDS is off", async () => {
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
+      const location: ShopifyCompanyLocation = {
+        id: `gid://shopify/CompanyLocation/pii-off-${TEST_SUFFIX}`,
+        name: "PII Off Company",
+        company: {
+          id: `gid://shopify/Company/pii-off-co-${TEST_SUFFIX}`,
+          mainContact: {
+            customer: {
+              id: `gid://shopify/Customer/contact-piioff-${TEST_SUFFIX}`,
+              email: "should-not-store@example.com",
+              displayName: "Should Not Store",
+            },
+          },
+        },
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        `wh-pii-off-${TEST_SUFFIX}`,
+        {}
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(account.mainContactEmail).toBeNull();
+      expect(account.mainContactName).toBeNull();
+      expect(account.mainContactCustomerId).toBeNull();
+    });
+
+    it("nulls existing mainContact fields when CUSTOMER_PII_FIELDS turns off", async () => {
+      const locationId = `gid://shopify/CompanyLocation/pii-turnoff-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/pii-turnoff-co-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "mainContactEmail", "mainContactName", "mainContactCustomerId",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Turn Off PII',
+          'was-stored@example.com', 'Was Stored', 'gid://shopify/Customer/was-stored',
+          NOW(), NOW()
+        )
+      `;
+
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
+      const location: ShopifyCompanyLocation = {
+        id: locationId,
+        name: "Turn Off PII",
+        company: {
+          id: companyId,
+          mainContact: {
+            customer: {
+              id: "gid://shopify/Customer/new-contact",
+              email: "new-contact@example.com",
+              displayName: "New Contact",
+            },
+          },
+        },
+      };
+
+      await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_UPDATE",
+        location,
+        `wh-pii-turnoff-${TEST_SUFFIX}`,
+        {}
+      );
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.mainContactEmail).toBeNull();
+      expect(account.mainContactName).toBeNull();
+      expect(account.mainContactCustomerId).toBeNull();
+    });
+
+    it("overwrites mainContact fields when contact changes", async () => {
+      const locationId = `gid://shopify/CompanyLocation/contact-change-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/contact-change-co-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "mainContactEmail", "mainContactName", "mainContactCustomerId",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Contact Change',
+          'old-contact@example.com', 'Old Contact', 'gid://shopify/Customer/old',
+          NOW(), NOW()
+        )
+      `;
+
+      // mainContact is on Company, not Location (B2B recipient is the company's main contact)
+      const location: ShopifyCompanyLocation = {
+        id: locationId,
+        name: "Contact Change",
+        company: {
+          id: companyId,
+          mainContact: {
+            customer: {
+              id: "gid://shopify/Customer/new",
+              email: "new-contact@example.com",
+              displayName: "New Contact",
+            },
+          },
+        },
+      };
+
+      await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_UPDATE",
+        location,
+        `wh-contact-change-${TEST_SUFFIX}`,
+        { CUSTOMER_PII_FIELDS: "1" }
+      );
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.mainContactEmail).toBe("new-contact@example.com");
+      expect(account.mainContactName).toBe("New Contact");
+      expect(account.mainContactCustomerId).toBe("gid://shopify/Customer/new");
+    });
+
+    it("nulls mainContact fields when contact is removed", async () => {
+      const locationId = `gid://shopify/CompanyLocation/contact-remove-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/contact-remove-co-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "mainContactEmail", "mainContactName", "mainContactCustomerId",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Contact Remove',
+          'had-contact@example.com', 'Had Contact', 'gid://shopify/Customer/had',
+          NOW(), NOW()
+        )
+      `;
+
+      const location: ShopifyCompanyLocation = {
+        id: locationId,
+        name: "Contact Remove",
+        company: { id: companyId },
+      };
+
+      await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_UPDATE",
+        location,
+        `wh-contact-remove-${TEST_SUFFIX}`,
+        { CUSTOMER_PII_FIELDS: "1" }
+      );
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.mainContactEmail).toBeNull();
+      expect(account.mainContactName).toBeNull();
+      expect(account.mainContactCustomerId).toBeNull();
+    });
+  });
+
+  describe("contactKnown=false preserves existing contact (bulk orphans, ACCESS_DENIED fallback)", () => {
+    it("preserves existing contact when contactKnown=false (orphan location from bulk chunk)", async () => {
+      const locationId = `gid://shopify/CompanyLocation/orphan-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/orphan-co-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "mainContactEmail", "mainContactName", "mainContactCustomerId",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Orphan Location',
+          'existing-contact@example.com', 'Existing Contact', 'gid://shopify/Customer/existing',
+          NOW(), NOW()
+        )
+      `;
+
+      const location: ShopifyCompanyLocation = {
+        id: locationId,
+        name: "Orphan Location Updated",
+        company: { id: companyId },
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_UPDATE",
+        location,
+        `wh-orphan-${TEST_SUFFIX}`,
+        { CUSTOMER_PII_FIELDS: "1" },
+        false
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId", name
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.mainContactEmail).toBe("existing-contact@example.com");
+      expect(account.mainContactName).toBe("Existing Contact");
+      expect(account.mainContactCustomerId).toBe("gid://shopify/Customer/existing");
+      expect(account.name).toBe("Orphan Location Updated");
+    });
+
+    it("preserves contact when contactKnown=false even if location has mainContact (orphan still preserves existing)", async () => {
+      const locationId = `gid://shopify/CompanyLocation/orphan-with-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/orphan-with-co-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "mainContactEmail", "mainContactName", "mainContactCustomerId",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'Has Existing Contact',
+          'keep-me@example.com', 'Keep Me', 'gid://shopify/Customer/keep',
+          NOW(), NOW()
+        )
+      `;
+
+      const location: ShopifyCompanyLocation = {
+        id: locationId,
+        name: "Has Existing Contact",
+        company: {
+          id: companyId,
+          mainContact: {
+            customer: {
+              id: "gid://shopify/Customer/ignore-this",
+              email: "ignore-this@example.com",
+              displayName: "Ignore This",
+            },
+          },
+        },
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_UPDATE",
+        location,
+        `wh-orphan-with-${TEST_SUFFIX}`,
+        { CUSTOMER_PII_FIELDS: "1" },
+        false
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.mainContactEmail).toBe("keep-me@example.com");
+      expect(account.mainContactName).toBe("Keep Me");
+      expect(account.mainContactCustomerId).toBe("gid://shopify/Customer/keep");
+    });
+
+    it("inserts new account with NULL contact when contactKnown=false (no existing row)", async () => {
+      const locationId = `gid://shopify/CompanyLocation/new-orphan-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/new-orphan-co-${TEST_SUFFIX}`;
+
+      const location: ShopifyCompanyLocation = {
+        id: locationId,
+        name: "New Orphan Location",
+        company: { id: companyId },
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        `wh-new-orphan-${TEST_SUFFIX}`,
+        { CUSTOMER_PII_FIELDS: "1" },
+        false
+      );
+
+      expect(result.success).toBe(true);
+
+      const [account] = await sql`
+        SELECT "mainContactEmail", "mainContactName", "mainContactCustomerId"
+        FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.mainContactEmail).toBeNull();
+      expect(account.mainContactName).toBeNull();
+      expect(account.mainContactCustomerId).toBeNull();
+    });
+  });
+
+  describe("shop/redact deletes BuyerAccount", () => {
+    it("removes BuyerAccount row entirely on shop deletion", async () => {
+      const { deleteShop } = await import("../../compliance/compliance.server");
+
+      const redactShopId = `shop-redact-${TEST_SUFFIX}`;
+      const redactDomain = `redact-test-${TEST_SUFFIX}.myshopify.com`;
+      const locationId = `gid://shopify/CompanyLocation/redact-${TEST_SUFFIX}`;
+
+      // Cleanup any leftover data from previous failed runs (belt and suspenders)
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${redactShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${redactShopId}`;
+
+      // Per #303: deleteShop skips erase when uninstalledAt IS NULL (shop reinstalled).
+      // Set uninstalledAt to simulate a genuinely uninstalled shop awaiting redact.
+      const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000); // 48h ago
+      await sql`
+        INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt", "uninstalledAt")
+        VALUES (${redactShopId}, ${redactDomain}, NOW(), NOW(), ${uninstalledAt})
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "mainContactEmail", "mainContactName", "mainContactCustomerId",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${redactShopId}, 'COMPANY', 'gid://shopify/Company/redact-co',
+          ${locationId}, 'To Be Deleted',
+          'deleted@example.com', 'Deleted Contact', 'gid://shopify/Customer/deleted',
+          NOW(), NOW()
+        )
+      `;
+
+      const [before] = await sql<{ id: string }[]>`
+        SELECT id FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(before).toBeDefined();
+
+      const result = await deleteShop(sql, redactDomain);
+      expect(result.deleted).toBe(true);
+      expect(result.skippedReinstalled).toBe(false);
+
+      // BuyerAccount row should be gone (cascade delete)
+      const after = await sql`
+        SELECT id FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(after).toHaveLength(0);
     });
   });
 });

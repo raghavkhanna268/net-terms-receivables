@@ -95,3 +95,13 @@ Only **Level 1 plus email and name** may be stored. **Phone and address are a fa
 - [ ] S12-30 through S12-34 pass. Release paths are audited, and a cleared bypass while over the limit returns to HELD.
 - [ ] DM-1 through DM-4 pass.
 - [ ] The blocking mechanism and the bypass permission model are documented in the repo, replacing the assumptions above.
+
+## 7. Main dev store (non-INR) smoke
+
+The main dev store stays USD (per the Team Lead ruling of 2026-10-26). The following smoke checks confirm that net-terms behaviour is correctly disabled and that held-fixture tooling refuses to operate on a non-target currency shop.
+
+- [ ] In the main dev store (non-INR shop), the net-terms payment method is hidden for **every** buyer, both held and non-held.
+- [ ] An ordinary checkout (a non-terms payment) still completes successfully.
+- [ ] The held-fixture re-seed refuses with error code `shop_currency_not_target` and writes nothing. Verify there are no new or changed rows or metafields.
+
+> **Note:** The INR held-fixture assertions (a held buyer is blocked, a non-held buyer sees terms) run on the throwaway INR store after PR #353, not on the main dev store.

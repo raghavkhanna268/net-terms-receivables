@@ -55,7 +55,7 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
 
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
-      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'uninstall-buyer@example.test', 'Uninstall Test Buyer', NOW())
+      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'uninstall-buyer@test-example.com', 'Uninstall Test Buyer', NOW())
       ON CONFLICT (shop_id, customer_id) DO NOTHING
     `;
 
@@ -98,7 +98,7 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
   describe("sendPaymentReminder - uninstalled shop", () => {
     it("skips with shop_uninstalled, no fetch, 0 ReminderLog rows", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.test-example.com", RESEND_TEST_RECIPIENTS: "uninstall-buyer@test-example.com" };
 
       const invoiceId = `inv-uninstall-send-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/uninstall-send-${TEST_SUFFIX}`;
@@ -154,7 +154,7 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
   describe("sendCatchupReminder - uninstalled shop", () => {
     it("deletes pre-existing delayed row when shop uninstalled", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.test-example.com", RESEND_TEST_RECIPIENTS: "uninstall-buyer@test-example.com" };
 
       const invoiceId = `inv-uninstall-catchup-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/uninstall-catchup-${TEST_SUFFIX}`;
