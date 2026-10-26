@@ -107,6 +107,11 @@ function createMockSql() {
       return mockResults.get("global_monthly") ?? [{ monthlyTotal: 0 }];
     }
 
+    // ReminderLog status lookup (for catch-up)
+    if (query.includes("FROM \"ReminderLog\"") && query.includes("status") && query.includes("SELECT")) {
+      return mockResults.get("log_status") ?? [];
+    }
+
     // ReminderRule lookup
     if (query.includes("FROM \"ReminderRule\"") && query.includes("WHERE id")) {
       return mockResults.get("rule") ?? [];
@@ -259,7 +264,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         -3,
-        "Asia/Kolkata",
         {} // No RESEND_API_KEY
       );
 
@@ -333,7 +337,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -378,7 +381,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -437,7 +439,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -459,7 +460,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -501,7 +501,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -548,7 +547,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -615,9 +613,7 @@ describe("Payment Reminders (S18)", () => {
         "shop-123",
         "inv-123",
         "rule-123",
-        0,
-        "Asia/Kolkata",
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(false);
@@ -645,9 +641,7 @@ describe("Payment Reminders (S18)", () => {
         "shop-123",
         "inv-123",
         "rule-123",
-        0,
-        "Asia/Kolkata",
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(false);
@@ -682,9 +676,7 @@ describe("Payment Reminders (S18)", () => {
         "shop-123",
         "inv-123",
         "rule-123",
-        0,
-        "Asia/Kolkata",
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(false);
@@ -715,9 +707,7 @@ describe("Payment Reminders (S18)", () => {
         "shop-123",
         "inv-123",
         "rule-123",
-        0,
-        "Asia/Kolkata",
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(false);
@@ -747,9 +737,7 @@ describe("Payment Reminders (S18)", () => {
         "shop-123",
         "inv-123",
         "rule-123",
-        0,
-        "Asia/Kolkata",
-        validEnv
+        0,validEnv
       );
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -777,7 +765,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "reminders@myapp.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -841,9 +828,7 @@ describe("Payment Reminders (S18)", () => {
         "shop-123",
         "inv-123",
         "rule-123",
-        0,
-        "Asia/Kolkata",
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(false);
@@ -889,7 +874,6 @@ describe("Payment Reminders (S18)", () => {
         "inv-123",
         "rule-123",
         0,
-        "Asia/Kolkata",
         { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@example.test" }
       );
 
@@ -1644,7 +1628,6 @@ describe("sendPaymentReminder - buyerAccountId null handling", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       {
         RESEND_API_KEY: "re_test_1234",
         RESEND_FROM: "noreply@example.com",
@@ -1722,7 +1705,6 @@ describe("sendPaymentReminder - SHOPIFY_APP_URL gate", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       {
         RESEND_API_KEY: "re_test_1234",
         RESEND_FROM: "noreply@example.com",
@@ -1776,7 +1758,6 @@ describe("sendPaymentReminder - SHOPIFY_APP_URL gate", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       {
         RESEND_API_KEY: "re_test_1234",
         RESEND_FROM: "noreply@example.com",
@@ -1789,5 +1770,564 @@ describe("sendPaymentReminder - SHOPIFY_APP_URL gate", () => {
     expect(result.action).toBe("skipped");
     expect(result.skipReason).toContain("SHOPIFY_APP_URL not configured");
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendPaymentReminder - timezone from invoice.shopTimezone only (#320)", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleLogSpy.mockRestore();
+  });
+
+  it("uses invoice.shopTimezone for send window check when shop is in America/Los_Angeles", async () => {
+    // Mock DateTime.now() to return a time that is:
+    // - 10:00 in America/Los_Angeles (within 09-19 window)
+    // - 22:30 in Asia/Kolkata (OUTSIDE 09-19 window)
+    // If the code incorrectly uses default Asia/Kolkata, it would reject as outside window.
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T17:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+    
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-tz-test",
+      shopId: "shop-la",
+      shopDomain: "test-la-shop.myshopify.com",
+      shopTimezone: "America/Los_Angeles",
+      invoiceName: "#TZ-001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: DateTime.fromISO("2026-10-24T12:00:00", { zone: "America/Los_Angeles" }).toJSDate(),
+      status: "open",
+      buyerAccountId: "buyer-tz",
+      customerId: "gid://shopify/Customer/tz-test",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "LA Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-tz-test" }),
+    });
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-la",
+      "inv-tz-test",
+      "rule-tz",
+      0,
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "buyer@example.test",
+      }
+    );
+
+    // Should NOT return outside_window because LA is in the 09-19 window at 10:00
+    expect(result.action).not.toBe("outside_window");
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("sent");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses invoice.shopTimezone for isReminderDueToday check even when UTC dates differ", async () => {
+    // Mock DateTime.now() to return a time where:
+    // - LA timezone: Oct 24 at 16:00 (within window)
+    // - Asia/Kolkata: Oct 25 at 04:30 (different calendar date!)
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T23:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+    
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-tz-day-test",
+      shopId: "shop-la",
+      shopDomain: "test-la-shop.myshopify.com",
+      shopTimezone: "America/Los_Angeles",
+      invoiceName: "#TZ-002",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: DateTime.fromISO("2026-10-24T12:00:00", { zone: "America/Los_Angeles" }).toJSDate(),
+      status: "open",
+      buyerAccountId: "buyer-tz",
+      customerId: "gid://shopify/Customer/tz-test2",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "LA Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-id-2" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-tz-day-test" }),
+    });
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-la",
+      "inv-tz-day-test",
+      "rule-tz-day",
+      0,
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "buyer@example.test",
+      }
+    );
+
+    // If the code correctly uses invoice.shopTimezone (LA), it should recognize
+    // that today is Oct 24 in LA and the due-day check passes.
+    // If it incorrectly used Asia/Kolkata, it would think it's Oct 25 and fail.
+    // skipReason is undefined when no skip occurred (good case)
+    if (result.skipReason) {
+      expect(result.skipReason).not.toContain("Not the reminder day");
+    }
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("sent");
+  });
+
+  it("sendPaymentReminder with invalid Shop.timezone falls back to Asia/Kolkata", async () => {
+    // Test that an invalid timezone stored in Shop.timezone falls back correctly
+    // by driving the real function, not just calling validateTimezone directly.
+    const { DateTime } = await import("luxon");
+    // Set time to 10:00 UTC = 15:30 IST (Asia/Kolkata) = within 09-19 window
+    const mockNow = DateTime.fromISO("2026-10-24T10:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+    
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const mockInvoice = {
+      invoiceId: "inv-invalid-tz",
+      shopId: "shop-invalid-tz",
+      shopDomain: "test-invalid-tz.myshopify.com",
+      shopTimezone: "Invalid/Zone", // Invalid timezone - should fall back to Asia/Kolkata
+      invoiceName: "#INV-TZ-001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: DateTime.fromISO("2026-10-24T12:00:00", { zone: "Asia/Kolkata" }).toJSDate(),
+      status: "open",
+      buyerAccountId: "buyer-invalid-tz",
+      customerId: "gid://shopify/Customer/invalid-tz-test",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Invalid TZ Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-invalid-tz" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-invalid-tz-test" }),
+    });
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-invalid-tz",
+      "inv-invalid-tz",
+      "rule-invalid-tz",
+      0,
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "buyer@example.test",
+      }
+    );
+
+    // Should succeed because Asia/Kolkata fallback at 15:30 IST is within 09-19 window
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("sent");
+  });
+
+  it("email date text uses shop's local date when UTC and shop dates differ", async () => {
+    // At 2026-10-24T23:00 UTC:
+    // - UTC: Oct 24
+    // - America/Los_Angeles (UTC-7): Oct 24 at 16:00 (within window)
+    // The invoice dueAt should be formatted in LA time, not UTC.
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T23:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+    
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    // Due date is Oct 27 in LA timezone
+    const dueDate = DateTime.fromISO("2026-10-27T12:00:00", { zone: "America/Los_Angeles" }).toJSDate();
+
+    const mockInvoice = {
+      invoiceId: "inv-date-text",
+      shopId: "shop-date-text",
+      shopDomain: "test-date-text.myshopify.com",
+      shopTimezone: "America/Los_Angeles",
+      shopName: "Test Store LA",
+      invoiceName: "#DATE-001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: dueDate,
+      status: "open",
+      buyerAccountId: "buyer-date-text",
+      buyerName: "Date Buyer",
+      customerId: "gid://shopify/Customer/date-text-test",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Date Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-date" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    let capturedEmailBody: string | undefined;
+    mockFetch.mockImplementationOnce(async (url, options) => {
+      capturedEmailBody = (options as { body?: string })?.body;
+      return {
+        ok: true,
+        json: async () => ({ id: "email-date-text-test" }),
+      };
+    });
+
+    const result = await sendPaymentReminder(
+      mockSql,
+      "shop-date-text",
+      "inv-date-text",
+      "rule-date-text",
+      -3, // 3 days before due
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "buyer@example.test",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("sent");
+    
+    // Verify the email body contains the date formatted in shop's timezone
+    // The date should be "October 27, 2026" (LA time), not UTC
+    expect(capturedEmailBody).toBeDefined();
+    const parsed = JSON.parse(capturedEmailBody!);
+    expect(parsed.html).toContain("October 27, 2026");
+  });
+});
+
+describe("handleReminderSend/handleReminderCatchup - message.timezone ignored (#320)", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleLogSpy.mockRestore();
+  });
+
+  it("handleReminderSend follows shop timezone when message.timezone disagrees", async () => {
+    // Message has Pacific/Kiritimati (UTC+14), Shop has America/Los_Angeles (UTC-7/UTC-8)
+    // At 2026-10-24T18:00 UTC:
+    // - Pacific/Kiritimati (UTC+14): Oct 25 at 08:00 (OUTSIDE 09-19 window)
+    // - America/Los_Angeles (UTC-7): Oct 24 at 11:00 (WITHIN 09-19 window)
+    // If handler used message.timezone (Kiritimati), it would skip as outside_window.
+    // If it correctly uses Shop.timezone (LA), it proceeds.
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T18:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { handleReminderSend } = await import("../../jobs/reminders");
+
+    const mockRule = { id: "rule-disagree", shopId: "shop-disagree", offsetDays: 0, enabled: true };
+    mockSql.setMockResult("rule", [mockRule]);
+
+    const mockInvoice = {
+      invoiceId: "inv-disagree",
+      shopId: "shop-disagree",
+      shopDomain: "test-disagree.myshopify.com",
+      shopTimezone: "America/Los_Angeles", // SHOP timezone is LA
+      invoiceName: "#DIS-001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: DateTime.fromISO("2026-10-24T12:00:00", { zone: "America/Los_Angeles" }).toJSDate(),
+      status: "open",
+      buyerAccountId: "buyer-disagree",
+      customerId: "gid://shopify/Customer/disagree-test",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Disagree Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-disagree" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@example.com";
+    process.env.REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
+    process.env.SHOPIFY_APP_URL = "https://net-terms-receivables.raghavkhanna.workers.dev";
+    process.env.RESEND_TEST_RECIPIENTS = "buyer@example.test";
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-disagree-test" }),
+    });
+
+    const message = {
+      topic: "REMINDER_SEND" as const,
+      shop: "test-disagree.myshopify.com",
+      shopId: "shop-disagree",
+      invoiceId: "inv-disagree",
+      ruleId: "rule-disagree",
+      offsetDays: 0,
+      timezone: "Pacific/Kiritimati", // MESSAGE timezone disagrees - should be IGNORED
+      webhookId: "s18_inv-disagree_rule-disagree_2026-10-24",
+      enqueuedAt: "2026-10-24T18:00:00Z",
+    };
+
+    const result = await handleReminderSend(mockSql, message);
+
+    // Should NOT be outside_window because LA (shop timezone) is in window
+    expect(result.action).not.toBe("skipped");
+    if (result.skipReason) {
+      expect(result.skipReason).not.toContain("Outside send window");
+    }
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("created"); // handleReminderSend maps 'sent' to 'created'
+  });
+
+  it("handleReminderCatchup follows shop timezone when message.timezone disagrees", async () => {
+    // Same timezone disagreement scenario for catch-up handler
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T18:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { handleReminderCatchup } = await import("../../jobs/reminders");
+
+    const mockRule = { id: "rule-catchup-disagree", shopId: "shop-catchup-disagree", offsetDays: 0, enabled: true };
+    mockSql.setMockResult("rule", [mockRule]);
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+
+    const mockInvoice = {
+      invoiceId: "inv-catchup-disagree",
+      shopId: "shop-catchup-disagree",
+      shopDomain: "test-catchup-disagree.myshopify.com",
+      shopTimezone: "America/Los_Angeles",
+      invoiceName: "#CAT-001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      // Due date 2 days ago for catch-up (D+2)
+      dueAt: DateTime.fromISO("2026-10-22T12:00:00", { zone: "America/Los_Angeles" }).toJSDate(),
+      status: "open",
+      buyerAccountId: "buyer-catchup-disagree",
+      customerId: "gid://shopify/Customer/catchup-disagree-test",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+    mockSql.setMockResult("customer", [{ email: "buyer@example.test", displayName: "Catchup Buyer" }]);
+    mockSql.setMockResult("claim_slot", [{ id: "new-log-catchup-disagree" }]);
+    mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
+
+    process.env.RESEND_API_KEY = "re_test_1234";
+    process.env.RESEND_FROM = "noreply@example.com";
+    process.env.REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
+    process.env.SHOPIFY_APP_URL = "https://net-terms-receivables.raghavkhanna.workers.dev";
+    process.env.RESEND_TEST_RECIPIENTS = "buyer@example.test";
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-catchup-disagree-test" }),
+    });
+
+    const message = {
+      topic: "REMINDER_CATCHUP" as const,
+      shop: "test-catchup-disagree.myshopify.com",
+      shopId: "shop-catchup-disagree",
+      invoiceId: "inv-catchup-disagree",
+      ruleId: "rule-catchup-disagree",
+      logId: "log-catchup-disagree",
+      offsetDays: 0,
+      timezone: "Pacific/Kiritimati", // MESSAGE timezone disagrees - should be IGNORED
+      webhookId: "s18_inv-catchup-disagree_rule-catchup-disagree_2026-10-24",
+      enqueuedAt: "2026-10-24T18:00:00Z",
+    };
+
+    const result = await handleReminderCatchup(mockSql, message);
+
+    // Should NOT be outside_window because LA (shop timezone) is in window
+    if (result.skipReason) {
+      expect(result.skipReason).not.toContain("Outside send window");
+    }
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("sendCatchupReminder - outside window + missing invoice behavior (#320)", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleLogSpy.mockRestore();
+  });
+
+  it("missing invoice outside window: deletes delayed row, returns skipped (not outside_window)", async () => {
+    // At 2026-10-24T05:00 UTC = 10:30 IST (within window for Asia/Kolkata)
+    // But for a shop with America/Los_Angeles, this is 22:00 PDT (OUTSIDE 09-19 window)
+    // With the invoice missing, the code should:
+    // 1. Not be able to check send window (no shopTimezone yet)
+    // 2. Fetch invoice -> not found
+    // 3. Delete the delayed row and return "Invoice not found"
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T05:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendCatchupReminder } = await import("../reminders.server");
+
+    // Log status shows delayed
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+    // Invoice NOT found
+    mockSql.setMockResult("invoice", []);
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-missing",
+      "inv-missing",
+      "rule-missing",
+      "log-missing",
+      0,
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://net-terms-receivables.raghavkhanna.workers.dev",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toBe("Invoice not found");
+    // The delayed row should be deleted - orphaned rows for missing invoices are cleaned up
+    const calls = mockSql.getAllCalls();
+    const deleteCall = calls.find(q => q.includes("DELETE") && q.includes("ReminderLog"));
+    expect(deleteCall).toBeDefined();
+  });
+
+  it("present invoice outside window: returns outside_window, keeps delayed row", async () => {
+    // At 2026-10-24T05:00 UTC = 22:00 LA time (OUTSIDE 09-19 window)
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T05:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendCatchupReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+
+    const mockInvoice = {
+      invoiceId: "inv-outside-window",
+      shopId: "shop-outside-window",
+      shopDomain: "test-outside.myshopify.com",
+      shopTimezone: "America/Los_Angeles", // 05:00 UTC = 22:00 LA = OUTSIDE window
+      invoiceName: "#OUT-001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: DateTime.fromISO("2026-10-22T12:00:00", { zone: "America/Los_Angeles" }).toJSDate(),
+      status: "open",
+      buyerAccountId: "buyer-outside",
+      customerId: "gid://shopify/Customer/outside-test",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-outside-window",
+      "inv-outside-window",
+      "rule-outside-window",
+      "log-outside-window",
+      0,
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://net-terms-receivables.raghavkhanna.workers.dev",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("outside_window");
+    expect(result.skipReason).toContain("Outside send window");
+    // The delayed row should NOT be deleted - keep it for retry in next window
+    const calls = mockSql.getAllCalls();
+    const deleteCall = calls.find(q => q.includes("DELETE") && q.includes("ReminderLog"));
+    expect(deleteCall).toBeUndefined();
   });
 });

@@ -186,7 +186,6 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       {} // No RESEND_API_KEY - triggers "reminders disabled"
     );
 
@@ -242,7 +241,6 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@pii-reminder-test.com,buyer@example.test" }
     );
 
@@ -306,7 +304,6 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "inv-r1",
       "rule-r1",
       0,
-      "Asia/Kolkata",
       { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@pii-reminder-test.com,buyer@example.test" }
     );
 
@@ -380,7 +377,6 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
       "inv-r1-http",
       "rule-r1-http",
       0,
-      "Asia/Kolkata",
       { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "buyer@pii-reminder-test.com,buyer@example.test" }
     );
 

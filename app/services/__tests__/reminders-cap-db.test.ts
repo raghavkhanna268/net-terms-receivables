@@ -249,8 +249,8 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
 
       try {
         const [result1, result2] = await Promise.all([
-          sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId1, TEST_RULE_ID, 0, "Asia/Kolkata", validEnv),
-          sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId2, TEST_RULE_ID, 0, "Asia/Kolkata", validEnv),
+          sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId1, TEST_RULE_ID, 0, validEnv),
+          sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId2, TEST_RULE_ID, 0, validEnv),
         ]);
 
         expect(result1.success).toBe(true);
@@ -302,7 +302,7 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
         const N = 5;
         const results = await Promise.all(
           Array.from({ length: N }, () =>
-            sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, 0, "Asia/Kolkata", validEnv)
+            sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, 0, validEnv)
           )
         );
 

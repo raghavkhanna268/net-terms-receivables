@@ -228,9 +228,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         TEST_SHOP_ID,
         invoiceId,
         TEST_RULE_ID_1,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(true);
@@ -335,9 +333,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         invoiceId,
         TEST_RULE_ID_1,
         logIdDelayed,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(true);
@@ -386,9 +382,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         invoiceId,
         TEST_RULE_ID_1,
         logId,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(true);
@@ -488,9 +482,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           invoiceId,
           ruleId3,
           logIdDelayed,
-          14,
-          testTimezone,
-          validEnv
+          14,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -531,9 +523,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         TEST_SHOP_ID,
         invoiceId,
         TEST_RULE_ID_1,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
       expect(sendResult1.action).toBe("sent");
 
@@ -543,9 +533,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         TEST_SHOP_ID,
         invoiceId,
         TEST_RULE_ID_1,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(sendResult2.success).toBe(true);
@@ -592,9 +580,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         invoiceId,
         TEST_RULE_ID_1,
         logId,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
       expect(result1.action).toBe("sent");
 
@@ -605,9 +591,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         invoiceId,
         TEST_RULE_ID_1,
         logId,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(result2.success).toBe(true);
@@ -797,9 +781,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         TEST_SHOP_ID,
         invoiceId,
         TEST_RULE_ID_1,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(true);
@@ -839,9 +821,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         TEST_SHOP_ID,
         invoiceId,
         TEST_RULE_ID_1,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(true);
@@ -899,9 +879,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         invoiceId,
         TEST_RULE_ID_1,
         logId,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
 
       expect(result.success).toBe(true);
@@ -955,9 +933,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         invoiceId,
         TEST_RULE_ID_1,
         logIdStage1,
-        0,
-        testTimezone,
-        validEnv
+        0,validEnv
       );
       expect(resultCatchup.success).toBe(true);
       expect(resultCatchup.action).toBe("skipped");
@@ -968,9 +944,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         TEST_SHOP_ID,
         invoiceId,
         TEST_RULE_ID_2,
-        7,
-        testTimezone,
-        validEnv
+        7,validEnv
       );
       expect(resultSend.success).toBe(true);
       expect(resultSend.action).toBe("sent");
@@ -1162,9 +1136,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           invoiceId,
           TEST_RULE_ID_1,
           logId,
-          0,
-          testTimezone,
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(false);
@@ -1252,9 +1224,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           invoiceId,
           TEST_RULE_ID_1,
           logId,
-          0,
-          testTimezone,
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -1303,9 +1273,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           invoiceId,
           TEST_RULE_ID_1,
           logId,
-          0,
-          testTimezone,
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -1368,9 +1336,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           invoiceId,
           TEST_RULE_ID_1,
           logId,
-          0,
-          testTimezone,
-          envWithAllowlist
+          0,envWithAllowlist
         );
 
         expect(result.success).toBe(true);
@@ -1435,9 +1401,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           invoiceId,
           TEST_RULE_ID_1,
           logId,
-          0,
-          testTimezone,
-          envEmptyAllowlist
+          0,envEmptyAllowlist
         );
 
         expect(result.success).toBe(true);
@@ -1508,9 +1472,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
           invoiceId,
           TEST_RULE_ID_1,
           logId,
-          0,
-          testTimezone,
-          envUnsetAllowlist
+          0,envUnsetAllowlist
         );
 
         expect(result.success).toBe(true);
