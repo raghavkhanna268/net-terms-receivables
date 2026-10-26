@@ -135,7 +135,8 @@ export async function deleteProcessedWebhooksViaReceipts(
  */
 export async function deleteShop(
   sql: Sql,
-  shopDomain: string
+  shopDomain: string,
+  triggeredAt?: Date | null
 ): Promise<DeleteShopResult> {
   return sql.begin(async (tx) => {
     // LOCK ORDER: Shop row first, then s6_bulk_operations/claims rows. This order
@@ -150,7 +151,18 @@ export async function deleteShop(
     // If the shop exists but uninstalledAt is NULL, the shop reinstalled after
     // the uninstall that triggered this shop/redact. Skip deletion to preserve
     // the reinstalled shop's data. See issue #291.
-    if (lockedShop && lockedShop.uninstalledAt === null) {
+    //
+    // Additionally, if triggeredAt is provided and uninstalledAt is NEWER than
+    // triggeredAt - 47 hours, the shop was reinstalled after the uninstall that
+    // triggered this webhook. Skip deletion to preserve the reinstalled shop's data.
+    const skipReinstall =
+      lockedShop &&
+      (lockedShop.uninstalledAt === null ||
+        (triggeredAt &&
+          lockedShop.uninstalledAt.getTime() >
+            triggeredAt.getTime() - 47 * 60 * 60 * 1000));
+
+    if (skipReinstall) {
       return {
         deleted: false,
         shopId: lockedShop.id,

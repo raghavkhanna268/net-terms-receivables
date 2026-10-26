@@ -792,7 +792,8 @@ describe("webhooks.compliance", () => {
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalledWith(
         expect.anything(),
-        "test-shop.myshopify.com"
+        "test-shop.myshopify.com",
+        null
       );
     });
 
@@ -961,7 +962,8 @@ describe("webhooks.compliance", () => {
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalledWith(
         expect.anything(),
-        "test-reinstalled.myshopify.com"
+        "test-reinstalled.myshopify.com",
+        null
       );
     });
 
@@ -1009,7 +1011,160 @@ describe("webhooks.compliance", () => {
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalledWith(
         expect.anything(),
-        "test-erase.myshopify.com"
+        "test-erase.myshopify.com",
+        null
+      );
+    });
+
+    // REVERT NOTE: This test FAILS if the triggeredAt header passthrough is reverted.
+    it("passes X-Shopify-Triggered-At header to deleteShop when present", async () => {
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-trigat-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 1,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: "test-trigat.myshopify.com", shop_id: 789 };
+      const triggeredAtIso = "2026-10-25T12:00:00.000Z";
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-trigat.myshopify.com",
+        topic: "shop/redact",
+        webhookId: "test-webhook-trigat",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+      mockParseTriggeredAt.mockReturnValue(new Date(triggeredAtIso));
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Triggered-At": triggeredAtIso,
+        },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockParseTriggeredAt).toHaveBeenCalledWith(request);
+      expect(mockDeleteShop).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-trigat.myshopify.com",
+        new Date(triggeredAtIso)
+      );
+    });
+
+    it("passes null to deleteShop when X-Shopify-Triggered-At header is missing", async () => {
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-no-trigat-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 1,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: "test-no-trigat.myshopify.com", shop_id: 101 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-no-trigat.myshopify.com",
+        topic: "shop/redact",
+        webhookId: "test-webhook-no-trigat",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+      mockParseTriggeredAt.mockReturnValue(null);
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockParseTriggeredAt).toHaveBeenCalledWith(request);
+      expect(mockDeleteShop).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-no-trigat.myshopify.com",
+        null
+      );
+    });
+
+    it("passes null to deleteShop when X-Shopify-Triggered-At header is unparsable", async () => {
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-bad-trigat-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 1,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: "test-bad-trigat.myshopify.com", shop_id: 202 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-bad-trigat.myshopify.com",
+        topic: "shop/redact",
+        webhookId: "test-webhook-bad-trigat",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+      mockParseTriggeredAt.mockReturnValue(null);
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Triggered-At": "not-a-valid-date",
+        },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockParseTriggeredAt).toHaveBeenCalledWith(request);
+      expect(mockDeleteShop).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-bad-trigat.myshopify.com",
+        null
       );
     });
   });
