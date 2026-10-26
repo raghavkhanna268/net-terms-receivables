@@ -57,10 +57,13 @@ export default function App() {
   return (
     <AppProvider apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app">Dashboard</s-link>
+        {/* @ts-expect-error rel="home" is valid per Shopify App Bridge docs but not in @shopify/polaris-types */}
+        <s-link href="/app" rel="home">Home</s-link>
         <s-link href="/app/reconcile">Reconcile</s-link>
-        <s-link href="/app/plan">Plan</s-link>
+        <s-link href="/app/imports">Imports</s-link>
+        <s-link href="/app/settings/reminders">Reminders</s-link>
         <s-link href="/app/tag-rules">Tag Rules</s-link>
+        <s-link href="/app/plan">Plan</s-link>
         <s-link href="/app/onboarding">Setup Guide</s-link>
         {/* Future navigation items for B2B features */}
         {/* <s-link href="/app/buyers">Buyers</s-link> */}
