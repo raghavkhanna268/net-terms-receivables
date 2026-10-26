@@ -418,7 +418,7 @@ describe("app.onboarding", () => {
 
       expect(result.error).toBeNull();
       expect(result.state).not.toBeNull();
-      expect(result.state?.steps).toHaveLength(5);
+      expect(result.state?.steps).toHaveLength(4); // default-terms step removed
       expect(result.state?.isComplete).toBe(true);
       expect(result.shopId).toBe(TEST_SHOP_ID);
       expect(result.registrationStatus).not.toBeNull();

@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { existsSync } from "fs";
+import { join } from "path";
 import {
   computeDefaultTermsStep,
   computeBuyerSetupStep,
@@ -13,7 +15,7 @@ import {
 } from "../onboarding-steps.server";
 
 describe("onboarding-steps", () => {
-  describe("computeDefaultTermsStep", () => {
+  describe("computeDefaultTermsStep (deprecated, no longer in computeOnboardingState)", () => {
     it("returns complete when defaultTermsDays is set", () => {
       const step = computeDefaultTermsStep(30);
       expect(step.status).toBe("complete");
@@ -185,13 +187,19 @@ describe("onboarding-steps", () => {
     it("returns incomplete state when no steps are done", () => {
       const state = computeOnboardingState(baseInputs);
       expect(state.isComplete).toBe(false);
-      expect(state.steps).toHaveLength(5);
+      expect(state.steps).toHaveLength(4);
+    });
+
+    it("does not include default-terms step (removed in favor of future settings page)", () => {
+      const state = computeOnboardingState(baseInputs);
+      const defaultTermsStep = state.steps.find((s) => s.id === "default-terms");
+      expect(defaultTermsStep).toBeUndefined();
     });
 
     it("returns complete state when all required steps are done", () => {
       const inputs: OnboardingStepInputs = {
         ...baseInputs,
-        defaultTermsDays: 30,
+        defaultTermsDays: 30, // still in inputs but not used for onboarding
         buyerAccountCount: 5,
         validation: {
           id: "gid://shopify/Validation/123",
@@ -241,8 +249,8 @@ describe("onboarding-steps", () => {
       const state = {
         steps: [],
         isComplete: true,
-        completedCount: 5,
-        totalCount: 5,
+        completedCount: 4,
+        totalCount: 4,
         dismissedAt: null,
       };
       expect(shouldShowOnboarding(state)).toBe(false);
@@ -253,7 +261,7 @@ describe("onboarding-steps", () => {
         steps: [],
         isComplete: false,
         completedCount: 2,
-        totalCount: 5,
+        totalCount: 4,
         dismissedAt: new Date(),
       };
       expect(shouldShowOnboarding(state)).toBe(false);
@@ -264,7 +272,7 @@ describe("onboarding-steps", () => {
         steps: [],
         isComplete: false,
         completedCount: 2,
-        totalCount: 5,
+        totalCount: 4,
         dismissedAt: null,
       };
       expect(shouldShowOnboarding(state)).toBe(true);
@@ -323,6 +331,37 @@ describe("onboarding-steps", () => {
         expect(["complete", "pending", "attention", "coming_soon"]).toContain(
           step.status
         );
+      }
+    });
+  });
+
+  describe("step actionUrls resolve to existing routes", () => {
+    it("all internal actionUrls have corresponding route files", () => {
+      const inputs: OnboardingStepInputs = {
+        shopId: "shop-123",
+        defaultTermsDays: null,
+        buyerAccountCount: 0,
+        tagRuleCount: 0,
+        validation: null,
+        paymentCustomization: null,
+        resendApiKeyConfigured: false,
+        dismissedAt: null,
+      };
+
+      const state = computeOnboardingState(inputs);
+      const routesDir = join(process.cwd(), "app/routes");
+
+      for (const step of state.steps) {
+        if (step.actionUrl && step.actionUrl.startsWith("/app/")) {
+          const routePath = step.actionUrl
+            .replace(/^\/app/, "app")
+            .replace(/\//g, ".");
+          const routeFile = join(routesDir, `${routePath}.tsx`);
+          expect(
+            existsSync(routeFile),
+            `Step '${step.id}' actionUrl '${step.actionUrl}' should resolve to route file '${routeFile}'`
+          ).toBe(true);
+        }
       }
     });
   });
