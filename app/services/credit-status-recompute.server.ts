@@ -266,6 +266,7 @@ export async function recomputeCreditStatus(
  * @param buyerAccountId - Buyer account ID to recompute
  * @param source - Source of the recompute (for audit)
  */
+// Must be called with root Sql, never a TransactionSql (nested begin).
 export async function enqueueCreditStatusRecompute(
   sql: Sql,
   shopDomain: string,
