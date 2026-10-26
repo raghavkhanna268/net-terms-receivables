@@ -274,6 +274,102 @@ describe("Tag Rules Route", () => {
       expect(result.error).toBeNull();
       expect(result.shopId).toBe("shop-123");
     });
+
+    it("does not call getUsageStats when gating flag is off", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { isGatingEnforced, getUsageStats } = await import("~/services/gating.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      (getUsageStats as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // COMPANY check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Tag rules fetch
+      mockSql.mockResolvedValueOnce([]);
+
+      const { loader } = await import("../app.tag-rules");
+      const rawResult = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractLoaderData(rawResult);
+      
+      // getUsageStats should NOT have been called when flag is off
+      expect(getUsageStats).not.toHaveBeenCalled();
+      // Banner should not show
+      expect((result as { newAccountsPausedBanner?: { show: boolean } }).newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("loader resolves with no banner when gating flag is on but getUsageStats rejects", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { isGatingEnforced, getUsageStats } = await import("~/services/gating.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Database error"));
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // COMPANY check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Tag rules fetch
+      mockSql.mockResolvedValueOnce([]);
+
+      const { loader } = await import("../app.tag-rules");
+      const rawResult = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractLoaderData(rawResult);
+      
+      // Loader should resolve despite getUsageStats error (fail-soft)
+      expect(result.error).toBeNull();
+      // Banner should not show when getUsageStats fails
+      expect((result as { newAccountsPausedBanner?: { show: boolean } }).newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("shows banner when gating flag is on and usage is at limit", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { isGatingEnforced, getUsageStats } = await import("~/services/gating.server");
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      // At limit: current=25, limit=25
+      (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
+        companies: { current: 25, limit: 25 },
+        importsThisMonth: { current: 0, limit: -1 },
+      });
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // COMPANY check - none found
+      mockSql.mockResolvedValueOnce([]);
+      // Tag rules fetch
+      mockSql.mockResolvedValueOnce([]);
+
+      const { loader } = await import("../app.tag-rules");
+      const rawResult = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractLoaderData(rawResult);
+      
+      // Banner should show when at limit
+      expect((result as { newAccountsPausedBanner?: { show: boolean; heading?: string } }).newAccountsPausedBanner?.show).toBe(true);
+      expect((result as { newAccountsPausedBanner?: { heading?: string } }).newAccountsPausedBanner?.heading).toBeDefined();
+    });
   });
 
   describe("action - validation", () => {
@@ -1613,5 +1709,47 @@ describe("S24: Finishing setup empty state (real render)", () => {
     expect(html).toContain("Net");
     expect(html).toContain("30");
     expect(html).toContain("days");
+  });
+
+  it("renders newAccountsPausedBanner when show is true", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          storeMode: "tag_based",
+          tagRules: [],
+          shopId: "shop-123",
+          error: null,
+          finishingSetup: false,
+          newAccountsPausedBanner: {
+            show: true,
+            heading: "New accounts paused",
+            bodyText: "You've reached your plan's account limit.",
+            upgradeUrl: "https://admin.shopify.com/store/test/charges/net-terms/pricing_plans",
+          },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle" }),
+        useRevalidator: () => ({ revalidate: vi.fn(), state: "idle" }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: TagRulesPage } = await import("../app.tag-rules");
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    // Verify banner renders with correct content
+    expect(html).toContain("s-banner");
+    expect(html).toContain("New accounts paused");
+    expect(html).toContain("account limit");
+    expect(html).toContain("Upgrade your plan");
+    expect(html).toContain("https://admin.shopify.com/store/test/charges/net-terms/pricing_plans");
   });
 });

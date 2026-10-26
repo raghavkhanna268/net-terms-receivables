@@ -778,6 +778,56 @@ describe("app.accounts.$id loader syncState", () => {
       expect(result.upgradeUrl).toContain("test-shop");
     });
   });
+
+  describe("newAccountsPausedBanner gating behavior", () => {
+    it("does not call getUsageStats when gating flag is off", async () => {
+      const { getUsageStats } = await import("~/services/gating.server");
+      (getUsageStats as ReturnType<typeof vi.fn>).mockClear();
+      mockIsGatingEnforced.mockReturnValue(false);
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      // getUsageStats should NOT have been called when flag is off
+      expect(getUsageStats).not.toHaveBeenCalled();
+      // Banner should not show
+      expect(result.newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("loader resolves with no banner when gating flag is on but getUsageStats rejects", async () => {
+      const { getUsageStats } = await import("~/services/gating.server");
+      mockIsGatingEnforced.mockReturnValue(true);
+      (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Database error"));
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      // Loader should resolve despite getUsageStats error (fail-soft)
+      expect(result.error).toBeNull();
+      // Banner should not show when getUsageStats fails
+      expect(result.newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("shows banner when gating flag is on and usage is at limit", async () => {
+      const { getUsageStats } = await import("~/services/gating.server");
+      mockIsGatingEnforced.mockReturnValue(true);
+      // At limit: current=25, limit=25
+      (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
+        companies: { current: 25, limit: 25 },
+        importsThisMonth: { current: 0, limit: -1 },
+      });
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      // Banner should show when at limit
+      expect(result.newAccountsPausedBanner?.show).toBe(true);
+      expect(result.newAccountsPausedBanner?.heading).toBeDefined();
+    });
+  });
 });
 
 import { updateCreditStatus } from "~/services/credit-status.server";

@@ -332,24 +332,33 @@ describe("Gating Service", () => {
       expect(reactivated).toBe(0);
     });
 
-    it("returns 0 immediately when flag is off (no sql.begin call)", async () => {
+    it("reactivates gated accounts even when flag is off", async () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
       vi.resetModules();
       const { reactivateGatedAccounts } = await import("../gating.server");
       
-      // Clear any prior calls before this test
-      (mockSql.begin as ReturnType<typeof vi.fn>).mockClear();
+      // Set plan to starter (limit 25) - plan lookup still happens
+      mockSql.setMockResult("shop_plan", [{
+        plan_key: "starter",
+        subscription_id: "sub-123",
+        subscription_name: "Starter",
+        is_test: false,
+        plan_cached_at: new Date(),
+      }]);
       
-      // Should return 0 without calling any SQL
-      // The function returns early when flag is off
+      // Currently 10 active accounts
+      mockSql.setMockResult("active_account_count", [{ count: "10" }]);
+      
+      // Reactivation updates 5 accounts (15 slots available, 5 gated)
+      mockSql.setMockResult("reactivate_result", { count: 5 });
+      
       const reactivated = await reactivateGatedAccounts(
         mockSql as unknown as Sql,
         TEST_SHOP_ID
       );
       
-      // Returns 0 without any database operations
-      expect(reactivated).toBe(0);
-      expect(mockSql.begin).not.toHaveBeenCalled();
+      // Rows MUST be reactivated even when flag is off
+      expect(reactivated).toBe(5);
     });
   });
 
@@ -406,6 +415,105 @@ describe("Gating Service", () => {
       expect(error.limit).toBe(25);
       expect(error.message).toContain("Upgrade required");
       expect(error.message).toContain("25/25");
+    });
+  });
+
+  describe("decideNewAccountGate", () => {
+    it("does not query plans table (limit passed as parameter)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { decideNewAccountGate } = await import("../gating.server");
+      
+      // Track all SQL calls made during decideNewAccountGate
+      const sqlCalls: string[] = [];
+      const trackingTx = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          sqlCalls.push(query);
+          // Mock pg_advisory_xact_lock
+          if (query.includes('pg_advisory_xact_lock')) {
+            return [];
+          }
+          // Mock active account count
+          if (query.includes('COUNT')) {
+            return [{ count: "5" }];
+          }
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Call decideNewAccountGate with limit already resolved (10)
+      const decision = await decideNewAccountGate(
+        trackingTx as unknown as Sql,
+        TEST_SHOP_ID,
+        10
+      );
+      
+      // Verify no plan lookup occurred - decideNewAccountGate should NOT query plans
+      const planQueries = sqlCalls.filter(
+        q => q.includes('plan_key') || q.includes('plan_cached_at') || q.includes('"Shop"')
+      );
+      expect(planQueries).toHaveLength(0);
+      
+      // Verify basic gating decision worked
+      expect(decision.gate).toBe(false); // 5 active, limit 10, not at limit
+      expect(decision.limit).toBe(10);
+      expect(decision.used).toBe(5);
+    });
+
+    it("returns gate: false without querying when flag is off", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+      const { decideNewAccountGate } = await import("../gating.server");
+      
+      // Track SQL calls
+      const sqlCalls: string[] = [];
+      const trackingTx = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          sqlCalls.push(strings.join("?"));
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      const decision = await decideNewAccountGate(
+        trackingTx as unknown as Sql,
+        TEST_SHOP_ID,
+        10
+      );
+      
+      // When flag is off, should return early with no SQL calls
+      expect(sqlCalls).toHaveLength(0);
+      expect(decision.gate).toBe(false);
+      expect(decision.limit).toBe(-1);
+    });
+
+    it("returns gate: false without querying when limit is -1 (unlimited)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { decideNewAccountGate } = await import("../gating.server");
+      
+      // Track SQL calls
+      const sqlCalls: string[] = [];
+      const trackingTx = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          sqlCalls.push(strings.join("?"));
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      const decision = await decideNewAccountGate(
+        trackingTx as unknown as Sql,
+        TEST_SHOP_ID,
+        -1  // unlimited
+      );
+      
+      // When limit is -1, should return early with no SQL calls
+      expect(sqlCalls).toHaveLength(0);
+      expect(decision.gate).toBe(false);
+      expect(decision.limit).toBe(-1);
     });
   });
 
@@ -854,9 +962,11 @@ describeWithDb("decideNewAccountGate flag-off inertness DB integration", () => {
 
     // Shop has plan_key='none' which has limit=0
     // When flag is ON, this SHOULD gate the account
+    // Caller looks up limit BEFORE sql.begin and passes it as parameter
+    const limit = 0;
 
     const decision = await sql.begin(async (tx) => {
-      return decideNewAccountGate(tx, TEST_SHOP_ID);
+      return decideNewAccountGate(tx, TEST_SHOP_ID, limit);
     });
 
     // With flag on and limit=0, gate should be true

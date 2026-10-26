@@ -174,20 +174,24 @@ export interface GateDecision {
  * taken when PLAN_GATING_ENFORCED is on AND limit != -1, so there's no cost
  * while the flag is false or for unlimited plans.
  *
+ * IMPORTANT: The limit must be looked up OUTSIDE the transaction using the
+ * outer SQL client (not tx) to avoid triggering background cache refresh
+ * on a closed transaction. Callers must call getPlanByShopId(sql, shopId)
+ * before sql.begin() and pass the resolved limit here.
+ *
  * @param tx - postgres.js transaction (from sql.begin)
  * @param shopId - Internal shop ID
+ * @param limit - The company limit from the plan (caller resolves this BEFORE sql.begin)
  * @returns GateDecision with gate flag and usage info
  */
 export async function decideNewAccountGate(
   tx: Sql,
-  shopId: string
+  shopId: string,
+  limit: number
 ): Promise<GateDecision> {
   if (!isGatingEnforced()) {
     return { gate: false, used: 0, limit: -1 };
   }
-
-  const plan = await getPlanByShopId(tx, shopId);
-  const limit = planLimit(plan, "companies");
 
   if (limit === -1) {
     return { gate: false, used: 0, limit: -1 };
@@ -357,9 +361,9 @@ export async function getUsageStats(
  * Called on plan upgrade via APP_SUBSCRIPTIONS_UPDATE webhook.
  * The caller (T2) is responsible for determining when to call this.
  *
- * When PLAN_GATING_ENFORCED is off, returns early without any transaction
- * or lock. Accounts that were gated while the flag was on remain gated
- * after it's turned off; they are simply treated as active for enforcement.
+ * This function ALWAYS reactivates gated accounts regardless of the
+ * PLAN_GATING_ENFORCED flag. Accounts gated while the flag was on should
+ * be reactivated on upgrade even if the flag is currently off.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
@@ -369,11 +373,6 @@ export async function reactivateGatedAccounts(
   sql: Sql,
   shopId: string
 ): Promise<number> {
-  // Flag off: no gated accounts exist, nothing to reactivate
-  if (!isGatingEnforced()) {
-    return 0;
-  }
-
   const plan = await getPlanByShopId(sql, shopId);
   const newLimit = planLimit(plan, "companies");
 
