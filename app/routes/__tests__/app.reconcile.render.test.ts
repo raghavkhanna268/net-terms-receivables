@@ -192,6 +192,7 @@ describe("Match label maps", () => {
       expect(getMatchReasonLabel("payer_alias")).toBe("Confirmed alias");
       expect(getMatchReasonLabel("payer_name")).toBe("Payer name");
       expect(getMatchReasonLabel("email_match")).toBe("Email match");
+      expect(getMatchReasonLabel("multi_invoice")).toBe("Multiple invoices");
 
       expect(Object.keys(MATCH_REASON_LABELS).length).toBeGreaterThan(0);
     });
@@ -212,7 +213,7 @@ describe("Match label maps", () => {
       expect(getMatchStateLabel("confirmed")).toBe("Confirmed");
       expect(getMatchStateLabel("pushing")).toBe("Applying…");
       expect(getMatchStateLabel("pushed")).toBe("Recorded in Shopify");
-      expect(getMatchStateLabel("unmatched")).toBe("Rejected");
+      expect(getMatchStateLabel("unmatched")).toBe("Not matched");
 
       expect(Object.keys(MATCH_STATE_LABELS).length).toBeGreaterThan(0);
     });

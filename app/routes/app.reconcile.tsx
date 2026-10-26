@@ -126,6 +126,7 @@ export const MATCH_REASON_LABELS: Record<string, string> = {
   payer_alias: "Confirmed alias",
   payer_name: "Payer name",
   email_match: "Email match",
+  multi_invoice: "Multiple invoices",
 };
 
 /**
@@ -145,7 +146,7 @@ export const MATCH_STATE_LABELS: Record<string, string> = {
   confirmed: "Confirmed",
   pushing: "Applying…",
   pushed: "Recorded in Shopify",
-  unmatched: "Rejected",
+  unmatched: "Not matched",
 };
 
 /**
