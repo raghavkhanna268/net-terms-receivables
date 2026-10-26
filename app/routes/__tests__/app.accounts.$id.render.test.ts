@@ -41,10 +41,22 @@ function buildLoaderData(overrides: {
   gatingEnforced?: boolean;
   planKey?: string;
   companiesUsed?: number;
+  newAccountsPausedBanner?: {
+    show: boolean;
+    heading: string;
+    bodyText: string;
+    upgradeUrl: string | null;
+  };
 } = {}) {
   const {
     isGated = false,
     gatingEnforced = false,
+    newAccountsPausedBanner = {
+      show: false,
+      heading: "",
+      bodyText: "",
+      upgradeUrl: null,
+    },
   } = overrides;
 
   return {
@@ -84,6 +96,7 @@ function buildLoaderData(overrides: {
     invoices: { rows: [], totalCount: 0 },
     gatingEnforced,
     reminderOptOut: null,
+    newAccountsPausedBanner,
     error: null,
   };
 }
@@ -208,6 +221,73 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       // No over-limit banner
       expect(html).not.toContain("This account was added after you reached your plan limit");
       expect(html).not.toContain("Upgrade to edit credit settings");
+    });
+  });
+
+  describe("T4: newAccountsPausedBanner render tests", () => {
+    it("shows newAccountsPausedBanner when show=true", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: true,
+        newAccountsPausedBanner: {
+          show: true,
+          heading: "25 of 25 buyer accounts",
+          bodyText: "New accounts can't be added or imported over your plan limit.",
+          upgradeUrl: "https://admin.shopify.com/store/test/charges/app/pricing_plans",
+        },
+      });
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      // The T4 banner heading should appear
+      expect(html).toContain("25 of 25 buyer accounts");
+      // The T4 banner body text should appear (apostrophe may be HTML-encoded)
+      expect(html).toContain("New accounts");
+      expect(html).toContain("over your plan limit");
+      // Upgrade link should appear
+      expect(html).toContain("Upgrade your plan");
+    });
+
+    it("hides newAccountsPausedBanner when show=false", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: true,
+        newAccountsPausedBanner: {
+          show: false,
+          heading: "",
+          bodyText: "",
+          upgradeUrl: null,
+        },
+      });
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      // The T4 banner should not appear
+      expect(html).not.toContain("buyer accounts");
+      expect(html).not.toContain("New accounts can't be added");
+    });
+
+    it("newAccountsPausedBanner without upgradeUrl does not show upgrade link", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: true,
+        newAccountsPausedBanner: {
+          show: true,
+          heading: "25 of 25 buyer accounts",
+          bodyText: "New accounts can't be added or imported over your plan limit.",
+          upgradeUrl: null,
+        },
+      });
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      // The T4 banner should appear
+      expect(html).toContain("25 of 25 buyer accounts");
+      // But upgrade link should NOT appear
+      expect(html).not.toContain("Upgrade your plan");
     });
   });
 });

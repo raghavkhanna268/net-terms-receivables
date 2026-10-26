@@ -18,6 +18,9 @@ import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, useR
 import { useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
+import { buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import {
   fetchShopOnboardingData,
   computeOnboardingState,
@@ -356,6 +359,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       state: null,
       registrationStatus: null,
       initialSyncState: null,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      } as NewAccountsPausedBannerState,
     };
   }
 
@@ -407,6 +416,34 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     metafieldStatus
   );
 
+  const gatingEnforced = isGatingEnforced();
+  let newAccountsPausedBanner: NewAccountsPausedBannerState = {
+    show: false,
+    heading: "",
+    bodyText: "",
+    upgradeUrl: null,
+  };
+
+  if (gatingEnforced) {
+    try {
+      const usage = await getUsageStats(sql, dbData.shopId);
+      const upgradeUrl = (() => {
+        const handle = getAppHandle();
+        if (handle === null) return null;
+        return buildPlanSelectionUrl(shopDomain, handle);
+      })();
+      newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+        usage.companies.current,
+        usage.companies.limit,
+        gatingEnforced,
+        upgradeUrl
+      );
+    } catch (err) {
+      safeLog("warn", "usage_stats_error", { shopHash: await shopHash(shopDomain), err: toErrorCode(err) });
+      // Fail soft: no banner on error
+    }
+  }
+
   return {
     error: null,
     state: {
@@ -419,6 +456,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopId: dbData.shopId,
     registrationStatus,
     initialSyncState: syncState,
+    newAccountsPausedBanner,
     currencySupported,
   };
 };
@@ -794,7 +832,7 @@ function OnboardingChecklist({
 const POLL_INTERVAL_MS = 5000;
 
 export default function OnboardingPage() {
-  const { error, state, registrationStatus, initialSyncState, currencySupported } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -857,6 +895,23 @@ export default function OnboardingPage() {
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      )}
+
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
           </s-banner>
         </s-section>
       )}
