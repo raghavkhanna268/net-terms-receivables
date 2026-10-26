@@ -1088,6 +1088,7 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
 describeWithDb("CREDIT_STATUS_RECOMPUTE message producers set source", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-src";
   const TEST_SHOP_ID = `shop-src-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `src-test-${TEST_SUFFIX}.myshopify.com`;
@@ -1774,6 +1775,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 describeWithDb("permanent sync error handling (#204)", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-perm";
   const TEST_SHOP_ID = `shop-perm-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `perm-test-${TEST_SUFFIX}.myshopify.com`;
@@ -2771,6 +2773,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
 describeWithDb("audit INSERT failure robustness (#204)", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-robust";
   const TEST_SHOP_ID = `shop-robust-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `robust-test-${TEST_SUFFIX}.myshopify.com`;
@@ -2963,6 +2966,7 @@ describeWithDb("audit INSERT failure robustness (#204)", () => {
 describeWithDb("release and hold direction end-to-end (#204)", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-dir";
   const TEST_SHOP_ID = `shop-dir-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `dir-test-${TEST_SUFFIX}.myshopify.com`;
@@ -3364,6 +3368,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
 describeWithDb("Part 1 and Part 2 regression (#204)", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-reg";
   const TEST_SHOP_ID = `shop-reg-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `reg-test-${TEST_SUFFIX}.myshopify.com`;
@@ -4275,6 +4280,7 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
 describeWithDb("safeLog console output for credit status events (#212)", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-safelog";
   const TEST_SHOP_ID = `shop-safelog-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `safelog-test-${TEST_SUFFIX}.myshopify.com`;
@@ -4410,6 +4416,7 @@ describeWithDb("safeLog console output for credit status events (#212)", () => {
 describeWithDb("retryable vs non-retryable error handling (#212)", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-retry";
   const TEST_SHOP_ID = `shop-retry-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `retry-test-${TEST_SUFFIX}.myshopify.com`;
@@ -4581,6 +4588,7 @@ describeWithDb("retryable vs non-retryable error handling (#212)", () => {
 describeWithDb("updateCreditStatus marker and audit (#212)", () => {
   let sql: ReturnType<typeof postgres>;
   let dbNow: Date;
+  void dbNow;
   const TEST_SUFFIX = lettersOnlyId(8) + "-ucsmrk";
   const TEST_SHOP_ID = `shop-ucsmrk-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `ucs-marker-test-${TEST_SUFFIX}.myshopify.com`;
