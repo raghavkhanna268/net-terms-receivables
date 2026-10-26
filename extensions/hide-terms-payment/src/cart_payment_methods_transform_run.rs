@@ -36,10 +36,18 @@ impl ShopConfig {
         }
     }
 
+    /// #292: Check if shop_config is valid (has schemaVersion 1 and currencyCode).
+    fn is_valid(&self) -> bool {
+        self.schema_version == Some(1) && self.currency_code.is_some()
+    }
+
     /// #292: Check if the shop is an INR shop.
     /// Returns Some(true) if shop_config has INR currency, Some(false) if non-INR.
-    /// Returns None if shop_config is missing/invalid (fail-open for rollout safety).
+    /// Returns None if shop_config is missing/invalid.
     fn is_inr_shop(&self) -> Option<bool> {
+        if !self.is_valid() {
+            return None;
+        }
         self.currency_code.as_ref().map(|c| c == SUPPORTED_SHOP_CURRENCY)
     }
 }
@@ -252,11 +260,24 @@ fn cart_payment_methods_transform_run(
             .collect()
     };
 
-    // #292: Non-INR shop → hide deferred payment (net-terms not available for non-INR shops)
-    // Missing shop_config alone does NOT hide (fail-open for rollout safety)
-    if let Some(is_inr) = shop_config.is_inr_shop() {
-        if !is_inr {
+    // #292 G2: Shop currency check with fail-closed for non-INR carts
+    // - Valid non-INR shop_config → hide deferred (net-terms not available)
+    // - Missing/malformed shop_config with non-INR cart → hide deferred (fail-closed)
+    // - Missing/malformed shop_config with INR cart → pass (don't break ordinary INR carts)
+    match shop_config.is_inr_shop() {
+        Some(false) => {
+            // Valid non-INR shop: hide deferred payment methods
             return Ok(schema::CartPaymentMethodsTransformRunResult { operations: hide_deferred() });
+        }
+        None => {
+            // Missing or malformed shop_config: fail-closed for non-INR carts
+            if cart_currency != SUPPORTED_SHOP_CURRENCY {
+                return Ok(schema::CartPaymentMethodsTransformRunResult { operations: hide_deferred() });
+            }
+            // INR cart with missing shop_config: pass (don't break ordinary INR carts)
+        }
+        Some(true) => {
+            // Valid INR shop: continue to buyer identity checks
         }
     }
 
@@ -1021,8 +1042,8 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_shop_config_passes() {
-        // Missing shop_config should fail-open (not hide deferred)
+    fn test_missing_shop_config_inr_cart_passes() {
+        // #292 G2: Missing shop_config with INR cart should pass (don't break ordinary INR carts)
         let input = make_b2b_input_full(
             Some(ok_metafield()),  // not held
             &default_payment_methods(),
@@ -1031,13 +1052,27 @@ mod tests {
             None,  // no shop_config
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Missing shop_config should fail-open (not hide)");
+        assert!(result.operations.is_empty(), "Missing shop_config with INR cart should pass");
     }
 
-    /// #292: Both credit_status AND shop_config missing must show all payment methods (fail-open).
+    #[test]
+    fn test_missing_shop_config_usd_cart_hides() {
+        // #292 G2: Missing shop_config with non-INR cart should hide deferred (fail-closed)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),  // not held
+            &default_payment_methods(),
+            None,
+            "USD",  // non-INR cart
+            None,   // no shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Missing shop_config with USD cart should hide deferred (fail-closed)");
+    }
+
+    /// #292 G2: Both credit_status AND shop_config missing with INR cart passes (fail-open for INR).
     /// This is the scenario for brand-new CompanyLocations before any metafield sync.
     #[test]
-    fn test_missing_credit_status_and_missing_shop_config_shows_all() {
+    fn test_missing_credit_status_and_missing_shop_config_inr_cart_shows_all() {
         let input = make_b2b_input_full(
             None,  // No credit_status metafield
             &default_payment_methods(),
@@ -1046,12 +1081,26 @@ mod tests {
             None,  // No shop_config metafield
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Missing credit_status AND missing shop_config must show all payment methods (fail-open)");
+        assert!(result.operations.is_empty(), "Missing credit_status AND missing shop_config with INR cart must show all payment methods");
     }
 
-    /// #292: Customer with both metafields missing must show all payment methods.
+    /// #292 G2: Both credit_status AND shop_config missing with non-INR cart hides deferred.
     #[test]
-    fn test_customer_missing_credit_status_and_missing_shop_config_shows_all() {
+    fn test_missing_credit_status_and_missing_shop_config_usd_cart_hides() {
+        let input = make_b2b_input_full(
+            None,  // No credit_status metafield
+            &default_payment_methods(),
+            None,
+            "USD",  // non-INR cart
+            None,   // No shop_config metafield
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Missing credit_status AND missing shop_config with USD cart must hide deferred (fail-closed)");
+    }
+
+    /// #292 G2: Customer with both metafields missing and INR cart passes.
+    #[test]
+    fn test_customer_missing_credit_status_and_missing_shop_config_inr_cart_shows_all() {
         let input = make_customer_input_full(
             None,  // No credit_status metafield
             &default_payment_methods(),
@@ -1060,7 +1109,21 @@ mod tests {
             None,  // No shop_config metafield
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Customer with missing credit_status AND missing shop_config must show all payment methods");
+        assert!(result.operations.is_empty(), "Customer with missing credit_status AND missing shop_config with INR cart must show all payment methods");
+    }
+
+    /// #292 G2: Customer with both metafields missing and non-INR cart hides deferred.
+    #[test]
+    fn test_customer_missing_credit_status_and_missing_shop_config_usd_cart_hides() {
+        let input = make_customer_input_full(
+            None,  // No credit_status metafield
+            &default_payment_methods(),
+            None,
+            "USD",  // non-INR cart
+            None,   // No shop_config metafield
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Customer with missing credit_status AND missing shop_config with USD cart must hide deferred (fail-closed)");
     }
 
     #[test]
@@ -1105,5 +1168,189 @@ mod tests {
         "#;
         let result = run_test(input).unwrap();
         assert_eq!(result.operations.len(), 2, "Non-INR shop with no buyerIdentity must hide deferred methods");
+    }
+
+    // =========================================================================
+    // #292 G2: Malformed shop_config tests (fail-closed for non-INR carts)
+    // =========================================================================
+
+    #[test]
+    fn test_malformed_shop_config_bad_json_usd_cart_hides() {
+        // Malformed JSON in shop_config with USD cart should hide deferred (fail-closed)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"notValid": true}"#),  // Missing schemaVersion and currencyCode
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Malformed shop_config (bad JSON structure) with USD cart must hide deferred");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_bad_json_inr_cart_passes() {
+        // Malformed JSON in shop_config with INR cart should pass (don't break INR carts)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"notValid": true}"#),  // Missing schemaVersion and currencyCode
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Malformed shop_config with INR cart should pass");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_wrong_schema_version_usd_cart_hides() {
+        // Wrong schemaVersion with USD cart should hide deferred (fail-closed)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"schemaVersion": 999, "currencyCode": "USD"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "shop_config with wrong schemaVersion and USD cart must hide deferred");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_wrong_schema_version_inr_cart_passes() {
+        // Wrong schemaVersion with INR cart should pass (don't break INR carts)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 999, "currencyCode": "INR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "shop_config with wrong schemaVersion and INR cart should pass");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_missing_currency_code_usd_cart_hides() {
+        // Missing currencyCode with USD cart should hide deferred (fail-closed)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"schemaVersion": 1}"#),  // Missing currencyCode
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "shop_config missing currencyCode with USD cart must hide deferred");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_missing_currency_code_inr_cart_passes() {
+        // Missing currencyCode with INR cart should pass (don't break INR carts)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1}"#),  // Missing currencyCode
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "shop_config missing currencyCode with INR cart should pass");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_missing_schema_version_usd_cart_hides() {
+        // Missing schemaVersion with USD cart should hide deferred (fail-closed)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"currencyCode": "USD"}"#),  // Missing schemaVersion
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "shop_config missing schemaVersion with USD cart must hide deferred");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_missing_schema_version_inr_cart_passes() {
+        // Missing schemaVersion with INR cart should pass (don't break INR carts)
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"currencyCode": "INR"}"#),  // Missing schemaVersion
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "shop_config missing schemaVersion with INR cart should pass");
+    }
+
+    /// #292 G2: Truly unparseable shop_config (string, not object) with USD cart hides deferred.
+    /// Simulates when Shopify's metafield contains garbage that can't be parsed as an object.
+    #[test]
+    fn test_unparseable_shop_config_usd_cart_hides() {
+        // When jsonValue is a string instead of an object, from_json_value returns default
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "USD" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "company": {},
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Credit Card" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/2", "name": "Deferred Payment" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/3", "name": "Net Terms" }
+            ],
+            "paymentCustomization": null,
+            "shop": {
+                "metafield": {
+                    "jsonValue": "not-json{"
+                }
+            }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Unparseable shop_config (string value) with USD cart must hide deferred (fail-closed)");
+    }
+
+    /// #292 G2: Truly unparseable shop_config (string, not object) with INR cart passes.
+    /// INR carts must never panic or error on malformed shop_config.
+    #[test]
+    fn test_unparseable_shop_config_inr_cart_passes() {
+        // When jsonValue is a string instead of an object, from_json_value returns default
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "INR" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "company": {},
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Credit Card" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/2", "name": "Deferred Payment" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/3", "name": "Net Terms" }
+            ],
+            "paymentCustomization": null,
+            "shop": {
+                "metafield": {
+                    "jsonValue": "not-json{"
+                }
+            }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert!(result.operations.is_empty(), "Unparseable shop_config (string value) with INR cart must pass without error");
     }
 }

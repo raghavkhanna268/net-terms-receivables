@@ -328,55 +328,76 @@ describe("app.onboarding", () => {
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              validations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/Validation/123",
-                    shopifyFunction: { handle: "credit-check-validation" },
-                    title: "Net Terms Credit Check",
-                    enabled: true,
-                  },
-                }],
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              paymentCustomizations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/PaymentCustomization/456",
-                    shopifyFunction: { handle: "hide-terms-payment" },
-                    title: "Net Terms Payment Hide",
-                    enabled: true,
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return {
+            json: async () => ({
+              data: {
+                validations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/Validation/123",
+                      shopifyFunction: { handle: "credit-check-validation" },
+                      title: "Net Terms Credit Check",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({
-            data: {
-              metafieldDefinitions: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/MetafieldDefinition/789",
-                    namespace: "$app",
-                    key: "credit_status",
-                    ownerType: "COMPANY_LOCATION",
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return {
+            json: async () => ({
+              data: {
+                paymentCustomizations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/PaymentCustomization/456",
+                      shopifyFunction: { handle: "hide-terms-payment" },
+                      title: "Net Terms Payment Hide",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        });
+            }),
+          };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return {
+            json: async () => ({
+              data: {
+                metafieldDefinitions: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/MetafieldDefinition/789",
+                      namespace: "$app",
+                      key: "credit_status",
+                      ownerType: "COMPANY_LOCATION",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -458,61 +479,85 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "1" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              validations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/Validation/123",
-                    shopifyFunction: { handle: "credit-check-validation" },
-                    title: "Test",
-                    enabled: true,
-                  },
-                }],
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({
-            data: {
-              paymentCustomizations: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/PaymentCustomization/456",
-                    shopifyFunction: { handle: "hide-terms-payment" },
-                    title: "Test",
-                    enabled: true,
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return {
+            json: async () => ({
+              data: {
+                validations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/Validation/123",
+                      shopifyFunction: { handle: "credit-check-validation" },
+                      title: "Test",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({
-            data: {
-              metafieldDefinitions: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/MetafieldDefinition/789",
-                    namespace: "$app",
-                    key: "credit_status",
-                    ownerType: "COMPANY_LOCATION",
-                  },
-                }],
+            }),
+          };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return {
+            json: async () => ({
+              data: {
+                paymentCustomizations: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/PaymentCustomization/456",
+                      shopifyFunction: { handle: "hide-terms-payment" },
+                      title: "Test",
+                      enabled: true,
+                    },
+                  }],
+                },
               },
-            },
-          }),
-        });
+            }),
+          };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return {
+            json: async () => ({
+              data: {
+                metafieldDefinitions: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/MetafieldDefinition/789",
+                      namespace: "$app",
+                      key: "credit_status",
+                      ownerType: "COMPANY_LOCATION",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -547,35 +592,55 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "1" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { paymentCustomizations: { edges: [] } } }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({
-            data: {
-              metafieldDefinitions: {
-                edges: [{
-                  node: {
-                    id: "gid://shopify/MetafieldDefinition/789",
-                    namespace: "app--123",
-                    key: "credit_status",
-                    ownerType: "COMPANY_LOCATION",
-                  },
-                }],
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
               },
-            },
-          }),
-        });
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return { json: async () => ({ data: { validations: { edges: [] } } }) };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return { json: async () => ({ data: { paymentCustomizations: { edges: [] } } }) };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return {
+            json: async () => ({
+              data: {
+                metafieldDefinitions: {
+                  edges: [{
+                    node: {
+                      id: "gid://shopify/MetafieldDefinition/789",
+                      namespace: "app--123",
+                      key: "credit_status",
+                      ownerType: "COMPANY_LOCATION",
+                    },
+                  }],
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -650,22 +715,40 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "0" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ errors: [{ message: "Validation access denied" }] }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { paymentCustomizations: { edges: [] } } }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }),
-        });
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
+              },
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return { json: async () => ({ errors: [{ message: "Validation access denied" }] }) };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return { json: async () => ({ data: { paymentCustomizations: { edges: [] } } }) };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return { json: async () => ({ data: { metafieldDefinitions: { edges: [] } } }) };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 
@@ -697,22 +780,40 @@ describe("app.onboarding", () => {
             onboardingDismissedAt: null,
           }]);
         }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
         if (query.includes("COUNT(*)")) {
           return Promise.resolve([{ count: "0" }]);
         }
         return Promise.resolve([]);
       });
 
-      const mockGraphql = vi.fn()
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ data: { validations: { edges: [] } } }),
-        })
-        .mockResolvedValueOnce({
-          json: () => Promise.resolve({ errors: [{ message: "Payment access denied" }] }),
-        })
-        .mockResolvedValue({
-          json: () => Promise.resolve({ data: { metafieldDefinitions: { edges: [] } } }),
-        });
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
+              },
+            }),
+          };
+        }
+        if (query.includes("validations")) {
+          return { json: async () => ({ data: { validations: { edges: [] } } }) };
+        }
+        if (query.includes("paymentCustomizations")) {
+          return { json: async () => ({ errors: [{ message: "Payment access denied" }] }) };
+        }
+        if (query.includes("metafieldDefinitions")) {
+          return { json: async () => ({ data: { metafieldDefinitions: { edges: [] } } }) };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
 
       const { loader } = await import("../app.onboarding");
 

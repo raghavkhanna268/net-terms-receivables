@@ -44,8 +44,9 @@ import {
   type InitialSyncStatus,
   type InitialSyncState,
 } from "~/lib/initial-sync.server";
-import { isShopCurrencySupported } from "~/lib/shop-currency.server";
+import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 
 /**
  * Client-side version of canStartSync to avoid importing server-only module in client code.
@@ -367,11 +368,17 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
-  // #292: Fetch shop currency for INR-only check
+  // #292 G1: Read stored currency, then recover if needed (same as /app)
   const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
     SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
-  const shopCurrency = shopCurrencyResult?.currency;
+  const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  const shopCurrency = await checkAndRecoverCurrency(
+    sql,
+    shopDomain,
+    storedCurrency,
+    admin,
+  );
   const currencySupported = isShopCurrencySupported(shopCurrency);
 
   const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
@@ -587,11 +594,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   if (actionType === "start_sync") {
-    // #292: Check shop currency before allowing sync
+    // #292 G1: Recover currency first, then check if supported
     const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
       SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
     `;
-    if (!isShopCurrencySupported(shopCurrencyResult?.currency)) {
+    const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+    const recoveredCurrency = await checkAndRecoverCurrency(
+      sql,
+      shopDomain,
+      storedCurrency,
+      admin,
+    );
+    if (!isShopCurrencySupported(recoveredCurrency)) {
       return {
         success: false,
         error: "Sync not available for non-INR stores",
