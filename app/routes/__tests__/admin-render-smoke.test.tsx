@@ -16,6 +16,8 @@
  * - Visible primary heading (s-page heading or h1)
  * - For INR shop: exact seeded amounts render with ₹ and Indian grouping
  * - For non-INR shop: exact banner text present, no ₹ symbols on gated pages
+ * - Every redirect must be declared; every declared redirect must happen
+ * - All deferred promises are awaited before rendering
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from "vitest";
@@ -87,7 +89,9 @@ vi.mock("react-router", () => ({
     children: (data: unknown) => ReactNode;
   }) => {
     if (resolve instanceof Promise) {
-      return null;
+      throw new Error(
+        "Await received an unresolved Promise. All deferred data must be awaited before rendering."
+      );
     }
     return children(resolve);
   },
@@ -129,10 +133,28 @@ function extractLoaderResult<T>(result: unknown): T {
   return result as T;
 }
 
+async function awaitAllDeferredData(
+  data: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (value instanceof Promise) {
+      result[key] = await value;
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 type ShopState = "fresh" | "inr" | "non_inr";
 
 interface RedirectExpectation {
   location: string | RegExp;
+}
+
+interface ErrorExpectation {
+  error: string | RegExp;
 }
 
 interface RouteTestConfig {
@@ -143,11 +165,15 @@ interface RouteTestConfig {
   resourceOnly?: boolean;
   resourceOnlyReason?: string;
   expectedRedirect?: Partial<Record<ShopState, RedirectExpectation>>;
+  expectedError?: Partial<Record<ShopState, ErrorExpectation>>;
   currencyGateExempt?: boolean;
   expectsSeededMoney?: boolean;
   seededMoneyValues?: string[];
   seededTextValues?: string[];
 }
+
+const FRESH_EMPTY_STATE_HEADING = "No outstanding receivables";
+const FRESH_EMPTY_STATE_SUBHEADING = "You don&#x27;t have any open invoices yet";
 
 const APP_ROUTES: RouteTestConfig[] = [
   {
@@ -161,6 +187,9 @@ const APP_ROUTES: RouteTestConfig[] = [
     name: "app._index",
     importPath: "../app._index",
     urlPath: "/app",
+    expectedRedirect: {
+      fresh: { location: "/app/onboarding" },
+    },
     expectsSeededMoney: true,
     seededMoneyValues: ["₹1,23,456.00"],
     seededTextValues: ["Test Buyer Corp INR"],
@@ -218,6 +247,9 @@ const APP_ROUTES: RouteTestConfig[] = [
     expectsSeededMoney: true,
     seededMoneyValues: ["₹1,23,456.00"],
     seededTextValues: ["Test Buyer Corp INR"],
+    expectedError: {
+      fresh: { error: "Account not found" },
+    },
   },
   {
     name: "app.data-requests.$id.download",
@@ -253,7 +285,6 @@ describeWithDb("Admin Render Smoke Tests", () => {
   const INR_DATA_REQUEST_ID = `dr-inr-${TEST_SUFFIX}`;
 
   const SEEDED_AMOUNT_RUPEES = 123456;
-  const SEEDED_AMOUNT_FORMATTED = "₹1,23,456.00";
   const SEEDED_BUYER_NAME = "Test Buyer Corp INR";
 
   const mockGraphQL = vi.fn();
@@ -508,29 +539,48 @@ describeWithDb("Admin Render Smoke Tests", () => {
 
           if (redirectResponse) {
             const location = redirectResponse.headers.get("Location");
+            const expectedRedirect = route.expectedRedirect?.[state];
+
+            expect(
+              expectedRedirect,
+              `${route.name} redirected to "${location}" in state ${state} but no expectedRedirect was declared. ` +
+                `Add expectedRedirect.${state} = { location: "${location}" } to the route config.`
+            ).toBeTruthy();
+
             expect(
               location,
               `${route.name} redirected but no Location header in state ${state}`
             ).toBeTruthy();
 
-            const expectedRedirect = route.expectedRedirect?.[state];
-            if (expectedRedirect) {
-              if (typeof expectedRedirect.location === "string") {
-                expect(location).toBe(expectedRedirect.location);
-              } else {
-                expect(location).toMatch(expectedRedirect.location);
-              }
+            if (typeof expectedRedirect!.location === "string") {
+              expect(location).toBe(expectedRedirect!.location);
+            } else {
+              expect(location).toMatch(expectedRedirect!.location);
             }
             return;
           }
 
-          const data = extractLoaderResult<Record<string, unknown>>(loaderResult);
+          const expectedRedirect = route.expectedRedirect?.[state];
+          expect(
+            expectedRedirect,
+            `${route.name} was expected to redirect in state ${state} (expectedRedirect.${state} declared) but it did not redirect.`
+          ).toBeFalsy();
 
-          if (data && typeof data === "object" && "dashboardData" in data) {
-            const dashboardDataPromise = data.dashboardData;
-            if (dashboardDataPromise instanceof Promise) {
-              const resolvedDashboardData = await dashboardDataPromise;
-              data.dashboardData = resolvedDashboardData;
+          const rawData = extractLoaderResult<Record<string, unknown>>(loaderResult);
+          const data = await awaitAllDeferredData(rawData);
+
+          const expectedError = route.expectedError?.[state];
+          if (expectedError) {
+            const errorField = data.error as string | undefined;
+            expect(
+              errorField,
+              `${route.name} expected error in state ${state} but loader returned no error field`
+            ).toBeTruthy();
+
+            if (typeof expectedError.error === "string") {
+              expect(errorField).toBe(expectedError.error);
+            } else {
+              expect(errorField).toMatch(expectedError.error);
             }
           }
 
@@ -567,21 +617,23 @@ describeWithDb("Admin Render Smoke Tests", () => {
               route.name === "app.reconcile" ||
               route.name === "app.imports"
             ) {
-              expect(
-                html.includes("Currency Not Supported") ||
-                  html.includes("currently supports INR only"),
-                `${route.name} should show currency banner in non-INR state`
-              ).toBe(true);
+              if (!route.expectedError?.[state]) {
+                expect(
+                  html.includes("Currency Not Supported") ||
+                    html.includes("currently supports INR only"),
+                  `${route.name} should show currency banner in non-INR state`
+                ).toBe(true);
 
-              expect(
-                html.includes("Shopify admin → Settings → General → Store defaults"),
-                `${route.name} should include switch steps in currency banner`
-              ).toBe(true);
+                expect(
+                  html.includes("Shopify admin → Settings → General → Store defaults"),
+                  `${route.name} should include switch steps in currency banner`
+                ).toBe(true);
 
-              expect(
-                hasRupeeSymbol(html),
-                `${route.name} should NOT show ₹ symbol on currency-gated page in non-INR state`
-              ).toBe(false);
+                expect(
+                  hasRupeeSymbol(html),
+                  `${route.name} should NOT show ₹ symbol on currency-gated page in non-INR state`
+                ).toBe(false);
+              }
             }
           }
 
@@ -611,21 +663,16 @@ describeWithDb("Admin Render Smoke Tests", () => {
             }
           }
 
-          if (state === "fresh") {
-            if (route.name === "app._index") {
-              const freshIndicators = [
-                "No outstanding invoices",
-                "No outstanding receivables",
-                "No buyer accounts",
-              ];
-              const hasFreshIndicator = freshIndicators.some((indicator) =>
-                html.includes(indicator)
-              );
-              expect(
-                hasFreshIndicator || !html.includes(SEEDED_AMOUNT_FORMATTED),
-                `${route.name} in fresh state should show empty state or not show seeded data`
-              ).toBe(true);
-            }
+          if (state === "fresh" && route.name === "app._index") {
+            expect(
+              html.includes(FRESH_EMPTY_STATE_HEADING),
+              `${route.name} in fresh state should show empty-state heading "${FRESH_EMPTY_STATE_HEADING}"`
+            ).toBe(true);
+
+            expect(
+              html.includes(FRESH_EMPTY_STATE_SUBHEADING),
+              `${route.name} in fresh state should show empty-state subheading containing "${FRESH_EMPTY_STATE_SUBHEADING}"`
+            ).toBe(true);
           }
         });
       }
