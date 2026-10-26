@@ -182,9 +182,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -247,9 +245,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           overdueRuleId,
-          7,
-          "Asia/Kolkata",
-          validEnv
+          7,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -305,9 +301,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -362,9 +356,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -414,9 +406,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -462,9 +452,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -518,9 +506,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           b2bInvoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(b2bResult.success).toBe(true);
@@ -531,9 +517,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           taggedInvoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(taggedResult.success).toBe(true);
@@ -596,9 +580,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(true);
@@ -685,9 +667,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
           TEST_SHOP_ID,
           invoiceId,
           TEST_RULE_ID,
-          0,
-          "Asia/Kolkata",
-          validEnv
+          0,validEnv
         );
 
         expect(result.success).toBe(false);

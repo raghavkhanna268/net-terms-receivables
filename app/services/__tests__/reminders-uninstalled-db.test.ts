@@ -127,7 +127,6 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -197,7 +196,6 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
           TEST_RULE_ID,
           logId,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 

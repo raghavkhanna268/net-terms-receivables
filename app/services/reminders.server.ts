@@ -744,22 +744,27 @@ export function getReminderLabel(offsetDays: number): string {
  *
  * This function:
  * 1. Checks provider gate (RESEND_API_KEY + RESEND_FROM) - if missing, acks WITHOUT consuming slot/cap
- * 2. Checks send window (09:00-19:00 in shop's timezone)
- * 3. Checks if buyer account is gated (over plan limit) - skips when PLAN_GATING_ENFORCED=true
- * 4. Verifies invoice is still open
- * 5. Re-checks if reminder day matches today in shop's timezone
- * 6. Checks buyer has email (via CUSTOMER_PII_FIELDS mechanism)
- * 7. Claims the reminder slot (idempotency)
- * 8. Reserves global cap slot atomically
- * 9. Sends via Resend API with Idempotency-Key header
- * 10. On non-retryable error (401, 4xx): releases cap slot to avoid waste
+ * 2. Fetches invoice data (includes validated shopTimezone)
+ * 3. Checks send window (09:00-19:00 in shop's timezone from invoice.shopTimezone)
+ * 4. Checks if buyer account is gated (over plan limit) - skips when PLAN_GATING_ENFORCED=true
+ * 5. Verifies invoice is still open
+ * 6. Re-checks if reminder day matches today in shop's timezone
+ * 7. Checks buyer has email (via CUSTOMER_PII_FIELDS mechanism)
+ * 8. Claims the reminder slot (idempotency)
+ * 9. Reserves global cap slot atomically
+ * 10. Sends via Resend API with Idempotency-Key header
+ * 11. On non-retryable error (401, 4xx): releases cap slot to avoid waste
+ *
+ * Timezone: All timezone-dependent operations (send window, due-day check,
+ * hasReminderSentToday, date formatting) use invoice.shopTimezone as the SINGLE
+ * source. This value comes from Shop.timezone validated via validateTimezone()
+ * in getInvoiceForReminder().
  *
  * @param sql - Database connection
  * @param shopId - Shop ID
  * @param invoiceId - Invoice ID
  * @param ruleId - Reminder rule ID
  * @param offsetDays - Days offset from due date
- * @param timezone - Shop's IANA timezone
  * @param env - Environment variables (RESEND_API_KEY, RESEND_FROM)
  */
 export async function sendPaymentReminder(
@@ -768,13 +773,11 @@ export async function sendPaymentReminder(
   invoiceId: string,
   ruleId: string,
   offsetDays: number,
-  timezone: string,
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
   deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
-  const validTz = validateTimezone(timezone);
 
   // Gate 1: Check provider config - if missing, ack WITHOUT consuming slot
   // This allows the reminder to fire again once both keys are configured
@@ -787,22 +790,23 @@ export async function sendPaymentReminder(
     };
   }
 
-  // Gate 2: Check send window (09:00-19:00 in shop's timezone)
-  if (!isWithinSendWindow(validTz)) {
-    return {
-      success: true, // Ack - the cron only enqueues in-window, but check again
-      action: "outside_window",
-      skipReason: "Outside send window (09:00-19:00 shop local time)",
-    };
-  }
-
-  // Fetch invoice data
+  // Fetch invoice data (includes validated shopTimezone from Shop.timezone)
   const invoice = await getInvoiceForReminder(sql, shopId, invoiceId);
   if (!invoice) {
     return {
       success: true,
       action: "skipped",
       skipReason: "Invoice not found",
+    };
+  }
+
+  // Gate 2: Check send window (09:00-19:00 in shop's timezone)
+  // Uses invoice.shopTimezone as the SINGLE timezone source
+  if (!isWithinSendWindow(invoice.shopTimezone)) {
+    return {
+      success: true, // Ack - the cron only enqueues in-window, but check again
+      action: "outside_window",
+      skipReason: "Outside send window (09:00-19:00 shop local time)",
     };
   }
 
@@ -957,7 +961,8 @@ export async function sendPaymentReminder(
     await acquireInvoiceLock(tx, invoiceId);
 
     // Gate 11: Check if already sent today (under the lock)
-    const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
+    // Uses invoice.shopTimezone as the SINGLE timezone source
+    const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, invoice.shopTimezone);
     if (alreadySentToday) {
       return { claimed: false, reason: "already_sent" } as const;
     }
@@ -1134,13 +1139,17 @@ export async function sendPaymentReminder(
  * If the cap is still reached, the row stays delayed for another catch-up attempt.
  * Uses per-invoice advisory lock to ensure at most one reminder per invoice per day.
  *
+ * Timezone: All timezone-dependent operations (send window, catch-up window,
+ * hasNewerStageDueToday, hasReminderSentToday, date formatting) use
+ * invoice.shopTimezone as the SINGLE source. This value comes from Shop.timezone
+ * validated via validateTimezone() in getInvoiceForReminder().
+ *
  * @param sql - Database connection
  * @param shopId - Shop ID
  * @param invoiceId - Invoice ID
  * @param ruleId - Reminder rule ID
  * @param _logId - Unused, kept for API compatibility (verification uses shopId/ruleId/invoiceId)
  * @param offsetDays - Days offset from due date
- * @param timezone - Shop's IANA timezone
  * @param env - Environment variables (RESEND_API_KEY, RESEND_FROM)
  */
 export async function sendCatchupReminder(
@@ -1150,12 +1159,10 @@ export async function sendCatchupReminder(
   ruleId: string,
   _logId: string,
   offsetDays: number,
-  timezone: string,
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
-  const validTz = validateTimezone(timezone);
 
   // Gate 1: Check provider config
   if (!isReminderSendingEnabled(env)) {
@@ -1167,16 +1174,7 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 2: Check send window (09:00-19:00 in shop's timezone)
-  if (!isWithinSendWindow(validTz)) {
-    return {
-      success: true,
-      action: "outside_window",
-      skipReason: "Outside send window (09:00-19:00 shop local time)",
-    };
-  }
-
-  // Gate 3: Re-check that the log entry is still delayed
+  // Gate 2: Re-check that the log entry is still delayed
   const logStatus = await getReminderLogStatus(sql, shopId, ruleId, invoiceId);
   if (!logStatus || logStatus.status !== "delayed") {
     return {
@@ -1186,7 +1184,7 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Fetch invoice data (also checks eligibility)
+  // Fetch invoice data (includes validated shopTimezone from Shop.timezone)
   const invoice = await getInvoiceForReminder(sql, shopId, invoiceId);
   if (!invoice) {
     await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
@@ -1197,13 +1195,24 @@ export async function sendCatchupReminder(
     };
   }
 
+  // Gate 3: Check send window (09:00-19:00 in shop's timezone)
+  // Uses invoice.shopTimezone as the SINGLE timezone source
+  if (!isWithinSendWindow(invoice.shopTimezone)) {
+    return {
+      success: true,
+      action: "outside_window",
+      skipReason: "Outside send window (09:00-19:00 shop local time)",
+    };
+  }
+
   // Gate 3b: Verify catch-up is within D+1..D+3 window
   // SQL enqueue enforces this, but TS re-checks for defense in depth
+  // Uses invoice.shopTimezone as the SINGLE timezone source
   if (invoice.dueAt) {
-    const reminderDate = DateTime.fromJSDate(invoice.dueAt, { zone: validTz })
+    const reminderDate = DateTime.fromJSDate(invoice.dueAt, { zone: invoice.shopTimezone })
       .plus({ days: offsetDays })
       .startOf("day");
-    const today = DateTime.now().setZone(validTz).startOf("day");
+    const today = DateTime.now().setZone(invoice.shopTimezone).startOf("day");
     const daysSinceReminder = today.diff(reminderDate, "days").days;
     if (daysSinceReminder < 1 || daysSinceReminder > CATCHUP_WINDOW_DAYS) {
       await sql`
@@ -1376,7 +1385,8 @@ export async function sendCatchupReminder(
 
   // Gate 11b: Check if a newer stage is due TODAY (no log row yet, but Part 3 will enqueue it)
   // One reminder per invoice per day: newer stage wins
-  const newerStageDueToday = await hasNewerStageDueToday(sql, shopId, invoiceId, offsetDays, validTz);
+  // Uses invoice.shopTimezone as the SINGLE timezone source
+  const newerStageDueToday = await hasNewerStageDueToday(sql, shopId, invoiceId, offsetDays, invoice.shopTimezone);
   if (newerStageDueToday) {
     await sql`
       UPDATE "ReminderLog"
@@ -1430,7 +1440,8 @@ export async function sendCatchupReminder(
     }
 
     // Gate 13: Check if already sent today (any rule for this invoice)
-    const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, validTz);
+    // Uses invoice.shopTimezone as the SINGLE timezone source
+    const alreadySentToday = await hasReminderSentToday(tx, shopId, invoiceId, invoice.shopTimezone);
     if (alreadySentToday) {
       return { claimed: false, reason: "already_sent" } as const;
     }

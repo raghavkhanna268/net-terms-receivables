@@ -201,7 +201,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "buyer@test-example.com" }
     );
 
@@ -226,7 +225,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "other@test-example.com" }
     );
 
@@ -256,7 +254,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "" }
     );
 
@@ -284,9 +281,7 @@ describe("sendPaymentReminder - allowlist", () => {
       "shop-123",
       "inv-123",
       "rule-123",
-      0,
-      "Asia/Kolkata",
-      envWithoutAllowlist
+      0,envWithoutAllowlist
     );
 
     expect(result.success).toBe(true);
@@ -318,7 +313,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "buyer@test-example.com" }
     );
 
@@ -351,7 +345,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "  buyer@test-example.com  ,  other@test-example.com  " }
     );
 
@@ -376,7 +369,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "other@test-example.com" }
     );
 
@@ -405,7 +397,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "allowed@test-example.com" }
     );
 
@@ -435,7 +426,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "" }
     );
 
@@ -469,7 +459,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" }
     );
 
@@ -495,9 +484,7 @@ describe("sendPaymentReminder - allowlist", () => {
       "shop-123",
       "inv-123",
       "rule-123",
-      0,
-      "Asia/Kolkata",
-      envWithoutEnforced
+      0,envWithoutEnforced
     );
 
     expect(result.success).toBe(true);
@@ -525,7 +512,6 @@ describe("sendPaymentReminder - allowlist", () => {
       "inv-123",
       "rule-123",
       0,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "False" }
     );
 
@@ -628,7 +614,6 @@ describe("sendCatchupReminder - allowlist enforcement (Gate 11c)", () => {
       "rule-delayed-123",
       "log-123",
       3,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "false" }
     );
 
@@ -658,9 +643,7 @@ describe("sendCatchupReminder - allowlist enforcement (Gate 11c)", () => {
       "inv-delayed-123",
       "rule-delayed-123",
       "log-123",
-      3,
-      "Asia/Kolkata",
-      envWithoutEnforced
+      3,envWithoutEnforced
     );
 
     expect(result.success).toBe(true);
@@ -692,7 +675,6 @@ describe("sendCatchupReminder - allowlist enforcement (Gate 11c)", () => {
       "rule-delayed-123",
       "log-123",
       3,
-      "Asia/Kolkata",
       { ...validEnv, RESEND_TEST_RECIPIENTS: "", RESEND_RECIPIENT_ALLOWLIST_ENFORCED: "False" }
     );
 

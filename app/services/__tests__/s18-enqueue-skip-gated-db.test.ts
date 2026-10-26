@@ -250,7 +250,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
       vi.stubGlobal("fetch", mockFetch);
 
       try {
-        const result = await sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, 0, testTimezone, validEnv);
+        const result = await sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, 0, validEnv);
         expect(result.success).toBe(true);
         expect(result.action).toBe("sent");
         expect(mockFetch).toHaveBeenCalled();
@@ -271,7 +271,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
       vi.stubGlobal("fetch", mockFetch);
 
       try {
-        const result = await sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, 0, testTimezone, validEnv);
+        const result = await sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, 0, validEnv);
 
         expect(result.success).toBe(true);
         expect(result.action).toBe("skipped");
@@ -318,7 +318,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
       vi.stubGlobal("fetch", mockFetch);
 
       try {
-        const result = await sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, logId, 0, testTimezone, validEnv);
+        const result = await sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, logId, 0, validEnv);
         expect(result.success).toBe(true);
         expect(result.action).toBe("sent");
         expect(mockFetch).toHaveBeenCalled();
@@ -348,7 +348,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
       vi.stubGlobal("fetch", mockFetch);
 
       try {
-        const result = await sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, logId, 0, testTimezone, validEnv);
+        const result = await sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, logId, 0, validEnv);
 
         expect(result.success).toBe(true);
         expect(result.action).toBe("skipped");
@@ -409,8 +409,8 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
 
       try {
         const [catchupResult, sendResult] = await Promise.all([
-          sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, rule1Id, logId, 0, testTimezone, validEnv),
-          sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, rule2Id, 1, testTimezone, validEnv),
+          sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, rule1Id, logId, 0, validEnv),
+          sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, rule2Id, 1, validEnv),
         ]);
 
         const sentCount = [catchupResult, sendResult].filter(r => r.action === "sent").length;
@@ -453,7 +453,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
       vi.stubGlobal("fetch", mockFetch);
 
       try {
-        const result = await sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, logId, 0, testTimezone, validEnv);
+        const result = await sendCatchupReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, logId, 0, validEnv);
 
         expect(result.success).toBe(false);
         expect(result.retryable).toBe(true);

@@ -38,7 +38,6 @@ import {
   getReminderRule,
 } from "~/services/reminders.server";
 import { getRequestEnv } from "~/lib/request-context.server";
-import { validateTimezone, DEFAULT_TIMEZONE } from "~/lib/aging-dates.server";
 
 /**
  * Message payload for REMINDER_SEND topic.
@@ -140,10 +139,8 @@ export async function handleReminderSend(
   // Use offsetDays from message if present, otherwise from rule
   const offsetDays = message.offsetDays ?? rule.offsetDays;
 
-  // Use timezone from message if present, otherwise default
-  const timezone = message.timezone 
-    ? validateTimezone(message.timezone) 
-    : DEFAULT_TIMEZONE;
+  // Timezone is now derived from invoice.shopTimezone inside sendPaymentReminder
+  // (validated via getInvoiceForReminder → validateTimezone)
 
   const env = getRequestEnv() ?? {};
   const result = await sendPaymentReminder(
@@ -152,7 +149,6 @@ export async function handleReminderSend(
     invoiceId,
     ruleId,
     offsetDays,
-    timezone,
     env as { RESEND_API_KEY?: string; RESEND_FROM?: string }
   );
 
@@ -207,9 +203,9 @@ export async function handleReminderCatchup(
   }
 
   const offsetDays = message.offsetDays ?? rule.offsetDays;
-  const timezone = message.timezone 
-    ? validateTimezone(message.timezone) 
-    : DEFAULT_TIMEZONE;
+
+  // Timezone is now derived from invoice.shopTimezone inside sendCatchupReminder
+  // (validated via getInvoiceForReminder → validateTimezone)
 
   const env = getRequestEnv() ?? {};
   const result = await sendCatchupReminder(
@@ -219,7 +215,6 @@ export async function handleReminderCatchup(
     ruleId,
     logId,
     offsetDays,
-    timezone,
     env as { RESEND_API_KEY?: string; RESEND_FROM?: string }
   );
 
@@ -240,6 +235,3 @@ export async function handleReminderCatchup(
     retryable: result.retryable ?? false,
   };
 }
-
-// Re-export DEFAULT_TIMEZONE for convenience
-export { DEFAULT_TIMEZONE };

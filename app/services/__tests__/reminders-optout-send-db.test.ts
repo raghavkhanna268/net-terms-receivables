@@ -188,7 +188,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -256,7 +255,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -327,7 +325,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           TEST_RULE_ID,
           logId,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -394,7 +391,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -487,7 +483,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           envWithoutSecret
         );
 
@@ -547,7 +542,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           TEST_RULE_ID,
           logId,
           0,
-          "Asia/Kolkata",
           envWithoutSecret
         );
 
@@ -606,7 +600,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -670,7 +663,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           TEST_RULE_ID,
           logId,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -751,7 +743,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           invoiceIdA,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -765,7 +756,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
           invoiceIdB,
           ruleIdB,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 

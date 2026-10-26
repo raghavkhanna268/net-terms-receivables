@@ -245,7 +245,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0, // offset = 0 (due today)
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -312,7 +311,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv
         );
 
@@ -384,7 +382,6 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           invoiceId,
           TEST_RULE_ID,
           0,
-          "Asia/Kolkata",
           validEnv,
           { reserveGlobalSendSlot: mockReserveSlot }
         );
