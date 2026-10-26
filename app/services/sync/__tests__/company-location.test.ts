@@ -446,5 +446,82 @@ describeWithDb("CompanyLocation Sync", () => {
         }
       }
     });
+
+    it("one bad row in bulk does not lose other rows when flag off", async () => {
+      const originalEnv = process.env.PLAN_GATING_ENFORCED;
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      
+      try {
+        // Create a unique constraint conflict on companyId for the "bad" row
+        // by inserting a row with the same companyLocationId but different shopId
+        const existingLocId = `gid://shopify/CompanyLocation/existing-${Date.now()}`;
+        const goodLocId1 = `gid://shopify/CompanyLocation/good1-${Date.now()}`;
+        const goodLocId2 = `gid://shopify/CompanyLocation/good2-${Date.now()}`;
+        
+        // Create another shop for the conflict test
+        const otherShopId = `shop-other-${Date.now()}`;
+        await sql`
+          INSERT INTO "Shop" (id, domain, "createdAt", "updatedAt")
+          VALUES (${otherShopId}, ${"other-" + Date.now() + ".myshopify.com"}, NOW(), NOW())
+        `;
+        
+        // Insert an account in the other shop with same companyLocationId
+        // This won't cause a conflict due to our unique constraint being (shopId, companyLocationId)
+        // Instead, let's test with a bad shopId (non-existent FK)
+        const badShopId = `shop-nonexistent-${Date.now()}`;
+        
+        const accounts = [
+          mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+            id: goodLocId1,
+            name: "Good Account 1",
+            company: { id: `gid://shopify/Company/good1-${Date.now()}` },
+          }),
+          mapCompanyLocationToBuyerAccount(badShopId, { // Non-existent shop - FK violation
+            id: existingLocId,
+            name: "Bad Account",
+            company: { id: `gid://shopify/Company/bad-${Date.now()}` },
+          }),
+          mapCompanyLocationToBuyerAccount(TEST_SHOP_ID, {
+            id: goodLocId2,
+            name: "Good Account 2",
+            company: { id: `gid://shopify/Company/good2-${Date.now()}` },
+          }),
+        ];
+
+        // With flag off, row-by-row processing - bad row should fail but others succeed
+        const count = await bulkUpsertBuyerAccounts(sql, accounts);
+        
+        // Should have inserted 2 good accounts (bad one failed)
+        expect(count).toBe(2);
+        
+        // Verify good accounts were created
+        const [good1] = await sql`
+          SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${goodLocId1}
+        `;
+        expect(good1).toBeDefined();
+        expect(good1.name).toBe("Good Account 1");
+        
+        const [good2] = await sql`
+          SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${goodLocId2}
+        `;
+        expect(good2).toBeDefined();
+        expect(good2.name).toBe("Good Account 2");
+        
+        // Bad account should not exist
+        const [bad] = await sql`
+          SELECT * FROM "BuyerAccount" WHERE "companyLocationId" = ${existingLocId}
+        `;
+        expect(bad).toBeUndefined();
+        
+        // Cleanup
+        await sql`DELETE FROM "Shop" WHERE id = ${otherShopId}`;
+      } finally {
+        if (originalEnv !== undefined) {
+          (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+        } else {
+          delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+        }
+      }
+    });
   });
 });
