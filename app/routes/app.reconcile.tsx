@@ -37,6 +37,7 @@ import { applyMatch, unmatchMatch, RECONCILE_HUMAN_MESSAGES } from "~/services/a
 import { formatPaiseAmount } from "~/lib/aging";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 
 const PAGE_SIZE = 20;
 
@@ -129,6 +130,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   if (!shop) {
     return {
       shopCurrency: "INR",
+      currencySupported: false,
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -138,6 +140,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
     };
   }
+
+  // G7: Check currency support for reconcile actions
+  const currencySupported = isShopCurrencySupported(shop.currency);
 
   let payments: PaymentSummary[] = [];
   let matches: MatchSummary[] = [];
@@ -308,6 +313,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     });
     return {
       shopCurrency: shop.currency,
+      currencySupported,
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -328,6 +334,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   return {
     shopCurrency: shop.currency,
+    currencySupported,
     payments,
     matches,
     selectedPayment,
@@ -347,13 +354,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
-  // Get shop ID
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  // Get shop ID and currency
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
     return { success: false, error: "Shop not found" };
+  }
+
+  // G7: Currency guard - refuse all reconcile actions for non-INR or unknown shops
+  if (!isShopCurrencySupported(shop.currency)) {
+    return { success: false, error: "Currency not supported" };
   }
 
   const userId = session.onlineAccessInfo?.associatedUser?.id?.toString() ?? "system";
@@ -480,13 +492,13 @@ function PaymentDetailView({
   payment,
   matches,
   currency,
+  actionsDisabled,
 }: {
   payment: { id: string; amountPaise: string; narration: string; payerText: string | null; utr: string | null; rail: string | null; valueDate: string; importFileName: string };
   matches: MatchSummary[];
   currency: string;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
 
   return (
     <s-section heading="Payment Details">
@@ -574,7 +586,7 @@ function PaymentDetailView({
                           <s-button
                             variant="primary"
                             type="submit"
-                            disabled={isSubmitting}
+                            disabled={actionsDisabled}
                           >
                             Confirm
                           </s-button>
@@ -586,7 +598,7 @@ function PaymentDetailView({
                             variant="secondary"
                             tone="critical"
                             type="submit"
-                            disabled={isSubmitting}
+                            disabled={actionsDisabled}
                           >
                             Reject
                           </s-button>
@@ -706,15 +718,15 @@ function SuggestedMatchesView({
   page,
   totalCount,
   pageSize,
+  actionsDisabled,
 }: {
   matches: MatchSummary[];
   currency: string;
   page: number;
   totalCount: number;
   pageSize: number;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
   const totalPages = Math.ceil(totalCount / pageSize);
 
   if (matches.length === 0) {
@@ -760,7 +772,7 @@ function SuggestedMatchesView({
                     <s-button
                       variant="primary"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Confirm
                     </s-button>
@@ -772,7 +784,7 @@ function SuggestedMatchesView({
                       variant="secondary"
                       tone="critical"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Reject
                     </s-button>
@@ -814,15 +826,15 @@ function ConfirmedMatchesView({
   page,
   totalCount,
   pageSize,
+  actionsDisabled,
 }: {
   matches: MatchSummary[];
   currency: string;
   page: number;
   totalCount: number;
   pageSize: number;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
   const totalPages = Math.ceil(totalCount / pageSize);
 
   if (matches.length === 0) {
@@ -861,7 +873,7 @@ function ConfirmedMatchesView({
                     <s-button
                       variant="primary"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Apply
                     </s-button>
@@ -873,7 +885,7 @@ function ConfirmedMatchesView({
                       variant="secondary"
                       tone="critical"
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                     >
                       Unmatch
                     </s-button>
@@ -916,15 +928,15 @@ function PushingMatchesView({
   page,
   totalCount,
   pageSize,
+  actionsDisabled,
 }: {
   matches: MatchSummary[];
   currency: string;
   page: number;
   totalCount: number;
   pageSize: number;
+  actionsDisabled: boolean;
 }) {
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
   const totalPages = Math.ceil(totalCount / pageSize);
 
   if (matches.length === 0) {
@@ -971,7 +983,7 @@ function PushingMatchesView({
                   <s-button
                     variant="primary"
                     type="submit"
-                    disabled={isSubmitting}
+                    disabled={actionsDisabled}
                   >
                     Retry
                   </s-button>
@@ -1006,6 +1018,7 @@ function PushingMatchesView({
 export default function ReconcilePage() {
   const {
     shopCurrency,
+    currencySupported,
     payments,
     matches,
     selectedPayment,
@@ -1016,9 +1029,21 @@ export default function ReconcilePage() {
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+  // G7: Disable actions for non-INR or unknown shops
+  const actionsDisabled = isSubmitting || !currencySupported;
 
   return (
     <s-page heading="Payment Reconciliation">
+      {/* G7: Currency not supported banner */}
+      {!currencySupported && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            Payment reconciliation is only available for INR stores. Your store
+            currency ({shopCurrency || "unknown"}) is not supported.
+          </s-banner>
+        </s-section>
+      )}
+
       {error && (
         <s-section>
           <s-banner tone="critical" heading="Error">
@@ -1032,7 +1057,7 @@ export default function ReconcilePage() {
         <s-stack direction="inline">
           <Form method="post">
             <input type="hidden" name="intent" value="run_matcher" />
-            <s-button variant="primary" type="submit" disabled={isSubmitting}>
+            <s-button variant="primary" type="submit" disabled={actionsDisabled}>
               {isSubmitting ? "Running…" : "Run Matcher"}
             </s-button>
           </Form>
@@ -1071,6 +1096,7 @@ export default function ReconcilePage() {
           payment={selectedPayment.payment}
           matches={selectedPayment.matches}
           currency={shopCurrency}
+          actionsDisabled={actionsDisabled}
         />
       ) : view === "unmatched" ? (
         <s-section heading="Unmatched Payments">
@@ -1090,6 +1116,7 @@ export default function ReconcilePage() {
             page={pagination.page}
             totalCount={pagination.totalCount}
             pageSize={pagination.pageSize}
+            actionsDisabled={actionsDisabled}
           />
         </s-section>
       ) : view === "pushing" ? (
@@ -1100,6 +1127,7 @@ export default function ReconcilePage() {
             page={pagination.page}
             totalCount={pagination.totalCount}
             pageSize={pagination.pageSize}
+            actionsDisabled={actionsDisabled}
           />
         </s-section>
       ) : (
@@ -1110,6 +1138,7 @@ export default function ReconcilePage() {
             page={pagination.page}
             totalCount={pagination.totalCount}
             pageSize={pagination.pageSize}
+            actionsDisabled={actionsDisabled}
           />
         </s-section>
       )}

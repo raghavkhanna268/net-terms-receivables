@@ -231,7 +231,7 @@ describe("Reconcile Route (M5)", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { confirmMatch } = await import("~/services/matcher.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-action-test" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-action-test", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const actionError = new Error(
@@ -275,7 +275,7 @@ describe("Reconcile Route (M5)", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { applyMatch } = await import("~/services/apply.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-utr-test" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-utr-test", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const errorWithSensitiveData = new Error(
@@ -312,7 +312,7 @@ describe("Reconcile Route (M5)", () => {
     it("logs hostile intent as 'other' (toSafeIntent)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const consoleWarnSpy = vi
@@ -356,7 +356,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-human-error" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-human-error", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -392,7 +392,7 @@ describe("Reconcile Route (M5)", () => {
       const { unmatchMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-human-readable" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-human-readable", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (unmatchMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -426,7 +426,7 @@ describe("Reconcile Route (M5)", () => {
       const { unmatchMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-code-only" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-code-only", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (unmatchMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -460,7 +460,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-free-text" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-free-text", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -496,7 +496,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-digits" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-digits", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -530,7 +530,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-prefixed" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-prefixed", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -577,7 +577,7 @@ describe("Reconcile Route (M5)", () => {
 
         const freshMockSql = vi.fn();
         freshMockSql.mockResolvedValueOnce([
-          { id: `shop-reconcile-msg-${humanMessage.slice(0, 10)}` },
+          { id: `shop-reconcile-msg-${humanMessage.slice(0, 10)}`, currency: "INR" },
         ]);
         (freshGetRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(
           freshMockSql
@@ -615,7 +615,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-domain-test" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-domain-test", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const errorWithDomain = "Error for test-store.myshopify.com";
@@ -720,6 +720,200 @@ describe("Reconcile Route (M5)", () => {
       expect(result).not.toHaveProperty("gatingEnforced");
       expect(result).not.toHaveProperty("storeHandle");
       expect(result).not.toHaveProperty("appHandle");
+    });
+  });
+
+  describe("#292 G7: Currency guard for reconcile actions", () => {
+    it("action returns error for non-INR shop", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      // Return shop with non-INR currency (USD)
+      mockSql.mockResolvedValueOnce([{ id: "shop-usd", currency: "USD" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      const formData = new FormData();
+      formData.append("intent", "run_matcher");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Currency not supported");
+    });
+
+    it("action returns error for unknown currency shop (XXX)", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      // Return shop with unknown currency
+      mockSql.mockResolvedValueOnce([{ id: "shop-xxx", currency: "XXX" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      const formData = new FormData();
+      formData.append("intent", "confirm");
+      formData.append("matchId", "match-123");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Currency not supported");
+    });
+
+    it("action returns error for null currency shop", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+
+      // Return shop with null currency
+      mockSql.mockResolvedValueOnce([{ id: "shop-null", currency: null }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      const formData = new FormData();
+      formData.append("intent", "apply");
+      formData.append("matchId", "match-456");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Currency not supported");
+    });
+
+    it("action proceeds for INR shop", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { runMatcher } = await import("~/services/matcher.server");
+
+      // Return shop with INR currency
+      mockSql.mockResolvedValueOnce([{ id: "shop-inr", currency: "INR" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      (runMatcher as ReturnType<typeof vi.fn>).mockResolvedValue({
+        paymentsProcessed: 5,
+        matchesCreated: 3,
+        highConfidenceMatches: 2,
+        hasMore: false,
+      });
+
+      const formData = new FormData();
+      formData.append("intent", "run_matcher");
+
+      const postRequest = new Request("https://example.com/app/reconcile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.reconcile");
+      const result = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.success).toBe(true);
+      expect(runMatcher).toHaveBeenCalled();
+    });
+
+    it("loader returns currencySupported=false for non-INR shop", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { getSuggestedMatches } = await import(
+        "~/lib/matching/queries.server"
+      );
+
+      // Return shop with USD currency
+      mockSql.mockResolvedValueOnce([{ id: "shop-usd-loader", currency: "USD" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockSql
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValue([]);
+
+      (getSuggestedMatches as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [],
+        totalCount: 0,
+      });
+
+      const { loader } = await import("../app.reconcile");
+      const result = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.currencySupported).toBe(false);
+      expect(result.shopCurrency).toBe("USD");
+    });
+
+    it("loader returns currencySupported=true for INR shop", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { getSuggestedMatches } = await import(
+        "~/lib/matching/queries.server"
+      );
+
+      // Return shop with INR currency
+      mockSql.mockResolvedValueOnce([{ id: "shop-inr-loader", currency: "INR" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockSql
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValueOnce([{ count: "0" }])
+        .mockResolvedValue([]);
+
+      (getSuggestedMatches as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [],
+        totalCount: 0,
+      });
+
+      const { loader } = await import("../app.reconcile");
+      const result = await loader({
+        request: mockRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.currencySupported).toBe(true);
+      expect(result.shopCurrency).toBe("INR");
     });
   });
 });

@@ -59,6 +59,19 @@ import {
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
 import { isShopCurrencySupported } from "~/lib/shop-currency.server";
+
+/**
+ * #292 G8: Terminal topics that must reach handlers even for non-INR shops.
+ * These update existing rows without importing new amounts:
+ * - ORDERS_PAID: marks existing invoice as paid
+ * - ORDERS_CANCELLED: marks existing invoice as cancelled  
+ * - DRAFT_ORDERS_DELETE: deletes existing draft order
+ */
+const TERMINAL_TOPICS = new Set([
+  "ORDERS_PAID",
+  "ORDERS_CANCELLED",
+  "DRAFT_ORDERS_DELETE",
+]);
 import {
   isShopNotFoundReason,
   sanitizeSyncMessage,
@@ -1171,9 +1184,25 @@ async function processSyncQueue(
       break;
     }
 
-    // #292: Skip non-INR shops
+    // #292: Skip non-INR shops (but let terminal topics through for existing rows)
+    // G4: Also skip when Shop row doesn't exist (currency undefined in map)
     const shopCurrency = shopCurrencies.get(msg.message.shop);
-    if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
+    const isNonInr = shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency);
+    const isNoShopRow = !shopCurrencies.has(msg.message.shop);
+    
+    if (isNoShopRow) {
+      // G4: No Shop row - skip with fixed-code log, don't crash
+      safeLog("info", "drain_skip_no_shop_row", {
+        queue: S6_QUEUES.SYNC,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+    
+    if (isNonInr && !TERMINAL_TOPICS.has(msg.message.topic)) {
+      // G8: Non-INR shop, non-terminal topic - skip (don't import new amounts)
       await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
       result.skipped++;
       skippedNonInrCounts.set(
@@ -1182,6 +1211,8 @@ async function processSyncQueue(
       );
       continue;
     }
+    // G8: Terminal topics (PAID, CANCELLED, DRAFT_DELETE) pass through to handlers
+    // which will update existing rows without importing new amounts
 
     // Skip already-sanitized messages (re-enqueued by hand)
     if ((msg.message as Record<string, unknown>).sanitized === true) {
@@ -1378,8 +1409,24 @@ async function processBulkQueue(
     }
 
     // #292: Skip non-INR shops
+    // G4: Also skip when Shop row doesn't exist (currency undefined in map)
     const shopCurrency = shopCurrencies.get(msg.message.shop);
-    if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
+    const isNonInr = shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency);
+    const isNoShopRow = !shopCurrencies.has(msg.message.shop);
+    
+    if (isNoShopRow) {
+      // G4: No Shop row - skip with fixed-code log, don't crash
+      safeLog("info", "drain_skip_no_shop_row", {
+        queue: S6_QUEUES.BULK,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+    
+    if (isNonInr) {
+      // G8: Bulk queue has no terminal topics - all non-INR are skipped
       await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
       result.skipped++;
       skippedNonInrCounts.set(
