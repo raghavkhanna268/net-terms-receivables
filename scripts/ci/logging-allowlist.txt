@@ -29,7 +29,7 @@ scripts/credit-status-metafield-backfill.ts:shop-interpolation:2
 
 # seed.ts:
 # - ${shopDomain} placeholder, ${accountName}, code-controlled .name endings
-scripts/seed.ts:shop-interpolation:10
+scripts/seed.ts:shop-interpolation:11
 scripts/seed.ts:domain-literal:1
 
 # validate-graphql-schema.ts:
