@@ -1649,7 +1649,7 @@ export interface ReminderLogEntry {
   id: string;
   invoiceName: string;
   offsetDays: number;
-  status: "sent" | "delayed" | "skipped_daily_limit";
+  status: "sent" | "delayed" | "skipped_daily_limit" | "skipped_opted_out";
   date: Date;
 }
 
