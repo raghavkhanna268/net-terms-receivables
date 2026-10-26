@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { syncClockToDb } from "../../../tests/helpers/db-clock";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
@@ -196,7 +197,18 @@ describeWithDb("S10 Drain Integration", () => {
   });
 
   describe("no-handler visibility extension", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("can extend message visibility with pgmq.set_vt", async () => {
+      // Sync JS clock to DB clock so Date.now() matches DB NOW()
+      await syncClockToDb(sql);
+
       const testMsg = {
         topic: "UNKNOWN_FUTURE_TOPIC",
         shop: `test-${TEST_SUFFIX}.myshopify.com`,
@@ -221,7 +233,7 @@ describeWithDb("S10 Drain Integration", () => {
       `;
       expect(vtResult.vt).toBeDefined();
 
-      // The new vt should be approximately 1 hour from now
+      // The new vt should be approximately 1 hour from now (using synced JS clock)
       const newVt = new Date(vtResult.vt);
       const oneHourFromNow = new Date(Date.now() + 3600 * 1000);
       const diffMs = Math.abs(newVt.getTime() - oneHourFromNow.getTime());

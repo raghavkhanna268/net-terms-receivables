@@ -21,6 +21,7 @@ on:
         type: choice
         options:
           - canary-orders-backstop
+          - dlq-classify-bulk
           - g3-noninr-is-dev-store
           - g3-shop-config-currency-counts
           - hold-audit-s12
