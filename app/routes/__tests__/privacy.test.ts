@@ -461,7 +461,7 @@ describe("data-retention.md content requirements", () => {
   });
 
   it("specifies 30-day backup retention period", () => {
-    expect(retentionContent).toContain("30 days (nightly backup, rolling deletion)");
+    expect(retentionContent).toContain("30-day rolling retention");
   });
 });
 
