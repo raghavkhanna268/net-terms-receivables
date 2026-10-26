@@ -45,10 +45,12 @@ describeWithDb("hasFinancialRows DB integration", () => {
     `;
 
     // Create a BuyerAccount for shops that need it
+    // Use TAGGED_CUSTOMER kind which doesn't require companyLocationId
     const BUYER_ID = `buyer-${TEST_SUFFIX}`;
+    const CUSTOMER_ID = `gid://shopify/Customer/test-${TEST_SUFFIX}`;
     await sql`
-      INSERT INTO "BuyerAccount" (id, "shopId", kind, name, "createdAt", "updatedAt")
-      VALUES (${BUYER_ID}, ${SHOP_WITH_INVOICE}, 'COMPANY', 'Test Buyer', NOW(), NOW())
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, "createdAt", "updatedAt")
+      VALUES (${BUYER_ID}, ${SHOP_WITH_INVOICE}, 'TAGGED_CUSTOMER', ${CUSTOMER_ID}, 'Test Buyer', NOW(), NOW())
     `;
 
     // Create an Invoice for SHOP_WITH_INVOICE
