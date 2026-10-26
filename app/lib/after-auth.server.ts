@@ -441,6 +441,11 @@ export function _isShopSetupInFlight(shop: string): boolean {
  *
  * #292: Now stores actual shop currency (not hardcoded INR) for INR-only guards.
  *
+ * #292 G4: A failed currency read (XXX) now overwrites the existing currency
+ * instead of preserving it. This ensures a shop that was INR but now has a failed
+ * re-auth read fails closed (currency=XXX → not supported) rather than keeping
+ * stale INR. Recovery can re-read and restore INR if the API becomes available.
+ *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
  * @param timezone - IANA timezone from Shopify, or null if query failed
@@ -464,10 +469,9 @@ export async function upsertShopOnAuth(
       ON CONFLICT (domain)
       DO UPDATE SET
         timezone = COALESCE(${timezone}, "Shop".timezone),
-        currency = CASE
-          WHEN ${currency} = 'XXX' THEN "Shop".currency
-          ELSE ${currency}
-        END,
+        -- G4: Do NOT preserve existing currency on failed read (XXX).
+        -- A failed re-auth read must fail-closed, not keep stale INR.
+        currency = ${currency},
         "uninstalledAt" = NULL,
         onboarding_dismissed_at = CASE
           WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
