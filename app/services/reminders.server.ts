@@ -913,7 +913,7 @@ export async function sendPaymentReminder(
       skipReason: "Recipient allowlist is empty or not configured",
     };
   }
-  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist, env)) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
@@ -1365,7 +1365,7 @@ export async function sendCatchupReminder(
       skipReason: "Recipient allowlist is empty or not configured",
     };
   }
-  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist)) {
+  if (enforced && !isRecipientAllowed(invoice.buyerEmail, allowlist, env)) {
     safeLog("info", "reminder_send_skipped", { shopId, reason: "recipient_not_allowlisted", skippedCount: 1, allowedCount: 0 });
     return {
       success: true,
