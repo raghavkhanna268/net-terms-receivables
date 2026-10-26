@@ -1,17 +1,17 @@
 -- post-drain-aggregates.sql (READ-ONLY)
--- Ids, enums, booleans, timestamps and counts only. No money amounts, shop domains,
--- names, emails, addresses, payloads or free text (reasons/errors mapped to enums).
+-- Enums, booleans, timestamps and counts only. No money amounts, shop domains,
+-- names, emails, addresses, payloads, free text (reasons/errors mapped to enums),
+-- or individual buyer/invoice/order IDs (QA 2 audit: aggregates only).
 -- Vars: since (ISO timestamp, redrive start), location_id (CompanyLocation numeric id
---       of one held account for the overdue drill-down).
--- Usage: psql -v since='2026-10-24T08:29:23Z' -v location_id='24544084133' -f ...
+--       of one held account for the overdue drill-down, passed as workflow input).
+-- Usage: psql -v since='2026-10-24T08:29:23Z' -v location_id='...' -f ...
 -- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
 -- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
 -- @col topic, original_queue, error_format, error_disposition, error_code, status, due_basis, action, account_hold_state, kind, holdState, defaultTermsSource, dueSource, dueBasis: enum
 -- dueBasis / due_basis and dueSource are TEXT columns holding app-written fixed codes (not free text), so enum.
--- @col fo_held, non_mm_skipped, syncVersion: count
+-- @col total_fo_held, total_non_mm_skipped: count
 -- @col defaultTermsDays: config_int
 -- @col manualHold, bypass, syncPending: boolean
--- @col issued_at_days_ago: timestamp
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 
@@ -163,9 +163,9 @@ FROM backstop_processed_orders b
 LEFT JOIN "Invoice" i ON i."orderId" = b.order_gid AND i."shopId" = b.shop_id
 WHERE b.action = 'held' AND b.processed_at >= (:'since')::timestamptz;
 
-\echo '== backstop.hold_applied AuditEvents since redrive start (order gid, account, reason fields from data)'
-SELECT e.at, e.data->>'orderGid' AS order_gid, e.data->>'buyerAccountId' AS buyer_account_id,
-       CASE WHEN e.data->>'holdReasonCode' ~ '^[A-Z0-9_]{1,40}$' THEN e.data->>'holdReasonCode' WHEN e.data->>'holdReasonCode' IS NULL THEN NULL ELSE '<other>' END AS data_hold_reason_code,
+\echo '== backstop.hold_applied AuditEvents since redrive start (aggregated by reason code)'
+-- QA 2 audit: individual order_gid and buyer_account_id removed; aggregated by reason code.
+SELECT CASE WHEN e.data->>'holdReasonCode' ~ '^[A-Z0-9_]{1,40}$' THEN e.data->>'holdReasonCode' WHEN e.data->>'holdReasonCode' IS NULL THEN NULL ELSE '<other>' END AS data_hold_reason_code,
        CASE e.data->>'reason'
          WHEN 'Order placed from held account - backstop applied'                   THEN 'hold_applied'
          WHEN 'Backstop failed after all retries - manual intervention required'     THEN 'failed_after_retries'
@@ -182,12 +182,18 @@ SELECT e.at, e.data->>'orderGid' AS order_gid, e.data->>'buyerAccountId' AS buye
          WHEN 'This order pushed account over limit (not held)'                     THEN 'order_pushed_over_limit'
          ELSE CASE WHEN e.data->>'reason' IS NULL THEN NULL ELSE '<other>' END
        END AS data_reason_code,
-       e.data->>'fulfillmentOrdersHeld' AS fo_held, e.data->>'nonMerchantManagedSkipped' AS non_mm_skipped,
-       CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS account_hold_reason_code, a."holdState" AS account_hold_state
+       CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS account_hold_reason_code,
+       a."holdState" AS account_hold_state,
+       COUNT(*) AS event_count,
+       COUNT(DISTINCT e.data->>'orderGid') AS distinct_orders,
+       COUNT(DISTINCT e.data->>'buyerAccountId') AS distinct_accounts,
+       SUM((e.data->>'fulfillmentOrdersHeld')::int) AS total_fo_held,
+       SUM((e.data->>'nonMerchantManagedSkipped')::int) AS total_non_mm_skipped
 FROM "AuditEvent" e
 LEFT JOIN "BuyerAccount" a ON a.id = e.data->>'buyerAccountId'
 WHERE e.type = 'backstop.hold_applied' AND e.at >= (:'since')::timestamptz
-ORDER BY e.at;
+GROUP BY 1, 2, 3, 4
+ORDER BY 1, 2, 3, 4;
 
 \echo '== backstop.failed AuditEvents by error code (all-time / since redrive start; data.errorCode since #176, legacy data.error text never printed)'
 SELECT CASE WHEN e.data ? 'errorCode' THEN
@@ -203,23 +209,32 @@ FROM "AuditEvent" e
 WHERE e.type = 'backstop.failed'
 GROUP BY 1 ORDER BY 1;
 
-\echo '== held account drill-down: account hold fields (no name)'
-SELECT a.id, a.kind, a."holdState", CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS hold_reason_code, a."manualHold", a.bypass,
-       a."syncPending", a."syncVersion", (a."creditLimit" IS NOT NULL) AS has_credit_limit,
-       CASE WHEN a."defaultTermsDays" BETWEEN 0 AND 365 THEN a."defaultTermsDays" END AS "defaultTermsDays", -- config_int, clamped: out of range prints NULL
-       a."defaultTermsSource", a.gated_at, a."updatedAt"
+\echo '== held account drill-down: aggregated account hold fields'
+-- QA 2 audit: individual account IDs removed; aggregated by holdState.
+-- The location_id variable is passed as a numeric workflow input.
+SELECT a.kind, a."holdState",
+       CASE WHEN a."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN a."holdReasonCode" WHEN a."holdReasonCode" IS NULL THEN NULL ELSE '<other>' END AS hold_reason_code,
+       a."manualHold", a.bypass, a."syncPending",
+       (a."creditLimit" IS NOT NULL) AS has_credit_limit,
+       CASE WHEN a."defaultTermsDays" BETWEEN 0 AND 365 THEN a."defaultTermsDays" END AS "defaultTermsDays",
+       a."defaultTermsSource",
+       (a.gated_at IS NOT NULL) AS gated,
+       COUNT(*) AS account_count
 FROM "BuyerAccount" a
-WHERE a."companyLocationId" = 'gid://shopify/CompanyLocation/' || :'location_id';
+WHERE a."companyLocationId" = 'gid://shopify/CompanyLocation/' || :'location_id'
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+ORDER BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10;
 
-\echo '== held account drill-down: its open invoices vs overdue rule'
-SELECT i.id, i.status, i."dueAt", i."dueOverrideAt", i."dueSource", i."dueBasis",
-       i.issued_at_days_ago, i.outstanding > 0 AS has_outstanding,
-       (i.status = 'open' AND i.outstanding > 0 AND i."dueAt" < NOW() - INTERVAL '1 day') AS overdue_rule
-FROM (
-  SELECT inv.*, EXTRACT(DAY FROM NOW() - inv."issuedAt")::int AS issued_at_days_ago
-  FROM "Invoice" inv JOIN "BuyerAccount" a ON a.id = inv."buyerAccountId"
-  WHERE a."companyLocationId" = 'gid://shopify/CompanyLocation/' || :'location_id'
-) i
-ORDER BY i."dueAt" NULLS LAST;
+\echo '== held account drill-down: its open invoices vs overdue rule (aggregated)'
+-- QA 2 audit: individual invoice IDs removed; aggregated by status and overdue state.
+SELECT i.status, i."dueSource", i."dueBasis",
+       (i.outstanding > 0) AS has_outstanding,
+       (i.status = 'open' AND i.outstanding > 0 AND i."dueAt" < NOW() - INTERVAL '1 day') AS overdue_rule,
+       COUNT(*) AS invoice_count
+FROM "Invoice" i
+JOIN "BuyerAccount" a ON a.id = i."buyerAccountId"
+WHERE a."companyLocationId" = 'gid://shopify/CompanyLocation/' || :'location_id'
+GROUP BY 1, 2, 3, 4, 5
+ORDER BY 1, 2, 3, 4, 5;
 
 ROLLBACK;
