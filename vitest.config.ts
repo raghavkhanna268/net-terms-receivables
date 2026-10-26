@@ -117,6 +117,7 @@ const DB_TEST_PATTERNS = [
   "app/lib/__tests__/aging-reconcile.test.ts",
   "app/lib/__tests__/initial-sync-db.test.ts",
   "app/lib/__tests__/offline-token.test.ts",
+  "app/lib/__tests__/reinstall-sync-reset-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
   // Script DB tests

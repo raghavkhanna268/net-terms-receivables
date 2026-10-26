@@ -107,6 +107,7 @@ interface StaleBulkOperation {
  *
  * An operation is stale if:
  * - completed_at IS NULL (not finished)
+ * - closed_at IS NULL (not closed by reinstall reset)
  * - failure_count < MAX_FAILURE_COUNT (not already marked failed)
  * - started_at < NOW() - STALE_THRESHOLD_MINUTES
  * - Shop is still installed (uninstalledAt IS NULL)
@@ -124,6 +125,7 @@ export async function findStaleBulkOperations(
     FROM s6_bulk_operations bo
     INNER JOIN "Shop" s ON s.domain = bo.shop
     WHERE bo.completed_at IS NULL
+      AND bo.closed_at IS NULL
       AND bo.failure_count < ${MAX_FAILURE_COUNT}
       AND bo.started_at < NOW() - INTERVAL '1 minute' * ${thresholdMinutes}
       AND s."uninstalledAt" IS NULL
@@ -181,6 +183,7 @@ export async function markBulkOperationFailed(
     WHERE bulk_operation_id = ${bulkOperationId}
       AND shop = ${shop}
       AND completed_at IS NULL
+      AND closed_at IS NULL
   `;
   return result.count > 0;
 }
@@ -207,6 +210,7 @@ async function enqueueCompletedOperation(
       WHERE bulk_operation_id = ${op.bulk_operation_id}
         AND shop = ${op.shop}
         AND completed_at IS NULL
+        AND closed_at IS NULL
       FOR UPDATE
     `;
 
@@ -412,6 +416,7 @@ export async function recoverStaleBulkOperationsForShop(
     FROM s6_bulk_operations
     WHERE shop = ${shop}
       AND completed_at IS NULL
+      AND closed_at IS NULL
       AND failure_count < ${MAX_FAILURE_COUNT}
       AND started_at < NOW() - INTERVAL '1 minute' * ${thresholdMinutes}
     ORDER BY started_at ASC
