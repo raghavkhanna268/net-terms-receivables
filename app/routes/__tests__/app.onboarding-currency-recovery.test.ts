@@ -228,7 +228,7 @@ describe("#292 G1: start_sync blocks non-INR and allows after recovery", () => {
   let mockGraphql: ReturnType<typeof vi.fn>;
   let sqlCalls: Array<{ query: string; values: unknown[] }>;
 
-  function createActionArgs(_shopCurrency: string): ActionFunctionArgs {
+  function createActionArgs(): ActionFunctionArgs {
     const formData = new FormData();
     formData.set("_action", "start_sync");
 
@@ -329,7 +329,7 @@ describe("#292 G1: start_sync blocks non-INR and allows after recovery", () => {
     setupSqlMockForAction("USD", "USD");
 
     const { action } = await import("../app.onboarding");
-    const result = await action(createActionArgs("USD"));
+    const result = await action(createActionArgs());
 
     expect(result).not.toBeInstanceOf(Response);
     const data = result as { success: boolean; error: string; action: string };
@@ -342,7 +342,7 @@ describe("#292 G1: start_sync blocks non-INR and allows after recovery", () => {
     setupSqlMockForAction("USD", "INR");
 
     const { action } = await import("../app.onboarding");
-    const result = await action(createActionArgs("USD"));
+    const result = await action(createActionArgs());
 
     expect(result).not.toBeInstanceOf(Response);
     const data = result as { success: boolean; action: string };
@@ -357,7 +357,7 @@ describe("#292 G1: start_sync blocks non-INR and allows after recovery", () => {
     setupSqlMockForAction("INR", "USD");
 
     const { action } = await import("../app.onboarding");
-    const result = await action(createActionArgs("INR"));
+    const result = await action(createActionArgs());
 
     expect(result).not.toBeInstanceOf(Response);
     const data = result as { success: boolean; error: string; action: string };
@@ -370,7 +370,7 @@ describe("#292 G1: start_sync blocks non-INR and allows after recovery", () => {
     setupSqlMockForAction("INR", "INR");
 
     const { action } = await import("../app.onboarding");
-    const result = await action(createActionArgs("INR"));
+    const result = await action(createActionArgs());
 
     expect(result).not.toBeInstanceOf(Response);
     const data = result as { success: boolean; action: string };

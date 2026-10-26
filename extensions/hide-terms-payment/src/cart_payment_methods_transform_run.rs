@@ -1285,4 +1285,72 @@ mod tests {
         let result = run_test(&input).unwrap();
         assert!(result.operations.is_empty(), "shop_config missing schemaVersion with INR cart should pass");
     }
+
+    /// #292 G2: Truly unparseable shop_config (string, not object) with USD cart hides deferred.
+    /// Simulates when Shopify's metafield contains garbage that can't be parsed as an object.
+    #[test]
+    fn test_unparseable_shop_config_usd_cart_hides() {
+        // When jsonValue is a string instead of an object, from_json_value returns default
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "USD" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "company": {},
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Credit Card" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/2", "name": "Deferred Payment" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/3", "name": "Net Terms" }
+            ],
+            "paymentCustomization": null,
+            "shop": {
+                "metafield": {
+                    "jsonValue": "not-json{"
+                }
+            }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Unparseable shop_config (string value) with USD cart must hide deferred (fail-closed)");
+    }
+
+    /// #292 G2: Truly unparseable shop_config (string, not object) with INR cart passes.
+    /// INR carts must never panic or error on malformed shop_config.
+    #[test]
+    fn test_unparseable_shop_config_inr_cart_passes() {
+        // When jsonValue is a string instead of an object, from_json_value returns default
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "INR" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "company": {},
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Credit Card" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/2", "name": "Deferred Payment" },
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/3", "name": "Net Terms" }
+            ],
+            "paymentCustomization": null,
+            "shop": {
+                "metafield": {
+                    "jsonValue": "not-json{"
+                }
+            }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert!(result.operations.is_empty(), "Unparseable shop_config (string value) with INR cart must pass without error");
+    }
 }

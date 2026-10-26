@@ -117,7 +117,7 @@ export async function checkAndRecoverCurrency(
       if (!writeResult.success) {
         safeLog("warn", "currency_recovery_metafield_failed", {
           shopHash: hash,
-          err: writeResult.error ?? "unknown",
+          err: writeResult.error ?? "shop_config_write_error",
         });
         return currentCurrency;
       }
