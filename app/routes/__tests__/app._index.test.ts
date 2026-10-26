@@ -96,6 +96,7 @@ const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
   getRequestWaitUntil: vi.fn(() => undefined),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-app-index-tests" })),
 }));
 
 vi.mock("~/services/plan.server", () => ({

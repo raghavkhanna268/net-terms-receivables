@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(),
+  getRequestEnv: vi.fn(() => ({ LOG_HASH_KEY: "test-key-for-tag-rules-tests" })),
 }));
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
