@@ -547,6 +547,7 @@ describeWithDb("Sequential DB", () => {
         WHERE send_key = 'global' AND send_month = ${FIXED_MONTH_STR}
       `;
       vi.unstubAllGlobals();
+      vi.useRealTimers();
       await sql.end();
     });
 
@@ -585,7 +586,9 @@ describeWithDb("Sequential DB", () => {
         VALUES (
           ${INVOICE_ID}, ${SHOP_ID}, ${BUYER_ACCOUNT_ID},
           'gid://shopify/Order/e2e-test', '#E2E-DUP', 10000.00, 10000.00,
-          'open', NOW() - INTERVAL '5 days', ${DUE_DATE_STR}::DATE, NOW(), NOW()
+          'open', NOW() - INTERVAL '5 days',
+          (${DUE_DATE_STR}::date + TIME '12:00') AT TIME ZONE ${SHOP_TIMEZONE},
+          NOW(), NOW()
         )
       `;
 
@@ -649,7 +652,9 @@ describeWithDb("Sequential DB", () => {
         VALUES (
           ${catchupInvoiceId}, ${SHOP_ID}, ${BUYER_ACCOUNT_ID},
           'gid://shopify/Order/catchup-e2e', '#CATCHUP-E2E', 10000.00, 10000.00,
-          'open', NOW() - INTERVAL '5 days', ${DUE_DATE_STR}::DATE - INTERVAL '1 day', NOW(), NOW()
+          'open', NOW() - INTERVAL '5 days',
+          ((${DUE_DATE_STR}::date - INTERVAL '1 day') + TIME '12:00') AT TIME ZONE ${SHOP_TIMEZONE},
+          NOW(), NOW()
         )
       `;
 
