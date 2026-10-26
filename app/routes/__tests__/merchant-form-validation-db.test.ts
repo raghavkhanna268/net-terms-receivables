@@ -144,6 +144,8 @@ describeWithDb("Merchant form validation (DB)", () => {
   const SHOP_A_DOMAIN = `test-shop-a-${TEST_SUFFIX}.myshopify.com`;
   const SHOP_B_ID = `shop-b-${TEST_SUFFIX}`;
   const SHOP_B_DOMAIN = `test-shop-b-${TEST_SUFFIX}.myshopify.com`;
+  const SHOP_TAG_ID = `shop-tag-${TEST_SUFFIX}`;
+  const SHOP_TAG_DOMAIN = `test-shop-tag-${TEST_SUFFIX}.myshopify.com`;
 
   const ACCOUNT_A_ID = `acc-a-${TEST_SUFFIX}`;
   const ACCOUNT_B_ID = `acc-b-${TEST_SUFFIX}`;
@@ -155,7 +157,8 @@ describeWithDb("Merchant form validation (DB)", () => {
       INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
       VALUES 
         (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW()),
-        (${SHOP_B_ID}, ${SHOP_B_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+        (${SHOP_B_ID}, ${SHOP_B_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW()),
+        (${SHOP_TAG_ID}, ${SHOP_TAG_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
     `;
 
     await sql`
@@ -173,12 +176,12 @@ describeWithDb("Merchant form validation (DB)", () => {
   });
 
   afterAll(async () => {
-    await sql`DELETE FROM "ReminderRule" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM "AccountSource" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+    await sql`DELETE FROM "ReminderRule" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID}, ${SHOP_TAG_ID})`;
+    await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID}, ${SHOP_TAG_ID})`;
+    await sql`DELETE FROM "AccountSource" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID}, ${SHOP_TAG_ID})`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID}, ${SHOP_TAG_ID})`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID}, ${SHOP_TAG_ID})`;
+    await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID}, ${SHOP_TAG_ID})`;
     await sql.end();
   });
 
@@ -232,23 +235,23 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const data = extractActionData(result);
       expect(data.success).toBe(true);
 
       const [saved] = await sql<{ tag: string; defaultTermsDays: number }[]>`
         SELECT tag, "defaultTermsDays" FROM "AccountSource"
-        WHERE "shopId" = ${SHOP_A_ID} AND tag = ${tag}
+        WHERE "shopId" = ${SHOP_TAG_ID} AND tag = ${tag}
       `;
       expect(saved).toBeDefined();
       expect(saved.defaultTermsDays).toBe(30);
 
-      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_TAG_ID}`;
     });
 
     it("net terms days = 0 is rejected with field error, DB unchanged", async () => {
-      const snapshotBefore = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotBefore = await getAccountSourceSnapshot(SHOP_TAG_ID);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -262,7 +265,7 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const status = extractStatus(result);
       expect(status).toBe(400);
@@ -271,12 +274,12 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.success).toBe(false);
       expect(data.fieldErrors?.defaultTermsDays).toContain("at least 1");
 
-      const snapshotAfter = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotAfter = await getAccountSourceSnapshot(SHOP_TAG_ID);
       expect(snapshotAfter).toEqual(snapshotBefore);
     });
 
     it("negative net terms days (-5) is rejected with field error, DB unchanged", async () => {
-      const snapshotBefore = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotBefore = await getAccountSourceSnapshot(SHOP_TAG_ID);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -290,7 +293,7 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const status = extractStatus(result);
       expect(status).toBe(400);
@@ -299,12 +302,12 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.success).toBe(false);
       expect(data.fieldErrors?.defaultTermsDays).toContain("at least 1");
 
-      const snapshotAfter = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotAfter = await getAccountSourceSnapshot(SHOP_TAG_ID);
       expect(snapshotAfter).toEqual(snapshotBefore);
     });
 
     it("non-integer net terms days (30.5) is rejected with field error, DB unchanged", async () => {
-      const snapshotBefore = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotBefore = await getAccountSourceSnapshot(SHOP_TAG_ID);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -318,7 +321,7 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const status = extractStatus(result);
       expect(status).toBe(400);
@@ -327,12 +330,12 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.success).toBe(false);
       expect(data.fieldErrors?.defaultTermsDays).toContain("whole number");
 
-      const snapshotAfter = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotAfter = await getAccountSourceSnapshot(SHOP_TAG_ID);
       expect(snapshotAfter).toEqual(snapshotBefore);
     });
 
     it("text net terms days ('abc') is rejected with field error, DB unchanged", async () => {
-      const snapshotBefore = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotBefore = await getAccountSourceSnapshot(SHOP_TAG_ID);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -346,7 +349,7 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const status = extractStatus(result);
       expect(status).toBe(400);
@@ -355,12 +358,12 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.success).toBe(false);
       expect(data.fieldErrors?.defaultTermsDays).toBeDefined();
 
-      const snapshotAfter = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotAfter = await getAccountSourceSnapshot(SHOP_TAG_ID);
       expect(snapshotAfter).toEqual(snapshotBefore);
     });
 
     it("huge net terms days (100000) is rejected with field error, DB unchanged", async () => {
-      const snapshotBefore = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotBefore = await getAccountSourceSnapshot(SHOP_TAG_ID);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -374,7 +377,7 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const status = extractStatus(result);
       expect(status).toBe(400);
@@ -383,7 +386,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(data.success).toBe(false);
       expect(data.fieldErrors?.defaultTermsDays).toContain("at most 365");
 
-      const snapshotAfter = await getAccountSourceSnapshot(SHOP_A_ID);
+      const snapshotAfter = await getAccountSourceSnapshot(SHOP_TAG_ID);
       expect(snapshotAfter).toEqual(snapshotBefore);
     });
 
@@ -401,12 +404,12 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const data = extractActionData(result);
       expect(data.success).toBe(true);
 
-      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_TAG_ID}`;
     });
 
     it("boundary: net terms days = 365 (max) is accepted", async () => {
@@ -423,12 +426,12 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
-      const result = await action(createTagRulesActionArgs(SHOP_A_DOMAIN, formData) as never);
+      const result = await action(createTagRulesActionArgs(SHOP_TAG_DOMAIN, formData) as never);
 
       const data = extractActionData(result);
       expect(data.success).toBe(true);
 
-      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM "AccountSource" WHERE tag = ${tag} AND "shopId" = ${SHOP_TAG_ID}`;
     });
   });
 
@@ -707,10 +710,10 @@ describeWithDb("Merchant form validation (DB)", () => {
     }
 
     it("enable reminders persists to DB", async () => {
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`
         INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
         VALUES (${SHOP_A_ID}, false, NOW(), NOW())
-        ON CONFLICT (shop_id) DO UPDATE SET enabled = false
       `;
 
       const formData = new FormData();
@@ -737,8 +740,10 @@ describeWithDb("Merchant form validation (DB)", () => {
     });
 
     it("disable reminders persists to DB", async () => {
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`
-        UPDATE s18_shop_reminder_settings SET enabled = true WHERE shop_id = ${SHOP_A_ID}
+        INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+        VALUES (${SHOP_A_ID}, true, NOW(), NOW())
       `;
 
       const formData = new FormData();
@@ -954,10 +959,10 @@ describeWithDb("Merchant form validation (DB)", () => {
     }
 
     it("onboarding loader returns remindersEnabled=true when DB has enabled=true", async () => {
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`
         INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
         VALUES (${SHOP_A_ID}, true, NOW(), NOW())
-        ON CONFLICT (shop_id) DO UPDATE SET enabled = true, updated_at = NOW()
       `;
 
       vi.doMock("~/lib/request-context.server", () => ({
@@ -996,9 +1001,10 @@ describeWithDb("Merchant form validation (DB)", () => {
     });
 
     it("onboarding loader returns remindersEnabled=false when DB has enabled=false", async () => {
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`
-        UPDATE s18_shop_reminder_settings SET enabled = false, updated_at = NOW()
-        WHERE shop_id = ${SHOP_A_ID}
+        INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+        VALUES (${SHOP_A_ID}, false, NOW(), NOW())
       `;
 
       vi.doMock("~/lib/request-context.server", () => ({
@@ -1166,7 +1172,7 @@ describeWithDb("Merchant form validation (DB)", () => {
   describe("6. Session required and GET rejection", () => {
     it("tag rules action rejects GET request with no AccountSource written", async () => {
       const snapshotBefore = await sql<{ id: string }[]>`
-        SELECT id FROM "AccountSource" WHERE "shopId" = ${SHOP_A_ID}
+        SELECT id FROM "AccountSource" WHERE "shopId" = ${SHOP_TAG_ID}
       `;
 
       vi.doMock("~/lib/request-context.server", () => ({
@@ -1177,26 +1183,31 @@ describeWithDb("Merchant form validation (DB)", () => {
       vi.resetModules();
       const { action } = await import("../app.tag-rules");
 
-      await expect(
-        action({
-          request: new Request("https://example.com/app/tag-rules", {
-            method: "GET",
-          }),
-          context: {
-            shopify: {
-              authenticate: {
-                admin: vi.fn().mockResolvedValue({ session: { shop: SHOP_A_DOMAIN } }),
-              },
+      const result = await action({
+        request: new Request("https://example.com/app/tag-rules", {
+          method: "GET",
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({ session: { shop: SHOP_TAG_DOMAIN } }),
             },
           },
-          params: {},
-          url: new URL("https://example.com/app/tag-rules"),
-          pattern: "/app/tag-rules",
-        } as never)
-      ).rejects.toThrow();
+        },
+        params: {},
+        url: new URL("https://example.com/app/tag-rules"),
+        pattern: "/app/tag-rules",
+      } as never);
+
+      const status = extractStatus(result);
+      expect(status).toBe(400);
+
+      const resultData = extractActionData(result);
+      expect(resultData.success).toBe(false);
+      expect(resultData.error).toBe("Invalid request body");
 
       const snapshotAfter = await sql<{ id: string }[]>`
-        SELECT id FROM "AccountSource" WHERE "shopId" = ${SHOP_A_ID}
+        SELECT id FROM "AccountSource" WHERE "shopId" = ${SHOP_TAG_ID}
       `;
       expect(snapshotAfter).toEqual(snapshotBefore);
     });
