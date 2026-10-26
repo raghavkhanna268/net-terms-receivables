@@ -12,7 +12,7 @@
  *   invoiceId: "<invoiceId>",
  *   ruleId: "<ruleId>",
  *   offsetDays: <number>,
- *   timezone: "<IANA timezone>",
+ *   timezone: "<IANA timezone>",  // @deprecated ignored since #320; tz comes from invoice.shopTimezone
  *   webhookId: "s18_<invoiceId>_<ruleId>_<date>",
  *   enqueuedAt: "<ISO timestamp>"
  * }
@@ -49,6 +49,9 @@ export interface ReminderSendMessage {
   invoiceId: string;
   ruleId: string;
   offsetDays?: number;
+  /**
+   * @deprecated ignored since #320; tz comes from invoice.shopTimezone
+   */
   timezone?: string;
   webhookId: string;
   enqueuedAt: string;
@@ -65,6 +68,9 @@ export interface ReminderCatchupMessage {
   ruleId: string;
   logId: string;
   offsetDays?: number;
+  /**
+   * @deprecated ignored since #320; tz comes from invoice.shopTimezone
+   */
   timezone?: string;
   webhookId: string;
   enqueuedAt: string;
