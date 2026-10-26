@@ -10,7 +10,7 @@
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/validationUpdate
  */
 
-import { toErrorCode } from "./log.server";
+import { safeLog, toErrorCode } from "./log.server";
 
 /**
  * Minimal type for the admin GraphQL client.
@@ -149,13 +149,14 @@ export interface EnsureValidationResult {
 }
 
 /**
- * Try to update the validation title. Returns the outcome without logging.
- * Caller is responsible for logging if needed.
+ * Try to update the validation title. Logs failures via safeLog.
  */
 async function tryUpdateTitle(
   admin: AdminGraphqlClient,
   id: string,
 ): Promise<{ outcome: TitleUpdateOutcome; errCode?: string }> {
+  let errCode: string | undefined;
+
   try {
     const updateResult = await admin.graphql(VALIDATION_UPDATE_MUTATION, {
       variables: { id, title: VALIDATION_TITLE },
@@ -163,26 +164,22 @@ async function tryUpdateTitle(
     const updateData = (await updateResult.json()) as ValidationUpdateResult;
 
     if (updateData.errors?.length) {
-      return {
-        outcome: "failed",
-        errCode: toErrorCode({ message: updateData.errors[0].message }),
-      };
-    }
-    if (updateData.data?.validationUpdate?.userErrors?.length) {
-      return {
-        outcome: "failed",
-        errCode: toErrorCode({
-          message: updateData.data.validationUpdate.userErrors[0].message,
-        }),
-      };
-    }
-    if (updateData.data?.validationUpdate?.validation) {
+      errCode = toErrorCode({ message: updateData.errors[0].message });
+    } else if (updateData.data?.validationUpdate?.userErrors?.length) {
+      errCode = toErrorCode({
+        message: updateData.data.validationUpdate.userErrors[0].message,
+      });
+    } else if (updateData.data?.validationUpdate?.validation) {
       return { outcome: "updated" };
+    } else {
+      errCode = "no_validation_returned";
     }
-    return { outcome: "failed", errCode: "no_validation_returned" };
   } catch (error) {
-    return { outcome: "failed", errCode: toErrorCode(error) };
+    errCode = toErrorCode(error);
   }
+
+  safeLog("warn", "validation.title_update_failed", { err: errCode });
+  return { outcome: "failed", errCode };
 }
 
 /**

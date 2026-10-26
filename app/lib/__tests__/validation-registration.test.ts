@@ -1,21 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ensureValidation } from "../validation-registration.server";
+import * as logServer from "../log.server";
 
 describe("validation-registration", () => {
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let safeLogSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    safeLogSpy = vi.spyOn(logServer, "safeLog");
   });
 
   afterEach(() => {
     consoleWarnSpy.mockRestore();
     consoleLogSpy.mockRestore();
     consoleErrorSpy.mockRestore();
+    safeLogSpy.mockRestore();
   });
 
   describe("ensureValidation", () => {
@@ -53,8 +57,8 @@ describe("validation-registration", () => {
       expect(result.titleUpdate).toBe("skipped");
       expect(result.errCode).toBeUndefined();
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -117,8 +121,8 @@ describe("validation-registration", () => {
           title: "Termwise Credit Check",
         },
       });
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -155,8 +159,8 @@ describe("validation-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -208,8 +212,12 @@ describe("validation-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
       expect(result.errCode).toBeDefined();
-      expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: result.errCode },
+      );
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -254,8 +262,12 @@ describe("validation-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
       expect(result.errCode).toBeDefined();
-      expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: result.errCode },
+      );
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -295,8 +307,12 @@ describe("validation-registration", () => {
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
       expect(result.errCode).toBeDefined();
-      expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: result.errCode },
+      );
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -350,8 +366,8 @@ describe("validation-registration", () => {
           title: "Termwise Credit Check",
         },
       });
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
@@ -487,8 +503,8 @@ describe("validation-registration", () => {
       expect(result.created).toBe(true);
       expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
+      expect(safeLogSpy).not.toHaveBeenCalled();
       expect(consoleWarnSpy).not.toHaveBeenCalled();
-      expect(consoleLogSpy).not.toHaveBeenCalled();
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });
