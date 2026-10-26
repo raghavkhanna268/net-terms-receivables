@@ -7,7 +7,7 @@
  *
  * Run with: TEST_DATABASE_URL=postgresql://... npm test -- app.data-requests.download-db
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { getDataRequestExport } from "~/services/compliance";
@@ -20,7 +20,7 @@ describeWithDb("data-request download DB integration", () => {
   const TEST_SUFFIX = Date.now().toString(36) + "-dr-download";
 
   const SHOP_ID = `shop-${TEST_SUFFIX}`;
-  const SHOP_DOMAIN = `shop-${TEST_SUFFIX}.myshopify.com`;
+  const SHOP_DOMAIN = `test-shop-${TEST_SUFFIX}.myshopify.com`;
   const REQUEST_ID_PENDING = `req-pending-${TEST_SUFFIX}`;
   const REQUEST_ID_COMPLETED = `req-completed-${TEST_SUFFIX}`;
   const CUSTOMER_GID = `gid://shopify/Customer/${TEST_SUFFIX}`;

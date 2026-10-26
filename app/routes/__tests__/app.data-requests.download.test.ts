@@ -20,6 +20,13 @@ vi.mock("~/services/compliance", () => ({
   markDataRequestDownloaded: (...args: unknown[]) => mockMarkDataRequestDownloaded(...args),
 }));
 
+const mockRecordAccess = vi.fn();
+
+vi.mock("~/services/access-log.server", () => ({
+  recordAccess: (...args: unknown[]) => mockRecordAccess(...args),
+  getActorFromSessionToken: vi.fn(() => ({ type: "user", id: "test-user" })),
+}));
+
 const mockAuthenticate = vi.fn();
 
 function createMockLoaderArgs(
@@ -91,6 +98,8 @@ describe("app.data-requests.$id.download", () => {
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       const json = (await response.json()) as { error: string };
       expect(json.error).toBe("Data request not found or expired");
+      expect(mockMarkDataRequestDownloaded).not.toHaveBeenCalled();
+      expect(mockRecordAccess).not.toHaveBeenCalled();
     });
 
     it("returns JSON with Content-Disposition using DB row id when export is found", async () => {
