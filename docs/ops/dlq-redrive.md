@@ -43,11 +43,12 @@ the original `no_session` error is preserved (behaviour unchanged).
 When `adminGraphQL` fails with `no_session`, the handler checks the Shop row and
 relabels to `shop_not_found` only when the Shop is missing or uninstalled.
 
-**ORDERS_\* CREATE/UPDATED/PAID/CANCELLED after uninstall:** These run `adminGraphQL`
-before any Shop lookup. After uninstall or redact, sessions are gone, so these fail
-with `No session found` (`retryable: false`). The DLQ reason becomes `non_retryable:...`,
-which is **not sanitized**. This gap is still open under #239—a follow-up will add
-the Shop-row check to orders once approved.
+**ORDERS_\* CREATE/UPDATED/PAID/CANCELLED after uninstall:** When `adminGraphQL` fails
+with `no_session`, the handler checks the Shop row. If the Shop row is missing or
+`uninstalledAt` is set, the message is ACKed immediately (success:true, no DLQ entry,
+no retry, no recordBackstopFailure). This avoids DLQ pollution for post-uninstall
+webhooks. If the Shop exists and is not uninstalled, the original `no_session` error
+is preserved (behaviour unchanged).
 
 **What actually gets sanitized:**
 - `COMPANIES_CREATE`, `COMPANIES_UPDATE` when `no_session` and Shop row missing/uninstalled
@@ -55,6 +56,9 @@ the Shop-row check to orders once approved.
 - `COMPANY_LOCATIONS_DELETE` when the Shop row is missing
 - `ORDERS_*` only if a session still exists while the Shop row is already missing (rare)
 - Bulk `companies`/`orders` (Shop check runs first, gives `permanent:shop_not_found`)
+
+**What gets ACKed (no DLQ):**
+- `ORDERS_*` when `no_session` and Shop row missing/uninstalled (ACKed, not DLQ'd)
 
 ## Diagnosing DLQ Issues
 
