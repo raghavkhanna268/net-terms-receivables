@@ -113,7 +113,7 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 XLSX fixtures are generated from CSV source files using `scripts/generate-xlsx-fixtures.ts`.
 Run `npx tsx scripts/generate-xlsx-fixtures.ts` to regenerate them after modifying CSV sources.
 
-### Real-Layout BIFF8 .xls Fixtures
+### Generated BIFF8 .xls Fixtures
 The `*-synthetic.xls` and matching `*-synthetic.csv` files are generated from value-free structural layout specs; all values are fictional.
 They reproduce the structural format of HDFC and ICICI .xls exports including:
 
@@ -129,7 +129,7 @@ They reproduce the structural format of HDFC and ICICI .xls exports including:
 **HDFC (`hdfc-synthetic.xls`):**
 - Bank banner row, two-column preamble block (rows 4-17)
 - Asterisk separator rows before/after header and after data
-- Header row at row 20 with exact HDFC column names
+- Header row at row 20
 - Mixed cell types: text for dates/narration/ref, NUMERIC for amounts
 - Blank (no cell) on non-applicable amount side (not 0.00)
 - Full footer: summary values row (numeric, no labels), Dr/Cr counts, generation line, end marker

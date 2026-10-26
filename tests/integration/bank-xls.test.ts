@@ -63,6 +63,7 @@ function assertTransactionsEquivalent(
     expect(xls.refNo, `${ctx} refNo`).toBe(csv.refNo);
     expect(xls.balancePaise, `${ctx} balancePaise`).toBe(csv.balancePaise);
     expect(xls.dedupeKey, `${ctx} dedupeKey`).toBe(csv.dedupeKey);
+    expect(xls.narration, `${ctx} narration`).toBe(csv.narration);
     
     // Parsed fields
     expect(xls.parsed.rail, `${ctx} rail`).toBe(csv.parsed.rail);
@@ -114,7 +115,7 @@ const SYNTHETIC_INVOICES: InvoiceForScoring[] = [
   },
 ];
 
-describe("ICICI BIFF8 .xls real-layout parsing", () => {
+describe("ICICI BIFF8 .xls parsing", () => {
   let xlsResult: ParseResult;
   let csvResult: ParseResult;
 
@@ -320,7 +321,7 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
   });
 });
 
-describe("HDFC BIFF8 .xls real-layout parsing", () => {
+describe("HDFC BIFF8 .xls parsing", () => {
   let xlsResult: ParseResult;
   let csvResult: ParseResult;
 
@@ -526,6 +527,85 @@ describe("HDFC BIFF8 .xls real-layout parsing", () => {
       expect(getConfidenceBand(allocation.score)).toBe("low");
       expect(formatReasons(allocation.reasons)).toBe("amount_exact(+20), payer_name(+8)");
     });
+  });
+});
+
+describe("fixture format validation", () => {
+  it("all 4 fixtures have amounts with at most 2 decimal places", () => {
+    const fixtures = [
+      "icici-synthetic.csv",
+      "icici-synthetic.xls",
+      "hdfc-synthetic.csv",
+      "hdfc-synthetic.xls",
+    ];
+    
+    for (const fixture of fixtures) {
+      const content = readFileSync(join(FIXTURES_DIR, fixture));
+      const text = fixture.endsWith(".csv") 
+        ? content.toString("utf-8")
+        : content.toString("latin1");
+      
+      const floatNoisePattern = /\b\d+\.\d{3,}\b/g;
+      const matches = text.match(floatNoisePattern) ?? [];
+      
+      const badMatches = matches.filter(m => {
+        if (/^\d{2}\.\d{4}$/.test(m)) return false;
+        if (/^\d+\.2026$/.test(m) || /^\d+\.2030$/.test(m)) return false;
+        return true;
+      });
+      
+      expect(badMatches, `${fixture} has float noise: ${badMatches.slice(0, 5).join(", ")}`).toHaveLength(0);
+    }
+  });
+});
+
+describe("pinned dedupe keys and refNo", () => {
+  it("pins HDFC refNo values from fixture", async () => {
+    const xlsContent = readFileSync(join(FIXTURES_DIR, "hdfc-synthetic.xls"));
+    const xlsFile = new File([xlsContent], "hdfc-synthetic.xls", { type: "application/vnd.ms-excel" });
+    const result = await parseBankStatement(xlsFile);
+
+    const firstTxn = result.transactions.find(t => t.narration.includes("SYNT VENDOR PVT LTD"));
+    expect(firstTxn).toBeDefined();
+    expect(firstTxn!.refNo).toBe("0000600000000001");
+
+    const diffRefTxn = result.transactions.find(t => t.narration.includes("SYNT RETAILER"));
+    expect(diffRefTxn).toBeDefined();
+    expect(diffRefTxn!.refNo).toBe("1234600000000003");
+
+    const alphaRefTxn = result.transactions.find(t => t.narration.includes("SYNT TRADERS"));
+    expect(alphaRefTxn).toBeDefined();
+    expect(alphaRefTxn!.refNo).toBe("ABC6000000000004");
+  });
+
+  it("pins HDFC dedupeKey format and stability", async () => {
+    const xlsContent = readFileSync(join(FIXTURES_DIR, "hdfc-synthetic.xls"));
+    const xlsFile = new File([xlsContent], "hdfc-synthetic.xls", { type: "application/vnd.ms-excel" });
+    const result = await parseBankStatement(xlsFile);
+
+    const firstTxn = result.transactions.find(t => t.narration.includes("SYNT VENDOR PVT LTD"));
+    expect(firstTxn).toBeDefined();
+    expect(firstTxn!.dedupeKey).toBe("utr:UPI:CR:600000000001");
+
+    for (const txn of result.transactions) {
+      expect(txn.dedupeKey).toBeDefined();
+      expect(txn.dedupeKey.length).toBeGreaterThan(10);
+    }
+  });
+
+  it("pins ICICI dedupeKey format and stability", async () => {
+    const xlsContent = readFileSync(join(FIXTURES_DIR, "icici-synthetic.xls"));
+    const xlsFile = new File([xlsContent], "icici-synthetic.xls", { type: "application/vnd.ms-excel" });
+    const result = await parseBankStatement(xlsFile);
+
+    const firstTxn = result.transactions.find(t => t.narration.includes("SYNT VENDOR PVT LTD"));
+    expect(firstTxn).toBeDefined();
+    expect(firstTxn!.dedupeKey).toBe("utr:UPI:CR:600000000001");
+
+    for (const txn of result.transactions) {
+      expect(txn.dedupeKey).toBeDefined();
+      expect(txn.dedupeKey.length).toBeGreaterThan(10);
+    }
   });
 });
 

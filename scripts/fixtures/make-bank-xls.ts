@@ -606,7 +606,7 @@ function generateHdfcTransactions(): { txns: HdfcTxn[]; openingBalance: number }
 function buildHdfcSheet(): XLSX.WorkSheet {
   const { txns, openingBalance } = generateHdfcTransactions();
   
-  // Calculate totals
+  // Calculate totals with round2() to avoid float noise
   let totalDebits = 0;
   let totalCredits = 0;
   let drCount = 0;
@@ -614,11 +614,11 @@ function buildHdfcSheet(): XLSX.WorkSheet {
   
   for (const txn of txns) {
     if (txn.withdrawal !== null) {
-      totalDebits += txn.withdrawal;
+      totalDebits = round2(totalDebits + txn.withdrawal);
       drCount++;
     }
     if (txn.deposit !== null) {
-      totalCredits += txn.deposit;
+      totalCredits = round2(totalCredits + txn.deposit);
       crCount++;
     }
   }
@@ -711,7 +711,7 @@ function buildHdfcSheet(): XLSX.WorkSheet {
   // +5: summary labels
   rows.push(["Opening Balance", null, null, null, "Debits", "Credits", "Closing Bal"]);
   
-  // +6: summary values (NUMERIC, no text labels - this is the ROW_PARSE_FAILED case)
+  // +6: summary values (NUMERIC, no text labels - footer skipped by parser)
   rows.push([openingBalance, null, null, null, totalDebits, totalCredits, closingBalance]);
   
   // +7: blank
@@ -802,10 +802,15 @@ function generateIciciCsv(txns: IciciTxn[]): string {
   return lines.join("\n");
 }
 
+/** Format number to exactly 2 decimal places for CSV */
+function fmt2(n: number): string {
+  return n.toFixed(2);
+}
+
 function generateHdfcCsv(txns: HdfcTxn[], openingBalance: number): string {
   const lines: string[] = [];
   
-  // Calculate totals
+  // Calculate totals with round2() to avoid float noise
   let totalDebits = 0;
   let totalCredits = 0;
   let drCount = 0;
@@ -813,11 +818,11 @@ function generateHdfcCsv(txns: HdfcTxn[], openingBalance: number): string {
   
   for (const txn of txns) {
     if (txn.withdrawal !== null) {
-      totalDebits += txn.withdrawal;
+      totalDebits = round2(totalDebits + txn.withdrawal);
       drCount++;
     }
     if (txn.deposit !== null) {
-      totalCredits += txn.deposit;
+      totalCredits = round2(totalCredits + txn.deposit);
       crCount++;
     }
   }
@@ -856,12 +861,12 @@ function generateHdfcCsv(txns: HdfcTxn[], openingBalance: number): string {
   // Asterisk row under header
   lines.push("********,**********************************,************,********,******************,******************,******************");
   
-  // Data rows
+  // Data rows - format all amounts to exactly 2 decimals
   for (const txn of txns) {
     const narrationEscaped = txn.narration.includes(",") ? `"${txn.narration}"` : txn.narration;
-    const withdrawal = txn.withdrawal !== null ? txn.withdrawal : "";
-    const deposit = txn.deposit !== null ? txn.deposit : "";
-    lines.push(`${txn.date},${narrationEscaped},${txn.ref},${txn.valueDate},${withdrawal},${deposit},${txn.balance}`);
+    const withdrawal = txn.withdrawal !== null ? fmt2(txn.withdrawal) : "";
+    const deposit = txn.deposit !== null ? fmt2(txn.deposit) : "";
+    lines.push(`${txn.date},${narrationEscaped},${txn.ref},${txn.valueDate},${withdrawal},${deposit},${fmt2(txn.balance)}`);
   }
   
   // Footer
@@ -871,7 +876,7 @@ function generateHdfcCsv(txns: HdfcTxn[], openingBalance: number): string {
   lines.push("");
   lines.push("STATEMENT SUMMARY  :-");
   lines.push("Opening Balance,,,,Debits,Credits,Closing Bal");
-  lines.push(`${openingBalance},,,,${totalDebits},${totalCredits},${closingBalance}`);
+  lines.push(`${fmt2(openingBalance)},,,,${fmt2(totalDebits)},${fmt2(totalCredits)},${fmt2(closingBalance)}`);
   lines.push("");
   lines.push(",,,,Dr Count,Cr Count");
   lines.push(`,,,,${drCount},${crCount}`);

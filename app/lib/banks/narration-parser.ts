@@ -116,9 +116,10 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
   // ICICI: `/` separated, format: UPI/CR/<rrn>/<vpa>/<name>/<bank>/...
   
   const isHdfcDashFormat = textUpper.startsWith("UPI-");
-  const isSlashFormat = text.includes("/");
+  const isIciciSlashFormat = textUpper.startsWith("UPI/");
+  const hasSlash = text.includes("/");
   
-  if (isHdfcDashFormat && !isSlashFormat) {
+  if (isHdfcDashFormat && !isIciciSlashFormat) {
     // HDFC dash format: UPI-NAME-vpa@handle-IFSC-RRN-note
     // OR for phone VPAs: UPI-9000000000-1@handle-NAME-IFSC-RRN-note
     const dashParts = text.split("-");
@@ -138,14 +139,13 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
         let vpaStartIdx = atSegmentIdx;
         for (let i = atSegmentIdx - 1; i >= 1; i--) {
           const seg = dashParts[i];
-          // If segment has letters and looks like a name (not lowercase VPA part), stop
-          // VPA parts are typically lowercase or digits; names are UPPER or Title
-          if (/[A-Z]/.test(seg) && seg === seg.toUpperCase()) {
+          // If segment has ANY uppercase letter, it's likely a name (UPPERCASE or Title-case)
+          // VPA parts are typically all lowercase or all digits
+          if (/[A-Z]/.test(seg)) {
             break;
           }
-          // If segment is all digits, could be phone number VPA start
-          // If segment is lowercase alphanumeric, could be VPA part like "synt" or "pay"
-          if (/^[a-z0-9._]+$/i.test(seg)) {
+          // If segment is all digits or all lowercase alphanumeric, could be VPA part
+          if (/^[a-z0-9._]+$/.test(seg)) {
             vpaStartIdx = i;
           } else {
             break;
@@ -163,7 +163,7 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
   }
   
   // Slash-separated format (ICICI and generic): find segment containing @
-  if (!result.upiId && isSlashFormat) {
+  if (!result.upiId && hasSlash) {
     const slashParts = text.split("/");
     for (const part of slashParts) {
       const trimmed = part.trim();

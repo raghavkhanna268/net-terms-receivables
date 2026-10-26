@@ -414,6 +414,44 @@ describe("narration-parser", () => {
         expect(result.rail).toBe("UPI");
         expect(result.upiId).toBe("synt-pay@oksynt");
       });
+
+      // Title-case one-word name (must NOT glue name on)
+      it("does NOT glue Title-case one-word name to VPA", () => {
+        const result = parseNarration(
+          "UPI-Syntco-syntpayer@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Must be syntpayer@oksynt, NOT syntco-syntpayer@oksynt
+        expect(result.upiId).toBe("syntpayer@oksynt");
+      });
+
+      // Lowercase one-word name looks like VPA part - included by design
+      it("includes lowercase segment as VPA part (may be VPA or name)", () => {
+        const result = parseNarration(
+          "UPI-syntco-syntpayer@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Lowercase segments look like VPA parts, so they're included
+        expect(result.upiId).toBe("syntco-syntpayer@oksynt");
+      });
+
+      // Dash-format with / in note segment (like INV/22) - still processes as dash-format
+      it("processes dash-format narration with / elsewhere in note", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-syntpayer@oksynt-SYNT0000001-600000000001-INV/22"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("syntpayer@oksynt");
+      });
+
+      // Dash-format with / in multiple segments
+      it("processes dash-format with / in reference segment", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-syntpayer@oksynt-SYNT0000001-REF/001/2030-Payment"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("syntpayer@oksynt");
+      });
     });
   });
 
