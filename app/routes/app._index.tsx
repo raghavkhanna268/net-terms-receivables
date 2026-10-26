@@ -242,11 +242,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   // #292: Re-read currency for non-INR shops to enable recovery when shop changes to INR
   // Pass shop.id to avoid re-querying the shop row
+  // Defensive: handle null/undefined result with fail-closed defaults
   const currencyResult = shop
     ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
-    : { currency: NO_CURRENCY_SENTINEL, flipBlocked: false };
-  const shopCurrency = currencyResult.currency;
-  const currencyFlipBlocked = currencyResult.flipBlocked;
+    : null;
+  const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
   // #292: Check currency gate BEFORE money queries - if not supported, return minimal payload with no amounts
   const currencySupported = isCurrencyGateOpen(shopCurrency);

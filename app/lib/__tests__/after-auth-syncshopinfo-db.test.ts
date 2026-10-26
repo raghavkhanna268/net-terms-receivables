@@ -6,9 +6,10 @@
  * - USD shop with financial rows: currency stays USD, no INR shop_config write, timezone updates
  * - USD shop with zero rows: flips to INR, shop_config write happens
  * - XXX stored with rows: blocked (fail-closed)
- * - NULL stored with rows: blocked (fail-closed)
  * - XXX stored with zero rows: flips to INR, writes shop_config
- * - NULL stored with zero rows: flips to INR, writes shop_config
+ *
+ * Note: NULL stored currency cases are tested via unit tests on decideShopCurrencyUpdate
+ * since Shop.currency is NOT NULL in the DB schema.
  *
  * Requires a running PostgreSQL instance.
  * Run with: TEST_DATABASE_URL=postgresql://... npm test -- after-auth-syncshopinfo-db
@@ -55,9 +56,7 @@ describeWithDb("syncShopInfo currency flip safety (#292) - real path", () => {
   const SHOP_WITH_INVOICE = `shop-invoice-${TEST_SUFFIX}`;
   const SHOP_EMPTY = `shop-empty-${TEST_SUFFIX}`;
   const SHOP_XXX = `shop-xxx-${TEST_SUFFIX}`;
-  const SHOP_NULL_ROWS = `shop-null-rows-${TEST_SUFFIX}`;
   const SHOP_XXX_ZERO = `shop-xxx-zero-${TEST_SUFFIX}`;
-  const SHOP_NULL_ZERO = `shop-null-zero-${TEST_SUFFIX}`;
 
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -71,45 +70,38 @@ describeWithDb("syncShopInfo currency flip safety (#292) - real path", () => {
         (${SHOP_WITH_INVOICE}, ${SHOP_WITH_INVOICE + ".example.com"}, 'USD', 'America/New_York', NOW(), NOW()),
         (${SHOP_EMPTY}, ${SHOP_EMPTY + ".example.com"}, 'USD', 'America/New_York', NOW(), NOW()),
         (${SHOP_XXX}, ${SHOP_XXX + ".example.com"}, 'XXX', 'America/New_York', NOW(), NOW()),
-        (${SHOP_NULL_ROWS}, ${SHOP_NULL_ROWS + ".example.com"}, NULL, 'America/New_York', NOW(), NOW()),
-        (${SHOP_XXX_ZERO}, ${SHOP_XXX_ZERO + ".example.com"}, 'XXX', 'America/New_York', NOW(), NOW()),
-        (${SHOP_NULL_ZERO}, ${SHOP_NULL_ZERO + ".example.com"}, NULL, 'America/New_York', NOW(), NOW())
+        (${SHOP_XXX_ZERO}, ${SHOP_XXX_ZERO + ".example.com"}, 'XXX', 'America/New_York', NOW(), NOW())
     `;
 
     // Create BuyerAccounts for shops that need invoices
     const BUYER_INVOICE = `buyer-invoice-${TEST_SUFFIX}`;
     const BUYER_XXX = `buyer-xxx-${TEST_SUFFIX}`;
-    const BUYER_NULL_ROWS = `buyer-null-rows-${TEST_SUFFIX}`;
     const CUSTOMER_INVOICE = `gid://shopify/Customer/invoice-${TEST_SUFFIX}`;
     const CUSTOMER_XXX = `gid://shopify/Customer/xxx-${TEST_SUFFIX}`;
-    const CUSTOMER_NULL_ROWS = `gid://shopify/Customer/null-rows-${TEST_SUFFIX}`;
     await testSql`
       INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, "createdAt", "updatedAt")
       VALUES 
         (${BUYER_INVOICE}, ${SHOP_WITH_INVOICE}, 'TAGGED_CUSTOMER', ${CUSTOMER_INVOICE}, 'Test Buyer', NOW(), NOW()),
-        (${BUYER_XXX}, ${SHOP_XXX}, 'TAGGED_CUSTOMER', ${CUSTOMER_XXX}, 'Test Buyer XXX', NOW(), NOW()),
-        (${BUYER_NULL_ROWS}, ${SHOP_NULL_ROWS}, 'TAGGED_CUSTOMER', ${CUSTOMER_NULL_ROWS}, 'Test Buyer NULL Rows', NOW(), NOW())
+        (${BUYER_XXX}, ${SHOP_XXX}, 'TAGGED_CUSTOMER', ${CUSTOMER_XXX}, 'Test Buyer XXX', NOW(), NOW())
     `;
 
     // Create Invoices for shops that need financial rows
     const ORDER_INVOICE = `gid://shopify/Order/invoice-${TEST_SUFFIX}`;
     const ORDER_XXX = `gid://shopify/Order/xxx-${TEST_SUFFIX}`;
-    const ORDER_NULL_ROWS = `gid://shopify/Order/null-rows-${TEST_SUFFIX}`;
     await testSql`
       INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "createdAt", "updatedAt")
       VALUES 
         (${`inv-invoice-${TEST_SUFFIX}`}, ${SHOP_WITH_INVOICE}, ${BUYER_INVOICE}, ${ORDER_INVOICE}, '#1001', 1000, 1000, NOW(), NOW(), NOW()),
-        (${`inv-xxx-${TEST_SUFFIX}`}, ${SHOP_XXX}, ${BUYER_XXX}, ${ORDER_XXX}, '#1002', 2000, 2000, NOW(), NOW(), NOW()),
-        (${`inv-null-rows-${TEST_SUFFIX}`}, ${SHOP_NULL_ROWS}, ${BUYER_NULL_ROWS}, ${ORDER_NULL_ROWS}, '#1003', 3000, 3000, NOW(), NOW(), NOW())
+        (${`inv-xxx-${TEST_SUFFIX}`}, ${SHOP_XXX}, ${BUYER_XXX}, ${ORDER_XXX}, '#1002', 2000, 2000, NOW(), NOW(), NOW())
     `;
   });
 
   afterAll(async () => {
     if (testSql) {
       // Clean up in reverse order of creation
-      await testSql`DELETE FROM "Invoice" WHERE id IN (${`inv-invoice-${TEST_SUFFIX}`}, ${`inv-xxx-${TEST_SUFFIX}`}, ${`inv-null-rows-${TEST_SUFFIX}`})`;
-      await testSql`DELETE FROM "BuyerAccount" WHERE id IN (${`buyer-invoice-${TEST_SUFFIX}`}, ${`buyer-xxx-${TEST_SUFFIX}`}, ${`buyer-null-rows-${TEST_SUFFIX}`})`;
-      await testSql`DELETE FROM "Shop" WHERE id IN (${SHOP_WITH_INVOICE}, ${SHOP_EMPTY}, ${SHOP_XXX}, ${SHOP_NULL_ROWS}, ${SHOP_XXX_ZERO}, ${SHOP_NULL_ZERO})`;
+      await testSql`DELETE FROM "Invoice" WHERE id IN (${`inv-invoice-${TEST_SUFFIX}`}, ${`inv-xxx-${TEST_SUFFIX}`})`;
+      await testSql`DELETE FROM "BuyerAccount" WHERE id IN (${`buyer-invoice-${TEST_SUFFIX}`}, ${`buyer-xxx-${TEST_SUFFIX}`})`;
+      await testSql`DELETE FROM "Shop" WHERE id IN (${SHOP_WITH_INVOICE}, ${SHOP_EMPTY}, ${SHOP_XXX}, ${SHOP_XXX_ZERO})`;
       await testSql.end();
       testSql = null;
     }
@@ -282,50 +274,6 @@ describeWithDb("syncShopInfo currency flip safety (#292) - real path", () => {
     expect(Object.keys(blockedLog!).sort()).toEqual(["event", "shopHash"]);
   });
 
-  it("NULL stored with financial rows: syncShopInfo with INR is blocked (fail-closed)", async () => {
-    const { _syncShopInfoForTesting: syncShopInfo } = await import("../after-auth.server");
-    const { NO_CURRENCY_SENTINEL } = await import("../shop-currency.server");
-
-    const mockAdmin = createMockAdmin("INR", "America/Chicago");
-    const shopDomain = SHOP_NULL_ROWS + ".example.com";
-
-    // Verify initial state: currency is NULL
-    const [beforeShop] = await testSql!<{ currency: string | null; timezone: string }[]>`
-      SELECT currency, timezone FROM "Shop" WHERE id = ${SHOP_NULL_ROWS}
-    `;
-    expect(beforeShop.currency).toBeNull();
-    expect(beforeShop.timezone).toBe("America/New_York");
-
-    // Call syncShopInfo
-    await syncShopInfo(shopDomain, mockAdmin);
-
-    // Verify Shop.currency becomes XXX (sentinel) for blocked NULL flip
-    // The guard normalizes NULL to XXX sentinel, which is preserved on block
-    const [afterShop] = await testSql!<{ currency: string | null; timezone: string }[]>`
-      SELECT currency, timezone FROM "Shop" WHERE id = ${SHOP_NULL_ROWS}
-    `;
-    expect(afterShop.currency).toBe(NO_CURRENCY_SENTINEL);
-
-    // Verify timezone was still updated
-    expect(afterShop.timezone).toBe("America/Chicago");
-
-    // Verify no INR shop_config metafield write happened (flip blocked)
-    const metafieldWrites = graphqlCalls.filter(c => c.query === "metafieldsSet");
-    expect(metafieldWrites.length).toBe(0);
-
-    // Verify currency_flip_blocked_on_auth was logged with shopHash, no PII
-    const blockedLog = findSafeLogEvent("currency_flip_blocked_on_auth");
-    expect(blockedLog).toBeDefined();
-    expect(blockedLog!.shopHash).toBeDefined();
-    expect(blockedLog!.shopHash).toBe(await shopHash(shopDomain));
-    // Assert NO raw shop domain or PII in the log entry
-    const logStr = JSON.stringify(blockedLog);
-    expect(logStr).not.toContain(shopDomain);
-    expect(logStr).not.toContain(".example.com");
-    // Should only have event and shopHash keys
-    expect(Object.keys(blockedLog!).sort()).toEqual(["event", "shopHash"]);
-  });
-
   it("XXX stored with zero financial rows: syncShopInfo with INR flips to INR and writes shop_config", async () => {
     const { _syncShopInfoForTesting: syncShopInfo } = await import("../after-auth.server");
 
@@ -348,39 +296,6 @@ describeWithDb("syncShopInfo currency flip safety (#292) - real path", () => {
 
     // Verify timezone was updated
     expect(afterShop.timezone).toBe("Asia/Tokyo");
-
-    // Verify INR shop_config metafield write happened
-    const metafieldWrites = graphqlCalls.filter(c => c.query === "metafieldsSet");
-    expect(metafieldWrites.length).toBe(1);
-    expect(metafieldWrites[0].variables?.currency).toBe("INR");
-
-    // Verify currency_flip_blocked_on_auth was NOT logged (flip succeeded)
-    const blockedLog = findSafeLogEvent("currency_flip_blocked_on_auth");
-    expect(blockedLog).toBeUndefined();
-  });
-
-  it("NULL stored with zero financial rows: syncShopInfo with INR flips to INR and writes shop_config", async () => {
-    const { _syncShopInfoForTesting: syncShopInfo } = await import("../after-auth.server");
-
-    const mockAdmin = createMockAdmin("INR", "Australia/Sydney");
-
-    // Verify initial state: currency is NULL and no invoices
-    const [beforeShop] = await testSql!<{ currency: string | null; timezone: string }[]>`
-      SELECT currency, timezone FROM "Shop" WHERE id = ${SHOP_NULL_ZERO}
-    `;
-    expect(beforeShop.currency).toBeNull();
-
-    // Call syncShopInfo
-    await syncShopInfo(SHOP_NULL_ZERO + ".example.com", mockAdmin);
-
-    // Verify Shop.currency flipped to INR
-    const [afterShop] = await testSql!<{ currency: string; timezone: string }[]>`
-      SELECT currency, timezone FROM "Shop" WHERE id = ${SHOP_NULL_ZERO}
-    `;
-    expect(afterShop.currency).toBe("INR");
-
-    // Verify timezone was updated
-    expect(afterShop.timezone).toBe("Australia/Sydney");
 
     // Verify INR shop_config metafield write happened
     const metafieldWrites = graphqlCalls.filter(c => c.query === "metafieldsSet");

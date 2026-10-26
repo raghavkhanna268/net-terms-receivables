@@ -374,6 +374,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
   const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  // Defensive: handle null/undefined result with fail-closed defaults
   const currencyResult = await checkAndRecoverCurrency(
     sql,
     shopDomain,
@@ -381,8 +382,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     admin,
     dbData.shopId,
   );
-  const shopCurrency = currencyResult.currency;
-  const currencyFlipBlocked = currencyResult.flipBlocked;
+  const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
   const currencySupported = isShopCurrencySupported(shopCurrency);
 
   const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
@@ -601,6 +602,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   if (actionType === "start_sync") {
     // #292 G1: Recover currency first, then check if supported
     // Pass shop.id to avoid re-querying the shop row in checkAndRecoverCurrency
+    // Defensive: handle null/undefined result with fail-closed defaults
     const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
       SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
     `;
@@ -612,7 +614,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       admin,
       shop.id,
     );
-    if (!isShopCurrencySupported(currencyResult.currency)) {
+    if (!isShopCurrencySupported(currencyResult?.currency ?? NO_CURRENCY_SENTINEL)) {
       return {
         success: false,
         error: "Sync not available for non-INR stores",
