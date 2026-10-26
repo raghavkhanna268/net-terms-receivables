@@ -157,19 +157,32 @@ interface ErrorExpectation {
   error: string | RegExp;
 }
 
-interface RouteTestConfig {
+interface BaseRouteConfig {
   name: string;
   importPath: string;
   urlPath: string;
   hasParams?: Record<string, string>;
-  resourceOnly?: boolean;
-  resourceOnlyReason?: string;
+}
+
+interface ResourceOnlyRouteConfig extends BaseRouteConfig {
+  resourceOnly: true;
+  resourceOnlyReason: string;
+}
+
+interface TestableRouteConfig extends BaseRouteConfig {
+  resourceOnly?: false;
+  currencyGate: "gated" | { exempt: string };
   expectedRedirect?: Partial<Record<ShopState, RedirectExpectation>>;
   expectedError?: Partial<Record<ShopState, ErrorExpectation>>;
-  currencyGate?: "gated" | { exempt: string };
   expectsSeededMoney?: boolean;
   seededMoneyValues?: string[];
   seededTextValues?: string[];
+}
+
+type RouteTestConfig = ResourceOnlyRouteConfig | TestableRouteConfig;
+
+function isTestableRoute(route: RouteTestConfig): route is TestableRouteConfig {
+  return route.resourceOnly !== true;
 }
 
 const FRESH_EMPTY_STATE_HEADING = "No outstanding receivables";
@@ -268,8 +281,10 @@ const APP_ROUTES: RouteTestConfig[] = [
   },
 ];
 
-const RESOURCE_ONLY_ROUTES = APP_ROUTES.filter((r) => r.resourceOnly);
-const TESTABLE_ROUTES = APP_ROUTES.filter((r) => !r.resourceOnly);
+const RESOURCE_ONLY_ROUTES = APP_ROUTES.filter(
+  (r): r is ResourceOnlyRouteConfig => r.resourceOnly === true
+);
+const TESTABLE_ROUTES = APP_ROUTES.filter(isTestableRoute);
 
 describeWithDb("Admin Render Smoke Tests", () => {
   let sql: ReturnType<typeof postgres>;
@@ -506,6 +521,20 @@ describeWithDb("Admin Render Smoke Tests", () => {
         "app.data-requests.$id.download",
         "app.welcome",
       ]);
+    });
+
+    it("testable routes have currencyGate declared", () => {
+      const missing: string[] = [];
+      for (const route of TESTABLE_ROUTES) {
+        if (!route.currencyGate) {
+          missing.push(route.name);
+        }
+      }
+      expect(
+        missing,
+        `Testable routes missing currencyGate config: ${missing.join(", ")}. ` +
+          `Add currencyGate: "gated" or currencyGate: { exempt: "reason" } to each.`
+      ).toHaveLength(0);
     });
   });
 

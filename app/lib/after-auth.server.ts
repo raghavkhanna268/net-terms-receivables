@@ -18,8 +18,9 @@ import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "./shop-currency.server";
-import { writeShopConfigMetafield } from "~/services/shop-config.server";
+import { refreshPlanCache } from "~/services/plan.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "./shop-currency-guard.server";
+import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -51,12 +52,44 @@ const setupCompletedShops = new Set<string>();
 const inFlightSetups = new Map<string, Promise<void>>();
 
 /**
- * Runs after-authentication hooks for a shop using ctx.waitUntil.
+ * In-flight reinstall handler promises by shop.
+ * 
+ * This is the PRIMARY deduplication mechanism for concurrent reinstall loads.
+ * Set SYNCHRONOUSLY before any DB call, so all concurrent callers await the
+ * same promise. Deleted in finally after the handler completes.
+ * 
+ * Why this exists (race condition fix):
+ * Without this, two concurrent calls race on clearUninstalledAtAndMetafieldErrors.
+ * The loser's 0-row result can return BEFORE the winner sets up its in-flight maps,
+ * causing the loser to fall through to runSetupIfNeeded and render stale state.
+ * 
+ * With this map set synchronously BEFORE the first await, every concurrent caller
+ * waits on the same promise. The first caller does the work; others await it.
+ * 
+ * This deduplication is per-isolate. Across Workers isolates, a concurrent
+ * duplicate is still possible but harmless, because every registration function
+ * (ensureMetafieldDefinitions, ensureValidation, ensurePaymentCustomization)
+ * is idempotent (query then create/update).
+ */
+const inFlightReinstallHandlers = new Map<string, Promise<void>>();
+
+/**
+ * Runs after-authentication hooks for a shop.
+ *
+ * Gap 1 (awaited reinstall clear): The critical reinstall path is now AWAITED,
+ * not fire-and-forget via waitUntil. This ensures:
+ * - uninstalledAt is cleared BEFORE the post-auth redirect/render
+ * - Registration (metafields, validation, payment customization) is complete
+ *   on reinstall before the first load, so onboarding shows true state
+ * - Failures are logged and visible (not swallowed)
+ *
+ * Non-critical work (normal first-install setup when not a reinstall) still
+ * runs via waitUntil to keep install latency low.
  *
  * This function is idempotent and safe to call on every request:
  * - Uses in-memory cache to skip already-processed shops
  * - Concurrent first loads share one ensureValidation call
- * - Runs setup via ctx.waitUntil to stay off critical path
+ * - Runs setup via ctx.waitUntil to stay off critical path (except reinstall)
  * - Marks shop complete only after success
  * - Allows retry on failure (shop not marked as complete)
  * - Logs errors for observability without affecting user experience
@@ -81,23 +114,22 @@ const inFlightSetups = new Map<string, Promise<void>>();
  * @param shop - The shop domain (e.g., "example.myshopify.com")
  * @param admin - The authenticated admin GraphQL client
  * @param waitUntil - The ctx.waitUntil function from Cloudflare Workers context
+ * @returns Promise that resolves when critical reinstall work is done
  */
-export function runAfterAuth(
+export async function runAfterAuth(
   shop: string,
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
-): void {
+): Promise<void> {
   let sql: Sql | null = null;
   try {
     sql = getRequestSql();
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] clear_uninstalled_at_failed reason=no_request_context err=${errInfo}`);
+    safeLog("warn", "clear_uninstalled_at_failed", { reason: "no_request_context", err: toErrorCode(error) });
   }
 
   if (sql) {
-    const clearAndSetupPromise = clearAndMaybeSetup(sql, shop, admin, waitUntil);
-    waitUntil(clearAndSetupPromise);
+    await clearAndMaybeSetup(sql, shop, admin, waitUntil);
   } else {
     runSetupIfNeeded(shop, admin, waitUntil);
   }
@@ -105,6 +137,31 @@ export function runAfterAuth(
 
 /**
  * Clear uninstalledAt and run setup if the shop was reinstalled or not cached.
+ *
+ * Deduplication (per-isolate):
+ * BEFORE any DB call, we check/set inFlightReinstallHandlers synchronously.
+ * All concurrent callers await the same promise, ensuring:
+ * - Registration runs exactly once per shop per isolate
+ * - All callers' runAfterAuth resolves only after critical registration completes
+ * - The Setup Guide never renders stale "Missing" state
+ *
+ * Across Workers isolates, a concurrent duplicate is still possible but harmless,
+ * because every registration function is idempotent (query then create/update).
+ *
+ * On reinstall (wasReinstalled=true):
+ * 1. Await critical work in parallel (registration + plan refresh)
+ * 2. Run non-critical work (syncShopInfo) via waitUntil
+ *
+ * Critical path (awaited, parallel):
+ * - [metafield definitions → validation] chain (validation depends on definitions)
+ * - [payment customization] (independent)
+ * - [plan refresh with forceRefresh] (bypasses stale cache)
+ *
+ * Background (waitUntil): syncShopInfo (timezone/currency/DB upsert)
+ *
+ * This fixes two reinstall bugs:
+ * - Plan cache showing old Starter plan after subscription was cancelled by uninstall
+ * - Payment Customization showing "Missing" on first load due to racing setup
  */
 async function clearAndMaybeSetup(
   sql: Sql,
@@ -112,13 +169,175 @@ async function clearAndMaybeSetup(
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
 ): Promise<void> {
-  const reinstallResult = await clearUninstalledAtAndMetafieldErrors(sql, shop);
-
-  if (reinstallResult.wasReinstalled) {
-    setupCompletedShops.delete(shop);
+  // Check for existing in-flight handler BEFORE any await.
+  // This prevents the race where the loser's SQL returns before the winner sets up dedupe.
+  const existingHandler = inFlightReinstallHandlers.get(shop);
+  if (existingHandler) {
+    // Another call is already handling this shop - await it and return.
+    // The existing handler will do the work; we just wait for it.
+    await existingHandler;
+    return;
   }
 
-  runSetupIfNeeded(shop, admin, waitUntil);
+  // We're the first caller - set up the handler promise synchronously.
+  // Create a deferred so we can resolve it from within the handler.
+  let resolveHandler!: () => void;
+  let rejectHandler!: (error: unknown) => void;
+  const handlerPromise = new Promise<void>((resolve, reject) => {
+    resolveHandler = resolve;
+    rejectHandler = reject;
+  });
+
+  // Set the handler BEFORE any await so concurrent callers find it immediately.
+  inFlightReinstallHandlers.set(shop, handlerPromise);
+
+  try {
+    // Now do the actual work - concurrent callers will await handlerPromise above.
+    const reinstallResult = await clearUninstalledAtAndMetafieldErrors(sql, shop);
+
+    if (reinstallResult.wasReinstalled) {
+      setupCompletedShops.delete(shop);
+
+      // Use a deferred to pass critical result to the background promise.
+      // This ensures the closure gets the actual result, not a captured initial value.
+      let resolveCritical!: (success: boolean) => void;
+      const criticalResultPromise = new Promise<boolean>((resolve) => {
+        resolveCritical = resolve;
+      });
+
+      // Create the full setup promise (critical + background) for waitUntil.
+      const fullSetupPromise = (async () => {
+        const criticalSuccess = await criticalResultPromise;
+        await runBackgroundSetup(shop, admin, criticalSuccess);
+      })();
+
+      inFlightSetups.set(shop, fullSetupPromise);
+
+      try {
+        // Run critical registration - this is what the Setup Guide depends on
+        const criticalSuccess = await runCriticalRegistration(sql, shop, admin);
+        resolveCritical(criticalSuccess);
+
+        // Background setup runs via waitUntil (not blocking the response)
+        waitUntil(fullSetupPromise);
+      } catch (error) {
+        // Signal failure so background can proceed
+        resolveCritical(false);
+        throw error;
+      } finally {
+        // Clean up inFlightSetups after full setup completes
+        fullSetupPromise.finally(() => {
+          inFlightSetups.delete(shop);
+        });
+      }
+    } else {
+      // Not a reinstall - run normal setup if needed
+      runSetupIfNeeded(shop, admin, waitUntil);
+    }
+
+    resolveHandler();
+  } catch (error) {
+    rejectHandler(error);
+    throw error;
+  } finally {
+    // Always clean up the handler map
+    inFlightReinstallHandlers.delete(shop);
+  }
+}
+
+/**
+ * Run critical registration steps that the Setup Guide depends on (awaited on reinstall).
+ *
+ * Runs two chains in parallel:
+ * 1. [definitions → validation] - validation depends on metafield definitions
+ * 2. [payment customization] - independent
+ * 3. [plan refresh] - force-bypasses cache to get fresh subscription status
+ *
+ * Returns true if ALL critical steps succeeded, false if any failed.
+ * A failed step leaves the shop retryable (not marked complete).
+ */
+async function runCriticalRegistration(
+  sql: Sql,
+  shop: string,
+  admin: AdminGraphqlClient,
+): Promise<boolean> {
+  let hasError = false;
+
+  // Chain 1: definitions → validation (validation depends on definitions)
+  const definitionsValidationChain = async (): Promise<void> => {
+    await ensureMetafieldDefinitions(admin);
+    const validationResult = await ensureValidation(admin);
+    if (validationResult.created) {
+      safeLog("info", "validation_created", { validationId: validationResult.id });
+    }
+  };
+
+  // Chain 2: payment customization (independent)
+  const paymentChain = async (): Promise<{ id: string; created: boolean }> => {
+    return await ensurePaymentCustomization(admin);
+  };
+
+  // Chain 3: plan refresh with force (bypasses stale cache)
+  // Note: refreshPlanCache internally catches errors and returns gracefully.
+  // A failed plan refresh is logged but doesn't cause the Promise to reject.
+  // This is by design - the plan will be refreshed on the next request.
+  const planChain = async (): Promise<void> => {
+    await refreshPlanCache(sql, shop);
+  };
+
+  const [defValResult, paymentResult, planResult] = await Promise.allSettled([
+    definitionsValidationChain(),
+    paymentChain(),
+    planChain(),
+  ]);
+
+  if (defValResult.status === "rejected") {
+    safeLog("error", "validation_registration_failed", { err: toErrorCode(defValResult.reason) });
+    hasError = true;
+  }
+
+  if (paymentResult.status === "rejected") {
+    safeLog("error", "payment_customization_failed", { err: toErrorCode(paymentResult.reason) });
+    hasError = true;
+  } else if (paymentResult.value.created) {
+    safeLog("info", "payment_customization_created", { paymentCustomizationId: paymentResult.value.id });
+  }
+
+  if (planResult.status === "rejected") {
+    safeLog("warn", "plan_background_refresh_failed", { err: toErrorCode(planResult.reason) });
+    hasError = true;
+  }
+
+  return !hasError;
+}
+
+/**
+ * Run non-critical setup in the background (via waitUntil).
+ *
+ * Includes: syncShopInfo (timezone/currency/DB upsert).
+ * Plan refresh is now in the critical path, not here.
+ *
+ * Only marks shop complete if BOTH critical registration AND syncShopInfo succeeded.
+ * A failed syncShopInfo on reinstall means timezone/currency/upsert didn't complete,
+ * so the next load should retry.
+ */
+async function runBackgroundSetup(
+  shop: string,
+  admin: AdminGraphqlClient,
+  criticalSuccess: boolean,
+): Promise<void> {
+  let syncSuccess = true;
+  try {
+    await syncShopInfo(shop, admin);
+  } catch (error) {
+    syncSuccess = false;
+    safeLog("warn", "sync_shop_info_failed", { err: toErrorCode(error) });
+  }
+
+  // Only mark complete if all steps succeeded (critical + syncShopInfo)
+  if (criticalSuccess && syncSuccess) {
+    setupCompletedShops.add(shop);
+  }
 }
 
 /**
@@ -260,8 +479,7 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
     }
     return { wasReinstalled: false };
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "clear_uninstalled_at_failed", { reason: "db_error", shopHash: await shopHash(shop), err: toErrorCode(error) });
     return { wasReinstalled: false };
   }
 }
@@ -344,8 +562,7 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
 }
 
 /**
- * Fetch shop auth info and sync to database and metafields.
- * #292: Also writes shop_config metafield with currency for Rust functions.
+ * Fetch shop auth info and sync to database.
  *
  * This function ensures the Shop row exists on every install or re-auth.
  * It uses INSERT ... ON CONFLICT to be idempotent:
@@ -353,14 +570,13 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
  * - Reinstall: Clears uninstalledAt and updates timezone/currency (preserves existing if query fails)
  * - Re-auth: Updates timezone/currency only (preserves existing if query fails)
  *
- * #292: Write order - shop_config FIRST, then DB. A failed shop_config write is logged
- * but does not block the DB upsert (install must succeed). /app will detect and retry
- * any shop_config mismatch on next load.
+ * Note: shop_config metafield write was REMOVED here to eliminate duplication.
+ * checkAndRecoverCurrency in the /app loader handles all shop_config writes with
+ * proper staleness detection and flip-blocked logic. See shop-currency-recovery.server.ts.
  *
  * #292 Currency Flip Safety: When live currency is INR, stored currency is NOT INR,
  * AND the shop has financial rows (Invoice, Payment, s8_draft_orders), the currency
  * flip is BLOCKED. In this case:
- * - Do NOT write shop_config with INR (would relabel Rust function reads)
  * - Do NOT update Shop.currency (preserves existing state)
  * - Timezone update still proceeds (independent of currency)
  * This is fail-closed: only zero financial rows allows flip to INR.
@@ -391,8 +607,8 @@ async function syncShopInfo(
       });
 
       if (decision.blocked) {
-        flipBlocked = true;
         effectiveCurrency = decision.effectiveCurrency;
+        flipBlocked = true;
         safeLog("info", "currency_flip_blocked_on_auth", {
           shopHash: await shopHash(shop),
         });
@@ -400,20 +616,23 @@ async function syncShopInfo(
     }
   }
 
-  // #292: Write shop_config metafield FIRST, log warning on failure but continue
-  // Skip shop_config write when flip is blocked (would relabel existing data)
-  if (authInfo.shopId && !flipBlocked) {
+  // #292: Write shop_config metafield with currency (unless flip was blocked)
+  // On first install, there's no Shop row yet, so checkAndRecoverCurrency never runs.
+  // This ensures the shop_config metafield is written on first install.
+  if (!flipBlocked && authInfo.shopId) {
     const writeResult = await writeShopConfigMetafield(admin, authInfo.shopId, effectiveCurrency);
     if (!writeResult.success) {
-      safeLog("warn", "shop_config_write_failed", { err: writeResult.error ?? "unknown" });
+      safeLog("warn", "shop_config_write_failed", {
+        shopHash: await shopHash(shop),
+        err: writeResult.error || "unknown",
+      });
     }
   }
 
   try {
     await upsertShopOnAuth(sql, shop, authInfo.timezone, effectiveCurrency);
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "upsert_shop_failed", { shopHash: await shopHash(shop), err: toErrorCode(error) });
     throw error;
   }
 }
@@ -429,15 +648,17 @@ async function runSetup(
     await ensureMetafieldDefinitions(admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${toErrorCode(error)}`);
+    safeLog("error", "metafield_definitions_failed", { err: toErrorCode(error) });
   }
   
   try {
-    await ensureValidation(admin);
+    const validationResult = await ensureValidation(admin);
+    if (validationResult.created) {
+      safeLog("info", "validation_created", { validationId: validationResult.id });
+    }
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] validation_registration_failed reason=exception err=${errInfo}`);
+    safeLog("error", "validation_registration_failed", { err: toErrorCode(error) });
   }
   
   // S13: Payment customization for hiding net-terms payment methods.
@@ -445,12 +666,11 @@ async function runSetup(
   try {
     const result = await ensurePaymentCustomization(admin);
     if (result.created) {
-      console.log(`[afterAuth] payment_customization_created id=${result.id}`);
+      safeLog("info", "payment_customization_created", { paymentCustomizationId: result.id });
     }
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
+    safeLog("error", "payment_customization_failed", { err: toErrorCode(error) });
   }
   
   // Shop info sync runs even if earlier steps fail - it's independent.
@@ -459,8 +679,7 @@ async function runSetup(
     await syncShopInfo(shop, admin);
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] sync_shop_info_failed reason=exception err=${errInfo}`);
+    safeLog("warn", "sync_shop_info_failed", { err: toErrorCode(error) });
   }
   
   // Only mark complete if all steps succeeded.
@@ -472,12 +691,13 @@ async function runSetup(
 }
 
 /**
- * Reset the setup cache and in-flight map - only for testing purposes.
+ * Reset the setup cache and in-flight maps - only for testing purposes.
  * @internal
  */
 export function _resetSetupCacheForTesting(): void {
   setupCompletedShops.clear();
   inFlightSetups.clear();
+  inFlightReinstallHandlers.clear();
 }
 
 /**
@@ -604,7 +824,7 @@ export async function upsertShopOnAuth(
   const shopId = result[0]?.id ?? 'unknown';
   const closedCount = result[0]?.closed_count ?? 0;
   const deletedClaimsCount = result[0]?.deleted_claims_count ?? 0;
-  console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
+  safeLog("info", "shop_upserted", { shopId });
   if (closedCount > 0 || deletedClaimsCount > 0) {
     safeLog("info", "reinstall_initial_sync_reset", {
       shopHash: await shopHash(shopDomain),
