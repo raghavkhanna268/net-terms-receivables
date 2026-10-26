@@ -259,9 +259,11 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          PRUNE_MODE: ${{ inputs.prune_mode || 'dry_run' }}
+          # Scheduled runs prune for real (Team Lead OK 2026-10-26 after the
+          # first dry run). Manual dispatches default to dry_run via the input.
+          PRUNE_MODE: ${{ github.event_name == 'schedule' && 'delete' || inputs.prune_mode || 'dry_run' }}
         run: |
           set -euo pipefail
-          # Scheduled runs always use dry_run until explicitly changed.
-          # PRUNE_MODE is set via env from inputs.prune_mode (default: dry_run).
+          # db/ prefix only, keep-newest-7, >30d by upload time, any delete
+          # failure exits non-zero, counts-only output (scripts/ops/prune-backups.ts).
           node --experimental-strip-types scripts/ops/prune-backups.ts

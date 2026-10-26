@@ -16,6 +16,7 @@ import {
   validateBucket,
   selectForDeletion,
   checkSanityFloor,
+  requiresSanityFloor,
   getNewestAgeHours,
   BUCKET,
   PREFIX,
@@ -472,5 +473,29 @@ describe("prune-backups: delete mode exit codes", () => {
 
     // Nothing eligible = deletedCount (0) equals eligibleCount (0), so no error
     expect(toDelete.length).toBe(0);
+  });
+});
+
+describe("prune-backups: no-op delete runs skip the sanity floor", () => {
+  it("does not require the floor when nothing is eligible", () => {
+    expect(requiresSanityFloor(0)).toBe(false);
+  });
+
+  it("requires the floor whenever anything is eligible", () => {
+    expect(requiresSanityFloor(1)).toBe(true);
+    expect(requiresSanityFloor(5)).toBe(true);
+  });
+
+  it("a young bucket (2 objects) has 0 eligible, so delete mode is a no-op", () => {
+    const now = Date.now();
+    const objects = [makeObject("db/a", 0, now), makeObject("db/b", 1, now)];
+    const toDelete = selectForDeletion(objects, RETENTION_DAYS, KEEP_NEWEST, now);
+    expect(toDelete).toHaveLength(0);
+    expect(requiresSanityFloor(toDelete.length)).toBe(false);
+  });
+
+  it("the floor still blocks when eligible > 0 and total is below minimum", () => {
+    expect(requiresSanityFloor(1)).toBe(true);
+    expect(checkSanityFloor(5, 1, 1, MIN_TOTAL_FOR_DELETE, KEEP_NEWEST, MAX_NEWEST_AGE_HOURS).ok).toBe(false);
   });
 });

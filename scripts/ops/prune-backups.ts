@@ -100,6 +100,17 @@ export function getNewestAgeHours(objects: S3Object[], nowMs: number): number {
 }
 
 /**
+ * The sanity floor protects deletions. When nothing is eligible, delete mode
+ * is a no-op and must succeed (exit 0, deleted=0) even while the bucket holds
+ * fewer than MIN_TOTAL_FOR_DELETE backups, so scheduled delete-mode runs stay
+ * green during the first days of retention. Keep-newest-7 is still enforced
+ * by selectForDeletion, and the floor still runs whenever eligible > 0.
+ */
+export function requiresSanityFloor(eligibleCount: number): boolean {
+  return eligibleCount > 0;
+}
+
+/**
  * Sanity floor check before allowing deletions.
  * Prevents destructive operations when the backup state looks unhealthy.
  */
@@ -294,8 +305,10 @@ export async function main(): Promise<number> {
   };
 
   if (deleteMode) {
-    // Sanity floor check before deletion
-    const sanity = checkSanityFloor(
+    // Sanity floor check before deletion (skipped only when nothing is eligible)
+    const sanity = !requiresSanityFloor(result.eligibleCount)
+      ? { ok: true as const }
+      : checkSanityFloor(
       result.totalCount,
       result.eligibleCount,
       result.newestAgeHours,

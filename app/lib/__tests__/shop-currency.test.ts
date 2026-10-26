@@ -5,7 +5,7 @@ import {
   isShopCurrencySupported,
   validateCurrencyCode,
 } from "../shop-currency.server";
-import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "../shop-currency-copy";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_COPY } from "../shop-currency-copy";
 
 describe("shop-currency constants", () => {
   it("SUPPORTED_SHOP_CURRENCY is INR", () => {
@@ -23,6 +23,14 @@ describe("shop-currency constants", () => {
     expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Settings → General → Store defaults");
     expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Change store currency");
     expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Shopify asks you to confirm");
+  });
+
+  it("CURRENCY_FLIP_BLOCKED_BANNER_COPY contains required elements", () => {
+    expect(CURRENCY_FLIP_BLOCKED_BANNER_COPY).toContain("existing receivables data");
+    expect(CURRENCY_FLIP_BLOCKED_BANNER_COPY).toContain("different currency");
+    expect(CURRENCY_FLIP_BLOCKED_BANNER_COPY).toContain("cannot convert");
+    expect(CURRENCY_FLIP_BLOCKED_BANNER_COPY).toContain("unavailable");
+    expect(CURRENCY_FLIP_BLOCKED_BANNER_COPY).toContain("contact support");
   });
 });
 
