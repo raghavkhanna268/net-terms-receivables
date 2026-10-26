@@ -46,6 +46,26 @@ export function isGatingEnforced(): boolean {
 }
 
 /**
+ * Build the lock key string for the ba_limit advisory lock.
+ * @param shopId - Internal shop ID
+ * @returns Lock key string for use with hashtextextended()
+ */
+export function baLimitLockKey(shopId: string): string {
+  return `ba_limit:${shopId}`;
+}
+
+/**
+ * Take the ba_limit advisory lock for a shop within a transaction.
+ * Must be called inside sql.begin().
+ *
+ * @param tx - postgres.js transaction
+ * @param shopId - Internal shop ID
+ */
+export async function takeBaLimitLock(tx: Sql, shopId: string): Promise<void> {
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${baLimitLockKey(shopId)}, 0))`;
+}
+
+/**
  * SQL fragment type for composable WHERE clauses.
  * This is a tagged template result from postgres.js.
  */
@@ -173,7 +193,7 @@ export async function decideNewAccountGate(
     return { gate: false, used: 0, limit: -1 };
   }
 
-  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${'ba_limit:' + shopId}, 0))`;
+  await takeBaLimitLock(tx, shopId);
 
   const used = await countActiveAccounts(tx, shopId);
 
@@ -338,7 +358,8 @@ export async function getUsageStats(
  * The caller (T2) is responsible for determining when to call this.
  *
  * When PLAN_GATING_ENFORCED is off, returns early without any transaction
- * or lock (no gated accounts can exist when gating is off).
+ * or lock. Accounts that were gated while the flag was on remain gated
+ * after it's turned off; they are simply treated as active for enforcement.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
@@ -367,7 +388,7 @@ export async function reactivateGatedAccounts(
   }
 
   return await sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${'ba_limit:' + shopId}, 0))`;
+    await takeBaLimitLock(tx, shopId);
 
     const activeCount = await countActiveAccounts(tx, shopId);
 

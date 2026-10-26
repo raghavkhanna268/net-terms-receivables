@@ -181,9 +181,15 @@ transactions to prevent concurrent creates from overshooting the plan limit:
 
 Paths using this pattern:
 - B2B webhook (`processCompanyLocationWebhook`)
-- Bulk company reconcile (`bulkUpsertBuyerAccounts` - one tx per shop batch)
+- Bulk company reconcile (`bulkUpsertBuyerAccounts` - one tx per ≤25-row batch)
 - Tagged-customer webhook (`syncTaggedCustomerBuyerAccount`)
 - Bulk customer sync goes through `processBulkCustomer` → `syncTaggedCustomerBuyerAccount`
+
+**Flag-off behavior**: When `PLAN_GATING_ENFORCED` is turned off, accounts that were
+gated while it was on remain gated (`gated_at` stays set). They are simply treated
+as active for enforcement purposes (all accounts are considered active when the flag
+is off). Turning the flag back on does not re-gate them unless they exceed the limit
+at the time of a new create.
 
 This ensures exactly N accounts stay ungated under any concurrency scenario.
 
@@ -224,7 +230,7 @@ The `app_handle` comes from `APP_HANDLE` env var.
 
 ## Status of #57 Items (Pre-Enable Checklist)
 
-Items 1-6 from issue #57 are done on main. Status summary:
+Items 1-6 from issue #57 are complete. Status summary:
 
 | Item | Description | Status | Evidence |
 |------|-------------|--------|----------|

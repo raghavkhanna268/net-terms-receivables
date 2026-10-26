@@ -44,15 +44,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   if (shop) {
     try {
-      // Only call getUsageStats and getGatedAccountCount when gating is enforced
+      // Always call getUsageStats for usage display. Only skip getGatedAccountCount when flag off.
       const results = await Promise.all([
         resolvePlan(sql, shopDomain),
-        gatingEnforced
-          ? getUsageStats(sql, shop.id).catch((err) => {
-              safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
-              return null;
-            })
-          : Promise.resolve(null),
+        getUsageStats(sql, shop.id).catch((err) => {
+          safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+          return null;
+        }),
         gatingEnforced ? getGatedAccountCount(sql, shop.id) : Promise.resolve(0),
       ]);
       planData = results[0];
@@ -76,10 +74,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           isTest: planData.isTest,
         }
       : null,
-    usage: usage ?? {
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
-    },
+    usage,
     gatedCount,
     gatingEnforced,
     upgradeUrl: (() => {
@@ -90,7 +85,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       }
       return buildPlanSelectionUrl(shopDomain, handle);
     })(),
-    newAccountsPausedBanner: usage
+    newAccountsPausedBanner: (gatingEnforced && usage)
       ? buildNewAccountsPausedBannerState(
           usage.companies.current,
           usage.companies.limit,
@@ -161,15 +156,15 @@ export default function PlanPage() {
   const isTest = plan?.isTest ?? false;
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
 
-  const companiesUsed = usage.companies.current;
-  const companiesLimit = usage.companies.limit;
-  // Plan-limit checks only apply when gating is enforced
+  const companiesUsed = usage?.companies.current ?? 0;
+  const companiesLimit = usage?.companies.limit ?? -1;
+  // Plan-limit checks only apply when gating is enforced AND usage is available
   // With none=0, every shop would show "at limit" if we didn't gate this
-  const companiesAtLimit = gatingEnforced && companiesLimit !== -1 && companiesUsed >= companiesLimit;
+  const companiesAtLimit = gatingEnforced && usage && companiesLimit !== -1 && companiesUsed >= companiesLimit;
 
-  const importsUsed = usage.importsThisMonth.current;
-  const importsLimit = usage.importsThisMonth.limit;
-  const importsAtLimit = gatingEnforced && importsLimit !== -1 && importsUsed >= importsLimit;
+  const importsUsed = usage?.importsThisMonth.current ?? 0;
+  const importsLimit = usage?.importsThisMonth.limit ?? -1;
+  const importsAtLimit = gatingEnforced && usage && importsLimit !== -1 && importsUsed >= importsLimit;
 
   const canUpgrade = planKey !== "unlimited";
   const hasLimitReached = companiesAtLimit || importsAtLimit;
@@ -217,35 +212,37 @@ export default function PlanPage() {
             </s-stack>
           </s-section>
 
-          {/* Usage Statistics */}
-          <s-section heading="Usage">
-            <s-stack>
-              <UsageDisplay
-                current={companiesUsed}
-                limit={companiesLimit}
-                label="Buyer Accounts"
-                gatingEnforced={gatingEnforced}
-              />
-              <UsageDisplay
-                current={importsUsed}
-                limit={importsLimit}
-                label="Bank Imports This Month"
-                gatingEnforced={gatingEnforced}
-              />
+          {/* Usage Statistics - only show when usage data is available */}
+          {usage && (
+            <s-section heading="Usage">
+              <s-stack>
+                <UsageDisplay
+                  current={companiesUsed}
+                  limit={companiesLimit}
+                  label="Buyer Accounts"
+                  gatingEnforced={gatingEnforced}
+                />
+                <UsageDisplay
+                  current={importsUsed}
+                  limit={importsLimit}
+                  label="Bank Imports This Month"
+                  gatingEnforced={gatingEnforced}
+                />
 
-              {(() => {
-                const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
-                return bannerState.show && (
-                  <s-banner tone="warning" heading={bannerState.heading}>
-                    <s-text>
-                      {bannerState.bodyText}
-                      {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
-                    </s-text>
-                  </s-banner>
-                );
-              })()}
-            </s-stack>
-          </s-section>
+                {(() => {
+                  const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
+                  return bannerState.show && (
+                    <s-banner tone="warning" heading={bannerState.heading}>
+                      <s-text>
+                        {bannerState.bodyText}
+                        {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                      </s-text>
+                    </s-banner>
+                  );
+                })()}
+              </s-stack>
+            </s-section>
+          )}
 
           {/* Upgrade Prompt */}
           {canUpgrade && (

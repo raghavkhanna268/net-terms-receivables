@@ -417,15 +417,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       };
 
       // Run all main queries in parallel with timing
-      // Only call getUsageStats when gating is enforced (fail-soft: returns null on error)
+      // Always call getUsageStats for usage display. Only skip gatedAccountCount and paused banner when flag off.
       const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
         timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
-        isGatingEnforced()
-          ? getUsageStats(sql, shop.id).catch((err) => {
-              safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
-              return null;
-            })
-          : Promise.resolve(null),
+        getUsageStats(sql, shop.id).catch((err) => {
+          safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+          return null;
+        }),
         getShopAgingTotals(sql, shop.id, asOf),
         timing.time("ledger_rows", () =>
           onlyOverLimit
@@ -547,7 +545,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     onlyOverLimit,
     overLimitCount,
     error,
-    newAccountsPausedBanner: usage
+    newAccountsPausedBanner: (gatingEnforced && usage)
       ? buildNewAccountsPausedBannerState(
           usage.companies.current,
           usage.companies.limit,

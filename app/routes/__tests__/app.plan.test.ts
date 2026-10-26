@@ -126,10 +126,7 @@ describe("Plan Page Loader", () => {
     });
 
     expect(result.plan).toBeNull();
-    expect(result.usage).toEqual({
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
-    });
+    expect(result.usage).toBeNull();
     expect(result.gatedCount).toBe(0);
     expect(result.error).toBeNull();
   });
@@ -243,6 +240,11 @@ describe("Plan Page Loader", () => {
     });
 
     expect(result.gatingEnforced).toBe(false);
+    // getUsageStats is always called - usage is shown regardless of flag
+    expect(result.usage).toEqual({
+      companies: { current: 0, limit: 0 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
     // When flag is off, gatedCount is 0 (no query made)
     expect(result.gatedCount).toBe(0);
     // getGatedAccountCount should not be called when flag is off

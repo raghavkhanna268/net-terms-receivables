@@ -39,7 +39,9 @@ import type { ShopifyCustomer, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
 import { decideNewAccountGate, isGatingEnforced } from "../gating.server";
-import { safeLog } from "~/lib/log.server";
+import { getPlanByShopId } from "../plan.server";
+import { planLimit } from "~/lib/entitlements";
+import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * PII write mode for customer sync.
@@ -177,6 +179,7 @@ export async function processCustomerWebhook(
   const result = await syncTaggedCustomerBuyerAccount(
     sql,
     shopId,
+    shopDomain,
     customer.id,
     hasTag,
     matchingRule?.defaultTermsDays ?? null
@@ -381,6 +384,7 @@ async function checkCompanyAccount(
 async function syncTaggedCustomerBuyerAccount(
   sql: Sql,
   shopId: string,
+  shopDomain: string,
   customerId: string,
   hasTag: boolean,
   defaultTermsDays: number | null
@@ -452,20 +456,13 @@ async function syncTaggedCustomerBuyerAccount(
     action = result.isNew === "true" ? "created" : "updated";
     entityId = result.id;
   } else {
-    // Flag on: use transaction with gating decision
-    const txResult = await sql.begin(async (tx) => {
-      const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
-        SELECT id, gated_at FROM "BuyerAccount"
-        WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
-      `;
+    // Flag on: check plan limit to decide if we need transaction
+    const plan = await getPlanByShopId(sql, shopId);
+    const limit = planLimit(plan, "companies");
 
-      let shouldGate = false;
-      if (!existingAccount) {
-        const decision = await decideNewAccountGate(tx, shopId);
-        shouldGate = decision.gate;
-      }
-
-      const [result] = await tx<{ id: string; isNew: string; gated_at: Date | null }[]>`
+    if (limit === -1) {
+      // Unlimited plan: plain upsert without transaction (no gating needed)
+      const [result] = await sql<{ id: string; isNew: string }[]>`
         INSERT INTO "BuyerAccount" (
           "shopId",
           kind,
@@ -473,7 +470,6 @@ async function syncTaggedCustomerBuyerAccount(
           name,
           "defaultTermsDays",
           "defaultTermsSource",
-          gated_at,
           "createdAt",
           "updatedAt"
         ) VALUES (
@@ -483,7 +479,6 @@ async function syncTaggedCustomerBuyerAccount(
           ${displayName},
           ${defaultTermsDays},
           ${termsSource},
-          ${shouldGate ? new Date() : null},
           NOW(),
           NOW()
         )
@@ -499,23 +494,77 @@ async function syncTaggedCustomerBuyerAccount(
             ELSE COALESCE(EXCLUDED."defaultTermsSource", "BuyerAccount"."defaultTermsSource")
           END,
           "updatedAt" = NOW()
-        RETURNING id, (xmax = 0)::text as "isNew", gated_at
+        RETURNING id, (xmax = 0)::text as "isNew"
       `;
+      action = result.isNew === "true" ? "created" : "updated";
+      entityId = result.id;
+    } else {
+      // Limited plan: use transaction with gating decision
+      const hash = await shopHash(shopDomain);
+      const txResult = await sql.begin(async (tx) => {
+        const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
+          SELECT id, gated_at FROM "BuyerAccount"
+          WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
+        `;
 
-      let resultAction: "created" | "updated" | "gated";
-      if (result.isNew === "true") {
-        resultAction = shouldGate ? "gated" : "created";
-        if (shouldGate) {
-          safeLog("info", "account_gated_tagged_customer", { shopHash: shopId.slice(0, 8) });
+        let shouldGate = false;
+        if (!existingAccount) {
+          const decision = await decideNewAccountGate(tx, shopId);
+          shouldGate = decision.gate;
         }
-      } else {
-        resultAction = "updated";
-      }
 
-      return { action: resultAction, entityId: result.id };
-    });
-    action = txResult.action;
-    entityId = txResult.entityId;
+        const [result] = await tx<{ id: string; isNew: string; gated_at: Date | null }[]>`
+          INSERT INTO "BuyerAccount" (
+            "shopId",
+            kind,
+            "customerId",
+            name,
+            "defaultTermsDays",
+            "defaultTermsSource",
+            gated_at,
+            "createdAt",
+            "updatedAt"
+          ) VALUES (
+            ${shopId},
+            'TAGGED_CUSTOMER',
+            ${customerId},
+            ${displayName},
+            ${defaultTermsDays},
+            ${termsSource},
+            ${shouldGate ? new Date() : null},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT ("shopId", "customerId")
+          DO UPDATE SET
+            name = COALESCE("BuyerAccount".name, EXCLUDED.name),
+            "defaultTermsDays" = CASE
+              WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN "BuyerAccount"."defaultTermsDays"
+              ELSE COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays")
+            END,
+            "defaultTermsSource" = CASE
+              WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN 'explicit'
+              ELSE COALESCE(EXCLUDED."defaultTermsSource", "BuyerAccount"."defaultTermsSource")
+            END,
+            "updatedAt" = NOW()
+          RETURNING id, (xmax = 0)::text as "isNew", gated_at
+        `;
+
+        let resultAction: "created" | "updated" | "gated";
+        if (result.isNew === "true") {
+          resultAction = shouldGate ? "gated" : "created";
+          if (shouldGate) {
+            safeLog("info", "account_gated_tagged_customer", { shopHash: hash });
+          }
+        } else {
+          resultAction = "updated";
+        }
+
+        return { action: resultAction, entityId: result.id };
+      });
+      action = txResult.action;
+      entityId = txResult.entityId;
+    }
   }
 
   return {
@@ -738,6 +787,7 @@ export async function processBulkCustomer(
   return syncTaggedCustomerBuyerAccount(
     sql,
     shopId,
+    shop,
     customer.id,
     true,
     matchingRule.defaultTermsDays

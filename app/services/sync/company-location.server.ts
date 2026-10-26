@@ -19,10 +19,10 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCompanyLocation, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
-import { decideNewAccountGate, isGatingEnforced, countActiveAccounts } from "../gating.server";
+import { decideNewAccountGate, isGatingEnforced, countActiveAccounts, takeBaLimitLock } from "../gating.server";
 import { getPlanByShopId } from "../plan.server";
 import { planLimit } from "~/lib/entitlements";
-import { safeLog } from "~/lib/log.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 import { shouldIncludePiiFields, type PiiEnv } from "./customer-fields.server";
 
 /**
@@ -156,21 +156,13 @@ export async function processCompanyLocationWebhook(
     action = result.upsertAction === "true" ? "created" : "updated";
     entityId = result.id;
   } else {
-    // Flag on: use transaction with gating decision
-    const txResult = await sql.begin(async (tx) => {
-      const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
-        SELECT id, gated_at FROM "BuyerAccount"
-        WHERE "shopId" = ${shopId} AND "companyLocationId" = ${location.id}
-      `;
+    // Flag on: check plan limit to decide if we need transaction
+    const plan = await getPlanByShopId(sql, shopId);
+    const limit = planLimit(plan, "companies");
 
-      let shouldGate = false;
-      if (!existingAccount) {
-        const decision = await decideNewAccountGate(tx, shopId);
-        shouldGate = decision.gate;
-      }
-
-      // When contactKnown=false (ACCESS_DENIED fallback), preserve existing contact fields
-      const [result] = await tx<{ id: string; upsertAction: string; gated_at: Date | null }[]>`
+    if (limit === -1) {
+      // Unlimited plan: plain upsert without transaction (no gating needed)
+      const [result] = await sql<{ id: string; upsertAction: string }[]>`
         INSERT INTO "BuyerAccount" (
           "shopId",
           kind,
@@ -179,7 +171,6 @@ export async function processCompanyLocationWebhook(
           name,
           "defaultTermsDays",
           "defaultTermsSource",
-          gated_at,
           "mainContactEmail",
           "mainContactName",
           "mainContactCustomerId",
@@ -193,7 +184,6 @@ export async function processCompanyLocationWebhook(
           ${displayName},
           ${defaultTermsDays},
           ${defaultTermsDays !== null ? "explicit" : null},
-          ${shouldGate ? new Date() : null},
           ${mainContactEmail},
           ${mainContactDisplayName},
           ${mainContactCustomerId},
@@ -209,23 +199,83 @@ export async function processCompanyLocationWebhook(
           "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
           "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
           "updatedAt" = NOW()
-        RETURNING id, (xmax = 0)::text as "upsertAction", gated_at
+        RETURNING id, (xmax = 0)::text as "upsertAction"
       `;
+      action = result.upsertAction === "true" ? "created" : "updated";
+      entityId = result.id;
+    } else {
+      // Limited plan: use transaction with gating decision
+      const hash = await shopHash(shopDomain);
+      const txResult = await sql.begin(async (tx) => {
+        const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
+          SELECT id, gated_at FROM "BuyerAccount"
+          WHERE "shopId" = ${shopId} AND "companyLocationId" = ${location.id}
+        `;
 
-      let resultAction: "created" | "updated" | "gated";
-      if (result.upsertAction === "true") {
-        resultAction = shouldGate ? "gated" : "created";
-        if (shouldGate) {
-          safeLog("info", "account_gated_company", { shopHash: shopId.slice(0, 8) });
+        let shouldGate = false;
+        if (!existingAccount) {
+          const decision = await decideNewAccountGate(tx, shopId);
+          shouldGate = decision.gate;
         }
-      } else {
-        resultAction = "updated";
-      }
 
-      return { action: resultAction, entityId: result.id };
-    });
-    action = txResult.action;
-    entityId = txResult.entityId;
+        // When contactKnown=false (ACCESS_DENIED fallback), preserve existing contact fields
+        const [result] = await tx<{ id: string; upsertAction: string; gated_at: Date | null }[]>`
+          INSERT INTO "BuyerAccount" (
+            "shopId",
+            kind,
+            "companyId",
+            "companyLocationId",
+            name,
+            "defaultTermsDays",
+            "defaultTermsSource",
+            gated_at,
+            "mainContactEmail",
+            "mainContactName",
+            "mainContactCustomerId",
+            "createdAt",
+            "updatedAt"
+          ) VALUES (
+            ${shopId},
+            'COMPANY',
+            ${location.company.id},
+            ${location.id},
+            ${displayName},
+            ${defaultTermsDays},
+            ${defaultTermsDays !== null ? "explicit" : null},
+            ${shouldGate ? new Date() : null},
+            ${mainContactEmail},
+            ${mainContactDisplayName},
+            ${mainContactCustomerId},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT ("shopId", "companyLocationId")
+          DO UPDATE SET
+            "companyId" = EXCLUDED."companyId",
+            name = EXCLUDED.name,
+            "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+            "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
+            "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
+            "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
+            "updatedAt" = NOW()
+          RETURNING id, (xmax = 0)::text as "upsertAction", gated_at
+        `;
+
+        let resultAction: "created" | "updated" | "gated";
+        if (result.upsertAction === "true") {
+          resultAction = shouldGate ? "gated" : "created";
+          if (shouldGate) {
+            safeLog("info", "account_gated_company", { shopHash: hash });
+          }
+        } else {
+          resultAction = "updated";
+        }
+
+        return { action: resultAction, entityId: result.id };
+      });
+      action = txResult.action;
+      entityId = txResult.entityId;
+    }
   }
 
   await markWebhookProcessed(sql, webhookId, topic, location.id);
@@ -346,95 +396,91 @@ export async function bulkUpsertBuyerAccounts(
 
   let totalCount = 0;
 
-  // Flag off: row-by-row without transaction (main's behavior)
+  // Flag off: row-by-row without transaction (main's behavior, errors propagate)
   if (!isGatingEnforced()) {
     for (const [, shopAccounts] of accountsByShop) {
       for (const a of shopAccounts) {
-        try {
-          // Use different UPDATE logic based on contactKnown:
-          // - contactKnown=true: write mainContact* values (even if null = contact removed)
-          // - contactKnown=false: preserve existing mainContact* values (orphan location)
-          if (a.contactKnown) {
-            const result = await sql`
-              INSERT INTO "BuyerAccount" (
-                "shopId",
-                kind,
-                "companyId",
-                "companyLocationId",
-                name,
-                "defaultTermsDays",
-                "defaultTermsSource",
-                "mainContactEmail",
-                "mainContactName",
-                "mainContactCustomerId",
-                "createdAt",
-                "updatedAt"
-              ) VALUES (
-                ${a.shopId},
-                ${a.kind},
-                ${a.companyId},
-                ${a.companyLocationId},
-                ${a.name},
-                ${a.defaultTermsDays},
-                ${a.defaultTermsSource},
-                ${a.mainContactEmail},
-                ${a.mainContactName},
-                ${a.mainContactCustomerId},
-                NOW(),
-                NOW()
-              )
-              ON CONFLICT ("shopId", "companyLocationId")
-              DO UPDATE SET
-                "companyId" = EXCLUDED."companyId",
-                name = EXCLUDED.name,
-                "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-                "mainContactEmail" = EXCLUDED."mainContactEmail",
-                "mainContactName" = EXCLUDED."mainContactName",
-                "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
-                "updatedAt" = NOW()
-            `;
-            totalCount += result.count;
-          } else {
-            // Orphan location: preserve existing mainContact* columns
-            const result = await sql`
-              INSERT INTO "BuyerAccount" (
-                "shopId",
-                kind,
-                "companyId",
-                "companyLocationId",
-                name,
-                "defaultTermsDays",
-                "defaultTermsSource",
-                "mainContactEmail",
-                "mainContactName",
-                "mainContactCustomerId",
-                "createdAt",
-                "updatedAt"
-              ) VALUES (
-                ${a.shopId},
-                ${a.kind},
-                ${a.companyId},
-                ${a.companyLocationId},
-                ${a.name},
-                ${a.defaultTermsDays},
-                ${a.defaultTermsSource},
-                ${a.mainContactEmail},
-                ${a.mainContactName},
-                ${a.mainContactCustomerId},
-                NOW(),
-                NOW()
-              )
-              ON CONFLICT ("shopId", "companyLocationId")
-              DO UPDATE SET
-                "companyId" = EXCLUDED."companyId",
-                name = EXCLUDED.name,
-                "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-                "updatedAt" = NOW()
-            `;
-            totalCount += result.count;
-          }
-        } catch {
-          // One bad row doesn't lose the others
+        // Use different UPDATE logic based on contactKnown:
+        // - contactKnown=true: write mainContact* values (even if null = contact removed)
+        // - contactKnown=false: preserve existing mainContact* values (orphan location)
+        if (a.contactKnown) {
+          const result = await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId",
+              kind,
+              "companyId",
+              "companyLocationId",
+              name,
+              "defaultTermsDays",
+              "defaultTermsSource",
+              "mainContactEmail",
+              "mainContactName",
+              "mainContactCustomerId",
+              "createdAt",
+              "updatedAt"
+            ) VALUES (
+              ${a.shopId},
+              ${a.kind},
+              ${a.companyId},
+              ${a.companyLocationId},
+              ${a.name},
+              ${a.defaultTermsDays},
+              ${a.defaultTermsSource},
+              ${a.mainContactEmail},
+              ${a.mainContactName},
+              ${a.mainContactCustomerId},
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT ("shopId", "companyLocationId")
+            DO UPDATE SET
+              "companyId" = EXCLUDED."companyId",
+              name = EXCLUDED.name,
+              "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "mainContactEmail" = EXCLUDED."mainContactEmail",
+              "mainContactName" = EXCLUDED."mainContactName",
+              "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+              "updatedAt" = NOW()
+          `;
+          totalCount += result.count;
+        } else {
+          // Orphan location: preserve existing mainContact* columns
+          const result = await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId",
+              kind,
+              "companyId",
+              "companyLocationId",
+              name,
+              "defaultTermsDays",
+              "defaultTermsSource",
+              "mainContactEmail",
+              "mainContactName",
+              "mainContactCustomerId",
+              "createdAt",
+              "updatedAt"
+            ) VALUES (
+              ${a.shopId},
+              ${a.kind},
+              ${a.companyId},
+              ${a.companyLocationId},
+              ${a.name},
+              ${a.defaultTermsDays},
+              ${a.defaultTermsSource},
+              ${a.mainContactEmail},
+              ${a.mainContactName},
+              ${a.mainContactCustomerId},
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT ("shopId", "companyLocationId")
+            DO UPDATE SET
+              "companyId" = EXCLUDED."companyId",
+              name = EXCLUDED.name,
+              "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "updatedAt" = NOW()
+          `;
+          totalCount += result.count;
         }
       }
     }
@@ -448,90 +494,97 @@ export async function bulkUpsertBuyerAccounts(
     const plan = await getPlanByShopId(sql, shopId);
     const limit = planLimit(plan, "companies");
 
-    // No limit or unlimited: process row-by-row without gating
+    // Look up domain for shopHash logging (only needed for limited plans with potential gating)
+    let hash: string | null = null;
+    if (limit !== -1) {
+      const [shop] = await sql<{ domain: string }[]>`
+        SELECT domain FROM "Shop" WHERE id = ${shopId}
+      `;
+      if (shop) {
+        hash = await shopHash(shop.domain);
+      }
+    }
+
+    // Unlimited: process row-by-row without gating (no transaction needed, errors propagate)
     if (limit === -1) {
       for (const a of shopAccounts) {
-        try {
-          if (a.contactKnown) {
-            const result = await sql`
-              INSERT INTO "BuyerAccount" (
-                "shopId",
-                kind,
-                "companyId",
-                "companyLocationId",
-                name,
-                "defaultTermsDays",
-                "defaultTermsSource",
-                "mainContactEmail",
-                "mainContactName",
-                "mainContactCustomerId",
-                "createdAt",
-                "updatedAt"
-              ) VALUES (
-                ${a.shopId},
-                ${a.kind},
-                ${a.companyId},
-                ${a.companyLocationId},
-                ${a.name},
-                ${a.defaultTermsDays},
-                ${a.defaultTermsSource},
-                ${a.mainContactEmail},
-                ${a.mainContactName},
-                ${a.mainContactCustomerId},
-                NOW(),
-                NOW()
-              )
-              ON CONFLICT ("shopId", "companyLocationId")
-              DO UPDATE SET
-                "companyId" = EXCLUDED."companyId",
-                name = EXCLUDED.name,
-                "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-                "mainContactEmail" = EXCLUDED."mainContactEmail",
-                "mainContactName" = EXCLUDED."mainContactName",
-                "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
-                "updatedAt" = NOW()
-            `;
-            totalCount += result.count;
-          } else {
-            const result = await sql`
-              INSERT INTO "BuyerAccount" (
-                "shopId",
-                kind,
-                "companyId",
-                "companyLocationId",
-                name,
-                "defaultTermsDays",
-                "defaultTermsSource",
-                "mainContactEmail",
-                "mainContactName",
-                "mainContactCustomerId",
-                "createdAt",
-                "updatedAt"
-              ) VALUES (
-                ${a.shopId},
-                ${a.kind},
-                ${a.companyId},
-                ${a.companyLocationId},
-                ${a.name},
-                ${a.defaultTermsDays},
-                ${a.defaultTermsSource},
-                ${a.mainContactEmail},
-                ${a.mainContactName},
-                ${a.mainContactCustomerId},
-                NOW(),
-                NOW()
-              )
-              ON CONFLICT ("shopId", "companyLocationId")
-              DO UPDATE SET
-                "companyId" = EXCLUDED."companyId",
-                name = EXCLUDED.name,
-                "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-                "updatedAt" = NOW()
-            `;
-            totalCount += result.count;
-          }
-        } catch {
-          // One bad row doesn't lose the others
+        if (a.contactKnown) {
+          const result = await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId",
+              kind,
+              "companyId",
+              "companyLocationId",
+              name,
+              "defaultTermsDays",
+              "defaultTermsSource",
+              "mainContactEmail",
+              "mainContactName",
+              "mainContactCustomerId",
+              "createdAt",
+              "updatedAt"
+            ) VALUES (
+              ${a.shopId},
+              ${a.kind},
+              ${a.companyId},
+              ${a.companyLocationId},
+              ${a.name},
+              ${a.defaultTermsDays},
+              ${a.defaultTermsSource},
+              ${a.mainContactEmail},
+              ${a.mainContactName},
+              ${a.mainContactCustomerId},
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT ("shopId", "companyLocationId")
+            DO UPDATE SET
+              "companyId" = EXCLUDED."companyId",
+              name = EXCLUDED.name,
+              "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "mainContactEmail" = EXCLUDED."mainContactEmail",
+              "mainContactName" = EXCLUDED."mainContactName",
+              "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+              "updatedAt" = NOW()
+          `;
+          totalCount += result.count;
+        } else {
+          const result = await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId",
+              kind,
+              "companyId",
+              "companyLocationId",
+              name,
+              "defaultTermsDays",
+              "defaultTermsSource",
+              "mainContactEmail",
+              "mainContactName",
+              "mainContactCustomerId",
+              "createdAt",
+              "updatedAt"
+            ) VALUES (
+              ${a.shopId},
+              ${a.kind},
+              ${a.companyId},
+              ${a.companyLocationId},
+              ${a.name},
+              ${a.defaultTermsDays},
+              ${a.defaultTermsSource},
+              ${a.mainContactEmail},
+              ${a.mainContactName},
+              ${a.mainContactCustomerId},
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT ("shopId", "companyLocationId")
+            DO UPDATE SET
+              "companyId" = EXCLUDED."companyId",
+              name = EXCLUDED.name,
+              "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "updatedAt" = NOW()
+          `;
+          totalCount += result.count;
         }
       }
       continue;
@@ -542,7 +595,7 @@ export async function bulkUpsertBuyerAccounts(
       const batch = shopAccounts.slice(i, i + BATCH_SIZE);
 
       const batchCount = await sql.begin(async (tx) => {
-        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${'ba_limit:' + shopId}, 0))`;
+        await takeBaLimitLock(tx, shopId);
 
         const currentUsage = await countActiveAccounts(tx, shopId);
         let slotsAvailable = Math.max(0, limit - currentUsage);
@@ -656,8 +709,8 @@ export async function bulkUpsertBuyerAccounts(
           }
         }
 
-        if (gatedCount > 0) {
-          safeLog("info", "bulk_accounts_gated", { gatedCount, shopHash: shopId.slice(0, 8) });
+        if (gatedCount > 0 && hash) {
+          safeLog("info", "bulk_accounts_gated", { gatedCount, shopHash: hash });
         }
 
         return count;
