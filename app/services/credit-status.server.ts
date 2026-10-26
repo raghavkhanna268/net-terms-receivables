@@ -132,6 +132,7 @@ export const CREDIT_STATUS_SOURCES = [
   "daily_sweep",
   "manual",
   "sync",
+  "draft_change",
   "unknown",
 ] as const;
 
