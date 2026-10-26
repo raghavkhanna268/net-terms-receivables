@@ -470,6 +470,99 @@ function checkCallExpression(
   if (SENTRY_METHODS.has(methodName)) {
     checkSentryCall(call, methodName, sourceFile, relPath, violations);
   }
+
+  // Check sql.json / tx.json for AuditEvent metadata (#332)
+  // These calls are used to serialize metadata in AuditEvent inserts.
+  // We flag webhookId in these calls because it could end up in AuditEvent.data.
+  // Note: We cannot statically determine if the call is actually within an AuditEvent
+  // INSERT (the INSERT is in the parent tagged template, and the json call is an
+  // interpolated expression). For safety, we flag all sql.json/tx.json objects
+  // containing banned keys. This may produce false positives if sql.json is used
+  // for non-AuditEvent data, but in this codebase sql.json is primarily used for
+  // AuditEvent.data fields.
+  if (callName === "sql.json" || callName === "tx.json" || callName === "json") {
+    const firstArg = call.arguments[0];
+    if (firstArg && ts.isObjectLiteralExpression(firstArg)) {
+      checkAuditEventMetadata(firstArg, sourceFile, relPath, violations);
+    }
+  }
+}
+
+/**
+ * Check AuditEvent metadata objects for banned keys (#332).
+ * Called for sql.json / tx.json arguments which serialize AuditEvent.data.
+ */
+function checkAuditEventMetadata(
+  obj: ts.ObjectLiteralExpression,
+  sourceFile: ts.SourceFile,
+  relPath: string,
+  violations: Violation[]
+): void {
+  for (const prop of obj.properties) {
+    let keyName: string | null = null;
+
+    if (ts.isPropertyAssignment(prop)) {
+      if (ts.isIdentifier(prop.name)) {
+        keyName = prop.name.text;
+      } else if (ts.isStringLiteral(prop.name)) {
+        keyName = prop.name.text;
+      } else if (ts.isComputedPropertyName(prop.name)) {
+        const nameExpr = prop.name.expression;
+        if (ts.isStringLiteral(nameExpr) && isBannedLogKey(nameExpr.text)) {
+          const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+          violations.push({
+            file: relPath,
+            line: line + 1,
+            column: character + 1,
+            rule: "banned-log-key",
+            message: `Banned computed key in AuditEvent metadata: ["${nameExpr.text}"] (removed per #332)`,
+            snippet: truncate(prop.getText(), 100),
+          });
+        }
+      }
+
+      // Check value for banned identifiers or property access
+      const value = prop.initializer;
+      if (ts.isIdentifier(value) && isBannedLogKey(value.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned identifier as AuditEvent metadata value: ${value.text} (removed per #332)`,
+          snippet: truncate(prop.getText(), 100),
+        });
+      }
+      if (ts.isPropertyAccessExpression(value) && isBannedLogKey(value.name.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned property access as AuditEvent metadata value: .${value.name.text} (removed per #332)`,
+          snippet: truncate(prop.getText(), 100),
+        });
+      }
+    }
+
+    if (ts.isShorthandPropertyAssignment(prop)) {
+      keyName = prop.name.text;
+    }
+
+    if (keyName && isBannedLogKey(keyName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned key in AuditEvent metadata: ${keyName} (removed per #332)`,
+        snippet: truncate(prop.getText(), 100),
+      });
+    }
+  }
 }
 
 function getCallName(call: ts.CallExpression): string | null {
@@ -584,6 +677,18 @@ function checkArgument(
   // No argIndex > 0 condition - check ALL arguments
   if (ts.isIdentifier(arg)) {
     const name = arg.text;
+    // Check for banned identifiers (#332) - e.g., console.log("x", webhookId)
+    if (isBannedLogKey(name)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned identifier passed as argument: ${name} (removed per #332)`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
     // Check for error-like identifiers
     if (isErrorLikeIdentifier(name)) {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
@@ -613,6 +718,18 @@ function checkArgument(
   // Check property access arguments (P2.4) - e.g., console.error("x", err.message), console.log("x", session.shop)
   if (ts.isPropertyAccessExpression(arg)) {
     const propName = arg.name.text;
+    // Check for banned property names (#332) - e.g., console.log("x", m.webhookId)
+    if (isBannedLogKey(propName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned property access passed as argument: .${propName} (removed per #332)`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
     // Check for .message/.stack
     if (propName === "message" || propName === "stack") {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
@@ -975,8 +1092,8 @@ function checkSentryCall(
           file: relPath,
           line: v.line,
           column: v.column,
-          rule: "shop-interpolation",
-          message: `Template in Sentry call interpolates sensitive variable: ${v.expr}`,
+          rule: v.rule ?? "shop-interpolation",
+          message: v.message ?? `Template in Sentry call interpolates sensitive variable: ${v.expr}`,
           snippet: v.snippet,
         });
       }
@@ -1200,6 +1317,23 @@ function checkObjectLiteral(
         keyName = prop.name.text;
       } else if (ts.isStringLiteral(prop.name)) {
         keyName = prop.name.text;
+      } else if (ts.isComputedPropertyName(prop.name)) {
+        // Computed property name: { ["webhookId"]: x } or { [key]: x }
+        const nameExpr = prop.name.expression;
+        if (ts.isStringLiteral(nameExpr)) {
+          const computedKey = nameExpr.text;
+          if (isBannedLogKey(computedKey)) {
+            const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+            violations.push({
+              file: relPath,
+              line: line + 1,
+              column: character + 1,
+              rule: "banned-log-key",
+              message: `Banned computed key in log argument: ["${computedKey}"] (removed per #332)`,
+              snippet: truncate(prop.getText(), 100),
+            });
+          }
+        }
       }
 
       // Check the value (P2.4)
@@ -1299,9 +1433,21 @@ function checkPropertyValue(
   violations: Violation[],
   _depth: number
 ): void {
-  // Check identifier values: { store: shop }
+  // Check identifier values: { store: shop } or { id: webhookId }
   if (ts.isIdentifier(value)) {
     const name = value.text;
+    // Check for banned identifiers (#332) - e.g., { id: webhookId }
+    if (isBannedLogKey(name)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned identifier as value: ${name} (removed per #332)`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
     if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
       violations.push({
@@ -1327,9 +1473,21 @@ function checkPropertyValue(
     }
   }
 
-  // Check property access: { error: err.message } or { x: foo.stack }
+  // Check property access: { error: err.message } or { x: foo.stack } or { id: m.webhookId }
   if (ts.isPropertyAccessExpression(value)) {
     const propName = value.name.text;
+    // Check for banned property access (#332) - e.g., { id: m.webhookId }
+    if (isBannedLogKey(propName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned property access as value: .${propName} (removed per #332)`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
     if (propName === "message" || propName === "stack") {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
       violations.push({
@@ -1412,7 +1570,7 @@ function checkArrayLiteral(
 }
 
 /**
- * Check string concatenation for sensitive identifiers (P2.7).
+ * Check string concatenation for sensitive identifiers (P2.7) and banned keys (#332).
  */
 function checkStringConcatenation(
   expr: ts.BinaryExpression,
@@ -1421,8 +1579,35 @@ function checkStringConcatenation(
   violations: Violation[]
 ): void {
   function checkOperand(operand: ts.Node): void {
+    // Check string literals for wh= pattern (#332)
+    if (ts.isStringLiteral(operand) || ts.isNoSubstitutionTemplateLiteral(operand)) {
+      const text = operand.text;
+      if (WH_EQUALS_PATTERN.test(text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-wh-prefix",
+          message: `Banned wh= prefix in string concatenation (webhookId abbreviation, removed per #332)`,
+          snippet: truncate(expr.getText(sourceFile), 100),
+        });
+      }
+    }
     if (ts.isIdentifier(operand)) {
       const name = operand.text;
+      // Check for banned identifiers (#332) - e.g., "wh=" + webhookId
+      if (isBannedLogKey(name)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned identifier in string concatenation: ${name} (removed per #332)`,
+          snippet: truncate(expr.getText(sourceFile), 100),
+        });
+      }
       if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
         violations.push({
@@ -1441,6 +1626,18 @@ function checkStringConcatenation(
     }
     if (ts.isPropertyAccessExpression(operand)) {
       const propName = operand.name.text;
+      // Check for banned property access (#332) - e.g., "wh=" + m.webhookId
+      if (isBannedLogKey(propName)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned property access in string concatenation: .${propName} (removed per #332)`,
+          snippet: truncate(expr.getText(sourceFile), 100),
+        });
+      }
       if (isSensitiveIdentifier(propName) && !SAFE_KEY_ALLOWLIST[propName]) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
         violations.push({

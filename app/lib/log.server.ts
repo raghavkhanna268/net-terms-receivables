@@ -4,9 +4,10 @@
  * Provides safeLog() for structured logging with automatic redaction of
  * sensitive data. Output is single-line JSON for easy parsing.
  *
- * Allowlisted fields: shopId, shopHash, requestId, webhookId, jobId, matchId,
+ * Allowlisted fields: shopId, shopHash, requestId, jobId, matchId,
  * buyerAccountId, orderGid, invoiceId, and other *Id/*Gid keys, plus topic,
  * status, reason, code, err, count/*Count, boolean flags, durationMs, timestamps.
+ * Note: webhookId is explicitly BANNED (#332) and will be redacted.
  *
  * Any other key, or any string value matching sensitive patterns, is redacted.
  *
