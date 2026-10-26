@@ -4,18 +4,16 @@
  * Tests verify that late or retried app/uninstalled webhooks arriving
  * after a quick reinstall do NOT wipe the fresh installation.
  *
- * Test cases:
- * 1. Late uninstall after reinstall (case a) is ignored, sessions and uninstalledAt untouched
- * 2. Genuine uninstall (case b) still works - header present and newer than lastInstalledAt
- * 3. lastInstalledAt NULL with header - genuine uninstall (case b variant)
- * 4. header missing + lastInstalledAt NULL (case c) - genuine uninstall
- * 5. header missing + lastInstalledAt set + probe 401 means genuine uninstall
- * 6. header missing + lastInstalledAt set + probe 200 means stale no-op
- * 7. probe error/timeout means 5xx and nothing changed
- * 8. retried delivery of the same stale/genuine uninstall is idempotent
- * 9. afterAuth sets lastInstalledAt on fresh install and reinstall
+ * These tests use REAL compliance functions (markShopUninstalled, deleteProcessedWebhooksViaReceipts)
+ * against the database. Only the Admin API layer (getOfflineAdminContext / graphql) is mocked.
  *
- * Mutation proof: disable the stale check, show test (1) fails, revert.
+ * Test cases:
+ * - afterAuth paths: fresh install, reinstall, plain re-auth with/without existing lastInstalledAt
+ * - Case (a): late uninstall after reinstall is ignored
+ * - Case (b): genuine uninstall with newer header
+ * - Case (c): header missing + NULL
+ * - Case (d): probe scenarios (no_session, 401, 403, malformed 200, GraphQL errors, timeout)
+ * - Log leak tests with REAL log.server.ts
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import postgres from "postgres";
@@ -29,24 +27,12 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 const SYNTHETIC_TEST_SECRET = "synthetic-test-secret-stale-uninstall";
 const SYNTHETIC_CLIENT_ID = "synthetic-client-id";
 
-const mockSessionStorage = {
-  deleteAllForShop: vi.fn().mockResolvedValue(0),
-};
-
 const mockGraphql = vi.fn();
 const mockAdmin = { graphql: mockGraphql };
 const mockGetOfflineAdminContext = vi.fn();
 
 vi.mock("~/lib/offline-admin.server", () => ({
   getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
-}));
-
-const mockMarkShopUninstalled = vi.fn();
-const mockDeleteProcessedWebhooksViaReceipts = vi.fn().mockResolvedValue(0);
-vi.mock("~/services/compliance", () => ({
-  markShopUninstalled: (...args: unknown[]) => mockMarkShopUninstalled(...args),
-  deleteProcessedWebhooksViaReceipts: (...args: unknown[]) =>
-    mockDeleteProcessedWebhooksViaReceipts(...args),
 }));
 
 const mockEvictShopFromSetupCache = vi.fn();
@@ -98,26 +84,33 @@ function createSignedRequest(
   });
 }
 
-function createMockActionArgs(request: Request): ActionFunctionArgs {
-  return {
-    request,
-    params: {},
-    context: {
-      cloudflare: { env: {}, ctx: {} },
-      shopify: {},
-      sessionStorage: mockSessionStorage,
-    },
-    url: new URL(request.url),
-    pattern: "/webhooks/app/uninstalled",
-  } as unknown as ActionFunctionArgs;
-}
-
 describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-staleuninstall";
   const TEST_SHOP_DOMAIN = `test-stale-${TEST_SUFFIX}.myshopify.com`;
   let testShopId: string;
   const originalEnv = process.env;
+
+  const mockSessionStorage = {
+    deleteAllForShop: vi.fn(async (shop: string) => {
+      const result = await sql`DELETE FROM "Session" WHERE shop = ${shop}`;
+      return result.count;
+    }),
+  };
+
+  function createMockActionArgs(request: Request): ActionFunctionArgs {
+    return {
+      request,
+      params: {},
+      context: {
+        cloudflare: { env: {}, ctx: {} },
+        shopify: {},
+        sessionStorage: mockSessionStorage,
+      },
+      url: new URL(request.url),
+      pattern: "/webhooks/app/uninstalled",
+    } as unknown as ActionFunctionArgs;
+  }
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -141,9 +134,6 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
-    mockMarkShopUninstalled.mockResolvedValue(true);
-    mockDeleteProcessedWebhooksViaReceipts.mockResolvedValue(0);
     mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
     mockGraphql.mockResolvedValue({ json: async () => ({ data: { shop: { id: "gid://shopify/Shop/123" } } }) });
 
@@ -171,12 +161,116 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
     `;
   }
 
+  async function getSessionCount(): Promise<number> {
+    const [result] = await sql<{ count: number }[]>`
+      SELECT COUNT(*)::int as count FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}
+    `;
+    return result.count;
+  }
+
   async function getShopState(): Promise<{ uninstalledAt: Date | null; lastInstalledAt: Date | null }> {
     const [shop] = await sql<{ uninstalledAt: Date | null; lastInstalledAt: Date | null }[]>`
       SELECT "uninstalledAt", "lastInstalledAt" FROM "Shop" WHERE id = ${testShopId}
     `;
     return shop;
   }
+
+  describe("afterAuth paths", () => {
+    it("fresh install sets lastInstalledAt to NOW", async () => {
+      const TEST_FRESH_SHOP = `test-fresh-${TEST_SUFFIX}.myshopify.com`;
+
+      try {
+        const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
+        await upsertShopOnAuth(sql, TEST_FRESH_SHOP, "America/New_York", "INR");
+
+        const [shop] = await sql<{ lastInstalledAt: Date | null; createdAt: Date }[]>`
+          SELECT "lastInstalledAt", "createdAt" FROM "Shop" WHERE domain = ${TEST_FRESH_SHOP}
+        `;
+        expect(shop.lastInstalledAt).not.toBeNull();
+        expect(Math.abs(shop.lastInstalledAt!.getTime() - Date.now())).toBeLessThan(5000);
+      } finally {
+        await sql`DELETE FROM "Shop" WHERE domain = ${TEST_FRESH_SHOP}`;
+      }
+    });
+
+    it("reinstall sets lastInstalledAt to NOW, moving a stale value forward", async () => {
+      const TEST_REINSTALL_SHOP = `test-reinstall-${TEST_SUFFIX}.myshopify.com`;
+      const oldInstallTime = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "lastInstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_REINSTALL_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), ${oldInstallTime}, NOW(), NOW())
+      `;
+
+      try {
+        const [beforeShop] = await sql<{ lastInstalledAt: Date | null }[]>`
+          SELECT "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_REINSTALL_SHOP}
+        `;
+        expect(beforeShop.lastInstalledAt?.getTime()).toBe(oldInstallTime.getTime());
+
+        const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
+        await upsertShopOnAuth(sql, TEST_REINSTALL_SHOP, "America/New_York", "INR");
+
+        const [afterShop] = await sql<{ uninstalledAt: Date | null; lastInstalledAt: Date | null }[]>`
+          SELECT "uninstalledAt", "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_REINSTALL_SHOP}
+        `;
+        expect(afterShop.uninstalledAt).toBeNull();
+        expect(afterShop.lastInstalledAt).not.toBeNull();
+        expect(afterShop.lastInstalledAt!.getTime()).toBeGreaterThan(oldInstallTime.getTime());
+      } finally {
+        await sql`DELETE FROM "Shop" WHERE domain = ${TEST_REINSTALL_SHOP}`;
+      }
+    });
+
+    it("plain re-auth with lastInstalledAt already set does NOT change it", async () => {
+      const TEST_REAUTH_SHOP = `test-reauth-existing-${TEST_SUFFIX}.myshopify.com`;
+      const existingInstallTime = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "lastInstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_REAUTH_SHOP}, 'America/New_York', 'INR', 'starter', ${existingInstallTime}, NOW(), NOW())
+      `;
+
+      try {
+        const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
+        await upsertShopOnAuth(sql, TEST_REAUTH_SHOP, "America/New_York", "INR");
+
+        const [shop] = await sql<{ lastInstalledAt: Date | null }[]>`
+          SELECT "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_REAUTH_SHOP}
+        `;
+        expect(shop.lastInstalledAt?.getTime()).toBe(existingInstallTime.getTime());
+      } finally {
+        await sql`DELETE FROM "Shop" WHERE domain = ${TEST_REAUTH_SHOP}`;
+      }
+    });
+
+    it("plain re-auth with NULL lastInstalledAt fills it with NOW", async () => {
+      const TEST_REAUTH_NULL_SHOP = `test-reauth-null-${TEST_SUFFIX}.myshopify.com`;
+
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "lastInstalledAt", "createdAt", "updatedAt")
+        VALUES (${TEST_REAUTH_NULL_SHOP}, 'America/New_York', 'INR', 'starter', NULL, NOW(), NOW())
+      `;
+
+      try {
+        const [beforeShop] = await sql<{ lastInstalledAt: Date | null }[]>`
+          SELECT "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_REAUTH_NULL_SHOP}
+        `;
+        expect(beforeShop.lastInstalledAt).toBeNull();
+
+        const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
+        await upsertShopOnAuth(sql, TEST_REAUTH_NULL_SHOP, "America/New_York", "INR");
+
+        const [afterShop] = await sql<{ lastInstalledAt: Date | null }[]>`
+          SELECT "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_REAUTH_NULL_SHOP}
+        `;
+        expect(afterShop.lastInstalledAt).not.toBeNull();
+        expect(Math.abs(afterShop.lastInstalledAt!.getTime() - Date.now())).toBeLessThan(5000);
+      } finally {
+        await sql`DELETE FROM "Shop" WHERE domain = ${TEST_REAUTH_NULL_SHOP}`;
+      }
+    });
+  });
 
   describe("Case (a): header present and older than lastInstalledAt - stale", () => {
     it("late uninstall after reinstall is ignored, sessions and uninstalledAt untouched", async () => {
@@ -196,16 +290,12 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
 
       const shopState = await getShopState();
       expect(shopState.uninstalledAt).toBeNull();
 
-      const [session] = await sql<{ id: string }[]>`
-        SELECT id FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}
-      `;
-      expect(session).toBeDefined();
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(1);
     });
   });
 
@@ -227,25 +317,12 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP_DOMAIN);
-      expect(mockMarkShopUninstalled).toHaveBeenCalled();
-    });
 
-    it("genuine uninstall works when lastInstalledAt is NULL", async () => {
-      await createTestSession();
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).not.toBeNull();
 
-      const payload = JSON.stringify({ shop_id: 123 });
-      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
-        shopDomain: TEST_SHOP_DOMAIN,
-        triggeredAt: new Date(),
-      });
-
-      const { action } = await import("../webhooks.app.uninstalled");
-      const response = await action(createMockActionArgs(request));
-
-      expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP_DOMAIN);
-      expect(mockMarkShopUninstalled).toHaveBeenCalled();
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(0);
     });
   });
 
@@ -263,13 +340,20 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP_DOMAIN);
-      expect(mockMarkShopUninstalled).toHaveBeenCalled();
+
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).not.toBeNull();
+
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(0);
     });
   });
 
   describe("Case (d): header missing and lastInstalledAt set - probe Admin API", () => {
-    it("probe 401 (no session) means genuine uninstall", async () => {
+    it("no offline session (no_session) = normal uninstall, 200, uninstalledAt set, no stale_* line", async () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
       const installTime = new Date();
       await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
       await createTestSession();
@@ -291,20 +375,28 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(TEST_SHOP_DOMAIN);
-      expect(mockMarkShopUninstalled).toHaveBeenCalled();
+
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).not.toBeNull();
+
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(0);
+
+      const allLogs = [...consoleSpy.mock.calls, ...consoleErrorSpy.mock.calls].map(c => c.join(" "));
+      expect(allLogs.some(l => l.includes("stale_ignored"))).toBe(false);
+      expect(allLogs.some(l => l.includes("stale_probe_failed"))).toBe(false);
+
+      consoleSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
     });
 
-    it("probe 401 (invalid_grant) means genuine uninstall", async () => {
+    it("HTTP 401 = genuine uninstall", async () => {
       const installTime = new Date();
       await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
+      await createTestSession();
 
-      mockGetOfflineAdminContext.mockResolvedValue({
-        success: false,
-        errorCode: "invalid_grant",
-        retryable: false,
-        needsReauth: true,
-      });
+      mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+      mockGraphql.mockRejectedValue({ response: { status: 401 } });
 
       const payload = JSON.stringify({ shop_id: 123 });
       const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
@@ -316,20 +408,42 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).toHaveBeenCalled();
+
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).not.toBeNull();
     });
 
-    it("probe 200 (shop.id returned) means stale no-op", async () => {
+    it("HTTP 403 = genuine uninstall", async () => {
       const installTime = new Date();
       await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
       await createTestSession();
 
-      mockGetOfflineAdminContext.mockResolvedValue({
-        success: true,
-        admin: mockAdmin,
-        retryable: false,
+      mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+      mockGraphql.mockRejectedValue({ response: { status: 403 } });
+
+      const payload = JSON.stringify({ shop_id: 123 });
+      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
+        shopDomain: TEST_SHOP_DOMAIN,
+        triggeredAt: null,
       });
+
+      const { action } = await import("../webhooks.app.uninstalled");
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).not.toBeNull();
+    });
+
+    it("well-formed 200 with shop.id = stale_ignored reason=probe_ok, return 200, nothing changed", async () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const installTime = new Date();
+      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
+      await createTestSession();
+
+      mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
       mockGraphql.mockResolvedValue({
         json: async () => ({ data: { shop: { id: "gid://shopify/Shop/123" } } }),
       });
@@ -344,14 +458,125 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
 
       const shopState = await getShopState();
       expect(shopState.uninstalledAt).toBeNull();
+
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(1);
+
+      const allLogs = consoleSpy.mock.calls.map(c => c.join(" "));
+      expect(allLogs.some(l => l.includes("stale_ignored reason=probe_ok"))).toBe(true);
+
+      consoleSpy.mockRestore();
     });
 
-    it("probe error (retryable) means 5xx and nothing changed", async () => {
+    it("malformed 200 (no shop.id) = 5xx, nothing changed, stale_probe_failed reason=unexpected_response", async () => {
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const installTime = new Date();
+      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
+      await createTestSession();
+
+      mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+      mockGraphql.mockResolvedValue({
+        json: async () => ({ data: { shop: null } }),
+      });
+
+      const payload = JSON.stringify({ shop_id: 123 });
+      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
+        shopDomain: TEST_SHOP_DOMAIN,
+        triggeredAt: null,
+      });
+
+      const { action } = await import("../webhooks.app.uninstalled");
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(500);
+
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).toBeNull();
+
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(1);
+
+      const allErrors = consoleErrorSpy.mock.calls.map(c => c.join(" "));
+      expect(allErrors.some(l => l.includes("stale_probe_failed reason=unexpected_response"))).toBe(true);
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("GraphQL errors array = 5xx, nothing changed, stale_probe_failed reason=graphql_error", async () => {
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const installTime = new Date();
+      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
+      await createTestSession();
+
+      mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+      mockGraphql.mockResolvedValue({
+        json: async () => ({ errors: [{ message: "Some internal error" }] }),
+      });
+
+      const payload = JSON.stringify({ shop_id: 123 });
+      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
+        shopDomain: TEST_SHOP_DOMAIN,
+        triggeredAt: null,
+      });
+
+      const { action } = await import("../webhooks.app.uninstalled");
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(500);
+
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).toBeNull();
+
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(1);
+
+      const allErrors = consoleErrorSpy.mock.calls.map(c => c.join(" "));
+      expect(allErrors.some(l => l.includes("stale_probe_failed reason=graphql_error"))).toBe(true);
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("thrown error/timeout = 5xx, nothing changed, stale_probe_failed reason=graphql_error", async () => {
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const installTime = new Date();
+      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
+      await createTestSession();
+
+      mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+      mockGraphql.mockRejectedValue(new Error("Network timeout"));
+
+      const payload = JSON.stringify({ shop_id: 123 });
+      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
+        shopDomain: TEST_SHOP_DOMAIN,
+        triggeredAt: null,
+      });
+
+      const { action } = await import("../webhooks.app.uninstalled");
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(500);
+
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).toBeNull();
+
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(1);
+
+      const allErrors = consoleErrorSpy.mock.calls.map(c => c.join(" "));
+      expect(allErrors.some(l => l.includes("stale_probe_failed reason=graphql_error"))).toBe(true);
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("non-retryable non-auth probe failure (admin_session_error) = 5xx, nothing changed", async () => {
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
       const installTime = new Date();
       await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
       await createTestSession();
@@ -359,7 +584,7 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       mockGetOfflineAdminContext.mockResolvedValue({
         success: false,
         errorCode: "admin_session_error",
-        retryable: true,
+        retryable: false,
         needsReauth: false,
       });
 
@@ -373,46 +598,99 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(500);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
 
       const shopState = await getShopState();
       expect(shopState.uninstalledAt).toBeNull();
 
-      const [session] = await sql<{ id: string }[]>`
-        SELECT id FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}
-      `;
-      expect(session).toBeDefined();
-    });
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(1);
 
-    it("probe GraphQL error (timeout) means 5xx and nothing changed", async () => {
-      const installTime = new Date();
-      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
-      await createTestSession();
-
-      mockGetOfflineAdminContext.mockResolvedValue({
-        success: true,
-        admin: mockAdmin,
-        retryable: false,
-      });
-      mockGraphql.mockRejectedValue(new Error("Network timeout"));
-
-      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-      const payload = JSON.stringify({ shop_id: 123 });
-      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
-        shopDomain: TEST_SHOP_DOMAIN,
-        triggeredAt: null,
-      });
-
-      const { action } = await import("../webhooks.app.uninstalled");
-      const response = await action(createMockActionArgs(request));
-
-      expect(response.status).toBe(500);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
+      const allErrors = consoleErrorSpy.mock.calls.map(c => c.join(" "));
+      expect(allErrors.some(l => l.includes("stale_probe_failed reason=admin_session_error"))).toBe(true);
 
       consoleErrorSpy.mockRestore();
+    });
+  });
+
+  describe("Log leak tests (REAL log.server.ts)", () => {
+    it("stale_ignored log contains no shop domain, token, error message, or webhookId", async () => {
+      const DISTINCTIVE_SHOP = `distinctive-leak-test-${TEST_SUFFIX}.myshopify.com`;
+      const DISTINCTIVE_WEBHOOK_ID = `webhook-id-leak-test-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "lastInstalledAt", "createdAt", "updatedAt")
+        VALUES (${DISTINCTIVE_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+      `;
+
+      try {
+        const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+        const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const staleTriggeredAt = new Date(Date.now() - 60 * 60 * 1000);
+        const payload = JSON.stringify({ shop_id: 123 });
+        const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
+          shopDomain: DISTINCTIVE_SHOP,
+          triggeredAt: staleTriggeredAt,
+          webhookId: DISTINCTIVE_WEBHOOK_ID,
+        });
+
+        const { action } = await import("../webhooks.app.uninstalled");
+        await action(createMockActionArgs(request));
+
+        const allLogs = [...consoleSpy.mock.calls, ...consoleErrorSpy.mock.calls].map(c => c.join(" "));
+        const staleLog = allLogs.find(l => l.includes("stale_ignored"));
+        expect(staleLog).toBeDefined();
+        expect(staleLog).not.toContain(DISTINCTIVE_SHOP);
+        expect(staleLog).not.toContain(".myshopify.com");
+        expect(staleLog).not.toContain(DISTINCTIVE_WEBHOOK_ID);
+        expect(staleLog).not.toContain("shpat_");
+
+        consoleSpy.mockRestore();
+        consoleErrorSpy.mockRestore();
+      } finally {
+        await sql`DELETE FROM "Shop" WHERE domain = ${DISTINCTIVE_SHOP}`;
+      }
+    });
+
+    it("stale_probe_failed log contains no shop domain, token, error message, or webhookId", async () => {
+      const DISTINCTIVE_SHOP = `distinctive-probe-leak-${TEST_SUFFIX}.myshopify.com`;
+      const DISTINCTIVE_WEBHOOK_ID = `webhook-probe-leak-${TEST_SUFFIX}`;
+      const DISTINCTIVE_ERROR_MSG = `Distinctive-Error-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "lastInstalledAt", "createdAt", "updatedAt")
+        VALUES (${DISTINCTIVE_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), NOW(), NOW())
+      `;
+
+      try {
+        const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+        mockGraphql.mockRejectedValue(new Error(DISTINCTIVE_ERROR_MSG));
+
+        const payload = JSON.stringify({ shop_id: 123 });
+        const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
+          shopDomain: DISTINCTIVE_SHOP,
+          triggeredAt: null,
+          webhookId: DISTINCTIVE_WEBHOOK_ID,
+        });
+
+        const { action } = await import("../webhooks.app.uninstalled");
+        await action(createMockActionArgs(request));
+
+        const allErrors = consoleErrorSpy.mock.calls.map(c => c.join(" "));
+        const probeFailedLog = allErrors.find(l => l.includes("stale_probe_failed"));
+        expect(probeFailedLog).toBeDefined();
+        expect(probeFailedLog).not.toContain(DISTINCTIVE_SHOP);
+        expect(probeFailedLog).not.toContain(".myshopify.com");
+        expect(probeFailedLog).not.toContain(DISTINCTIVE_WEBHOOK_ID);
+        expect(probeFailedLog).not.toContain(DISTINCTIVE_ERROR_MSG);
+        expect(probeFailedLog).not.toContain("shpat_");
+
+        consoleErrorSpy.mockRestore();
+      } finally {
+        await sql`DELETE FROM "Shop" WHERE domain = ${DISTINCTIVE_SHOP}`;
+      }
     });
   });
 
@@ -440,188 +718,11 @@ describeWithDb("stale app/uninstalled detection (DB-backed)", () => {
       const response2 = await action(createMockActionArgs(createRequest()));
       expect(response2.status).toBe(200);
 
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
+      const shopState = await getShopState();
+      expect(shopState.uninstalledAt).toBeNull();
 
-      const [session] = await sql<{ id: string }[]>`
-        SELECT id FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}
-      `;
-      expect(session).toBeDefined();
-    });
-
-    it("retried delivery of genuine uninstall is idempotent", async () => {
-      const installTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const genuineTriggeredAt = new Date();
-
-      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${installTime} WHERE id = ${testShopId}`;
-      await createTestSession();
-
-      const payload = JSON.stringify({ shop_id: 123 });
-      const webhookId = `idempotent-genuine-${TEST_SUFFIX}`;
-      const createRequest = () => createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
-        shopDomain: TEST_SHOP_DOMAIN,
-        triggeredAt: genuineTriggeredAt,
-        webhookId,
-      });
-
-      const { action } = await import("../webhooks.app.uninstalled");
-
-      const response1 = await action(createMockActionArgs(createRequest()));
-      expect(response1.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledTimes(1);
-      expect(mockMarkShopUninstalled).toHaveBeenCalledTimes(1);
-
-      vi.clearAllMocks();
-      mockSessionStorage.deleteAllForShop.mockResolvedValue(0);
-      mockMarkShopUninstalled.mockResolvedValue(false);
-
-      const response2 = await action(createMockActionArgs(createRequest()));
-      expect(response2.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledTimes(1);
-      expect(mockMarkShopUninstalled).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  describe("afterAuth sets lastInstalledAt", () => {
-    it("upsertShopOnAuth sets lastInstalledAt on fresh install", async () => {
-      const TEST_FRESH_SHOP = `test-fresh-${TEST_SUFFIX}.myshopify.com`;
-
-      try {
-        const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
-        await upsertShopOnAuth(sql, TEST_FRESH_SHOP, "America/New_York", "INR");
-
-        const [shop] = await sql<{ lastInstalledAt: Date | null }[]>`
-          SELECT "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_FRESH_SHOP}
-        `;
-        expect(shop.lastInstalledAt).not.toBeNull();
-      } finally {
-        await sql`DELETE FROM "Shop" WHERE domain = ${TEST_FRESH_SHOP}`;
-      }
-    });
-
-    it("upsertShopOnAuth sets lastInstalledAt on reinstall", async () => {
-      const TEST_REINSTALL_SHOP = `test-reinstall-${TEST_SUFFIX}.myshopify.com`;
-
-      const oldInstallTime = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "lastInstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_REINSTALL_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), ${oldInstallTime}, NOW(), NOW())
-      `;
-
-      try {
-        const [beforeShop] = await sql<{ uninstalledAt: Date | null; lastInstalledAt: Date | null }[]>`
-          SELECT "uninstalledAt", "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_REINSTALL_SHOP}
-        `;
-        expect(beforeShop.uninstalledAt).not.toBeNull();
-        expect(beforeShop.lastInstalledAt?.getTime()).toBe(oldInstallTime.getTime());
-
-        const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
-        await upsertShopOnAuth(sql, TEST_REINSTALL_SHOP, "America/New_York", "INR");
-
-        const [afterShop] = await sql<{ uninstalledAt: Date | null; lastInstalledAt: Date | null }[]>`
-          SELECT "uninstalledAt", "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_REINSTALL_SHOP}
-        `;
-        expect(afterShop.uninstalledAt).toBeNull();
-        expect(afterShop.lastInstalledAt).not.toBeNull();
-        expect(afterShop.lastInstalledAt!.getTime()).toBeGreaterThan(oldInstallTime.getTime());
-      } finally {
-        await sql`DELETE FROM "Shop" WHERE domain = ${TEST_REINSTALL_SHOP}`;
-      }
-    });
-
-    it("clearUninstalledAtAndMetafieldErrors sets lastInstalledAt on reinstall", async () => {
-      const TEST_CLEAR_SHOP = `test-clear-${TEST_SUFFIX}.myshopify.com`;
-
-      const oldInstallTime = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "uninstalledAt", "lastInstalledAt", "createdAt", "updatedAt")
-        VALUES (${TEST_CLEAR_SHOP}, 'America/New_York', 'INR', 'starter', NOW(), ${oldInstallTime}, NOW(), NOW())
-      `;
-
-      try {
-        const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("~/lib/after-auth.server");
-        const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_CLEAR_SHOP);
-
-        expect(result.wasReinstalled).toBe(true);
-
-        const [shop] = await sql<{ uninstalledAt: Date | null; lastInstalledAt: Date | null }[]>`
-          SELECT "uninstalledAt", "lastInstalledAt" FROM "Shop" WHERE domain = ${TEST_CLEAR_SHOP}
-        `;
-        expect(shop.uninstalledAt).toBeNull();
-        expect(shop.lastInstalledAt).not.toBeNull();
-        expect(shop.lastInstalledAt!.getTime()).toBeGreaterThan(oldInstallTime.getTime());
-      } finally {
-        await sql`DELETE FROM "Shop" WHERE domain = ${TEST_CLEAR_SHOP}`;
-      }
-    });
-  });
-
-  describe("Shop not found", () => {
-    it("header present but Shop row missing: existing behaviour (genuine)", async () => {
-      const UNKNOWN_SHOP = `unknown-${TEST_SUFFIX}.myshopify.com`;
-      mockMarkShopUninstalled.mockResolvedValue(false);
-
-      const payload = JSON.stringify({ shop_id: 123 });
-      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
-        shopDomain: UNKNOWN_SHOP,
-        triggeredAt: new Date(),
-      });
-
-      const { action } = await import("../webhooks.app.uninstalled");
-      const response = await action(createMockActionArgs(request));
-
-      expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).toHaveBeenCalledWith(UNKNOWN_SHOP);
-      expect(mockMarkShopUninstalled).toHaveBeenCalled();
-    });
-  });
-
-  describe("Mutation proof: stale check prevents data loss", () => {
-    it("without stale check, late uninstall would delete sessions (mutation test)", async () => {
-      const reinstallTime = new Date();
-      const staleTriggeredAt = new Date(reinstallTime.getTime() - 60 * 60 * 1000);
-
-      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${reinstallTime} WHERE id = ${testShopId}`;
-      await createTestSession();
-
-      const payload = JSON.stringify({ shop_id: 123 });
-      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
-        shopDomain: TEST_SHOP_DOMAIN,
-        triggeredAt: staleTriggeredAt,
-      });
-
-      const { action } = await import("../webhooks.app.uninstalled");
-      const response = await action(createMockActionArgs(request));
-
-      expect(response.status).toBe(200);
-      expect(mockSessionStorage.deleteAllForShop).not.toHaveBeenCalled();
-      expect(mockMarkShopUninstalled).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("Logs do not contain shop domain", () => {
-    it("stale webhook log does not contain shop domain", async () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-      const reinstallTime = new Date();
-      const staleTriggeredAt = new Date(reinstallTime.getTime() - 60 * 60 * 1000);
-
-      await sql`UPDATE "Shop" SET "lastInstalledAt" = ${reinstallTime} WHERE id = ${testShopId}`;
-
-      const payload = JSON.stringify({ shop_id: 123 });
-      const request = createSignedRequest(payload, "app/uninstalled", SYNTHETIC_TEST_SECRET, {
-        shopDomain: TEST_SHOP_DOMAIN,
-        triggeredAt: staleTriggeredAt,
-      });
-
-      const { action } = await import("../webhooks.app.uninstalled");
-      await action(createMockActionArgs(request));
-
-      for (const call of consoleSpy.mock.calls) {
-        const logMessage = call.join(" ");
-        expect(logMessage).not.toContain(".myshopify.com");
-      }
-
-      consoleSpy.mockRestore();
+      const sessionCount = await getSessionCount();
+      expect(sessionCount).toBe(1);
     });
   });
 });

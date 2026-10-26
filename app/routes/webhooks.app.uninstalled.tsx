@@ -18,9 +18,20 @@ import { evictShopFromSetupCache } from "~/lib/after-auth.server";
  * Used by isStaleUninstall to determine if webhook should be ignored.
  */
 type StaleCheckResult =
-  | { status: "stale" }
+  | { status: "stale"; reason: "triggered_before_install" | "probe_ok" }
   | { status: "genuine" }
-  | { status: "probe_error"; retryable: boolean };
+  | { status: "probe_error"; reason: string };
+
+/**
+ * Error codes from getOfflineAdminContext that indicate genuine uninstall.
+ * These mean the token is invalid/revoked, so the shop actually uninstalled.
+ */
+const GENUINE_UNINSTALL_ERROR_CODES = new Set([
+  "invalid_grant",
+  "no_refresh_token",
+  "no_session",
+  "admin_no_session",
+]);
 
 /**
  * Check if an app/uninstalled webhook is stale (arrived after a quick reinstall).
@@ -30,9 +41,14 @@ type StaleCheckResult =
  * (b) Header present and newer, or lastInstalledAt NULL: genuine uninstall.
  * (c) Header missing and lastInstalledAt NULL: genuine uninstall.
  * (d) Header missing and lastInstalledAt set: probe Admin API to determine.
- *     - 200 response means stale (shop still has a valid token)
- *     - 401/invalid/missing token means genuine uninstall
- *     - Other errors or timeout are retryable (return 5xx)
+ *     - 200 with shop.id means stale (shop still has a valid token)
+ *     - Token/auth failure (invalid_grant, no_session, 401, 403) means genuine uninstall
+ *     - Any other error or unexpected response returns 5xx for Shopify retry
+ *
+ * Rule (d) is STRICT:
+ * - Only specific auth error codes or HTTP 401/403 mean genuine uninstall
+ * - A 200 without shop.id is unexpected → 5xx
+ * - Any non-auth probe failure → 5xx
  *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
@@ -52,7 +68,7 @@ async function isStaleUninstall(
 
   if (triggeredAt !== null) {
     if (lastInstalledAt !== null && triggeredAt < lastInstalledAt) {
-      return { status: "stale" };
+      return { status: "stale", reason: "triggered_before_install" };
     }
     return { status: "genuine" };
   }
@@ -65,46 +81,59 @@ async function isStaleUninstall(
   const clientSecret = process.env.SHOPIFY_API_SECRET;
 
   if (!clientId || !clientSecret) {
-    console.error("[uninstalled] stale_probe_failed reason=missing_credentials");
-    return { status: "probe_error", retryable: true };
+    return { status: "probe_error", reason: "_env_missing" };
   }
 
   const adminResult = await getOfflineAdminContext(sql, shop, clientId, clientSecret);
 
   if (!adminResult.success) {
-    if (adminResult.needsReauth || adminResult.errorCode === "no_session") {
+    if (GENUINE_UNINSTALL_ERROR_CODES.has(adminResult.errorCode ?? "")) {
       return { status: "genuine" };
     }
-    console.error(`[uninstalled] stale_probe_failed reason=${adminResult.errorCode}`);
-    return { status: "probe_error", retryable: adminResult.retryable };
+    return { status: "probe_error", reason: adminResult.errorCode ?? "unknown" };
   }
 
   try {
     const response = await adminResult.admin!.graphql(`{ shop { id } }`);
     const data = (await response.json()) as {
       data?: { shop?: { id?: string } };
-      errors?: Array<{ message: string }>;
+      errors?: Array<{ message: string; extensions?: { code?: string } }>;
     };
 
     if (data.data?.shop?.id) {
-      return { status: "stale" };
+      return { status: "stale", reason: "probe_ok" };
     }
 
-    if (data.errors?.some((e) => e.message.toLowerCase().includes("access denied"))) {
-      return { status: "genuine" };
+    if (data.errors && data.errors.length > 0) {
+      const hasAuthError = data.errors.some((e) =>
+        e.extensions?.code === "ACCESS_DENIED" ||
+        e.message.toLowerCase().includes("access denied")
+      );
+      if (hasAuthError) {
+        return { status: "genuine" };
+      }
+      return { status: "probe_error", reason: "graphql_error" };
     }
 
-    return { status: "genuine" };
+    return { status: "probe_error", reason: "unexpected_response" };
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    const errMsg = error instanceof Error ? error.message : "unknown";
+    const err = error as { response?: { status?: number }; code?: string; name?: string };
 
-    if (errMsg.includes("401") || errMsg.toLowerCase().includes("unauthorized")) {
+    if (err.response?.status === 401 || err.response?.status === 403) {
       return { status: "genuine" };
     }
 
-    console.error(`[uninstalled] stale_probe_failed reason=graphql_error err=${errInfo}`);
-    return { status: "probe_error", retryable: true };
+    const errMsg = error instanceof Error ? error.message : "";
+    if (
+      errMsg.includes("401") ||
+      errMsg.includes("403") ||
+      errMsg.toLowerCase().includes("unauthorized") ||
+      errMsg.toLowerCase().includes("forbidden")
+    ) {
+      return { status: "genuine" };
+    }
+
+    return { status: "probe_error", reason: "graphql_error" };
   }
 }
 
@@ -148,7 +177,8 @@ async function isStaleUninstall(
  */
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
-  if (!apiSecret) {
+  const apiKey = process.env.SHOPIFY_API_KEY;
+  if (!apiSecret || !apiKey) {
     console.error("[uninstalled] SHOPIFY_API_SECRET not configured");
     return new Response(null, { status: 500 });
   }
@@ -169,16 +199,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const staleResult = await isStaleUninstall(sql, shop, triggeredAt);
 
   if (staleResult.status === "stale") {
-    console.log(`[uninstalled] stale_webhook_ignored reason=after_reinstall`);
+    console.log(`[uninstalled] stale_ignored reason=${staleResult.reason}`);
     return new Response();
   }
 
   if (staleResult.status === "probe_error") {
-    if (staleResult.retryable) {
-      console.error(`[uninstalled] stale_check_failed reason=probe_error retryable=true`);
-      return new Response(null, { status: 500 });
+    if (staleResult.reason !== "_env_missing") {
+      console.error(`[uninstalled] stale_probe_failed reason=${staleResult.reason}`);
     }
-    console.log(`[uninstalled] stale_check_inconclusive reason=probe_error_non_retryable proceeding=true`);
+    return new Response(null, { status: 500 });
   }
 
   try {
