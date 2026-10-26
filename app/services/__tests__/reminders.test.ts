@@ -107,6 +107,11 @@ function createMockSql() {
       return mockResults.get("global_monthly") ?? [{ monthlyTotal: 0 }];
     }
 
+    // ReminderLog status lookup (for catch-up)
+    if (query.includes("FROM \"ReminderLog\"") && query.includes("status") && query.includes("SELECT")) {
+      return mockResults.get("log_status") ?? [];
+    }
+
     // ReminderRule lookup
     if (query.includes("FROM \"ReminderRule\"") && query.includes("WHERE id")) {
       return mockResults.get("rule") ?? [];
@@ -2109,7 +2114,7 @@ describe("handleReminderSend/handleReminderCatchup - message.timezone ignored (#
     process.env.RESEND_API_KEY = "re_test_1234";
     process.env.RESEND_FROM = "noreply@example.com";
     process.env.REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
-    process.env.SHOPIFY_APP_URL = "https://app.example.com";
+    process.env.SHOPIFY_APP_URL = "https://net-terms-receivables.raghavkhanna.workers.dev";
     process.env.RESEND_TEST_RECIPIENTS = "buyer@example.test";
 
     mockFetch.mockResolvedValueOnce({
@@ -2179,7 +2184,7 @@ describe("handleReminderSend/handleReminderCatchup - message.timezone ignored (#
     process.env.RESEND_API_KEY = "re_test_1234";
     process.env.RESEND_FROM = "noreply@example.com";
     process.env.REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
-    process.env.SHOPIFY_APP_URL = "https://app.example.com";
+    process.env.SHOPIFY_APP_URL = "https://net-terms-receivables.raghavkhanna.workers.dev";
     process.env.RESEND_TEST_RECIPIENTS = "buyer@example.test";
 
     mockFetch.mockResolvedValueOnce({
@@ -2207,5 +2212,122 @@ describe("handleReminderSend/handleReminderCatchup - message.timezone ignored (#
       expect(result.skipReason).not.toContain("Outside send window");
     }
     expect(result.success).toBe(true);
+  });
+});
+
+describe("sendCatchupReminder - outside window + missing invoice behavior (#320)", () => {
+  const originalEnv = process.env;
+  let mockSql: ReturnType<typeof createMockSql>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    mockSql = createMockSql();
+    mockFetch.mockReset();
+    process.env = { ...originalEnv };
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env = originalEnv;
+    consoleLogSpy.mockRestore();
+  });
+
+  it("missing invoice outside window: deletes delayed row, returns skipped (not outside_window)", async () => {
+    // At 2026-10-24T05:00 UTC = 10:30 IST (within window for Asia/Kolkata)
+    // But for a shop with America/Los_Angeles, this is 22:00 PDT (OUTSIDE 09-19 window)
+    // With the invoice missing, the code should:
+    // 1. Not be able to check send window (no shopTimezone yet)
+    // 2. Fetch invoice -> not found
+    // 3. Delete the delayed row and return "Invoice not found"
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T05:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendCatchupReminder } = await import("../reminders.server");
+
+    // Log status shows delayed
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+    // Invoice NOT found
+    mockSql.setMockResult("invoice", []);
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-missing",
+      "inv-missing",
+      "rule-missing",
+      "log-missing",
+      0,
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://net-terms-receivables.raghavkhanna.workers.dev",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("skipped");
+    expect(result.skipReason).toBe("Invoice not found");
+    // The delayed row should be deleted - orphaned rows for missing invoices are cleaned up
+    const calls = mockSql.getAllCalls();
+    const deleteCall = calls.find(q => q.includes("DELETE") && q.includes("ReminderLog"));
+    expect(deleteCall).toBeDefined();
+  });
+
+  it("present invoice outside window: returns outside_window, keeps delayed row", async () => {
+    // At 2026-10-24T05:00 UTC = 22:00 LA time (OUTSIDE 09-19 window)
+    const { DateTime } = await import("luxon");
+    const mockNow = DateTime.fromISO("2026-10-24T05:00:00Z", { zone: "UTC" });
+    vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+    const { sendCatchupReminder } = await import("../reminders.server");
+
+    mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+
+    const mockInvoice = {
+      invoiceId: "inv-outside-window",
+      shopId: "shop-outside-window",
+      shopDomain: "test-outside.myshopify.com",
+      shopTimezone: "America/Los_Angeles", // 05:00 UTC = 22:00 LA = OUTSIDE window
+      invoiceName: "#OUT-001",
+      total: "1000.00",
+      outstanding: "1000.00",
+      currency: "INR",
+      dueAt: DateTime.fromISO("2026-10-22T12:00:00", { zone: "America/Los_Angeles" }).toJSDate(),
+      status: "open",
+      buyerAccountId: "buyer-outside",
+      customerId: "gid://shopify/Customer/outside-test",
+      shopUninstalledAt: null,
+      buyerAccountGatedAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoice]);
+
+    const result = await sendCatchupReminder(
+      mockSql,
+      "shop-outside-window",
+      "inv-outside-window",
+      "rule-outside-window",
+      "log-outside-window",
+      0,
+      {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+        SHOPIFY_APP_URL: "https://net-terms-receivables.raghavkhanna.workers.dev",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("outside_window");
+    expect(result.skipReason).toContain("Outside send window");
+    // The delayed row should NOT be deleted - keep it for retry in next window
+    const calls = mockSql.getAllCalls();
+    const deleteCall = calls.find(q => q.includes("DELETE") && q.includes("ReminderLog"));
+    expect(deleteCall).toBeUndefined();
   });
 });
