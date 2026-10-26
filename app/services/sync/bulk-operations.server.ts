@@ -399,6 +399,8 @@ export async function getBulkOperationMetadata(
 
 /**
  * Increment failure count for a bulk operation.
+ *
+ * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
  */
 export async function incrementBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
@@ -408,6 +410,7 @@ export async function incrementBulkOperationFailureCount(
     UPDATE s6_bulk_operations
     SET failure_count = failure_count + 1
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
     RETURNING failure_count
   `;
   return row?.failure_count ?? 0;
@@ -416,6 +419,8 @@ export async function incrementBulkOperationFailureCount(
 /**
  * Reset failure count to 0 after successful progress.
  * Called on successful progress to give the operation a clean slate.
+ *
+ * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
  */
 export async function resetBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
@@ -425,11 +430,14 @@ export async function resetBulkOperationFailureCount(
     UPDATE s6_bulk_operations
     SET failure_count = 0
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
   `;
 }
 
 /**
  * Update chunk size for a bulk operation (for growing range window).
+ *
+ * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
  */
 export async function updateBulkOperationChunkSize(
   sql: import("~/lib/db-light.server").Sql,
@@ -440,5 +448,6 @@ export async function updateBulkOperationChunkSize(
     UPDATE s6_bulk_operations
     SET chunk_size = ${chunkSize}
     WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
   `;
 }
