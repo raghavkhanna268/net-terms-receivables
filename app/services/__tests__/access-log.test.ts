@@ -139,6 +139,118 @@ describe("access-log.server", () => {
       };
       expect(getActorFromSessionToken(sessionToken, session)).toBe("unknown");
     });
+
+    describe("associated_user.id validation", () => {
+      it("accepts valid numeric id (number type)", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: 12345,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("12345");
+      });
+
+      it("accepts valid digit string id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "9876543210",
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("9876543210");
+      });
+
+      it("returns 'unknown' for non-numeric string id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "user-abc-123" as unknown as number,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for email-like id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "staff@shop.myshopify.com" as unknown as number,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for empty string id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "" as unknown as number,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for negative number id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: -12345,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for NaN id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: NaN,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for object id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: { value: 123 } as unknown as number,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("returns 'unknown' for absurdly long id", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "1234567890123456789012345" as unknown as number,
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("unknown");
+      });
+
+      it("accepts 24-digit id at boundary", () => {
+        const session = {
+          onlineAccessInfo: {
+            associated_user: {
+              id: "123456789012345678901234",
+            },
+          },
+        };
+        expect(getActorFromSessionToken(undefined, session)).toBe("123456789012345678901234");
+      });
+    });
   });
 
   describe("buildEventData (via recordAccess integration)", () => {
