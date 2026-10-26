@@ -549,6 +549,25 @@ describe("app._index loader", () => {
       expect(result.agingTotals).toBeNull();
       expect(result.buyerLedger).toBeNull();
     });
+
+    it("P3: missing Shop returns error:null (main's behavior), not 'Shop not found'", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id, currency, timezone FROM")) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { loader } = await import("../app._index");
+      const result = await extractLoaderData(await loader(createLoaderArgs()));
+
+      expect(result.error).toBeNull();
+      expect(result.agingTotals).toBeNull();
+      expect(result.buyerLedger).toBeNull();
+      expect(result.plan).toBeNull();
+      expect(result.usage).toBeNull();
+    });
   });
 
   describe("shop metadata", () => {

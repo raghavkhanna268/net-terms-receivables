@@ -1,24 +1,32 @@
 /**
- * Tests for DashboardSkeleton component (#290).
+ * Tests for DashboardSkeleton and DashboardErrorBanner components (#290).
  *
- * Validates that the skeleton component renders correctly while
- * deferred data is loading.
+ * Validates that:
+ * - Skeleton renders correctly while deferred data is loading
+ * - Error banner renders with retry button when promise rejects
+ * - Error banner keeps the page usable (header, nav, sections remain)
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 import { DashboardSkeleton } from "../app._index";
+
+vi.mock("react-router", async () => {
+  const actual = await vi.importActual("react-router");
+  return {
+    ...actual,
+    useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+  };
+});
 
 describe("DashboardSkeleton (#290 LCP fix)", () => {
   it("renders three sections with loading spinners", () => {
     const html = renderToString(React.createElement(DashboardSkeleton));
 
-    // Check for three sections
     expect(html).toContain('heading="Your Plan"');
     expect(html).toContain('heading="Receivables Summary"');
     expect(html).toContain('heading="Buyer Ledger"');
 
-    // Check for spinners (s-spinner)
     const spinnerCount = (html.match(/s-spinner/g) || []).length;
     expect(spinnerCount).toBeGreaterThanOrEqual(3);
   });
@@ -34,25 +42,73 @@ describe("DashboardSkeleton (#290 LCP fix)", () => {
   it("does not include any data or money values", () => {
     const html = renderToString(React.createElement(DashboardSkeleton));
 
-    // Should not contain any currency symbols or data
     expect(html).not.toContain("₹");
     expect(html).not.toContain("INR");
     expect(html).not.toContain("paise");
     expect(html).not.toContain("outstanding");
-    expect(html).not.toMatch(/\d{6,}/); // No large numbers
+    expect(html).not.toMatch(/\d{6,}/);
   });
 
   it("uses Polaris components with valid props", () => {
     const html = renderToString(React.createElement(DashboardSkeleton));
 
-    // Check for valid Polaris components
     expect(html).toContain("s-section");
     expect(html).toContain("s-box");
     expect(html).toContain("s-stack");
     expect(html).toContain("s-text");
     expect(html).toContain("s-spinner");
-
-    // Check spinner uses valid size prop
     expect(html).toContain('size="base"');
+  });
+
+  it("skeleton layout footprint matches DashboardContent structure (avoids CLS)", () => {
+    const html = renderToString(React.createElement(DashboardSkeleton));
+
+    const sectionMatches = html.match(/s-section/g) || [];
+    expect(sectionMatches.length).toBeGreaterThanOrEqual(3);
+
+    expect(html).toContain('heading="Your Plan"');
+    expect(html).toContain('heading="Receivables Summary"');
+    expect(html).toContain('heading="Buyer Ledger"');
+  });
+});
+
+describe("DashboardErrorBanner (#290 P1: error handling)", () => {
+  it("renders error message with fixed copy", async () => {
+    const { DashboardErrorBanner } = await import("../app._index");
+    const html = renderToString(React.createElement(DashboardErrorBanner));
+
+    expect(html).toContain("Failed to load aging data. Please try again.");
+  });
+
+  it("renders retry button", async () => {
+    const { DashboardErrorBanner } = await import("../app._index");
+    const html = renderToString(React.createElement(DashboardErrorBanner));
+
+    expect(html).toContain("Retry");
+    expect(html).toContain("s-button");
+  });
+
+  it("renders all three sections to maintain layout structure", async () => {
+    const { DashboardErrorBanner } = await import("../app._index");
+    const html = renderToString(React.createElement(DashboardErrorBanner));
+
+    expect(html).toContain('heading="Your Plan"');
+    expect(html).toContain('heading="Receivables Summary"');
+    expect(html).toContain('heading="Buyer Ledger"');
+  });
+
+  it("uses critical tone for error banner", async () => {
+    const { DashboardErrorBanner } = await import("../app._index");
+    const html = renderToString(React.createElement(DashboardErrorBanner));
+
+    expect(html).toContain('tone="critical"');
+  });
+
+  it("provides empty states for data sections while error is shown", async () => {
+    const { DashboardErrorBanner } = await import("../app._index");
+    const html = renderToString(React.createElement(DashboardErrorBanner));
+
+    expect(html).toContain("Data unavailable");
+    expect(html).toContain("Unable to load");
   });
 });

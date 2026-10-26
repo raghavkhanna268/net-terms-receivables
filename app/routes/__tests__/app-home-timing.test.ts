@@ -309,6 +309,14 @@ describe("app home timing instrumentation", () => {
       const { loader: layoutLoader } = await import("../app");
       const { loader: indexLoader } = await import("../app._index");
 
+      // Helper to extract and await deferred dashboardData from index loader result
+      async function awaitDeferredData(result: unknown): Promise<void> {
+        const data = (result as { data?: Record<string, unknown> })?.data;
+        if (data?.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+          await (data.dashboardData as Promise<unknown>);
+        }
+      }
+
       // Create a context factory (one context per request, shared by layout and index)
       const createContext = () => ({
         shopify: {
@@ -331,10 +339,12 @@ describe("app home timing instrumentation", () => {
       const context1 = createContext();
       const request1Layout = new Request("https://example.com/app");
       const request1Index = new Request("https://example.com/app");
-      await Promise.all([
+      const [, indexResult1] = await Promise.all([
         layoutLoader({ request: request1Layout, context: context1, params: {} } as never),
         indexLoader({ request: request1Index, context: context1, params: {} } as never),
       ]);
+
+      await awaitDeferredData(indexResult1);
 
       let allLogs = consoleLogSpy.mock.calls
         .map((c: unknown[]) => c[0])
@@ -351,10 +361,12 @@ describe("app home timing instrumentation", () => {
       const context2 = createContext();
       const request2Layout = new Request("https://example.com/app");
       const request2Index = new Request("https://example.com/app");
-      await Promise.all([
+      const [, indexResult2] = await Promise.all([
         layoutLoader({ request: request2Layout, context: context2, params: {} } as never),
         indexLoader({ request: request2Index, context: context2, params: {} } as never),
       ]);
+
+      await awaitDeferredData(indexResult2);
 
       allLogs = consoleLogSpy.mock.calls
         .map((c: unknown[]) => c[0])
@@ -380,6 +392,39 @@ describe("app home timing instrumentation", () => {
         (log: { stage: string }) => log.stage === "loader_total_cold" || log.stage === "loader_total"
       );
       expect(loaderTotalLogs.length).toBe(1);
+    });
+
+    it("P2: deferred phases (plan_resolve, ledger_rows, ledger_count) are logged after promise settles", async () => {
+      const { loader } = await import("../app._index");
+      const result = await loader(createLoaderArgs());
+
+      const initialLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const initialStages = initialLogs.map((log: { stage: string }) => log.stage.replace(/_cold$/, ""));
+      expect(initialStages).toContain("auth_index");
+      expect(initialStages).toContain("shop_lookup");
+      expect(initialStages).toContain("loader_total");
+      expect(initialStages).not.toContain("plan_resolve");
+      expect(initialStages).not.toContain("ledger_rows");
+
+      consoleLogSpy.mockClear();
+
+      const data = (result as { data: Record<string, unknown> }).data;
+      if (data.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+        await (data.dashboardData as Promise<unknown>);
+      }
+
+      const deferredLogs = consoleLogSpy.mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((log: unknown) => typeof log === "string" && (log as string).includes("app_home_timing"))
+        .map((logStr: unknown) => JSON.parse(logStr as string));
+
+      const deferredStages = deferredLogs.map((log: { stage: string }) => log.stage.replace(/_cold$/, ""));
+      expect(deferredStages).toContain("plan_resolve");
+      expect(deferredStages).toContain("ledger_rows");
     });
   });
 
@@ -630,6 +675,14 @@ describe("cold flag across layout and index", () => {
     const { loader: layoutLoader } = await import("../app");
     const { loader: indexLoader } = await import("../app._index");
 
+    // Helper to extract and await deferred dashboardData from index loader result
+    async function awaitDeferredData(result: unknown): Promise<void> {
+      const data = (result as { data?: Record<string, unknown> })?.data;
+      if (data?.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
+        await (data.dashboardData as Promise<unknown>);
+      }
+    }
+
     // Different contexts for A and B (workers/app.ts creates one per fetch)
     const contextA = createContextForColdTest();
     const contextB = createContextForColdTest();
@@ -643,7 +696,10 @@ describe("cold flag across layout and index", () => {
     const promiseA = Promise.all([layoutLoader(argsA), indexLoader(argsA)]);
     const promiseB = Promise.all([layoutLoader(argsB), indexLoader(argsB)]);
 
-    await Promise.all([promiseA, promiseB]);
+    const [[, indexResultA], [, indexResultB]] = await Promise.all([promiseA, promiseB]);
+
+    // Await deferred data to ensure all deferred phases are logged
+    await Promise.all([awaitDeferredData(indexResultA), awaitDeferredData(indexResultB)]);
 
     const allLogs = consoleLogSpy.mock.calls
       .map((c: unknown[]) => c[0])

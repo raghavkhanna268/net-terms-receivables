@@ -1,8 +1,8 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, data, Await } from "react-router";
+import { useLoaderData, data, Await, useRevalidator } from "react-router";
 import { Suspense } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { getRequestSql } from "~/lib/request-context.server";
+import { getRequestSql, getRequestWaitUntil } from "~/lib/request-context.server";
 import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import { resolvePlanKey, type PlanKey } from "~/lib/entitlements";
@@ -250,6 +250,9 @@ export interface DeferredDashboardData {
  * Load dashboard data (deferred).
  * This function is NOT awaited in the loader - it returns a promise that
  * React Router streams to the client for Suspense rendering.
+ *
+ * Timing: Deferred phases (plan_resolve, ledger_rows, ledger_count) are logged
+ * after the promise settles, using the existing per-phase timing codes.
  */
 async function loadDashboardData(
   sql: Sql,
@@ -265,6 +268,7 @@ async function loadDashboardData(
     onlyOverLimit: boolean;
   },
   timing: ServerTiming,
+  waitUntil: ((p: Promise<unknown>) => void) | undefined,
 ): Promise<DeferredDashboardData> {
   const { page, sortBy, sortOrder, selectedBuyerId, onlyOverLimit } = params;
   const gatingEnforced = isGatingEnforced();
@@ -350,18 +354,25 @@ async function loadDashboardData(
     error = "Failed to load aging data. Please try again.";
   }
 
+  timing.logAllPhases();
+
   if (!error) {
-    const accessParams: Parameters<typeof recordAccess>[1] = {
-      shopId: shop.id,
-      actor: getActorFromSessionToken(sessionToken, session),
-      action: "dashboard",
-      recordType: "BuyerAccount",
-      count: buyerLedger?.totalCount ?? 0,
-    };
-    if (selectedBuyerId) {
-      accessParams.recordId = selectedBuyerId;
+    const accessPromise = (async () => {
+      const accessParams: Parameters<typeof recordAccess>[1] = {
+        shopId: shop.id,
+        actor: getActorFromSessionToken(sessionToken, session),
+        action: "dashboard",
+        recordType: "BuyerAccount",
+        count: buyerLedger?.totalCount ?? 0,
+      };
+      if (selectedBuyerId) {
+        accessParams.recordId = selectedBuyerId;
+      }
+      recordAccess(sql, accessParams);
+    })();
+    if (waitUntil) {
+      waitUntil(accessPromise);
     }
-    recordAccess(sql, accessParams);
   }
 
   return {
@@ -426,9 +437,53 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
   timing.endPhase("shop_lookup");
 
-  const currencyResult = shop
-    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
-    : null;
+  const storeHandle = shopDomain.replace(".myshopify.com", "");
+  const gatingEnforced = isGatingEnforced();
+  const upgradeUrl = (() => {
+    const handle = getAppHandle();
+    if (handle === null) {
+      safeLog("warn", "plan_url_app_handle_missing", {});
+      return null;
+    }
+    return buildPlanSelectionUrl(shopDomain, handle);
+  })();
+
+  if (!shop) {
+    timing.endPhase("loader_total");
+    timing.logAllPhases();
+    const serverTiming = timing.toHeaderValue();
+    const headers: HeadersInit = {};
+    if (serverTiming) {
+      headers["Server-Timing"] = serverTiming;
+    }
+    return data({
+      shopName: storeHandle,
+      shopDomain,
+      storeHandle,
+      shopCurrency: NO_CURRENCY_SENTINEL,
+      currencySupported: true as const,
+      currencyFlipBlocked: false,
+      gatingEnforced,
+      upgradeUrl,
+      sortBy,
+      sortOrder,
+      onlyOverLimit,
+      selectedBuyerId,
+      dashboardData: Promise.resolve({
+        plan: null,
+        usage: null,
+        agingTotals: null,
+        buyerLedger: null,
+        selectedBuyerInvoices: null,
+        overLimitCount: 0,
+        error: null,
+        newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+        pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
+      } satisfies DeferredDashboardData),
+    }, { headers });
+  }
+
+  const currencyResult = await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id);
   const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
@@ -463,7 +518,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     }, { headers });
   }
 
-  if (shop && !skipOnboarding) {
+  if (!skipOnboarding) {
     timing.startPhase("onboarding_checks");
     const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
     timing.endPhase("onboarding_checks");
@@ -471,17 +526,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       throw shopifyRedirect("/app/onboarding");
     }
   }
-
-  const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const gatingEnforced = isGatingEnforced();
-  const upgradeUrl = (() => {
-    const handle = getAppHandle();
-    if (handle === null) {
-      safeLog("warn", "plan_url_app_handle_missing", {});
-      return null;
-    }
-    return buildPlanSelectionUrl(shopDomain, handle);
-  })();
 
   timing.endPhase("loader_total");
   timing.logAllPhases();
@@ -492,33 +536,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     headers["Server-Timing"] = serverTiming;
   }
 
-  if (!shop) {
-    return data({
-      shopName: storeHandle,
-      shopDomain,
-      storeHandle,
-      shopCurrency,
-      currencySupported: true as const,
-      currencyFlipBlocked,
-      gatingEnforced,
-      upgradeUrl,
-      sortBy,
-      sortOrder,
-      onlyOverLimit,
-      selectedBuyerId,
-      dashboardData: Promise.resolve({
-        plan: null,
-        usage: null,
-        agingTotals: null,
-        buyerLedger: null,
-        selectedBuyerInvoices: null,
-        overLimitCount: 0,
-        error: "Shop not found",
-        newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
-        pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
-      } satisfies DeferredDashboardData),
-    }, { headers });
-  }
+  const waitUntil = getRequestWaitUntil();
 
   const dashboardData = loadDashboardData(
     sql,
@@ -528,6 +546,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     session,
     { page, sortBy, sortOrder, selectedBuyerId, onlyOverLimit },
     timing,
+    waitUntil,
   );
 
   return data({
@@ -835,40 +854,94 @@ function BuyerInvoiceList({
 
 /**
  * Polaris skeleton component for the dashboard while data loads.
- * Uses s-spinner and placeholder sections for loading states.
+ * Matches the layout footprint of DashboardContent to minimize CLS.
+ * Uses s-spinner with placeholder text in each section.
  * Exported for testing.
  */
 export function DashboardSkeleton() {
   return (
     <>
-      {/* Plan section skeleton */}
+      {/* Plan section skeleton - matches PlanBanner height */}
       <s-section heading="Your Plan">
         <s-box padding="base">
-          <s-stack direction="inline" gap="base">
-            <s-spinner size="base" />
-            <s-text>Loading plan information...</s-text>
+          <s-stack gap="base">
+            <s-stack direction="inline" gap="base">
+              <s-spinner size="base" />
+              <s-text>Loading plan information...</s-text>
+            </s-stack>
           </s-stack>
         </s-box>
       </s-section>
 
-      {/* Receivables Summary skeleton */}
+      {/* Receivables Summary skeleton - matches AgingBucketSummary height */}
       <s-section heading="Receivables Summary">
         <s-box padding="base">
-          <s-stack direction="inline" gap="base">
-            <s-spinner size="base" />
-            <s-text>Loading receivables data...</s-text>
+          <s-stack gap="base">
+            <s-stack direction="inline" gap="base">
+              <s-spinner size="base" />
+              <s-text>Loading receivables data...</s-text>
+            </s-stack>
           </s-stack>
         </s-box>
       </s-section>
 
-      {/* Buyer Ledger skeleton */}
+      {/* Buyer Ledger skeleton - matches BuyerLedgerTable height */}
       <s-section heading="Buyer Ledger">
         <s-box padding="base">
-          <s-stack direction="inline" gap="base">
-            <s-spinner size="base" />
-            <s-text>Loading buyer ledger...</s-text>
+          <s-stack gap="base">
+            <s-stack direction="inline" gap="base">
+              <s-spinner size="base" />
+              <s-text>Loading buyer ledger...</s-text>
+            </s-stack>
           </s-stack>
         </s-box>
+      </s-section>
+    </>
+  );
+}
+
+/**
+ * Error fallback for deferred dashboard data.
+ * Shows a retryable banner inside the page without triggering the route ErrorBoundary.
+ * The rest of the page (header, nav, aside sections) remains usable.
+ * Exported for testing.
+ */
+export function DashboardErrorBanner() {
+  const revalidator = useRevalidator();
+  const isRetrying = revalidator.state === "loading";
+
+  const handleRetry = () => {
+    revalidator.revalidate();
+  };
+
+  return (
+    <>
+      <s-section heading="Your Plan">
+        <s-banner tone="critical" heading="Error">
+          <s-stack gap="base">
+            <s-text>Failed to load aging data. Please try again.</s-text>
+            <s-button onClick={handleRetry} disabled={isRetrying}>
+              {isRetrying ? "Retrying..." : "Retry"}
+            </s-button>
+          </s-stack>
+        </s-banner>
+      </s-section>
+
+      {/* Empty sections maintain layout structure */}
+      <s-section heading="Receivables Summary">
+        <s-empty-state heading="Data unavailable">
+          <s-text slot="subheading">
+            Unable to load receivables data. Click retry above to reload.
+          </s-text>
+        </s-empty-state>
+      </s-section>
+
+      <s-section heading="Buyer Ledger">
+        <s-empty-state heading="Data unavailable">
+          <s-text slot="subheading">
+            Unable to load buyer ledger. Click retry above to reload.
+          </s-text>
+        </s-empty-state>
       </s-section>
     </>
   );
@@ -1102,7 +1175,7 @@ export default function Index() {
   return (
     <s-page heading="Termwise: Net Terms & Credit">
       <Suspense fallback={<DashboardSkeleton />}>
-        <Await resolve={dashboardData}>
+        <Await resolve={dashboardData} errorElement={<DashboardErrorBanner />}>
           {(data) => (
             <DashboardContent
               dashboardData={data}
