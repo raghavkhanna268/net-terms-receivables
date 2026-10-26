@@ -14,20 +14,14 @@ import * as path from "path";
 
 const NEW_APP_NAME = "Termwise: Net Terms & Credit";
 
-const OLD_NAME_PATTERNS = [
-  /Net Terms Receivables/gi,
-];
+const OLD_NAME_PATTERN = /Net Terms Receivables/gi;
 
 const SKIP_PATHS = [
-  // app/lib/banks is a slot directory (code comments only, no UI strings)
-  "app/lib/banks",
-  // ci workflows
+  // ci workflows (read-only, must not edit)
   ".github/workflows",
   "scripts/ci",
   // generated files (Prisma, etc.)
   "app/generated",
-  // tests for slot files (they test the slot file's actual behavior)
-  "app/services/compliance/__tests__",
 ];
 
 const ALLOWLIST_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
@@ -55,6 +49,9 @@ const ALLOWLIST_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
  * Exact file:line allowlist for slot file strings pending follow-up.
  * Each entry specifies an exact file path and line number to skip.
  * These are strings in slot files that will be renamed in a separate PR.
+ *
+ * IMPORTANT: The test verifies these entries are not stale. If an allowlisted
+ * line no longer contains the old name, the test fails with 'stale allowlist entry'.
  */
 const PENDING_FOLLOWUP_ALLOWLIST: Array<{
   file: string;
@@ -84,6 +81,30 @@ const PENDING_FOLLOWUP_ALLOWLIST: Array<{
     file: "app/services/compliance/compliance.server.ts",
     line: 998,
     reason: "pending follow-up: remove after Developer PR merges",
+  },
+  // pending follow-up: remove after Developer #357 merges (privacy.tsx owned by Developer)
+  {
+    file: "app/routes/privacy.tsx",
+    line: 266,
+    reason: "pending follow-up: remove after Developer #357 merges",
+  },
+  // pending follow-up: remove after Developer PR merges (test for compliance.server.ts)
+  {
+    file: "app/services/compliance/__tests__/compliance.test.ts",
+    line: 1051,
+    reason: "pending follow-up: remove after Developer PR merges",
+  },
+  // pending follow-up: remove after Developer PR merges (test for compliance.server.ts)
+  {
+    file: "app/services/compliance/__tests__/compliance.test.ts",
+    line: 1053,
+    reason: "pending follow-up: remove after Developer PR merges",
+  },
+  // pending follow-up: remove after Developer #357 merges (test for privacy.tsx)
+  {
+    file: "app/routes/__tests__/privacy.test.ts",
+    line: 103,
+    reason: "pending follow-up: remove after Developer #357 merges",
   },
 ];
 
@@ -151,6 +172,39 @@ function findTsFiles(dir: string, files: string[] = []): string[] {
   return files;
 }
 
+/**
+ * Verify that all PENDING_FOLLOWUP_ALLOWLIST entries are still valid.
+ * An entry is stale if the line no longer contains the old name pattern.
+ */
+function checkForStaleAllowlistEntries(): string[] {
+  const staleEntries: string[] = [];
+
+  for (const entry of PENDING_FOLLOWUP_ALLOWLIST) {
+    const filePath = path.join(process.cwd(), entry.file);
+    if (!fs.existsSync(filePath)) {
+      staleEntries.push(`${entry.file}:${entry.line} - file does not exist`);
+      continue;
+    }
+
+    const content = fs.readFileSync(filePath, "utf-8");
+    const lines = content.split("\n");
+    const lineIndex = entry.line - 1;
+
+    if (lineIndex < 0 || lineIndex >= lines.length) {
+      staleEntries.push(`${entry.file}:${entry.line} - line number out of range`);
+      continue;
+    }
+
+    const line = lines[lineIndex];
+    OLD_NAME_PATTERN.lastIndex = 0;
+    if (!OLD_NAME_PATTERN.test(line)) {
+      staleEntries.push(`${entry.file}:${entry.line} - line no longer contains old name`);
+    }
+  }
+
+  return staleEntries;
+}
+
 describe("App Name Guard", () => {
   it("shopify.app.toml has correct app name", () => {
     const tomlPath = path.join(process.cwd(), "shopify.app.toml");
@@ -159,6 +213,19 @@ describe("App Name Guard", () => {
 
     expect(nameMatch).not.toBeNull();
     expect(nameMatch![1]).toBe(NEW_APP_NAME);
+  });
+
+  it("pending followup allowlist entries are not stale", () => {
+    const staleEntries = checkForStaleAllowlistEntries();
+
+    if (staleEntries.length > 0) {
+      const message = staleEntries
+        .map((e) => `  ${e}`)
+        .join("\n");
+      expect.fail(
+        `stale allowlist entry, remove it:\n${message}`
+      );
+    }
   });
 
   it("no old app name in UI strings (app/**/*.{ts,tsx})", () => {
@@ -192,16 +259,14 @@ describe("App Name Guard", () => {
           continue;
         }
 
-        for (const pattern of OLD_NAME_PATTERNS) {
-          pattern.lastIndex = 0;
-          const match = pattern.exec(line);
-          if (match && isInStringLiteral(line, match)) {
-            violations.push({
-              file: relativePath,
-              line: lineNumber,
-              text: line.trim().slice(0, 100),
-            });
-          }
+        OLD_NAME_PATTERN.lastIndex = 0;
+        const match = OLD_NAME_PATTERN.exec(line);
+        if (match && isInStringLiteral(line, match)) {
+          violations.push({
+            file: relativePath,
+            line: lineNumber,
+            text: line.trim().slice(0, 100),
+          });
         }
       }
     }
@@ -247,16 +312,14 @@ describe("App Name Guard", () => {
           continue;
         }
 
-        for (const pattern of OLD_NAME_PATTERNS) {
-          pattern.lastIndex = 0;
-          const match = pattern.exec(line);
-          if (match && isInStringLiteral(line, match)) {
-            violations.push({
-              file: relativePath,
-              line: lineNumber,
-              text: line.trim().slice(0, 100),
-            });
-          }
+        OLD_NAME_PATTERN.lastIndex = 0;
+        const match = OLD_NAME_PATTERN.exec(line);
+        if (match && isInStringLiteral(line, match)) {
+          violations.push({
+            file: relativePath,
+            line: lineNumber,
+            text: line.trim().slice(0, 100),
+          });
         }
       }
     }
