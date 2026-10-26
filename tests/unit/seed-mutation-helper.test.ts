@@ -18,12 +18,14 @@ import {
   seedTaggedCustomerOrders,
   migrateCustomerEmails,
   findCompanyForAdoption,
+  seedCompanies,
   COMPANY_SEEDS,
   REVIEWER_DEMO_COMPANY_SEED,
   TAGGED_CUSTOMER_SEEDS,
   SEED_EMAIL_DOMAIN,
   LEGACY_SEED_EMAILS,
   seedEmail,
+  SEED_PREFIX,
   type GraphQLResponse,
   type UserError,
   type SeedState,
@@ -1117,5 +1119,473 @@ describe("findCompanyForAdoption with legacy email", () => {
     if ("company" in result!) {
       expect(result.matchType).toBe("email");
     }
+  });
+});
+
+describe("seedCompanies with legacy email adoption", () => {
+  let state: SeedState;
+  const originalFetch = globalThis.fetch;
+  const originalConsoleLog = console.log;
+
+  beforeEach(() => {
+    state = createEmptyState();
+    console.log = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    console.log = originalConsoleLog;
+    vi.restoreAllMocks();
+  });
+
+  function createSeedCompaniesMock(options: {
+    legacyEmailMatch?: boolean;
+    nameMatch?: boolean;
+  }) {
+    const requestBodies: string[] = [];
+    const adoptedCompanies = new Set<string>();
+
+    const mockFetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
+      const body = init?.body ?? "";
+      requestBodies.push(body);
+
+      if (body.includes("companies(") && body.includes("external_id:")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("customers(") && body.includes("email:")) {
+        const emailMatch = body.match(/email:'([^']+)'/);
+        const searchEmail = emailMatch?.[1] ?? "";
+
+        if (options.legacyEmailMatch) {
+          for (const seed of COMPANY_SEEDS) {
+            const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+            if (searchEmail === legacyEmail) {
+              return {
+                ok: true,
+                json: async () => ({
+                  data: {
+                    customers: {
+                      nodes: [{ id: `gid://shopify/Customer/${seed.key}`, email: legacyEmail }],
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                    },
+                  },
+                }),
+              };
+            }
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companies(") && body.includes("name:")) {
+        if (options.nameMatch) {
+          const nameMatch = body.match(/name:'([^']+)'/);
+          const searchName = nameMatch?.[1] ?? "";
+          for (const seed of COMPANY_SEEDS) {
+            if (searchName === seed.name) {
+              const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+              return {
+                ok: true,
+                json: async () => ({
+                  data: {
+                    companies: {
+                      nodes: [{
+                        id: `gid://shopify/Company/${seed.key}-name-match`,
+                        name: seed.name,
+                        externalId: null,
+                        contacts: {
+                          edges: [{
+                            node: { customer: { email: legacyEmail } },
+                          }],
+                        },
+                      }],
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                    },
+                  },
+                }),
+              };
+            }
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companies(") && !body.includes("external_id:") && !body.includes("name:")) {
+        if (options.legacyEmailMatch) {
+          const companies = COMPANY_SEEDS.map(seed => {
+            const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+            return {
+              id: `gid://shopify/Company/${seed.key}-legacy`,
+              name: seed.name,
+              externalId: null,
+              contacts: {
+                edges: [{
+                  node: {
+                    customer: { id: `gid://shopify/Customer/${seed.key}`, email: legacyEmail },
+                  },
+                }],
+              },
+            };
+          });
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                companies: {
+                  nodes: companies,
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companyUpdate")) {
+        const parsed = JSON.parse(body);
+        const companyId = parsed.variables?.companyId;
+        const externalId = parsed.variables?.input?.externalId;
+        adoptedCompanies.add(companyId);
+        
+        const seedKey = externalId?.replace(SEED_PREFIX, "") ?? "";
+        const seed = COMPANY_SEEDS.find(s => s.key === seedKey);
+        const legacyEmail = seed ? LEGACY_SEED_EMAILS[seed.key] : "";
+        
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companyUpdate: {
+                company: {
+                  id: companyId,
+                  name: seed?.name ?? "Test Company",
+                  externalId: externalId,
+                  contacts: {
+                    edges: [{
+                      node: {
+                        id: `${companyId}/contact`,
+                        customer: { id: `${companyId}/customer`, email: legacyEmail },
+                      },
+                    }],
+                  },
+                  locations: {
+                    edges: [
+                      { node: { id: `${companyId}/loc1`, name: `${seed?.name ?? "Test"} - Net-15` } },
+                      { node: { id: `${companyId}/loc2`, name: `${seed?.name ?? "Test"} - Net-30` } },
+                      { node: { id: `${companyId}/loc3`, name: `${seed?.name ?? "Test"} - Net-60` } },
+                    ],
+                  },
+                },
+                userErrors: [],
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companyContactRoles")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companyContactRoles: {
+                nodes: [{ id: "gid://shopify/CompanyContactRole/admin", name: "Admin" }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companyLocationRoleAssignments")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companyLocation: {
+                roleAssignments: {
+                  nodes: [{ id: "gid://shopify/CompanyLocationRoleAssignment/1" }],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: null }) };
+    });
+
+    return { mockFetch, requestBodies, adoptedCompanies };
+  }
+
+  it("adopts company by legacy email when no externalId match, no companyCreate sent", async () => {
+    const { mockFetch, requestBodies } = createSeedCompaniesMock({
+      legacyEmailMatch: true,
+    });
+
+    globalThis.fetch = mockFetch;
+
+    await seedCompanies(state);
+
+    const companyCreateRequests = requestBodies.filter(b => b.includes("companyCreate"));
+    expect(companyCreateRequests).toHaveLength(0);
+    expect(state.adoptedCount.companies).toBe(COMPANY_SEEDS.length);
+  });
+
+  it("adopts company by name+legacy email when no email match, no companyCreate sent", async () => {
+    const { mockFetch, requestBodies } = createSeedCompaniesMock({
+      nameMatch: true,
+    });
+
+    globalThis.fetch = mockFetch;
+
+    await seedCompanies(state);
+
+    const companyCreateRequests = requestBodies.filter(b => b.includes("companyCreate"));
+    expect(companyCreateRequests).toHaveLength(0);
+    expect(state.adoptedCount.companies).toBe(COMPANY_SEEDS.length);
+  });
+
+  it("TAKEN-recovery adopts by legacy email when pre-create adoption fails", async () => {
+    const requestBodies: string[] = [];
+    const takenCompanies = new Set<string>();
+
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: { body?: string }) => {
+      const body = init?.body ?? "";
+      requestBodies.push(body);
+
+      if (body.includes("companies(") && body.includes("external_id:")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("customers(") && body.includes("email:")) {
+        const emailMatch = body.match(/email:'([^']+)'/);
+        const searchEmail = emailMatch?.[1] ?? "";
+        
+        for (const seed of COMPANY_SEEDS) {
+          const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+          if (searchEmail === legacyEmail && takenCompanies.has(seed.key)) {
+            return {
+              ok: true,
+              json: async () => ({
+                data: {
+                  customers: {
+                    nodes: [{ id: `gid://shopify/Customer/${seed.key}-taken`, email: legacyEmail }],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                },
+              }),
+            };
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              customers: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companies(") && body.includes("name:")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companies(") && !body.includes("external_id:") && !body.includes("name:")) {
+        const companiesForTaken = COMPANY_SEEDS
+          .filter(seed => takenCompanies.has(seed.key))
+          .map(seed => ({
+            id: `gid://shopify/Company/${seed.key}-taken`,
+            name: seed.name,
+            externalId: null,
+            contacts: {
+              edges: [{
+                node: {
+                  customer: { 
+                    id: `gid://shopify/Customer/${seed.key}-taken`, 
+                    email: LEGACY_SEED_EMAILS[seed.key] 
+                  },
+                },
+              }],
+            },
+          }));
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companies: {
+                nodes: companiesForTaken,
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companyCreate")) {
+        const parsed = JSON.parse(body);
+        const email = parsed.variables?.input?.companyContact?.email;
+        for (const seed of COMPANY_SEEDS) {
+          if (email === seedEmail(seed.key)) {
+            takenCompanies.add(seed.key);
+            return {
+              ok: true,
+              json: async () => ({
+                data: {
+                  companyCreate: {
+                    company: null,
+                    userErrors: [{ field: ["email"], message: "Email has already been taken" }],
+                  },
+                },
+              }),
+            };
+          }
+        }
+      }
+
+      if (body.includes("companyUpdate")) {
+        const parsed = JSON.parse(body);
+        const companyId = parsed.variables?.companyId;
+        const externalId = parsed.variables?.input?.externalId;
+        
+        const seedKey = externalId?.replace(SEED_PREFIX, "") ?? "";
+        const seed = COMPANY_SEEDS.find(s => s.key === seedKey);
+        const legacyEmail = seed ? LEGACY_SEED_EMAILS[seed.key] : "";
+        
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companyUpdate: {
+                company: {
+                  id: companyId,
+                  name: seed?.name ?? "Test Company",
+                  externalId: externalId,
+                  contacts: {
+                    edges: [{
+                      node: {
+                        id: `${companyId}/contact`,
+                        customer: { id: `${companyId}/customer`, email: legacyEmail },
+                      },
+                    }],
+                  },
+                  locations: {
+                    edges: [
+                      { node: { id: `${companyId}/loc1`, name: `${seed?.name ?? "Test"} - Net-15` } },
+                      { node: { id: `${companyId}/loc2`, name: `${seed?.name ?? "Test"} - Net-30` } },
+                      { node: { id: `${companyId}/loc3`, name: `${seed?.name ?? "Test"} - Net-60` } },
+                    ],
+                  },
+                },
+                userErrors: [],
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companyContactRoles")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companyContactRoles: {
+                nodes: [{ id: "gid://shopify/CompanyContactRole/admin", name: "Admin" }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.includes("companyLocationRoleAssignments")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              companyLocation: {
+                roleAssignments: {
+                  nodes: [{ id: "gid://shopify/CompanyLocationRoleAssignment/1" }],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: null }) };
+    });
+
+    await seedCompanies(state);
+
+    expect(state.adoptedCount.companies).toBe(COMPANY_SEEDS.length);
   });
 });

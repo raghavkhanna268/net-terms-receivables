@@ -3059,8 +3059,9 @@ interface CustomersSearchResult {
  * - If the contact customer's email is legacy (.example), update it.
  * - If no company or contact exists, nothing to migrate (create path handles it).
  * 
- * The create path cannot duplicate because companyCreate with a taken email fails
- * with TAKEN error, which triggers adoption of the existing company.
+ * The create path uses legacy-email fallback adoption: if no company is found by
+ * externalId, it tries to find and adopt an existing company by contact email
+ * (including legacy .example emails) or by name with matching contact.
  * 
  * @returns void - counts are tracked in state
  */
