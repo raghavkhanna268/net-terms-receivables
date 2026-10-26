@@ -468,16 +468,13 @@ describe("app.onboarding", () => {
     });
 
     describe("reminders step via loader (step 3)", () => {
-      const originalEnv = { ...process.env };
-
       beforeEach(() => {
-        process.env.RESEND_API_KEY = "re_test_key_for_loader_test";
-        process.env.RESEND_FROM = "test@example.com";
+        vi.stubEnv("RESEND_API_KEY", "re_test_key_for_loader_test");
+        vi.stubEnv("RESEND_FROM", "test@example.com");
       });
 
       afterEach(() => {
-        process.env.RESEND_API_KEY = originalEnv.RESEND_API_KEY;
-        process.env.RESEND_FROM = originalEnv.RESEND_FROM;
+        vi.unstubAllEnvs();
       });
 
       it("returns step 3 as 'pending' when email sending is configured but reminders disabled (fails on revert)", async () => {
