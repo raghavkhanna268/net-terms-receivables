@@ -66,6 +66,10 @@ const STOP_WORDS = new Set([
 /**
  * Normalize a name for matching.
  * Returns a lowercase string with suffixes/prefixes removed and normalized whitespace.
+ *
+ * This is the CANONICAL normalizer for payer alias storage AND matching.
+ * Both confirmMatch (storage) and scorePayerNameMatch (matching) must use this
+ * function to ensure aliases are stored and looked up consistently.
  */
 export function normalizeName(name: string): string {
   let normalized = name.toUpperCase().trim();

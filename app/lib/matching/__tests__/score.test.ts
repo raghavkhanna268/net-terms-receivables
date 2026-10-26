@@ -464,16 +464,85 @@ describe("scorePaymentToInvoice", () => {
       expect(dashResult.reasons.some((r) => r.type === "payer_alias")).toBe(false);
     });
 
-    it("'OTHER TRADERS' vs alias 'traders': matches (whole-word in payer)", () => {
-      // This is intentional: "traders" IS a complete token in "other traders"
-      // High still needs an exact amount plus an invoice ref, and High is a label only
+    it("'OTHER TRADERS' vs alias 'traders': NO match (generic-only alias)", () => {
+      // Generic-word guard: alias "traders" is all-generic, so no bonus
+      // even though "traders" IS a complete token in "other traders"
       const payment = makePayment({ payerText: "OTHER TRADERS" });
       const invoice = makeInvoice();
       const buyer = makeBuyer({ aliases: ["traders"] });
 
       const result = scorePaymentToInvoice(payment, invoice, buyer, []);
 
-      expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+      // Generic-only alias gets no alias bonus
+      expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    });
+
+    // Generic-word guard tests: TRADERS vs alias 'synthetic traders' case in BOTH directions
+    describe("generic-word guard: TRADERS vs 'synthetic traders'", () => {
+      it("payer 'TRADERS' vs alias 'synthetic traders': NO bonus (payer matches only generic token)", () => {
+        // Payer "TRADERS" normalizes to "traders" (generic-only after suffix removal)
+        // Alias "synthetic traders" contains non-generic "synthetic"
+        // But payer has no non-generic token to match, so no bonus
+        const payment = makePayment({ payerText: "TRADERS" });
+        const invoice = makeInvoice();
+        const buyer = makeBuyer({ aliases: ["synthetic traders"] });
+
+        const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+        // No alias bonus: payer only matches the generic "traders" token
+        expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+      });
+
+      it("payer 'SYNTHETIC TRADERS' vs alias 'traders': NO bonus (generic-only alias)", () => {
+        // Payer "SYNTHETIC TRADERS" normalizes to "synthetic" (traders removed as suffix)
+        // Alias "traders" is all-generic, so no bonus regardless of payer content
+        const payment = makePayment({ payerText: "SYNTHETIC TRADERS" });
+        const invoice = makeInvoice();
+        const buyer = makeBuyer({ aliases: ["traders"] });
+
+        const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+        // No alias bonus: alias is entirely generic words
+        expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+      });
+
+      it("payer 'SYNTHETIC TRADERS' vs generic-only alias 'traders enterprises': NO bonus", () => {
+        // Both "traders" and "enterprises" are generic words
+        const payment = makePayment({ payerText: "SYNTHETIC TRADERS" });
+        const invoice = makeInvoice();
+        const buyer = makeBuyer({ aliases: ["traders enterprises"] });
+
+        const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+        // No alias bonus: alias contains only generic words
+        expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+      });
+
+      it("payer 'SYNTHETIC TRADERS' vs alias 'synthetic traders': GETS bonus (non-generic match)", () => {
+        // Payer "SYNTHETIC TRADERS" normalizes to "synthetic"
+        // Alias "synthetic traders" has non-generic "synthetic" which matches
+        const payment = makePayment({ payerText: "SYNTHETIC TRADERS" });
+        const invoice = makeInvoice();
+        const buyer = makeBuyer({ aliases: ["synthetic traders"] });
+
+        const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+        // Alias bonus: "synthetic" is non-generic and matches
+        expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+      });
+
+      it("payer 'TRADERS ONLY' vs alias 'synthetic traders': NO bonus (payer has no non-generic alias token)", () => {
+        // Payer "TRADERS ONLY" normalizes to "only" (traders removed as suffix)
+        // Alias has "synthetic" (non-generic) but payer doesn't contain it
+        const payment = makePayment({ payerText: "TRADERS ONLY" });
+        const invoice = makeInvoice();
+        const buyer = makeBuyer({ aliases: ["synthetic traders"] });
+
+        const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+        // No alias bonus: payer doesn't contain the non-generic "synthetic" token
+        expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+      });
     });
 
     it("alias 'test buyer' vs payer 'testbuyers ltd': no match (partial-word overlap)", () => {
