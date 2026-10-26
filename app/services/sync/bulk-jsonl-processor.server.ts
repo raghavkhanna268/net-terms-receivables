@@ -341,8 +341,11 @@ export async function fetchJsonlChunk(
       totalSize = bytes.length;
     }
 
-    // Smaller-than-requested response also indicates EOF
-    if (bytes.length < chunkSize && !isEof) {
+    // Smaller-than-requested response indicates EOF, but ONLY if Content-Range
+    // didn't already tell us we're not at EOF. When Content-Range is present and
+    // says there's more data (rangeEnd < totalSize - 1), trust it over the
+    // "smaller-than-requested" heuristic. This handles small files correctly.
+    if (bytes.length < chunkSize && !isEof && !contentRange) {
       isEof = true;
     }
 
@@ -1096,10 +1099,16 @@ async function processLines(
  * @param maxLines - Max lines to process per invocation (default 100)
  * @returns Sync result with status field
  */
+export interface ProcessBulkOperationHooks {
+  /** Called right before renewal check (for testing M2/M5 mutations) */
+  beforeRenewal?: () => Promise<void>;
+}
+
 export async function processBulkOperation(
   sql: Sql,
   message: BulkMessage,
-  maxLines: number = DEFAULT_MAX_LINES
+  maxLines: number = DEFAULT_MAX_LINES,
+  hooks?: ProcessBulkOperationHooks
 ): Promise<BulkProcessResult> {
   const { shop, webhookId, bulkOperationId, bulkType } = message;
 
@@ -1604,6 +1613,9 @@ export async function processBulkOperation(
 
   // R1: Renew lease BEFORE writing progress to ensure we still own it.
   // Per Team Lead ruling: If renewal updates 0 rows, stop immediately without writing progress.
+  if (hooks?.beforeRenewal) {
+    await hooks.beforeRenewal();
+  }
   const renewed = await renewProcessingLease(sql, bulkOperationId, shop, leaseToken);
   if (!renewed) {
     return {

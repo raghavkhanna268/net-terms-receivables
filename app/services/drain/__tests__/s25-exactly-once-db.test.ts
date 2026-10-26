@@ -11,7 +11,7 @@
  * 7. Claims purge and uninstall cleanup
  * 8. Stale recovery writes DLQ row with bulk_stale_recovery error code
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
@@ -2503,23 +2503,27 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // Kills M2: renew moved after the writes
   // Kills M5: renewal failure ignored
   // 
-  // This test calls processBulkOperation with a multi-chunk JSONL and hooks into
-  // the fetch to expire A's lease between chunks. It verifies A stops when
-  // renewal fails and writes no further progress.
+  // Uses the beforeRenewal hook to inject B taking over right before A's renewal.
+  // This tests that A checks renewal BEFORE writing progress.
   // ==========================================================================
-  describe("M2/M5: renewProcessingLease owner-check prevents stale processor", () => {
-    // M2/M5 test the renewal owner-check. Since ESM modules call internal functions directly,
-    // we test the behavior at the DB level: when a token becomes stale (B takes over),
-    // renewal fails and the caller should stop.
-    //
-    // The integration in processBulkOperation is: renew BEFORE write, fail if renewal fails.
-    // This is covered by the code structure and the lower-level renewProcessingLease tests.
+  describe("M2/M5: B takes over mid-run, A writes nothing after takeover", () => {
+    it("A stops when B takes over before renewal; no progress written after takeover", async () => {
+      const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const { adminGraphQL } = await import("../admin-client.server");
 
-    it("M2: renewal with stale token returns false (B took over)", async () => {
-      const { acquireProcessingLease, renewProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const bulkOpId = `gid://shopify/BulkOperation/m2m5-hook-${TEST_SUFFIX}`;
+      const webhookId = `finish:${bulkOpId}`;
 
-      const bulkOpId = `gid://shopify/BulkOperation/m2-stale-token-${TEST_SUFFIX}`;
+      // Generate JSONL content
+      const lines: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        lines.push(JSON.stringify({ id: `gid://shopify/Company/${i}`, name: `Company ${i}`, locations: { edges: [] } }));
+      }
+      const jsonlContent = lines.join("\n") + "\n";
+      const jsonlBytes = new TextEncoder().encode(jsonlContent);
+      const totalSize = jsonlBytes.length;
 
+      // Setup: operation at byte_offset 0
       await sql`
         INSERT INTO s6_bulk_operations (
           bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset
@@ -2528,58 +2532,98 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         )
       `;
 
-      // A acquires the lease
-      const tokenA = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
-      expect(tokenA).not.toBeNull();
+      // Mock adminGraphQL status
+      vi.mocked(adminGraphQL).mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            url: "https://storage.shopify.com/m2m5-result.jsonl",
+            objectCount: String(lines.length),
+            fileSize: String(totalSize),
+            errorCode: null,
+          },
+        },
+        retryable: false,
+      });
 
-      // B takes over (simulating A's lease expired and B acquired)
-      await sql`UPDATE s6_bulk_operations SET processing_lease_until = NOW() - INTERVAL '1 minute' WHERE bulk_operation_id = ${bulkOpId}`;
-      const tokenB = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
-      expect(tokenB).not.toBeNull();
-      expect(tokenB).not.toBe(tokenA);
+      const B_TOKEN = "B-token-" + TEST_SUFFIX;
+      let hookCalled = false;
 
-      // A tries to renew with stale token - should fail
-      const renewed = await renewProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN, tokenA!);
-      expect(renewed).toBe(false);
+      // Stub global fetch to serve the JSONL
+      vi.stubGlobal("fetch", async () => {
+        // Serve partial data (not EOF) to trigger progress write path
+        const partialEnd = Math.floor(totalSize / 2);
+        const chunk = jsonlBytes.slice(0, partialEnd);
+        return new Response(chunk, {
+          status: 206,
+          headers: {
+            "Content-Range": `bytes 0-${partialEnd - 1}/${totalSize}`,
+            "Content-Length": String(chunk.length),
+          },
+        });
+      });
 
-      // This kills M2: if renewal is moved after writes, this test still catches stale tokens.
-      // The production code checks renewal BEFORE writing progress, so stale A stops early.
-    });
+      // Hook: B takes over right before A's renewal check
+      const hooks = {
+        beforeRenewal: async () => {
+          hookCalled = true;
+          await sql`
+            UPDATE s6_bulk_operations 
+            SET processing_lease_token = ${B_TOKEN},
+                processing_lease_until = NOW() + INTERVAL '10 minutes'
+            WHERE bulk_operation_id = ${bulkOpId}
+          `;
+        },
+      };
 
-    it("M5: saveBulkOperationProgress with stale token updates 0 rows", async () => {
-      const { acquireProcessingLease, saveBulkOperationProgress } = await import("~/services/sync/bulk-jsonl-processor.server");
+      try {
+        const message = {
+          topic: "BULK_OPERATIONS_FINISH" as const,
+          shop: TEST_SHOP_DOMAIN,
+          webhookId,
+          bulkOperationId: bulkOpId,
+          bulkType: "companies" as const,
+          enqueuedAt: new Date().toISOString(),
+        };
 
-      const bulkOpId = `gid://shopify/BulkOperation/m5-stale-save-${TEST_SUFFIX}`;
+        const result = await processBulkOperation(sql, message, 100, hooks);
 
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 0
-        )
-      `;
+        // Hook should have been called
+        expect(hookCalled).toBe(true);
 
-      // A acquires the lease
-      const tokenA = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
-      expect(tokenA).not.toBeNull();
+        // A should fail with LEASE_CONTENTION (B took over before renewal)
+        expect(result.success).toBe(false);
+        expect(result.errorCode).toBe(BULK_ERROR_CODES.LEASE_CONTENTION);
+        expect(result.errorType).toBe("retryable");
 
-      // B takes over
-      await sql`UPDATE s6_bulk_operations SET processing_lease_until = NOW() - INTERVAL '1 minute' WHERE bulk_operation_id = ${bulkOpId}`;
-      const tokenB = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
-      expect(tokenB).not.toBeNull();
+        // Verify: byte_offset is still 0 (A wrote nothing because R1 checks renewal BEFORE save)
+        const [finalRow] = await sql<{ byte_offset: string | null; processing_lease_token: string | null; completed_at: Date | null }[]>`
+          SELECT byte_offset::text, processing_lease_token, completed_at 
+          FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+        `;
 
-      // A tries to save progress with stale token - should fail (0 rows updated)
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, tokenA!);
-      expect(rowUpdated).toBe(false);
+        // byte_offset should be 0 (A didn't write progress because renewal failed first)
+        expect(finalRow.byte_offset).toBe("0");
 
-      // Verify byte_offset unchanged
-      const [row] = await sql<{ byte_offset: string | null }[]>`
-        SELECT byte_offset::text FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
-      `;
-      expect(row.byte_offset).toBe("0");
+        // B's token should still be in place
+        expect(finalRow.processing_lease_token).toBe(B_TOKEN);
 
-      // This kills M5: if renewal failure is ignored, stale A continues to save, but save fails.
-      // Combined with M2 test, both paths catch stale processors.
+        // completed_at should be NULL (A didn't complete)
+        expect(finalRow.completed_at).toBeNull();
+
+        // No next-stage message should be in pgmq.q_s6_sync
+        const [syncMsg] = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync 
+          WHERE message->>'shop' = ${TEST_SHOP_DOMAIN} 
+          AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+        `;
+        expect(parseInt(syncMsg.count, 10)).toBe(0);
+
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
   });
 
@@ -2665,84 +2709,124 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   });
 
   // ==========================================================================
-  // M4/C16: Real interleave - B completes between A's initial load and fresh re-check
+  // M4/C16: B completes between A's initial load and fresh re-check
   // Kills M4: the C16 re-check disabled
   //
-  // Spies on acquireProcessingLease and has B complete the op AFTER A's initial
-  // load but BEFORE A's fresh re-check at ~:1194.
+  // Uses a temporary Postgres TRIGGER that fires when processing_lease_token changes
+  // from NULL to non-NULL (A acquires lease). The trigger sets completed_at, simulating
+  // B completing the op right as A got the lease. A's re-check should see this and skip.
   // ==========================================================================
-  describe("M4/C16: re-check after lease acquisition catches concurrent completion", () => {
-    // M4/C16 tests the re-check of completed_at AFTER acquiring the lease.
-    // The flow is: initial load -> acquire lease -> re-check -> process.
-    // If B completes between initial load and re-check, A should skip.
-    //
-    // Since ESM modules call internal functions directly, we test the observable behavior:
-    // If completed_at is set when processBulkOperation re-checks, it returns "skipped".
+  describe("M4/C16: B completes between A's initial load and re-check via trigger", () => {
+    const TRIGGER_NAME = "s25_m4_test_trigger";
+    const TRIGGER_FUNC = "s25_m4_test_trigger_func";
 
-    it("M4: processBulkOperation skips when completed_at is set before processing", async () => {
+    afterEach(async () => {
+      // Drop the trigger and function
+      await sql`DROP TRIGGER IF EXISTS ${sql(TRIGGER_NAME)} ON s6_bulk_operations`;
+      await sql`DROP FUNCTION IF EXISTS ${sql(TRIGGER_FUNC)}()`;
+    });
+
+    it("M4: A skips when B completes during lease acquisition (trigger-based)", async () => {
       const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
-      const bulkOpId = `gid://shopify/BulkOperation/m4-precheck-${TEST_SUFFIX}`;
+      const bulkOpId = `gid://shopify/BulkOperation/m4-trigger-${TEST_SUFFIX}`;
       const webhookId = `finish:${bulkOpId}`;
 
-      // Setup: operation already completed (B finished before A started)
+      // Setup: operation NOT completed initially
       await sql`
         INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset, completed_at
+          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset
         ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 0, NOW()
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 0
         )
       `;
 
-      // Mock adminGraphQL (won't be called if check works)
+      // Create trigger function that sets completed_at when lease is acquired
+      await sql`
+        CREATE OR REPLACE FUNCTION ${sql(TRIGGER_FUNC)}()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          -- Fire when processing_lease_token changes from NULL to non-NULL (lease acquired)
+          IF OLD.processing_lease_token IS NULL AND NEW.processing_lease_token IS NOT NULL THEN
+            -- B completed the op right as A acquired the lease
+            NEW.completed_at := NOW();
+            NEW.finish_received_at := NOW();
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `;
+
+      // Create BEFORE UPDATE trigger
+      await sql`
+        CREATE TRIGGER ${sql(TRIGGER_NAME)}
+        BEFORE UPDATE ON s6_bulk_operations
+        FOR EACH ROW
+        EXECUTE FUNCTION ${sql(TRIGGER_FUNC)}()
+      `;
+
+      // Mock adminGraphQL status
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
-        data: { node: { id: bulkOpId, status: "COMPLETED", url: "https://test.com/result.jsonl", objectCount: "1", fileSize: 100, errorCode: null } },
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            url: "https://test.com/result.jsonl",
+            objectCount: "10",
+            fileSize: 1000,
+            errorCode: null,
+          },
+        },
         retryable: false,
       });
 
-      const message = {
-        topic: "BULK_OPERATIONS_FINISH" as const,
-        shop: TEST_SHOP_DOMAIN,
-        webhookId,
-        bulkOperationId: bulkOpId,
-        bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
-      };
+      // Track fetch calls - should be 0 if re-check works
+      let fetchCallCount = 0;
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCallCount++;
+        return new Response("", { status: 500 });
+      });
 
-      const result = await processBulkOperation(sql, message);
+      try {
+        const message = {
+          topic: "BULK_OPERATIONS_FINISH" as const,
+          shop: TEST_SHOP_DOMAIN,
+          webhookId,
+          bulkOperationId: bulkOpId,
+          bulkType: "companies" as const,
+          enqueuedAt: new Date().toISOString(),
+        };
 
-      // Should skip because op is already completed (initial check at ~:1153)
-      expect(result.success).toBe(true);
-      expect(result.action).toBe("skipped");
-      expect(result.skipReason).toContain("already completed");
+        const result = await processBulkOperation(sql, message);
 
-      // This kills M4: if the initial/re-check is disabled, A would acquire a lease and try to process.
-      // The check catches completed ops early and returns "skipped".
-    });
+        // A should skip because re-check sees completed_at (set by trigger during lease acquire)
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("already completed");
 
-    it("C16: loadBulkOperationProgress returns completedAt when set", async () => {
-      const { loadBulkOperationProgress } = await import("~/services/sync/bulk-jsonl-processor.server");
+        // 0 JSONL fetches (A stopped at re-check)
+        expect(fetchCallCount).toBe(0);
 
-      const bulkOpId = `gid://shopify/BulkOperation/c16-load-${TEST_SUFFIX}`;
+        // 0 progress writes (byte_offset still 0)
+        const [row] = await sql<{ byte_offset: string | null }[]>`
+          SELECT byte_offset::text FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+        `;
+        expect(row.byte_offset).toBe("0");
 
-      // Setup: operation with completed_at set
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 100, NOW()
-        )
-      `;
+        // No next-stage enqueue
+        const [syncMsg] = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync 
+          WHERE message->>'shop' = ${TEST_SHOP_DOMAIN} 
+          AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+        `;
+        expect(parseInt(syncMsg.count, 10)).toBe(0);
 
-      const progress = await loadBulkOperationProgress(sql, bulkOpId);
-
-      expect(progress).not.toBeNull();
-      expect(progress!.completedAt).not.toBeNull();
-
-      // This is a lower-level test for C16: loadBulkOperationProgress correctly returns completedAt.
-      // Combined with M4 test, this verifies the re-check path works correctly.
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
   });
 
