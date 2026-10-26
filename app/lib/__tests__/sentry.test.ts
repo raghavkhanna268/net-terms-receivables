@@ -108,22 +108,41 @@ describe("sentry.ts", () => {
       query_string?: string;
       url?: string;
       data?: Record<string, unknown>;
+      env?: Record<string, string>;
+    }
+    interface TestStacktraceFrame {
+      filename?: string;
+      function?: string;
+      vars?: Record<string, unknown>;
+    }
+    interface TestMechanism {
+      type?: string;
+      handled?: boolean;
+      data?: Record<string, unknown>;
+    }
+    interface TestException {
+      value?: string;
+      type?: string;
+      mechanism?: TestMechanism;
+      stacktrace?: { frames?: TestStacktraceFrame[] };
     }
     interface TestEvent {
       request?: TestRequest;
-      exception?: { values?: Array<{ value?: string; type?: string }> };
+      exception?: { values?: TestException[] };
       message?: string;
       logentry?: { message?: string; params?: unknown[] };
       transaction?: string;
       fingerprint?: string[];
       threads?: { values: Array<{ name?: string }> };
-      spans?: Array<{ description?: string; data: Record<string, unknown>; span_id: string; trace_id: string; start_timestamp: number; status: string }>;
+      spans?: Array<{ description?: string; data?: Record<string, unknown>; span_id: string; trace_id: string; start_timestamp: number; status: string }>;
       breadcrumbs?: Array<{ message?: string; data?: Record<string, unknown> }>;
       extra?: Record<string, unknown>;
       tags?: Record<string, string>;
       contexts?: Record<string, Record<string, unknown>>;
+      user?: { id?: string; email?: string; username?: string; ip_address?: string };
     }
     let beforeSend: (event: TestEvent, hint: unknown) => TestEvent | null;
+    let beforeSendTransaction: (event: TestEvent, hint: unknown) => TestEvent | null;
 
     beforeEach(async () => {
       vi.resetModules();
@@ -136,6 +155,25 @@ describe("sentry.ts", () => {
       const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
       beforeSend = config.beforeSend as typeof beforeSend;
+      beforeSendTransaction = config.beforeSendTransaction as typeof beforeSendTransaction;
+    });
+
+    describe("user scrubbing", () => {
+      it("deletes event.user entirely", () => {
+        const event = {
+          user: {
+            id: "user-123",
+            email: "buyer@example.com",
+            username: "Asha Verma",
+            ip_address: "192.168.1.1",
+          },
+          message: "Test",
+        };
+
+        const result = beforeSend(event, {});
+
+        expect(result?.user).toBeUndefined();
+      });
     });
 
     describe("request scrubbing", () => {
@@ -210,6 +248,23 @@ describe("sentry.ts", () => {
 
         expect(result?.request?.data).toBeUndefined();
       });
+
+      it("deletes request.env entirely", () => {
+        const event = {
+          request: {
+            url: "https://example.com/app",
+            env: {
+              REMOTE_ADDR: "192.168.1.1",
+              SERVER_NAME: "shop.myshopify.com",
+              DATABASE_URL: "postgres://user:pass@host/db",
+            },
+          },
+        };
+
+        const result = beforeSend(event, {});
+
+        expect(result?.request?.env).toBeUndefined();
+      });
     });
 
     describe("exception scrubbing (P1b)", () => {
@@ -244,6 +299,143 @@ describe("sentry.ts", () => {
 
         // Should return an error code
         expect(result?.exception?.values?.[0]?.value).toBe("connection_refused");
+      });
+
+      it("deletes mechanism.data containing sensitive context", () => {
+        const event = {
+          exception: {
+            values: [
+              {
+                value: "Test error",
+                type: "Error",
+                mechanism: {
+                  type: "generic",
+                  handled: false,
+                  data: {
+                    buyer: "Asha Verma",
+                    email: "buyer@example.com",
+                    amount: "50000.00",
+                  },
+                },
+              },
+            ],
+          },
+        };
+
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        expect(json).not.toContain("Asha Verma");
+        expect(json).not.toContain("buyer@example.com");
+        expect(json).not.toContain("50000.00");
+        expect((result?.exception?.values?.[0]?.mechanism as Record<string, unknown>)?.data).toBeUndefined();
+        expect(result?.exception?.values?.[0]?.mechanism?.type).toBe("generic");
+      });
+
+      it("deletes stacktrace.frames[].vars containing local variables", () => {
+        const event = {
+          exception: {
+            values: [
+              {
+                value: "Test error",
+                type: "Error",
+                stacktrace: {
+                  frames: [
+                    {
+                      filename: "app.js",
+                      function: "processBuyer",
+                      vars: {
+                        buyerName: "Asha Verma",
+                        amount: 50000,
+                        narration: "NEFT/ACME TRADERS/INV-1001",
+                      },
+                    },
+                    {
+                      filename: "handler.js",
+                      function: "handleRequest",
+                      vars: {
+                        email: "buyer@example.com",
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        expect(json).not.toContain("Asha Verma");
+        expect(json).not.toContain("ACME TRADERS");
+        expect(json).not.toContain("buyer@example.com");
+        expect((result?.exception?.values?.[0]?.stacktrace?.frames?.[0] as Record<string, unknown>)?.vars).toBeUndefined();
+        expect((result?.exception?.values?.[0]?.stacktrace?.frames?.[1] as Record<string, unknown>)?.vars).toBeUndefined();
+        // Preserve non-sensitive frame data
+        expect(result?.exception?.values?.[0]?.stacktrace?.frames?.[0]?.filename).toBe("app.js");
+        expect(result?.exception?.values?.[0]?.stacktrace?.frames?.[0]?.function).toBe("processBuyer");
+      });
+    });
+
+    describe("span scrubbing", () => {
+      it("handles span with no data without crashing", () => {
+        const event = {
+          spans: [
+            {
+              description: "/app/test",
+              span_id: "span1",
+              trace_id: "trace1",
+              start_timestamp: Date.now(),
+              status: "ok",
+            } as TestEvent["spans"] extends Array<infer T> ? T : never,
+          ],
+        };
+
+        // Should not throw
+        expect(() => beforeSendTransaction(event, {})).not.toThrow();
+
+        const result = beforeSendTransaction(event, {});
+        expect(result?.spans?.[0]?.description).toBe("/app/:param");
+      });
+
+      it("handles span with undefined data without crashing", () => {
+        const event = {
+          spans: [
+            {
+              description: "/app/buyers/123",
+              data: undefined as unknown as Record<string, unknown>,
+              span_id: "span1",
+              trace_id: "trace1",
+              start_timestamp: Date.now(),
+              status: "ok",
+            },
+          ],
+        };
+
+        expect(() => beforeSendTransaction(event, {})).not.toThrow();
+
+        const result = beforeSendTransaction(event, {});
+        expect(result?.spans?.[0]?.description).toBe("/app/buyers/:id");
+      });
+
+      it("scrubs HTTP method prefixed span descriptions", () => {
+        const event = {
+          spans: [
+            {
+              description: "GET /app/buyers/asha",
+              span_id: "span1",
+              trace_id: "trace1",
+              start_timestamp: Date.now(),
+              status: "ok",
+            } as TestEvent["spans"] extends Array<infer T> ? T : never,
+          ],
+        };
+
+        const result = beforeSendTransaction(event, {});
+
+        expect(result?.spans?.[0]?.description).toBe("GET /app/buyers/:param");
+        expect(result?.spans?.[0]?.description).not.toContain("asha");
       });
     });
 
@@ -637,6 +829,197 @@ describe("sentry.ts", () => {
         const json = JSON.stringify(result);
 
         assertNoSensitiveData(json);
+      });
+    });
+  });
+
+  describe("strict allowlist route scrubbing (all paths)", () => {
+    interface RouteTestEvent {
+      request?: { url?: string };
+      transaction?: string;
+      spans?: Array<{ description?: string; data?: Record<string, unknown>; span_id: string; trace_id: string; start_timestamp: number; status: string }>;
+    }
+
+    let beforeSend: (event: RouteTestEvent, hint: unknown) => RouteTestEvent | null;
+    let beforeSendTransaction: (event: RouteTestEvent, hint: unknown) => RouteTestEvent | null;
+
+    beforeEach(async () => {
+      vi.resetModules();
+      const { withSentry } = await import("@sentry/cloudflare");
+      const { wrapWithSentry } = await import("../sentry");
+
+      const mockHandler = { fetch: vi.fn() };
+      wrapWithSentry(mockHandler);
+
+      const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
+      beforeSend = config.beforeSend as typeof beforeSend;
+      beforeSendTransaction = config.beforeSendTransaction as typeof beforeSendTransaction;
+    });
+
+    function assertNoLeakedNames(json: string) {
+      expect(json).not.toContain("Asha");
+      expect(json).not.toContain("asha");
+      expect(json).not.toContain("asha-verma");
+      expect(json).not.toContain("ACMETRADERS");
+      expect(json).not.toContain("acme");
+      expect(json).not.toContain("ACME");
+      expect(json).not.toContain("INV-1001");
+      expect(json).not.toContain("NEFT");
+    }
+
+    describe("QA test cases via request.url", () => {
+      it("scrubs /app/buyers/Asha to :param", () => {
+        const event = { request: { url: "/app/buyers/Asha" } };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.request?.url).toBe("/app/buyers/:param");
+      });
+
+      it("scrubs /app/buyers/asha-verma/invoices to :param", () => {
+        const event = { request: { url: "/app/buyers/asha-verma/invoices" } };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.request?.url).toBe("/app/buyers/:param/invoices");
+      });
+
+      it("scrubs /app/reconcile/ACMETRADERS to :param", () => {
+        const event = { request: { url: "/app/reconcile/ACMETRADERS" } };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.request?.url).toBe("/app/reconcile/:param");
+      });
+    });
+
+    describe("QA test cases via transaction", () => {
+      it("scrubs /app/buyers/Asha to :param", () => {
+        const event = { transaction: "/app/buyers/Asha" };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.transaction).toBe("/app/buyers/:param");
+      });
+
+      it("scrubs /app/buyers/asha-verma/invoices to :param", () => {
+        const event = { transaction: "/app/buyers/asha-verma/invoices" };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.transaction).toBe("/app/buyers/:param/invoices");
+      });
+
+      it("scrubs /app/reconcile/ACMETRADERS to :param", () => {
+        const event = { transaction: "/app/reconcile/ACMETRADERS" };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.transaction).toBe("/app/reconcile/:param");
+      });
+
+      it("scrubs NEFT/ACME TRADERS/INV-1001 transaction name", () => {
+        const event = { transaction: "NEFT/ACME TRADERS/INV-1001" };
+        const result = beforeSend(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        // All non-allowlisted segments become :param
+        expect(result?.transaction).toBe(":param/:param/:param");
+      });
+    });
+
+    describe("QA test cases via span description", () => {
+      it("scrubs /app/buyers/Asha to :param", () => {
+        const event = {
+          spans: [{
+            description: "/app/buyers/Asha",
+            span_id: "span1",
+            trace_id: "trace1",
+            start_timestamp: Date.now(),
+            status: "ok",
+          }],
+        };
+        const result = beforeSendTransaction(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.spans?.[0]?.description).toBe("/app/buyers/:param");
+      });
+
+      it("scrubs /app/buyers/asha-verma/invoices to :param", () => {
+        const event = {
+          spans: [{
+            description: "/app/buyers/asha-verma/invoices",
+            span_id: "span1",
+            trace_id: "trace1",
+            start_timestamp: Date.now(),
+            status: "ok",
+          }],
+        };
+        const result = beforeSendTransaction(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.spans?.[0]?.description).toBe("/app/buyers/:param/invoices");
+      });
+
+      it("scrubs /app/reconcile/ACMETRADERS to :param", () => {
+        const event = {
+          spans: [{
+            description: "/app/reconcile/ACMETRADERS",
+            span_id: "span1",
+            trace_id: "trace1",
+            start_timestamp: Date.now(),
+            status: "ok",
+          }],
+        };
+        const result = beforeSendTransaction(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.spans?.[0]?.description).toBe("/app/reconcile/:param");
+      });
+
+      it("scrubs GET /app/buyers/asha with HTTP method", () => {
+        const event = {
+          spans: [{
+            description: "GET /app/buyers/asha",
+            span_id: "span1",
+            trace_id: "trace1",
+            start_timestamp: Date.now(),
+            status: "ok",
+          }],
+        };
+        const result = beforeSendTransaction(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.spans?.[0]?.description).toBe("GET /app/buyers/:param");
+      });
+
+      it("scrubs POST /app/reconcile/ACMETRADERS with HTTP method", () => {
+        const event = {
+          spans: [{
+            description: "POST /app/reconcile/ACMETRADERS",
+            span_id: "span1",
+            trace_id: "trace1",
+            start_timestamp: Date.now(),
+            status: "ok",
+          }],
+        };
+        const result = beforeSendTransaction(event, {});
+        const json = JSON.stringify(result);
+
+        assertNoLeakedNames(json);
+        expect(result?.spans?.[0]?.description).toBe("POST /app/reconcile/:param");
       });
     });
   });

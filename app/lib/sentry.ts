@@ -72,10 +72,14 @@ export interface SentryEnv {
 
 /**
  * Scrub a record to only keep allowlisted keys.
+ * Guards against undefined or non-object inputs.
  */
-function scrubRecord(record: Record<string, unknown>): Record<string, unknown> {
+function scrubRecord(record: unknown): Record<string, unknown> {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return {};
+  }
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
+  for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
     if (ALLOWED_SENTRY_KEYS.has(key)) {
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         result[key] = value;
@@ -96,33 +100,68 @@ function scrubMessage(message: string | undefined): string {
 }
 
 /**
+ * Allowlisted HTTP methods for span descriptions.
+ */
+const ALLOWED_HTTP_METHODS = new Set([
+  "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
+]);
+
+/**
  * Known safe route segments (lowercase).
- * These are allowed to pass through without being scrubbed.
+ * STRICT ALLOWLIST: Only these segments pass through.
+ * Derived from app/routes/*.tsx and common API patterns.
  */
 const SAFE_ROUTE_SEGMENTS = new Set([
-  "app", "api", "v1", "v2", "admin", "public", "auth",
-  "buyers", "invoices", "orders", "payments", "accounts", "settings",
-  "reconcile", "imports", "exports", "webhooks", "callbacks",
-  "home", "dashboard", "details", "list", "view", "edit", "create", "delete",
+  // App routes from app/routes/*.tsx
+  "app", "api", "auth", "jobs", "webhooks", "privacy", "unsubscribe",
+  // Route segments
+  "accounts", "data-requests", "download", "imports", "onboarding",
+  "plan", "reconcile", "settings", "reminders", "tag-rules",
+  // Webhook topics
+  "orders", "companies", "company_locations", "compliance",
+  "customers", "draft_orders", "bulk_operations", "finish",
+  "subscriptions_update", "scopes_update", "uninstalled",
+  // API endpoints
+  "web-vitals", "drain",
+  // Common API versioning
+  "v1", "v2", "v3",
+  // Common route patterns
+  "health", "ready", "live", "metrics", "graphql", "admin", "public",
+  // Standard CRUD operations
+  "list", "view", "edit", "create", "delete", "new", "update",
+  // Action verbs
   "process", "verify", "confirm", "cancel", "refund", "status",
-  "health", "ready", "live", "metrics", "graphql",
+  // Resource types (generic)
+  "invoices", "payments", "buyers", "exports", "callbacks",
+  "home", "dashboard", "details", "index",
 ]);
 
 /**
  * Convert a URL or transaction name to a safe route template.
- * Replaces dynamic segments (UUIDs, IDs, names, amounts) with placeholders.
- * Only known safe route segment names pass through.
+ * STRICT ALLOWLIST: Only segments in SAFE_ROUTE_SEGMENTS pass through.
+ * All other segments become :param placeholders.
  *
  * Examples:
  * - "/app/buyers/123" -> "/app/buyers/:id"
  * - "/app/orders/gid://shopify/Order/456" -> "/app/orders/:gid"
- * - "/api/v1/shops/abc-def-123/invoices" -> "/api/v1/shops/:uuid/invoices"
- * - "/app/buyers/Asha Verma/invoices" -> "/app/buyers/:param/invoices"
+ * - "/app/buyers/asha" -> "/app/buyers/:param"
+ * - "GET /app/buyers/asha" -> "GET /app/buyers/:param"
  */
 function toRouteTemplate(value: string | undefined): string {
   if (!value) return SAFE_MESSAGE_CODE;
 
   let result = value;
+  let httpMethodPrefix = "";
+
+  // Extract HTTP method prefix if present (e.g., "GET /app/buyers")
+  const methodMatch = result.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.*)$/i);
+  if (methodMatch) {
+    const method = methodMatch[1].toUpperCase();
+    if (ALLOWED_HTTP_METHODS.has(method)) {
+      httpMethodPrefix = method + " ";
+    }
+    result = methodMatch[2];
+  }
 
   // Strip query strings entirely
   const queryIdx = result.indexOf("?");
@@ -136,7 +175,7 @@ function toRouteTemplate(value: string | undefined): string {
     result = result.slice(0, fragIdx);
   }
 
-  // Replace UUIDs with :uuid (must come before generic replacement)
+  // Replace UUIDs with :uuid (must come before segment processing)
   result = result.replace(
     /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
     ":uuid"
@@ -148,19 +187,25 @@ function toRouteTemplate(value: string | undefined): string {
   // Replace shop IDs (e.g., shp_abc123)
   result = result.replace(/shp_[a-z0-9]+/gi, ":shopId");
 
-  // Split into segments and filter each one
+  // Split into segments and filter each one with STRICT ALLOWLIST
   const parts = result.split("/");
   const scrubbedParts = parts.map((segment) => {
+    // Empty segments (from leading/trailing slashes)
     if (segment === "") return "";
-    
-    // Check if it's a known safe segment
-    if (SAFE_ROUTE_SEGMENTS.has(segment.toLowerCase())) {
-      return segment;
-    }
 
     // Already a placeholder from earlier replacements
     if (segment.startsWith(":")) {
       return segment;
+    }
+
+    // Protocol prefixes
+    if (segment === "http:" || segment === "https:" || segment === "gid:") {
+      return segment;
+    }
+
+    // STRICT ALLOWLIST: Only safe segments pass through
+    if (SAFE_ROUTE_SEGMENTS.has(segment.toLowerCase())) {
+      return segment.toLowerCase();
     }
 
     // Purely numeric -> :id
@@ -168,40 +213,11 @@ function toRouteTemplate(value: string | undefined): string {
       return ":id";
     }
 
-    // Decimal amounts (e.g., 50000.00) -> :amount
-    if (/^\d+\.\d+$/.test(segment)) {
-      return ":amount";
-    }
-
-    // Contains spaces (names) -> :param
-    if (segment.includes(" ") || segment.includes("%20")) {
-      return ":param";
-    }
-
-    // Contains @ (emails) -> :param
-    if (segment.includes("@")) {
-      return ":param";
-    }
-
-    // Short alphanumeric segments (< 3 chars) that are safe
-    if (/^[a-z]{1,2}$/i.test(segment)) {
-      return segment;
-    }
-
-    // Known safe patterns: protocol-like prefixes
-    if (segment === "http:" || segment === "https:" || segment === "gid:") {
-      return segment;
-    }
-
-    // Everything else that's not a simple lowercase word -> :param
-    if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/i.test(segment) || segment.length > 30) {
-      return ":param";
-    }
-
-    return segment;
+    // Everything else becomes :param (strict allowlist)
+    return ":param";
   });
 
-  return scrubbedParts.join("/");
+  return httpMethodPrefix + scrubbedParts.join("/");
 }
 
 /**
@@ -219,12 +235,13 @@ function scrubFingerprint(value: string): string {
 
 /**
  * Scrub a span's description and data fields.
+ * Guards against undefined data.
  */
 function scrubSpan(span: SpanJSON): SpanJSON {
   return {
     ...span,
     description: span.description ? toRouteTemplate(span.description) : undefined,
-    data: scrubRecord(span.data as Record<string, unknown>) as SpanJSON["data"],
+    data: scrubRecord(span.data) as SpanJSON["data"],
   };
 }
 
@@ -232,10 +249,13 @@ function scrubSpan(span: SpanJSON): SpanJSON {
  * Scrub sensitive data from a Sentry event.
  *
  * Security rules per #174:
- * - Deletes request.headers, cookies, query_string
- * - Strips query string from request.url
+ * - Deletes event.user entirely (can contain email, name, IP)
+ * - Deletes request.headers, cookies, query_string, data, env
+ * - Converts request.url to route template
  * - Replaces exception values with error code (not raw messages)
  * - Replaces exception types with safe codes
+ * - Deletes exception.mechanism.data (can contain sensitive context)
+ * - Deletes stacktrace.frames[].vars (can contain local variable values)
  * - Replaces event.message with safe code (no free text)
  * - Scrubs event.logentry (message, params)
  * - Scrubs event.transaction to route template
@@ -246,19 +266,23 @@ function scrubSpan(span: SpanJSON): SpanJSON {
  * - Removes breadcrumbs entirely (can contain sensitive data)
  */
 function scrubEvent(event: SentryEvent): SentryEvent {
+  // Delete user data entirely (can contain email, name, IP)
+  delete event.user;
+
   if (event.request) {
     delete event.request.headers;
     delete event.request.cookies;
     delete event.request.query_string;
+    delete event.request.data;
+    delete event.request.env;
 
     if (event.request.url) {
       event.request.url = toRouteTemplate(event.request.url);
     }
-
-    delete event.request.data;
   }
 
   // Replace exception values and types with error codes (P1b)
+  // Also delete mechanism.data and stacktrace frame vars as defense in depth
   if (event.exception?.values) {
     for (const exception of event.exception.values) {
       if (exception.value) {
@@ -274,6 +298,16 @@ function scrubEvent(event: SentryEvent): SentryEvent {
         } else {
           // Scrub anything that doesn't look like a standard error type
           exception.type = "Error";
+        }
+      }
+      // Delete mechanism.data (can contain sensitive context)
+      if (exception.mechanism) {
+        delete (exception.mechanism as unknown as Record<string, unknown>).data;
+      }
+      // Delete stacktrace frame vars (can contain local variable values)
+      if (exception.stacktrace?.frames) {
+        for (const frame of exception.stacktrace.frames) {
+          delete (frame as unknown as Record<string, unknown>).vars;
         }
       }
     }
