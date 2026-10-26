@@ -143,7 +143,7 @@ The merchant sets each buyer's credit limit and payment terms. When a buyer goes
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All app data in transit | Global (Worker placed near ap-south-1) |
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored app data | AWS ap-south-1 (Mumbai, India) |
 | Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
-| Functional Software, Inc. (Sentry) | Error monitoring (used only when configured). Data is stored in Sentry's EU data region (Germany). Exception values are replaced with error codes; breadcrumbs are removed; request headers, cookies, and bodies are removed; tags, extra fields, and contexts are limited to an allowlist; event messages have email addresses, shop domains, and access tokens redacted. | Sanitized error and performance events | EU (Germany) |
+| Functional Software, Inc. (Sentry) | Error monitoring (used only when configured). Data is stored in Sentry's EU data region (Germany). It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts. | Sanitized error and performance events | EU (Germany) |
 
 **Resend data handling:**
 

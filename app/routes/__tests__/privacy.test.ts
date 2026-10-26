@@ -394,6 +394,12 @@ describe("privacy.md content requirements", () => {
     expect(privacyContent).toContain("requested access to protected customer data");
     expect(privacyContent).toContain("Shopify reviews this request with our app submission");
   });
+
+  it("contains Team Lead Sentry sentence", () => {
+    expect(privacyContent).toContain(
+      "It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts."
+    );
+  });
 });
 
 describe("merchant-terms.md content requirements", () => {
@@ -434,6 +440,12 @@ describe("merchant-terms.md content requirements", () => {
   it("contains exact backup retention sentence", () => {
     expect(termsContent).toContain(
       "Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted"
+    );
+  });
+
+  it("contains Team Lead Sentry sentence", () => {
+    expect(termsContent).toContain(
+      "It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts."
     );
   });
 });
