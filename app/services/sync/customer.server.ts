@@ -38,7 +38,7 @@ import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCustomer, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { minimiseCustomerPiiIfInactive } from "~/services/compliance";
-import { decideNewAccountGate } from "../gating.server";
+import { decideNewAccountGate, isGatingEnforced } from "../gating.server";
 import { safeLog } from "~/lib/log.server";
 
 /**
@@ -409,22 +409,13 @@ async function syncTaggedCustomerBuyerAccount(
   // Pre-compute derived values
   const termsSource = defaultTermsDays !== null ? "tag" : null;
 
-  // T4: Use transaction with lock for gating decision
-  const { action, entityId } = await sql.begin(async (tx) => {
-    const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
-      SELECT id, gated_at FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
-    `;
+  // T4: Only use transaction+lock when gating is enforced. Otherwise, use main's plain upsert.
+  let action: "created" | "updated" | "gated";
+  let entityId: string;
 
-    let shouldGate = false;
-    if (!existingAccount) {
-      const decision = await decideNewAccountGate(tx, shopId);
-      shouldGate = decision.gate;
-    }
-
-    // Must-fix #2: Only apply defaultTermsDays when existing source is NULL or 'tag'
-    // Never overwrite 'explicit' (merchant-set) terms
-    const [result] = await tx<{ id: string; isNew: string; gated_at: Date | null }[]>`
+  if (!isGatingEnforced()) {
+    // Flag off: main's code path - plain upsert, no transaction, no lock
+    const [result] = await sql<{ id: string; isNew: string }[]>`
       INSERT INTO "BuyerAccount" (
         "shopId",
         kind,
@@ -432,7 +423,6 @@ async function syncTaggedCustomerBuyerAccount(
         name,
         "defaultTermsDays",
         "defaultTermsSource",
-        gated_at,
         "createdAt",
         "updatedAt"
       ) VALUES (
@@ -442,14 +432,12 @@ async function syncTaggedCustomerBuyerAccount(
         ${displayName},
         ${defaultTermsDays},
         ${termsSource},
-        ${shouldGate ? new Date() : null},
         NOW(),
         NOW()
       )
       ON CONFLICT ("shopId", "customerId")
       DO UPDATE SET
         name = COALESCE("BuyerAccount".name, EXCLUDED.name),
-        -- Only apply tag terms if source is NULL or 'tag', never override 'explicit'
         "defaultTermsDays" = CASE
           WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN "BuyerAccount"."defaultTermsDays"
           ELSE COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays")
@@ -458,23 +446,77 @@ async function syncTaggedCustomerBuyerAccount(
           WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN 'explicit'
           ELSE COALESCE(EXCLUDED."defaultTermsSource", "BuyerAccount"."defaultTermsSource")
         END,
-        -- NEVER touch holdState - that belongs to credit logic
         "updatedAt" = NOW()
-      RETURNING id, (xmax = 0)::text as "isNew", gated_at
+      RETURNING id, (xmax = 0)::text as "isNew"
     `;
+    action = result.isNew === "true" ? "created" : "updated";
+    entityId = result.id;
+  } else {
+    // Flag on: use transaction with gating decision
+    const txResult = await sql.begin(async (tx) => {
+      const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
+        SELECT id, gated_at FROM "BuyerAccount"
+        WHERE "shopId" = ${shopId} AND "customerId" = ${customerId}
+      `;
 
-    let resultAction: "created" | "updated" | "gated";
-    if (result.isNew === "true") {
-      resultAction = shouldGate ? "gated" : "created";
-      if (shouldGate) {
-        safeLog("info", "account_gated_new", { kind: "TAGGED_CUSTOMER" });
+      let shouldGate = false;
+      if (!existingAccount) {
+        const decision = await decideNewAccountGate(tx, shopId);
+        shouldGate = decision.gate;
       }
-    } else {
-      resultAction = "updated";
-    }
 
-    return { action: resultAction, entityId: result.id };
-  });
+      const [result] = await tx<{ id: string; isNew: string; gated_at: Date | null }[]>`
+        INSERT INTO "BuyerAccount" (
+          "shopId",
+          kind,
+          "customerId",
+          name,
+          "defaultTermsDays",
+          "defaultTermsSource",
+          gated_at,
+          "createdAt",
+          "updatedAt"
+        ) VALUES (
+          ${shopId},
+          'TAGGED_CUSTOMER',
+          ${customerId},
+          ${displayName},
+          ${defaultTermsDays},
+          ${termsSource},
+          ${shouldGate ? new Date() : null},
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT ("shopId", "customerId")
+        DO UPDATE SET
+          name = COALESCE("BuyerAccount".name, EXCLUDED.name),
+          "defaultTermsDays" = CASE
+            WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN "BuyerAccount"."defaultTermsDays"
+            ELSE COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays")
+          END,
+          "defaultTermsSource" = CASE
+            WHEN "BuyerAccount"."defaultTermsSource" = 'explicit' THEN 'explicit'
+            ELSE COALESCE(EXCLUDED."defaultTermsSource", "BuyerAccount"."defaultTermsSource")
+          END,
+          "updatedAt" = NOW()
+        RETURNING id, (xmax = 0)::text as "isNew", gated_at
+      `;
+
+      let resultAction: "created" | "updated" | "gated";
+      if (result.isNew === "true") {
+        resultAction = shouldGate ? "gated" : "created";
+        if (shouldGate) {
+          safeLog("info", "account_gated_tagged_customer", { shopHash: shopId.slice(0, 8) });
+        }
+      } else {
+        resultAction = "updated";
+      }
+
+      return { action: resultAction, entityId: result.id };
+    });
+    action = txResult.action;
+    entityId = txResult.entityId;
+  }
 
   return {
     success: true,

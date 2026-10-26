@@ -40,13 +40,24 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   let gatedCount = 0;
   let error: string | null = null;
 
+  const gatingEnforced = isGatingEnforced();
+
   if (shop) {
     try {
-      [planData, usage, gatedCount] = await Promise.all([
+      // Only call getUsageStats and getGatedAccountCount when gating is enforced
+      const results = await Promise.all([
         resolvePlan(sql, shopDomain),
-        getUsageStats(sql, shop.id),
-        getGatedAccountCount(sql, shop.id),
+        gatingEnforced
+          ? getUsageStats(sql, shop.id).catch((err) => {
+              safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+              return null;
+            })
+          : Promise.resolve(null),
+        gatingEnforced ? getGatedAccountCount(sql, shop.id) : Promise.resolve(0),
       ]);
+      planData = results[0];
+      usage = results[1];
+      gatedCount = results[2];
     } catch (err) {
       safeLog("error", "app.plan.load_plan_data_failed", { err: toErrorCode(err) });
       error = "Failed to load plan information. Please try again.";
@@ -54,7 +65,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   }
 
   const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const gatingEnforced = isGatingEnforced();
 
   return {
     storeHandle,
@@ -80,16 +90,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       }
       return buildPlanSelectionUrl(shopDomain, handle);
     })(),
-    newAccountsPausedBanner: buildNewAccountsPausedBannerState(
-      usage?.companies.current ?? 0,
-      usage?.companies.limit ?? 0,
-      gatingEnforced,
-      (() => {
-        const handle = getAppHandle();
-        if (handle === null) return null;
-        return buildPlanSelectionUrl(shopDomain, handle);
-      })()
-    ),
+    newAccountsPausedBanner: usage
+      ? buildNewAccountsPausedBannerState(
+          usage.companies.current,
+          usage.companies.limit,
+          gatingEnforced,
+          (() => {
+            const handle = getAppHandle();
+            if (handle === null) return null;
+            return buildPlanSelectionUrl(shopDomain, handle);
+          })()
+        )
+      : { show: false, heading: "", bodyText: "", upgradeUrl: null },
     error,
   };
 };

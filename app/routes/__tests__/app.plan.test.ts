@@ -243,7 +243,10 @@ describe("Plan Page Loader", () => {
     });
 
     expect(result.gatingEnforced).toBe(false);
-    expect(result.gatedCount).toBe(2);
+    // When flag is off, gatedCount is 0 (no query made)
+    expect(result.gatedCount).toBe(0);
+    // getGatedAccountCount should not be called when flag is off
+    expect(getGatedAccountCount).not.toHaveBeenCalled();
   });
 
   it("does not include subscriptionId or fromCache in returned plan", async () => {

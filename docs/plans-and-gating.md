@@ -138,6 +138,13 @@ When `PLAN_GATING_ENFORCED` is ON and a new BuyerAccount would exceed the limit:
    - Up to the new limit
    - Oldest accounts first (by `createdAt`)
 
+6. **Tag reactivation edge case**: When a removed tag is re-added to a customer,
+   the existing TAGGED_CUSTOMER account is reactivated (tag_active=true). This does
+   NOT change `gated_at` - the account remains ungated if it was ungated when
+   the tag was removed. This can push the active count over the limit because
+   reactivation doesn't re-check the limit. This is by design: tag operations
+   are controlled by the merchant's Shopify admin, not our app.
+
 ### Bank Statement Imports
 
 Bank statement imports are **unlimited on all plans**. There is no import limit enforcement.

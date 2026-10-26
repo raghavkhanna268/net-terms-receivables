@@ -14,7 +14,9 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyCompanyLocation, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
-import { decideNewAccountGate, isGatingEnforced } from "../gating.server";
+import { decideNewAccountGate, isGatingEnforced, countActiveAccounts } from "../gating.server";
+import { getPlanByShopId } from "../plan.server";
+import { planLimit } from "~/lib/entitlements";
 import { safeLog } from "~/lib/log.server";
 
 /**
@@ -82,19 +84,13 @@ export async function processCompanyLocationWebhook(
     location.billingAddress?.companyName ||
     `Location ${location.id.split("/").pop()}`;
 
-  const { action, entityId } = await sql.begin(async (tx) => {
-    const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
-      SELECT id, gated_at FROM "BuyerAccount"
-      WHERE "shopId" = ${shopId} AND "companyLocationId" = ${location.id}
-    `;
+  // T4: Only use transaction+lock when gating is enforced. Otherwise, use main's plain upsert.
+  let action: "created" | "updated" | "gated";
+  let entityId: string;
 
-    let shouldGate = false;
-    if (!existingAccount) {
-      const decision = await decideNewAccountGate(tx, shopId);
-      shouldGate = decision.gate;
-    }
-
-    const [result] = await tx<{ id: string; upsertAction: string; gated_at: Date | null }[]>`
+  if (!isGatingEnforced()) {
+    // Flag off: main's code path - plain upsert, no transaction, no lock
+    const [result] = await sql<{ id: string; upsertAction: string }[]>`
       INSERT INTO "BuyerAccount" (
         "shopId",
         kind,
@@ -103,7 +99,6 @@ export async function processCompanyLocationWebhook(
         name,
         "defaultTermsDays",
         "defaultTermsSource",
-        gated_at,
         "createdAt",
         "updatedAt"
       ) VALUES (
@@ -114,7 +109,6 @@ export async function processCompanyLocationWebhook(
         ${displayName},
         ${defaultTermsDays},
         ${defaultTermsDays !== null ? "explicit" : null},
-        ${shouldGate ? new Date() : null},
         NOW(),
         NOW()
       )
@@ -124,21 +118,72 @@ export async function processCompanyLocationWebhook(
         name = EXCLUDED.name,
         "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
         "updatedAt" = NOW()
-      RETURNING id, (xmax = 0)::text as "upsertAction", gated_at
+      RETURNING id, (xmax = 0)::text as "upsertAction"
     `;
+    action = result.upsertAction === "true" ? "created" : "updated";
+    entityId = result.id;
+  } else {
+    // Flag on: use transaction with gating decision
+    const txResult = await sql.begin(async (tx) => {
+      const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
+        SELECT id, gated_at FROM "BuyerAccount"
+        WHERE "shopId" = ${shopId} AND "companyLocationId" = ${location.id}
+      `;
 
-    let resultAction: "created" | "updated" | "gated";
-    if (result.upsertAction === "true") {
-      resultAction = shouldGate ? "gated" : "created";
-      if (shouldGate) {
-        safeLog("info", "account_gated_new", { kind: "COMPANY" });
+      let shouldGate = false;
+      if (!existingAccount) {
+        const decision = await decideNewAccountGate(tx, shopId);
+        shouldGate = decision.gate;
       }
-    } else {
-      resultAction = "updated";
-    }
 
-    return { action: resultAction, entityId: result.id };
-  });
+      const [result] = await tx<{ id: string; upsertAction: string; gated_at: Date | null }[]>`
+        INSERT INTO "BuyerAccount" (
+          "shopId",
+          kind,
+          "companyId",
+          "companyLocationId",
+          name,
+          "defaultTermsDays",
+          "defaultTermsSource",
+          gated_at,
+          "createdAt",
+          "updatedAt"
+        ) VALUES (
+          ${shopId},
+          'COMPANY',
+          ${location.company.id},
+          ${location.id},
+          ${displayName},
+          ${defaultTermsDays},
+          ${defaultTermsDays !== null ? "explicit" : null},
+          ${shouldGate ? new Date() : null},
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT ("shopId", "companyLocationId")
+        DO UPDATE SET
+          "companyId" = EXCLUDED."companyId",
+          name = EXCLUDED.name,
+          "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+          "updatedAt" = NOW()
+        RETURNING id, (xmax = 0)::text as "upsertAction", gated_at
+      `;
+
+      let resultAction: "created" | "updated" | "gated";
+      if (result.upsertAction === "true") {
+        resultAction = shouldGate ? "gated" : "created";
+        if (shouldGate) {
+          safeLog("info", "account_gated_company", { shopHash: shopId.slice(0, 8) });
+        }
+      } else {
+        resultAction = "updated";
+      }
+
+      return { action: resultAction, entityId: result.id };
+    });
+    action = txResult.action;
+    entityId = txResult.entityId;
+  }
 
   await markWebhookProcessed(sql, webhookId, topic, location.id);
 
@@ -197,12 +242,11 @@ export function mapCompanyLocationToBuyerAccount(
  * always allowed (downgrade-safe). Gated accounts are excluded from the
  * limit count and can be reactivated on upgrade.
  *
- * Concurrency: Each shop's batch runs in a single transaction with
- * pg_advisory_xact_lock to prevent concurrent creates from overshooting.
- * Uses the same lock key as decideNewAccountGate().
+ * Concurrency (flag on): Uses short transactions (≤25 rows) with
+ * pg_advisory_xact_lock per batch to avoid starving webhooks.
  *
- * Performance: Per-batch count check instead of per-account. Computes
- * which accounts need gating upfront based on current count and limit.
+ * Flag off: Row-by-row without transaction (main's original behavior),
+ * so one bad row doesn't roll back the chunk.
  *
  * @param sql - postgres.js SQL client
  * @param accounts - Array of mapped BuyerAccount data
@@ -223,96 +267,173 @@ export async function bulkUpsertBuyerAccounts(
 
   let totalCount = 0;
 
-  for (const [shopId, shopAccounts] of accountsByShop) {
-    const batchCount = await sql.begin(async (tx) => {
-      let slotsAvailable = Infinity;
-      let shouldGateAll = false;
-      let existingSet = new Set<string>();
-      let limit = -1;
-
-      if (isGatingEnforced()) {
-        const { getPlanByShopId } = await import("../plan.server");
-        const { countActiveAccounts } = await import("../gating.server");
-        const { planLimit } = await import("~/lib/entitlements");
-        const plan = await getPlanByShopId(tx, shopId);
-        limit = planLimit(plan, "companies");
-
-        if (limit !== -1) {
-          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${'ba_limit:' + shopId}, 0))`;
-
-          const currentUsage = await countActiveAccounts(tx, shopId);
-          slotsAvailable = Math.max(0, limit - currentUsage);
-          shouldGateAll = slotsAvailable === 0;
-        }
-
-        if (shopAccounts.length > 0) {
-          const locationIds = shopAccounts.map(a => a.companyLocationId);
-          const existingAccounts = await tx<{ companyLocationId: string }[]>`
-            SELECT "companyLocationId" FROM "BuyerAccount"
-            WHERE "shopId" = ${shopId} AND "companyLocationId" IN ${tx(locationIds)}
-          `;
-          existingSet = new Set(existingAccounts.map(e => e.companyLocationId));
-        }
-      }
-
-      let newAccountsProcessed = 0;
-      let gatedCount = 0;
-      let count = 0;
-
+  // Flag off: row-by-row without transaction (main's behavior)
+  if (!isGatingEnforced()) {
+    for (const [, shopAccounts] of accountsByShop) {
       for (const a of shopAccounts) {
-        const isNew = !existingSet.has(a.companyLocationId);
-        let shouldGate = false;
+        try {
+          const result = await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId",
+              kind,
+              "companyId",
+              "companyLocationId",
+              name,
+              "defaultTermsDays",
+              "defaultTermsSource",
+              "createdAt",
+              "updatedAt"
+            ) VALUES (
+              ${a.shopId},
+              ${a.kind},
+              ${a.companyId},
+              ${a.companyLocationId},
+              ${a.name},
+              ${a.defaultTermsDays},
+              ${a.defaultTermsSource},
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT ("shopId", "companyLocationId")
+            DO UPDATE SET
+              "companyId" = EXCLUDED."companyId",
+              name = EXCLUDED.name,
+              "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "updatedAt" = NOW()
+          `;
+          totalCount += result.count;
+        } catch {
+          // One bad row doesn't lose the others
+        }
+      }
+    }
+    return totalCount;
+  }
 
-        if (isNew && isGatingEnforced()) {
-          if (shouldGateAll || newAccountsProcessed >= slotsAvailable) {
-            shouldGate = true;
-            gatedCount++;
+  // Flag on: use small batches (≤25 rows) with short transactions per batch
+  const BATCH_SIZE = 25;
+
+  for (const [shopId, shopAccounts] of accountsByShop) {
+    const plan = await getPlanByShopId(sql, shopId);
+    const limit = planLimit(plan, "companies");
+
+    // No limit or unlimited: process row-by-row without gating
+    if (limit === -1) {
+      for (const a of shopAccounts) {
+        try {
+          const result = await sql`
+            INSERT INTO "BuyerAccount" (
+              "shopId",
+              kind,
+              "companyId",
+              "companyLocationId",
+              name,
+              "defaultTermsDays",
+              "defaultTermsSource",
+              "createdAt",
+              "updatedAt"
+            ) VALUES (
+              ${a.shopId},
+              ${a.kind},
+              ${a.companyId},
+              ${a.companyLocationId},
+              ${a.name},
+              ${a.defaultTermsDays},
+              ${a.defaultTermsSource},
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT ("shopId", "companyLocationId")
+            DO UPDATE SET
+              "companyId" = EXCLUDED."companyId",
+              name = EXCLUDED.name,
+              "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "updatedAt" = NOW()
+          `;
+          totalCount += result.count;
+        } catch {
+          // One bad row doesn't lose the others
+        }
+      }
+      continue;
+    }
+
+    // Limited plan: process in small batches with short transactions
+    for (let i = 0; i < shopAccounts.length; i += BATCH_SIZE) {
+      const batch = shopAccounts.slice(i, i + BATCH_SIZE);
+
+      const batchCount = await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${'ba_limit:' + shopId}, 0))`;
+
+        const currentUsage = await countActiveAccounts(tx, shopId);
+        let slotsAvailable = Math.max(0, limit - currentUsage);
+
+        const locationIds = batch.map(a => a.companyLocationId);
+        const existingAccounts = await tx<{ companyLocationId: string }[]>`
+          SELECT "companyLocationId" FROM "BuyerAccount"
+          WHERE "shopId" = ${shopId} AND "companyLocationId" IN ${tx(locationIds)}
+        `;
+        const existingSet = new Set(existingAccounts.map(e => e.companyLocationId));
+
+        let gatedCount = 0;
+        let count = 0;
+
+        for (const a of batch) {
+          const isNew = !existingSet.has(a.companyLocationId);
+          let shouldGate = false;
+
+          if (isNew) {
+            if (slotsAvailable === 0) {
+              shouldGate = true;
+              gatedCount++;
+            } else {
+              slotsAvailable--;
+            }
           }
-          newAccountsProcessed++;
+
+          const result = await tx`
+            INSERT INTO "BuyerAccount" (
+              "shopId",
+              kind,
+              "companyId",
+              "companyLocationId",
+              name,
+              "defaultTermsDays",
+              "defaultTermsSource",
+              gated_at,
+              "createdAt",
+              "updatedAt"
+            ) VALUES (
+              ${a.shopId},
+              ${a.kind},
+              ${a.companyId},
+              ${a.companyLocationId},
+              ${a.name},
+              ${a.defaultTermsDays},
+              ${a.defaultTermsSource},
+              ${shouldGate ? new Date() : null},
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT ("shopId", "companyLocationId")
+            DO UPDATE SET
+              "companyId" = EXCLUDED."companyId",
+              name = EXCLUDED.name,
+              "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "updatedAt" = NOW()
+          `;
+          count += result.count;
         }
 
-        const result = await tx`
-          INSERT INTO "BuyerAccount" (
-            "shopId",
-            kind,
-            "companyId",
-            "companyLocationId",
-            name,
-            "defaultTermsDays",
-            "defaultTermsSource",
-            gated_at,
-            "createdAt",
-            "updatedAt"
-          ) VALUES (
-            ${a.shopId},
-            ${a.kind},
-            ${a.companyId},
-            ${a.companyLocationId},
-            ${a.name},
-            ${a.defaultTermsDays},
-            ${a.defaultTermsSource},
-            ${shouldGate ? new Date() : null},
-            NOW(),
-            NOW()
-          )
-          ON CONFLICT ("shopId", "companyLocationId")
-          DO UPDATE SET
-            "companyId" = EXCLUDED."companyId",
-            name = EXCLUDED.name,
-            "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
-            "updatedAt" = NOW()
-        `;
-        count += result.count;
-      }
+        if (gatedCount > 0) {
+          safeLog("info", "bulk_accounts_gated", { gatedCount, shopHash: shopId.slice(0, 8) });
+        }
 
-      if (gatedCount > 0) {
-        safeLog("info", "bulk_accounts_gated", { gatedCount, kind: "COMPANY" });
-      }
+        return count;
+      });
 
-      return count;
-    });
-
-    totalCount += batchCount;
+      totalCount += batchCount;
+    }
   }
 
   return totalCount;

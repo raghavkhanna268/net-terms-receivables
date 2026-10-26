@@ -203,10 +203,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   }
 
   try {
-    const [storeMode, tagRules, usage] = await Promise.all([
+    const [storeMode, tagRules] = await Promise.all([
       detectStoreMode(sql, shop.id),
       getTagRules(sql, shop.id),
-      getUsageStats(sql, shop.id),
     ]);
 
     const gatingEnforced = isGatingEnforced();
@@ -216,18 +215,36 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       return buildPlanSelectionUrl(shopDomain, handle);
     })();
 
+    // Only call getUsageStats when gating is enforced (fail-soft on error)
+    let newAccountsPausedBanner: NewAccountsPausedBannerState = {
+      show: false,
+      heading: "",
+      bodyText: "",
+      upgradeUrl: null,
+    };
+
+    if (gatingEnforced) {
+      try {
+        const usage = await getUsageStats(sql, shop.id);
+        newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+          usage.companies.current,
+          usage.companies.limit,
+          gatingEnforced,
+          upgradeUrl
+        );
+      } catch (err) {
+        safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+        // Fail soft: no banner on error
+      }
+    }
+
     return {
       storeMode,
       tagRules,
       shopId: shop.id,
       error: null,
       finishingSetup: false,
-      newAccountsPausedBanner: buildNewAccountsPausedBannerState(
-        usage.companies.current,
-        usage.companies.limit,
-        gatingEnforced,
-        upgradeUrl
-      ),
+      newAccountsPausedBanner,
     } satisfies LoaderData;
   } catch (err) {
     safeLog("error", "tag_rules_load_error", {

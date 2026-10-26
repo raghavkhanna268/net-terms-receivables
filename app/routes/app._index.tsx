@@ -274,9 +274,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       };
 
       // Run all main queries in parallel with timing
+      // Only call getUsageStats when gating is enforced (fail-soft: returns null on error)
       const [planResult, usageResult, agingResult, ledgerResult, countResult] = await Promise.all([
         timing.time("plan_resolve", () => resolvePlan(sql, shopDomain)),
-        getUsageStats(sql, shop.id),
+        isGatingEnforced()
+          ? getUsageStats(sql, shop.id).catch((err) => {
+              safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+              return null;
+            })
+          : Promise.resolve(null),
         getShopAgingTotals(sql, shop.id, asOf),
         timing.time("ledger_rows", () =>
           onlyOverLimit
@@ -393,16 +399,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     onlyOverLimit,
     overLimitCount,
     error,
-    newAccountsPausedBanner: buildNewAccountsPausedBannerState(
-      usage?.companies.current ?? 0,
-      usage?.companies.limit ?? 0,
-      gatingEnforced,
-      (() => {
-        const handle = getAppHandle();
-        if (handle === null) return null;
-        return buildPlanSelectionUrl(shopDomain, handle);
-      })()
-    ),
+    newAccountsPausedBanner: usage
+      ? buildNewAccountsPausedBannerState(
+          usage.companies.current,
+          usage.companies.limit,
+          gatingEnforced,
+          (() => {
+            const handle = getAppHandle();
+            if (handle === null) return null;
+            return buildPlanSelectionUrl(shopDomain, handle);
+          })()
+        )
+      : { show: false, heading: "", bodyText: "", upgradeUrl: null },
   };
 
   const headers: HeadersInit = {};

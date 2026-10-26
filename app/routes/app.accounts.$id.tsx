@@ -48,7 +48,7 @@ import {
 import { buildAccountOverLimitBannerState, buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
 import { getSyncErrorInfo, type SyncErrorInfo } from "~/lib/sync-error-info";
-import { safeLog } from "~/lib/log.server";
+import { safeLog, toErrorCode } from "~/lib/log.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
@@ -363,7 +363,29 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   });
 
   const gatingEnforced = isGatingEnforced();
-  const usage = await getUsageStats(sql, shop.id);
+
+  // Only call getUsageStats when gating is enforced (fail-soft on error)
+  let newAccountsPausedBanner: NewAccountsPausedBannerState = {
+    show: false,
+    heading: "",
+    bodyText: "",
+    upgradeUrl: null,
+  };
+
+  if (gatingEnforced) {
+    try {
+      const usage = await getUsageStats(sql, shop.id);
+      newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+        usage.companies.current,
+        usage.companies.limit,
+        gatingEnforced,
+        upgradeUrl
+      );
+    } catch (err) {
+      safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+      // Fail soft: no banner on error
+    }
+  }
 
   return {
     account,
@@ -373,12 +395,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     gatingEnforced,
     reminderOptOut,
     upgradeUrl,
-    newAccountsPausedBanner: buildNewAccountsPausedBannerState(
-      usage.companies.current,
-      usage.companies.limit,
-      gatingEnforced,
-      upgradeUrl
-    ),
+    newAccountsPausedBanner,
     error: null,
   } satisfies LoaderData;
 };

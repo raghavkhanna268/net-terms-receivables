@@ -337,6 +337,9 @@ export async function getUsageStats(
  * Called on plan upgrade via APP_SUBSCRIPTIONS_UPDATE webhook.
  * The caller (T2) is responsible for determining when to call this.
  *
+ * When PLAN_GATING_ENFORCED is off, returns early without any transaction
+ * or lock (no gated accounts can exist when gating is off).
+ *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
  * @returns Number of accounts reactivated
@@ -345,6 +348,11 @@ export async function reactivateGatedAccounts(
   sql: Sql,
   shopId: string
 ): Promise<number> {
+  // Flag off: no gated accounts exist, nothing to reactivate
+  if (!isGatingEnforced()) {
+    return 0;
+  }
+
   const plan = await getPlanByShopId(sql, shopId);
   const newLimit = planLimit(plan, "companies");
 

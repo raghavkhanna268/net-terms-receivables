@@ -99,7 +99,8 @@ export interface NewAccountsPausedBannerState {
 
 /**
  * Build the banner state for the "new accounts paused" condition.
- * Shows on Dashboard, account detail (app.accounts.$id), Plan page, and Tag rules page.
+ * Shows on Dashboard, account detail (app.accounts.$id), Plan page, Tag rules page,
+ * and Onboarding page.
  *
  * Displayed when gating is enforced and the shop has reached its plan limit.
  *

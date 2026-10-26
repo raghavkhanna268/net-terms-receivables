@@ -409,18 +409,23 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   };
 
   if (gatingEnforced) {
-    const usage = await getUsageStats(sql, dbData.shopId);
-    const upgradeUrl = (() => {
-      const handle = getAppHandle();
-      if (handle === null) return null;
-      return buildPlanSelectionUrl(shopDomain, handle);
-    })();
-    newAccountsPausedBanner = buildNewAccountsPausedBannerState(
-      usage.companies.current,
-      usage.companies.limit,
-      gatingEnforced,
-      upgradeUrl
-    );
+    try {
+      const usage = await getUsageStats(sql, dbData.shopId);
+      const upgradeUrl = (() => {
+        const handle = getAppHandle();
+        if (handle === null) return null;
+        return buildPlanSelectionUrl(shopDomain, handle);
+      })();
+      newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+        usage.companies.current,
+        usage.companies.limit,
+        gatingEnforced,
+        upgradeUrl
+      );
+    } catch (err) {
+      safeLog("warn", "usage_stats_error", { shopHash: await shopHash(shopDomain), err: toErrorCode(err) });
+      // Fail soft: no banner on error
+    }
   }
 
   return {
