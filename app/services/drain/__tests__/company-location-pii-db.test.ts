@@ -696,7 +696,6 @@ describeWithDb("bulkUpsertBuyerAccounts split-chunk behavior (DB)", () => {
       const { bulkUpsertBuyerAccounts } = await import(
         "~/services/sync/company-location.server"
       );
-      type MappedBuyerAccount = Awaited<typeof import("~/services/sync/company-location.server")>["MappedBuyerAccount"];
 
       const companyId = `gid://shopify/Company/co-preserve-${TEST_SUFFIX}`;
       const locationId = `gid://shopify/CompanyLocation/loc-preserve-${TEST_SUFFIX}`;
