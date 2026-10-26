@@ -1,7 +1,7 @@
 # This file stores configurations for your Shopify app.
 # The client_id will be populated when you run `shopify app config link`
 client_id = "dbfae79a0ca15489c7467598bce10965"
-name = "Net Terms Receivables"
+name = "Termwise: Net Terms & Credit"
 application_url = "https://net-terms-receivables.raghavkhanna.workers.dev"
 embedded = true
 

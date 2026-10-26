@@ -1,10 +1,10 @@
-# App Store Listing — Net Terms Receivables
+# App Store Listing — Termwise: Net Terms & Credit
 
 ---
 
 ## App Name
 
-**Net Terms Receivables**
+**Termwise: Net Terms & Credit**
 
 ---
 
