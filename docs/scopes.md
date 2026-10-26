@@ -6,9 +6,22 @@ This document lists all OAuth scopes requested by the Net Terms Receivables app,
 
 **S24 scope reduction**: Dropped `read_companies`, `read_customers`, `read_orders` because write scopes imply read access. Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/access-scopes) 'How it works' section: "Any scope that writes a resource also grants read access to it, so request the write scope only when your app needs both."
 
-## Production Scopes (8 total)
+## Production Scopes (9 total)
 
-### Read Scopes (2)
+### Read Scopes (3)
+
+#### read_all_orders
+
+**Requested:** 25 Oct 2026 22:13 IST; grant evidence accepted by Team Lead (WTB, Partners API access card, 22:23 IST: no Request button, no explicit Approved label); to be confirmed by DevOps's post-release granted-scopes check
+
+Extends `write_orders` (which implies `read_orders`) to access orders older than 60 days.
+
+| Feature | Step | API Call | Reference |
+|---------|------|----------|-----------|
+| Historical order backfill | S6 | `bulkOperationRunQuery` with orders | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
+| Order refetch for reconciliation | S10b | `order` query | [order query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/order) |
+
+> **Why needed:** Net-60/90 payment terms mean invoices can be due or overdue beyond the default 60-day order window. Without this scope, aging reports, payment reconciliation, and historical backfills break for orders older than 60 days. See `docs/launch-checklist/read-all-orders-request.md` for full justification.
 
 #### read_draft_orders
 
@@ -50,7 +63,7 @@ Implies `read_customers` per [Access Scopes](https://shopify.dev/docs/api/usage/
 | Bulk customer export | S8 | `bulkOperationRunQuery` with customers | [bulkOperationRunQuery](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/bulkOperationRunQuery) |
 | Customer webhooks | S8 | `customers/create`, `customers/update`, `customers/delete` | [Webhook topics](https://shopify.dev/docs/api/admin-rest/2026-10/resources/webhook) |
 
-> **Protected Customer Data (2026-10-23):** Level 1 + Name + Email approved. Fields fetched: `id`, `tags`, `email`, `displayName`. Fields NEVER fetched: `phone`, `addresses`, `firstName`, `lastName`, `defaultAddress`. See "Protected Customer Data" section below.
+> **Protected Customer Data:** PCD Level 1 (Name, Email): requested/draft, not approved. Fields fetched: `id`, `tags`, `email`, `displayName`. Fields NEVER fetched: `phone`, `addresses`, `firstName`, `lastName`, `defaultAddress`. See "Protected Customer Data" section below.
 
 #### write_orders
 
@@ -88,13 +101,12 @@ Implies `read_orders` per [Access Scopes](https://shopify.dev/docs/api/usage/acc
 | Feature | Step | Mutation | Reference |
 |---------|------|----------|-----------|
 | Fulfillment hold on overdue accounts | S13 | `fulfillmentOrderHold` | [fulfillmentOrderHold](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/fulfillmentOrderHold) |
-| Release fulfillment hold | S13 | `fulfillmentOrderReleaseHold` | [fulfillmentOrderReleaseHold](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/fulfillmentOrderReleaseHold) |
 
-> **Pre-granted for S13**: Hold fulfillment for orders from accounts that are overdue or on credit hold. Both mutations require `write_merchant_managed_fulfillment_orders` OR `write_third_party_fulfillment_orders`. Since this app is merchant-facing (not a fulfillment service), we use `write_merchant_managed_fulfillment_orders`.
+> **Pre-granted for S13**: Hold fulfillment for orders from accounts that are overdue or on credit hold via `fulfillmentOrderHold` (see `app/services/backstop.server.ts`). Requires `write_merchant_managed_fulfillment_orders` OR `write_third_party_fulfillment_orders`. Since this app is merchant-facing (not a fulfillment service), we use `write_merchant_managed_fulfillment_orders`.
 
 ## Dev Seed Script
 
-The seed script (`scripts/seed.ts`) runs with **the same 8 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than the one in the `ALLOWED_DEV_STORE` env var (a GitHub Actions secret in CI), and refuses to run at all if it is unset.
+The seed script (`scripts/seed.ts`) runs with **the same 9 production scopes** — no separate dev app needed. It uses **only the dev-store token** (`SHOPIFY_ADMIN_TOKEN` env var) and refuses to run on any shop other than the one in the `ALLOWED_DEV_STORE` env var (a GitHub Actions secret in CI), and refuses to run at all if it is unset.
 
 ### How the Seed Uses Production Scopes
 
@@ -133,17 +145,16 @@ Orders are backdated using `processedAt` from [OrderCreateOrderInput](https://sh
 - **`write_payment_terms`**: Not needed. Payment terms are configured via `companyLocationUpdate` (requires `write_companies`).
 - **`write_draft_orders`**: Not in production. For local dev, create `shopify.app.dev.toml`.
 - **`read_locations`**: Not requested. Not needed for app functionality.
-- **`read_all_orders`**: Protected scope. Requires separate Partner Dashboard approval. See `docs/launch-checklist/read-all-orders-request.md`.
 
-## Final Production Scope List (8)
+## Final Production Scope List (9)
 
 ```
-read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
+read_all_orders,read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations
 ```
 
 ## Protected Customer Data
 
-**Approval date:** 2026-10-23
+**Status:** PCD Level 1 (Name, Email): requested/draft, not approved
 
 **Level:** Level 1 + Name + Email
 
