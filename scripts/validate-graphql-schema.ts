@@ -1111,12 +1111,13 @@ function runSelfTests(schema: GraphQLSchema): boolean {
  * - Are generic wrapper functions where queries are passed in (validated elsewhere)
  */
 const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
-  "after-auth.server.ts", // Uses SHOP_TIMEZONE_QUERY constant
+  "after-auth.server.ts", // Uses SHOP_AUTH_INFO_QUERY constant
   "metafield-definitions.server.ts", // Uses METAFIELD_DEFINITION_CREATE_MUTATION constant
   "validation-registration.server.ts", // Uses VALIDATIONS_QUERY, VALIDATION_CREATE_MUTATION constants
   "payment-customization-registration.server.ts", // Uses PAYMENT_CUSTOMIZATIONS_QUERY, PAYMENT_CUSTOMIZATION_CREATE_MUTATION constants
   "shopify-client.server.ts", // Generic wrapper that takes query as parameter
   "app.onboarding.tsx", // Uses METAFIELD_DEFINITIONS_QUERY constant (S23-02)
+  "shop-config.server.ts", // #292: Uses WRITE_SHOP_CONFIG_MUTATION constant for INR-only shop_config
 ];
 
 /**
