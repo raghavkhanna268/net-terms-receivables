@@ -418,32 +418,24 @@ export async function getBulkOperationMetadata(
  *
  * #293: Only updates rows where closed_at IS NULL to prevent reopening closed rows.
  *
- * R1: Owner-checked with processing_lease_token when provided.
- * Note: During error paths, the processor may not have a lease yet (e.g., status fetch failed
- * before lease acquired), so leaseToken is optional here. But when provided, it must match.
+ * R1: Owner-checked with processing_lease_token to prevent stale processor A
+ * from incrementing failure_count after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function incrementBulkOperationFailureCount(
   sql: import("~/lib/db-light.server").Sql,
   bulkOperationId: string,
-  leaseToken?: string
-): Promise<number> {
-  const [row] = leaseToken
-    ? await sql<{ failure_count: number }[]>`
-        UPDATE s6_bulk_operations
-        SET failure_count = failure_count + 1
-        WHERE bulk_operation_id = ${bulkOperationId}
-          AND closed_at IS NULL
-          AND processing_lease_token = ${leaseToken}
-        RETURNING failure_count
-      `
-    : await sql<{ failure_count: number }[]>`
-        UPDATE s6_bulk_operations
-        SET failure_count = failure_count + 1
-        WHERE bulk_operation_id = ${bulkOperationId}
-          AND closed_at IS NULL
-        RETURNING failure_count
-      `;
-  return row?.failure_count ?? 0;
+  leaseToken: string
+): Promise<{ rowUpdated: boolean; failureCount: number }> {
+  const [row] = await sql<{ failure_count: number }[]>`
+    UPDATE s6_bulk_operations
+    SET failure_count = failure_count + 1
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
+    RETURNING failure_count
+  `;
+  return { rowUpdated: row !== undefined, failureCount: row?.failure_count ?? 0 };
 }
 
 /**

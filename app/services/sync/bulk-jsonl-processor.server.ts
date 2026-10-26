@@ -1327,7 +1327,7 @@ export async function processBulkOperation(
     }
 
     // Retryable failure: increment failure count (owner-checked)
-    const newFailureCount = await incrementBulkOperationFailureCount(
+    const { failureCount: newFailureCount } = await incrementBulkOperationFailureCount(
       sql,
       bulkOperationId,
       leaseToken
@@ -1372,7 +1372,7 @@ export async function processBulkOperation(
     }
 
     // Retryable error - increment failure count (owner-checked)
-    const newFailureCount = await incrementBulkOperationFailureCount(
+    const { failureCount: newFailureCount } = await incrementBulkOperationFailureCount(
       sql,
       bulkOperationId,
       leaseToken
