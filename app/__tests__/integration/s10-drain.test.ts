@@ -14,14 +14,28 @@ import { sqlOptions } from "~/lib/db-light.server";
  * 5. No-handler visibility extension via pgmq.set_vt
  *
  * Tests run against the CI Postgres with pgmq extension.
+ *
+ * ONE CLOCK = THE DB CLOCK. Tests read NOW() from Postgres, then sync the JS
+ * clock to it with vi.setSystemTime(). All date values are derived from that
+ * same DB instant to avoid JS/DB clock disagreement.
  */
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+/**
+ * Generate a letters-only random string (a-z) to avoid /\d{5,}/ assertion conflicts.
+ */
+function lettersOnlyId(len: number): string {
+  return Array.from({ length: len }, () =>
+    String.fromCharCode(97 + Math.floor(Math.random() * 26))
+  ).join("");
+}
+
 describeWithDb("S10 Drain Integration", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36);
+  let dbNow: Date;
+  const TEST_SUFFIX = lettersOnlyId(8);
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -52,6 +66,15 @@ describeWithDb("S10 Drain Integration", () => {
     await sql.end();
   });
 
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    dbNow = await syncClockToDb(sql);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   describe("s6_dead_letter table", () => {
     it("table exists", async () => {
       const [result] = await sql<{ exists: boolean }[]>`
@@ -69,7 +92,7 @@ describeWithDb("S10 Drain Integration", () => {
         shop: `test-${TEST_SUFFIX}.myshopify.com`,
         webhookId: `test-${TEST_SUFFIX}-wh1`,
         resourceGid: "gid://shopify/Company/123",
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       // Insert a dead-lettered message
@@ -111,7 +134,7 @@ describeWithDb("S10 Drain Integration", () => {
         shop: `test-${TEST_SUFFIX}.myshopify.com`,
         webhookId: `test-${TEST_SUFFIX}-wh2`,
         resourceGid: "gid://shopify/Order/456",
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
         metadata: {
           nested: {
             value: 123,
@@ -161,7 +184,7 @@ describeWithDb("S10 Drain Integration", () => {
         topic: "RECONCILE_COMPANIES",
         shop: `test-${TEST_SUFFIX}.myshopify.com`,
         webhookId: `reconcile-${TEST_SUFFIX}-1`,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       // Send to s6_sync queue
@@ -188,7 +211,8 @@ describeWithDb("S10 Drain Integration", () => {
 
     it("reconcile webhookId is idempotent per day", async () => {
       // The pattern is reconcile:<shop>:<YYYY-MM-DD>:<kind>
-      const today = new Date().toISOString().split("T")[0];
+      // Use dbNow (synced to DB clock) to get the date
+      const today = dbNow.toISOString().split("T")[0];
       const expectedId = `reconcile:test.myshopify.com:${today}:companies`;
 
       // Verify the pattern format
@@ -197,24 +221,13 @@ describeWithDb("S10 Drain Integration", () => {
   });
 
   describe("no-handler visibility extension", () => {
-    beforeEach(() => {
-      vi.useFakeTimers({ toFake: ["Date"] });
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
     it("can extend message visibility with pgmq.set_vt", async () => {
-      // Sync JS clock to DB clock so Date.now() matches DB NOW()
-      await syncClockToDb(sql);
-
       const testMsg = {
         topic: "UNKNOWN_FUTURE_TOPIC",
         shop: `test-${TEST_SUFFIX}.myshopify.com`,
         webhookId: `unknown-${TEST_SUFFIX}-1`,
         resourceGid: "gid://shopify/Unknown/123",
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       // Send message
@@ -233,9 +246,9 @@ describeWithDb("S10 Drain Integration", () => {
       `;
       expect(vtResult.vt).toBeDefined();
 
-      // The new vt should be approximately 1 hour from now (using synced JS clock)
+      // The new vt should be approximately 1 hour from now (using synced DB clock)
       const newVt = new Date(vtResult.vt);
-      const oneHourFromNow = new Date(Date.now() + 3600 * 1000);
+      const oneHourFromNow = new Date(dbNow.getTime() + 3600 * 1000);
       const diffMs = Math.abs(newVt.getTime() - oneHourFromNow.getTime());
       expect(diffMs).toBeLessThan(5000); // Within 5 seconds
 

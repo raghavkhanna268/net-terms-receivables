@@ -29,7 +29,7 @@ describe("getSyncErrorInfo", () => {
     it.each(SESSION_ERROR_CODES)("maps %s to session category", (code) => {
       const result = getSyncErrorInfo(code);
       expect(result.category).toBe("session");
-      expect(result.message).toContain("reopen the app or reinstall");
+      expect(result.message).toContain("Reopen the app, or reinstall");
     });
 
     it.each(SESSION_ERROR_CODES)("message for %s does NOT contain raw code", (code) => {
@@ -81,7 +81,7 @@ describe("getSyncErrorInfo", () => {
     it("maps null to generic category", () => {
       const result = getSyncErrorInfo(null);
       expect(result.category).toBe("generic");
-      expect(result.message).toContain("multiple failures");
+      expect(result.message).toContain("multiple attempts");
     });
 
     it("message for null is user-friendly", () => {
@@ -101,9 +101,9 @@ describe("getSyncErrorInfo", () => {
       expect(result.message).toMatch(/permission/i);
     });
 
-    it("owner message mentions company/customer", () => {
+    it("owner message mentions company location or customer", () => {
       const result = getSyncErrorInfo("owner_not_found");
-      expect(result.message).toMatch(/company.*customer|customer.*company/i);
+      expect(result.message).toMatch(/company location or customer/i);
     });
 
     it("all messages except owner_not_found mention retries stopped", () => {

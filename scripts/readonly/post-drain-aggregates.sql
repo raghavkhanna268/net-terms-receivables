@@ -4,7 +4,14 @@
 -- or individual buyer/invoice/order IDs (QA 2 audit: aggregates only).
 -- Vars: since (ISO timestamp, redrive start), location_id (CompanyLocation numeric id
 --       of one held account for the overdue drill-down, passed as workflow input).
--- Usage: psql -v since='2026-10-24T08:29:23Z' -v location_id='...' -f ...
+--       allowed, e2e (masked secrets, passed by prod-readonly-query.yml) for shop_kind.
+-- shop_kind: identity label from the canonical shop_labels CTE
+-- (scripts/ci/shop-labels.ts). 'main' = the shop whose domain is :'allowed'
+-- (ALLOWED_DEV_STORE), 'e2e' = :'e2e' (E2E_SHOP), 'other_N' = the rest ranked by
+-- Shop.id within this run only (N is stable within one run but does NOT identify
+-- a shop across runs), 'unknown' for every shop if a secret is empty or both are
+-- equal. Domains are compared, never printed.
+-- Usage: psql -v since='2026-10-24T08:29:23Z' -v location_id='...' -v allowed=... -v e2e=... -f ...
 -- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
 -- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
 -- @col topic, original_queue, error_format, error_disposition, error_code, status, due_basis, action, account_hold_state, kind, holdState, defaultTermsSource, dueSource, dueBasis: enum
@@ -123,7 +130,18 @@ FROM
 GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
 
 \echo '== Invoice totals by status / past-due bucket / dueBasis (dueAt; overdue_rule = backstop rule dueAt < now()-1d)'
-SELECT DENSE_RANK() OVER (ORDER BY i."shopId") AS shop_idx, i.status,
+WITH shop_labels AS (
+  SELECT s.id AS shop_id,
+         CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+              WHEN s.domain = :'allowed' THEN 'main'
+              WHEN s.domain = :'e2e' THEN 'e2e'
+              ELSE 'other_' || (ROW_NUMBER() OVER (
+                     PARTITION BY s.domain IN (:'allowed', :'e2e')
+                     ORDER BY s.id))::text
+         END AS shop_kind
+  FROM "Shop" s
+)
+SELECT sl.shop_kind, i.status,
        CASE WHEN i.status <> 'open' THEN '-'
             WHEN i."dueAt" IS NULL THEN 'open_no_due'
             WHEN i."dueAt" < NOW() THEN 'past_due'
@@ -134,7 +152,8 @@ SELECT DENSE_RANK() OVER (ORDER BY i."shopId") AS shop_idx, i.status,
        COUNT(*) FILTER (WHERE i.status = 'open' AND i.outstanding > 0
                         AND i."dueAt" < NOW() - INTERVAL '1 day') AS overdue_rule_count
 FROM "Invoice" i
-GROUP BY i."shopId", 2, 3, 4 ORDER BY 1, 2, 3, 4;
+LEFT JOIN shop_labels sl ON sl.shop_id = i."shopId"
+GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;
 
 \echo '== backstop_processed_orders by action/reason (all-time / since redrive start)'
 SELECT action, COALESCE(CASE reason

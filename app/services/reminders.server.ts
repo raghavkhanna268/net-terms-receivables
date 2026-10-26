@@ -49,6 +49,7 @@ import {
   isAllowlistEnforced,
 } from "./recipient-allowlist.server";
 import { sendViaResend } from "./resend-client.server";
+import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 
 /**
  * Merchant info fetched from Admin GraphQL for Reply-To and email footer.
@@ -262,15 +263,12 @@ const SEND_WINDOW_END = 19;
 /**
  * Check if reminder sending is enabled.
  * Requires BOTH RESEND_API_KEY AND RESEND_FROM to be set.
+ * Delegates to shared leaf module for consistency with onboarding step.
  */
 export function isReminderSendingEnabled(
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {}
 ): boolean {
-  const key = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
-  const from = env.RESEND_FROM ?? process.env.RESEND_FROM;
-  const hasKey = typeof key === "string" && key.trim().length > 0;
-  const hasFrom = typeof from === "string" && from.trim().length > 0;
-  return hasKey && hasFrom;
+  return isEmailSendingConfigured(env);
 }
 
 /**
@@ -675,6 +673,32 @@ export async function hasNewerStageDueToday(
     ) AS "hasNewer"
   `;
   return row?.hasNewer ?? false;
+}
+
+/**
+ * Check if a sibling rule (same offsetDays, different ruleId) already sent
+ * for this invoice. Used by catch-up path to prevent duplicate sends when
+ * duplicate ReminderRule rows exist for the same (shopId, offsetDays, channel).
+ */
+export async function hasSiblingRuleSent(
+  sql: Sql,
+  shopId: string,
+  invoiceId: string,
+  ruleId: string,
+  offsetDays: number
+): Promise<boolean> {
+  const [row] = await sql<{ hasSibling: boolean }[]>`
+    SELECT EXISTS(
+      SELECT 1 FROM "ReminderLog" rl
+      INNER JOIN "ReminderRule" r ON r.id = rl."ruleId"
+      WHERE rl."shopId" = ${shopId}
+        AND rl."invoiceId" = ${invoiceId}
+        AND rl."ruleId" != ${ruleId}
+        AND rl.status = 'sent'::"ReminderLogStatus"
+        AND r."offsetDays" = ${offsetDays}
+    ) AS "hasSibling"
+  `;
+  return row?.hasSibling ?? false;
 }
 
 /**
@@ -1532,6 +1556,22 @@ export async function sendCatchupReminder(
     };
   }
 
+  // Gate 10b: Check if a sibling rule (same offsetDays) already sent for this invoice.
+  // Prevents duplicate sends when duplicate ReminderRule rows exist.
+  const siblingAlreadySent = await hasSiblingRuleSent(sql, shopId, invoiceId, ruleId, offsetDays);
+  if (siblingAlreadySent) {
+    await sql`
+      UPDATE "ReminderLog"
+      SET status = 'skipped_daily_limit'::"ReminderLogStatus"
+      WHERE "shopId" = ${shopId} AND "ruleId" = ${ruleId} AND "invoiceId" = ${invoiceId} AND status = 'delayed'::"ReminderLogStatus"
+    `;
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Sibling rule already sent for this invoice",
+    };
+  }
+
   // Gate 11: Check if a newer stage exists (latest-stage-wins)
   const newerStageExists = await hasNewerStageForInvoice(sql, shopId, invoiceId, ruleId, offsetDays);
   if (newerStageExists) {
@@ -2052,6 +2092,7 @@ export const DEFAULT_RULE_OFFSETS = [-3, 0, 7] as const;
  * Skips seeding entirely if:
  * - Shop already has a settings row (not first visit)
  * - Shop has any ReminderLog history (has used reminders before)
+ * - Shop already has ReminderRule rows (e.g., from migration seed)
  *
  * Concurrency-safe: Uses pg_advisory_xact_lock plus INSERT ... ON CONFLICT
  * to prevent duplicate inserts from concurrent requests.
@@ -2095,8 +2136,17 @@ export async function ensureDefaultReminderRules(
       RETURNING shop_id
     `;
 
-    // Only seed rules if we just created the settings row for the first time
+    // If settings row already existed, skip seeding entirely
     if (inserted.length === 0) {
+      return { seeded: false, count: 0 };
+    }
+
+    // Check for existing ReminderRule rows (e.g., from migration seed).
+    // If rules already exist, keep them and skip re-seeding to prevent duplicates.
+    const [rulesCheck] = await tx<{ hasRules: boolean }[]>`
+      SELECT EXISTS(SELECT 1 FROM "ReminderRule" WHERE "shopId" = ${shopId}) AS "hasRules"
+    `;
+    if (rulesCheck?.hasRules) {
       return { seeded: false, count: 0 };
     }
 
