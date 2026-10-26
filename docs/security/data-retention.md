@@ -50,6 +50,7 @@
 | `s10b_purge_old_refetch_null` | `0 4 * * *` (daily 04:00 UTC) | Delete order refetch null counts older than 90 days | `20261024030000_s10b_nightly_reconcile/migration.sql:175-179` |
 | `s20_webhook_receipts_cleanup` | `30 4 * * *` (daily 04:30 UTC) | Delete webhook receipts older than 30 days | `20261025010000_s20_webhook_receipts/migration.sql:69-73` |
 | `purge_old_order_outstanding_missing` | `30 4 * * *` (daily 04:30 UTC) | Delete order outstanding missing counts older than 90 days | `20261026010000_order_outstanding_missing/migration.sql:50-54` |
+| `pgmq_purge_archives_30d` | `30 5 * * *` (daily 05:30 UTC) | Delete pgmq archive rows (`a_s6_sync`, `a_s6_bulk`) archived more than 30 days ago | `20261125000000_pgmq_archive_purge_schedule/migration.sql:24-28` |
 | `s10b_purge_old_pii_fallback` | `15 4 * * *` (daily 04:15 UTC) | Delete customer PII fallback counts older than 90 days | `20261027000000_s10b_customer_pii_fallback/migration.sql:47-51` |
 | `backstop-purge-30d` | `0 3 * * *` (daily 03:00 UTC) | Delete backstop processed orders older than 30 days | `20261028000000_s13_backstop_table/migration.sql:61-65` |
 | `credit_status_daily_sweep` | `0 19 * * *` (daily 19:00 UTC) | Enqueue credit status recomputes | `20261029010000_credit_status_daily_sweep/migration.sql:167-171` |
@@ -72,7 +73,7 @@
 
    Processed sync-queue messages are kept for 30 days for troubleshooting, then deleted.
 
-   Status: the purge function `public.pgmq_purge_archives_30d()` (`prisma/migrations/20261124000000_pgmq_archive_purge/migration.sql`) is defined but not scheduled yet; the nightly job is enabled only with the owner's OK. Until then the archive tables `pgmq.a_s6_sync` and `pgmq.a_s6_bulk` are not purged on a schedule.
+   Status: scheduled daily. The pg_cron job `pgmq_purge_archives_30d` (`30 5 * * *`, daily 05:30 UTC; `prisma/migrations/20261125000000_pgmq_archive_purge_schedule/migration.sql`) runs `public.pgmq_purge_archives_30d()` (`prisma/migrations/20261124000000_pgmq_archive_purge/migration.sql`), which deletes rows archived more than 30 days ago from `pgmq.a_s6_sync` and `pgmq.a_s6_bulk` in bounded batches.
 
 4. **AuditEvent:** Access events (`access.*` types) are purged after 365 days by the daily pg_cron job `audit_purge_access_events_365d` (03:30 UTC). Financial events (`match.*`, `invoice.*`, `account.*`) are not purged by schedule and are deleted only by the shop/redact FK cascade (`compliance.server.ts:230`, `prisma/migrations/20261022000001_s5_data_model/migration.sql:284`). See `prisma/migrations/20261115000000_access_event_purge/migration.sql`.
 

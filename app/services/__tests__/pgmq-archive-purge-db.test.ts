@@ -68,17 +68,12 @@ describeWithDb("pgmq archive 30-day purge (DB)", () => {
     return rows.map((r) => Number(r.id));
   }
 
-  it("is defined and not scheduled", async () => {
+  // Scheduling is covered by pgmq-archive-purge-schedule-db.test.ts
+  // (20261125000000_pgmq_archive_purge_schedule).
+  it("is defined", async () => {
     const [fn] = await sql`
       SELECT to_regprocedure('public.pgmq_purge_archives_30d(integer, integer)') IS NOT NULL AS ok`;
     expect(fn.ok).toBe(true);
-    const [cron] = await sql`
-      SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') AS has_cron`;
-    if (cron.has_cron) {
-      const jobs = await sql`
-        SELECT 1 FROM cron.job WHERE command ILIKE '%pgmq_purge_archives_30d%'`;
-      expect(jobs).toHaveLength(0);
-    }
   });
 
   it("archive tables have an archived_at index for the purge predicate", async () => {
