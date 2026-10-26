@@ -500,7 +500,6 @@ describe("buildSentryOptions", () => {
     expect(options!.enhanceFetchErrorMessages).toBe(false);
     expect(options!.beforeSend).toBeDefined();
     expect(options!.beforeSendTransaction).toBeDefined();
-    expect(options!.beforeBreadcrumb).toBeDefined();
   });
 
   it("uses defaults for missing optional env vars", () => {

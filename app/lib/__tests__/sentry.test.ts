@@ -177,7 +177,7 @@ describe("sentry.ts", () => {
     });
 
     describe("request scrubbing", () => {
-      it("keeps only allowlisted headers (content-type, cf-ray)", () => {
+      it("deletes ALL request headers (#361 restrictive policy)", () => {
         const event = {
           request: {
             headers: {
@@ -191,12 +191,8 @@ describe("sentry.ts", () => {
         };
 
         const result = beforeSend(event, {});
-        const headers = result?.request?.headers as Record<string, string>;
 
-        expect(headers["content-type"]).toBe("application/json");
-        expect(headers["cf-ray"]).toBe("abc123");
-        expect(headers["user-agent"]).toBeUndefined();
-        expect(headers["Authorization"]).toBeUndefined();
+        expect(result?.request?.headers).toBeUndefined();
       });
 
       it("deletes request.cookies", () => {
