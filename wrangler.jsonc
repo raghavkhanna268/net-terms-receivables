@@ -48,7 +48,10 @@
     // When OFF (default): Plan resolution, banner, usage work but limits are not enforced.
     // When ON: Over-limit accounts are gated (gated_at set) and blocked from operations.
     // Expected Partner Dashboard plan names: Free, Starter, Growth, Scale (case-insensitive)
-    "PLAN_GATING_ENFORCED": "false"
+    "PLAN_GATING_ENFORCED": "false",
+    // Sentry environment tag. Production deploys set this via wrangler vars.
+    // SENTRY_RELEASE is injected at deploy time via --var SENTRY_RELEASE:${{ steps.main-head.outputs.sha }}
+    "SENTRY_ENVIRONMENT": "production"
   },
 
   "observability": {

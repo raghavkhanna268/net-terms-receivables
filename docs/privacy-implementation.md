@@ -201,21 +201,24 @@ Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafi
 
 ### Sentry Error Events — Data Scrubbing
 
-When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry.ts:140-150`) before transmission:
+When Sentry is enabled, error events are scrubbed by `beforeSend` and `beforeSendTransaction` hooks (`app/lib/sentry.ts:388-397`) before transmission:
 
 **Removed entirely:**
-- `request.headers`, `request.cookies`, `request.query_string`, `request.data` (lines 85-95)
-- `event.breadcrumbs` (line 115)
+- `event.user` (`sentry.ts:272`)
+- `request.headers` — **no request headers are sent to Sentry** (`sentry.ts:275`)
+- `request.cookies`, `request.query_string`, `request.data`, `request.env` (`sentry.ts:276-279`)
+- `event.breadcrumbs` (`sentry.ts:360`)
 
 **Transformed:**
-- `request.url` — query string stripped (lines 89-92)
-- `exception.value` — replaced with error code via `toErrorCode` (lines 99-106)
-- `event.message` — redacted via `redactString` (lines 110-112)
+- `request.url` — converted to route template via `toRouteTemplate` (`sentry.ts:282`)
+- `exception.value` — replaced with error code via `toErrorCode` (`sentry.ts:289-293`)
+- `event.message` — replaced with safe code via `scrubMessage` (`sentry.ts:319-326`)
+- `event.transaction` — converted to route template (`sentry.ts:337-339`)
 
 **Scrubbed to allowlist:**
-- `event.extra`, `event.tags`, `event.contexts` — only keys in `ALLOWED_SENTRY_KEYS` (lines 37-46) are retained: `shopId`, `code`, `requestId`, `webhookId`, `jobId`, `topic`, `status`, `errorCode`
+- `event.extra`, `event.tags`, `event.contexts` — only keys in `ALLOWED_SENTRY_KEYS` (`sentry.ts:54-62`) are retained: `shopId`, `code`, `requestId`, `jobId`, `topic`, `status`, `errorCode`
 
-**Disabled via `dataCollection` config (lines 19-31):**
+**Disabled via `RESTRICTIVE_DATA_COLLECTION` config (`sentry.ts:19-31`):**
 - `userInfo`, `cookies`, `httpHeaders`, `httpBodies`, `urlQueryParams`, `graphQL`, `genAI`, `databaseQueryData`, `queues`, `stackFrameVariables`, `frameContextLines`
 
 ---

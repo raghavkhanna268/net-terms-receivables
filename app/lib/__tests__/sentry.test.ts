@@ -177,10 +177,15 @@ describe("sentry.ts", () => {
     });
 
     describe("request scrubbing", () => {
-      it("deletes request.headers", () => {
+      it("deletes ALL request headers (#361 restrictive policy)", () => {
         const event = {
           request: {
-            headers: { Authorization: "Bearer shpat_secret" },
+            headers: {
+              Authorization: "Bearer shpat_secret",
+              "content-type": "application/json",
+              "user-agent": "Test/1.0",
+              "cf-ray": "abc123",
+            },
             url: "https://example.com/app",
           },
         };

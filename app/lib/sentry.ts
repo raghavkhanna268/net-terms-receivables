@@ -68,6 +68,8 @@ const ALLOWED_SENTRY_KEYS = new Set([
 export interface SentryEnv {
   SENTRY_DSN?: string;
   SENTRY_TRACES_SAMPLE_RATE?: string;
+  SENTRY_RELEASE?: string;
+  SENTRY_ENVIRONMENT?: string;
 }
 
 /**
@@ -381,8 +383,9 @@ function scrubEvent(event: SentryEvent): SentryEvent {
 
 /**
  * beforeSend hook for scrubbing PII from Sentry events.
+ * Exported for leak testing to verify production scrubbing behavior.
  */
-function beforeSend(event: ErrorEvent, _hint: EventHint): ErrorEvent | null {
+export function beforeSend(event: ErrorEvent, _hint: EventHint): ErrorEvent | null {
   return scrubEvent(event) as ErrorEvent;
 }
 
@@ -391,6 +394,48 @@ function beforeSend(event: ErrorEvent, _hint: EventHint): ErrorEvent | null {
  */
 function beforeSendTransaction(event: TransactionEvent, _hint: EventHint): TransactionEvent | null {
   return scrubEvent(event) as TransactionEvent;
+}
+
+/**
+ * Options returned by buildSentryOptions for Sentry SDK initialization.
+ * Exported for leak testing to ensure tests use the exact same configuration.
+ */
+export interface SentryOptions {
+  dsn: string;
+  release?: string;
+  environment: string;
+  tracesSampleRate: number;
+  dataCollection: DataCollection;
+  enhanceFetchErrorMessages: false;
+  beforeSend: typeof beforeSend;
+  beforeSendTransaction: typeof beforeSendTransaction;
+}
+
+/**
+ * Build Sentry SDK options from environment variables.
+ * Returns undefined if DSN is not set (no-op mode).
+ *
+ * This is exported for leak testing to ensure tests use the exact same
+ * configuration as production. Use it in tests with a fake DSN.
+ *
+ * @param env - Environment variables containing SENTRY_* config
+ * @returns Sentry options or undefined if no DSN
+ */
+export function buildSentryOptions<E extends SentryEnv>(env: E): SentryOptions | undefined {
+  const dsn = env.SENTRY_DSN;
+  if (!dsn) {
+    return undefined;
+  }
+  return {
+    dsn,
+    release: env.SENTRY_RELEASE || undefined,
+    environment: env.SENTRY_ENVIRONMENT || "development",
+    tracesSampleRate: parseFloat(env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
+    dataCollection: RESTRICTIVE_DATA_COLLECTION,
+    enhanceFetchErrorMessages: false,
+    beforeSend,
+    beforeSendTransaction,
+  };
 }
 
 /**
@@ -417,27 +462,7 @@ export function wrapWithSentry<E extends SentryEnv>(
   handler: ExportedHandler<E>
 ): ExportedHandler<E> {
   return sentryWithSentry(
-    (env: E) => {
-      const dsn = env.SENTRY_DSN;
-      if (!dsn) {
-        return undefined;
-      }
-      return {
-        dsn,
-        tracesSampleRate: parseFloat(env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
-        // A1: Disable all automatic data collection. @sentry/core 11.8.0 replaced
-        // sendDefaultPii with dataCollection, which defaults to permissive settings.
-        // Shopify request URLs carry shop/host/hmac query params, so we must disable
-        // urlQueryParams, cookies, httpHeaders, httpBodies, and all other collection.
-        // beforeSend/beforeSendTransaction hooks provide defense-in-depth scrubbing.
-        dataCollection: RESTRICTIVE_DATA_COLLECTION,
-        // Disable fetch error hostname enrichment (e.g. "Failed to fetch (example.com)").
-        // The hostname could be a shop domain, which is PII per #174.
-        enhanceFetchErrorMessages: false,
-        beforeSend,
-        beforeSendTransaction,
-      };
-    },
+    (env: E) => buildSentryOptions(env),
     handler
   );
 }
