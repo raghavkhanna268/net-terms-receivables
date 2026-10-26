@@ -3,12 +3,15 @@
  * 
  * Provides:
  * - Pluralisation helper for day/days patterns
- * - Supported banks list derived from parser registry
+ * - Supported banks list (re-exported from parser registry)
  * - Error code label maps for human-readable messages
  * - GID formatting to avoid raw Shopify IDs
  */
 
-import type { BankId } from "./banks/types.js";
+import { SUPPORTED_BANKS, type SupportedBankId } from "./banks/index.js";
+
+// Re-export for consumers
+export { SUPPORTED_BANKS, type SupportedBankId };
 
 /**
  * Pluralise a unit based on count.
@@ -46,36 +49,26 @@ export function pluralizeWithCount(count: number, singular: string, plural?: str
 }
 
 /**
- * Supported banks for bank statement import.
- * Derived from the parser registry - matches HDFC, ICICI, SBI, AXIS.
- * "UNKNOWN" is excluded as it represents unrecognised statements.
+ * Human-readable display names for supported banks.
+ * Used for consistent presentation across the UI.
  */
-export const SUPPORTED_BANKS: readonly Exclude<BankId, "UNKNOWN">[] = [
-  "HDFC",
-  "ICICI",
-  "SBI",
-  "AXIS",
-] as const;
-
-/**
- * Human-readable names for supported banks.
- */
-export const BANK_DISPLAY_NAMES: Record<Exclude<BankId, "UNKNOWN">, string> = {
-  HDFC: "HDFC Bank",
-  ICICI: "ICICI Bank",
-  SBI: "State Bank of India",
-  AXIS: "Axis Bank",
+export const BANK_DISPLAY_NAMES: Record<SupportedBankId, string> = {
+  HDFC: "HDFC",
+  ICICI: "ICICI",
+  SBI: "SBI",
+  AXIS: "Axis",
 } as const;
 
 /**
  * Format the supported banks as a comma-separated list with "or" before the last item.
+ * Uses BANK_DISPLAY_NAMES for consistent presentation.
  * 
- * @returns Formatted string like "HDFC, ICICI, SBI or Axis Bank"
+ * @returns Formatted string like "HDFC, ICICI, SBI or Axis"
  */
 export function formatSupportedBankList(): string {
   if (SUPPORTED_BANKS.length === 0) return "";
-  if (SUPPORTED_BANKS.length === 1) return SUPPORTED_BANKS[0];
-  const bankNames = SUPPORTED_BANKS.map((b) => b === "AXIS" ? "Axis Bank" : b);
+  if (SUPPORTED_BANKS.length === 1) return BANK_DISPLAY_NAMES[SUPPORTED_BANKS[0]];
+  const bankNames = SUPPORTED_BANKS.map((b) => BANK_DISPLAY_NAMES[b]);
   const allButLast = bankNames.slice(0, -1);
   const last = bankNames[bankNames.length - 1];
   return `${allButLast.join(", ")} or ${last}`;
@@ -105,20 +98,37 @@ export function getImportErrorLabel(code: string): string {
 }
 
 /**
+ * Lookup function type for getting the spreadsheet row from a credit index.
+ */
+export type SourceRowLookup = (creditIndex: number) => number | undefined;
+
+/**
  * Format a validation error path for display.
- * Converts internal paths like "credits.3.amountPaise" to "Row 4: amount".
+ * Converts internal paths like "credits.3.amountPaise" to "Row {sourceRow}: amount"
+ * when sourceRow is available, or "Transaction 4: amount" as fallback.
  * 
  * @param path - The validation error path
- * @param message - The error message
+ * @param message - The error message  
+ * @param sourceRowLookup - Optional function to get the 1-indexed spreadsheet row from credit index
  * @returns Human-readable error description
  */
-export function formatValidationError(path: string, message: string): string {
+export function formatValidationError(
+  path: string,
+  message: string,
+  sourceRowLookup?: SourceRowLookup
+): string {
   const match = path.match(/^credits\.(\d+)\.(\w+)$/);
   if (match) {
-    const rowIndex = parseInt(match[1], 10);
+    const creditIndex = parseInt(match[1], 10);
     const field = match[2];
     const fieldLabel = VALIDATION_FIELD_LABELS[field] ?? field;
-    return `Row ${rowIndex + 1}: ${fieldLabel} ${formatValidationMessage(message)}`;
+    
+    const sourceRow = sourceRowLookup?.(creditIndex);
+    const rowLabel = sourceRow !== undefined
+      ? `Row ${sourceRow}`
+      : `Transaction ${creditIndex + 1}`;
+    
+    return `${rowLabel}: ${fieldLabel} ${formatValidationMessage(message)}`;
   }
   
   if (path === "credits" || path === "") {
@@ -151,14 +161,17 @@ function formatValidationMessage(message: string): string {
  * Extract a human label from a Shopify GID.
  * Never renders raw GIDs like "gid://shopify/Customer/123" in the UI.
  * 
+ * When the GID parses successfully, returns the resource type (e.g., "Customer").
+ * The fallback is used ONLY when parsing fails - it never swallows a parsed value.
+ * 
  * @param gid - The Shopify Global ID
- * @param fallback - Optional fallback label (defaults to the resource type)
- * @returns Human-readable label like "Customer" or the provided fallback
+ * @param fallback - Optional fallback label used only when GID parsing fails
+ * @returns Human-readable label like "Customer" or the fallback
  */
 export function formatShopifyGid(gid: string, fallback?: string): string {
-  const match = gid.match(/^gid:\/\/shopify\/(\w+)\//);
+  const match = gid.match(/^gid:\/\/shopify\/(\w+)\/\d+$/);
   if (match) {
-    return fallback ?? match[1];
+    return match[1];
   }
   return fallback ?? "Customer";
 }

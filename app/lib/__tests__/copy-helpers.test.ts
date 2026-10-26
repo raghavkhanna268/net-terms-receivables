@@ -11,6 +11,7 @@ import {
   formatShopifyGid,
   isShopifyGid,
 } from "../copy-helpers";
+import type { BankId } from "../banks/types";
 
 /**
  * Copy helpers tests for merchant-facing text.
@@ -18,6 +19,7 @@ import {
  * Tests ensure:
  * - Pluralisation works correctly for "1 day" vs "2 days"
  * - Bank list matches the parser registry (HDFC, ICICI, SBI, Axis)
+ * - Parser routing reaches real parsers for all supported banks
  * - Error labels have fallbacks for unknown codes
  * - Shopify GIDs are never rendered raw
  */
@@ -91,12 +93,50 @@ describe("SUPPORTED_BANKS", () => {
       expect(typeof BANK_DISPLAY_NAMES[bank]).toBe("string");
     }
   });
+
+  it("includes all non-UNKNOWN BankId values", () => {
+    const allBankIds: BankId[] = ["HDFC", "ICICI", "SBI", "AXIS", "UNKNOWN"];
+    const nonUnknownBankIds = allBankIds.filter((b) => b !== "UNKNOWN");
+    
+    for (const bankId of nonUnknownBankIds) {
+      expect(SUPPORTED_BANKS).toContain(bankId);
+    }
+  });
+});
+
+describe("SUPPORTED_BANKS parser routing", () => {
+  it("every bank in SUPPORTED_BANKS reaches a real parser (not UNKNOWN_BANK_FORMAT)", async () => {
+    const { parseBankStatement } = await import("../banks/index");
+    
+    for (const bank of SUPPORTED_BANKS) {
+      const minimalCsv = `Date,Narration,Amount\n2024-01-01,Test,100`;
+      const content = new TextEncoder().encode(minimalCsv).buffer;
+      
+      const result = await parseBankStatement(content as ArrayBuffer, {
+        fileName: `${bank.toLowerCase()}_statement.csv`,
+      });
+      
+      const hasUnknownBankError = result.errors.some(
+        (e) => e.code === "UNKNOWN_BANK_FORMAT"
+      );
+      
+      expect(hasUnknownBankError).toBe(false);
+    }
+  });
 });
 
 describe("formatSupportedBankList", () => {
-  it("formats all banks with 'or' before the last", () => {
+  it("formats all banks with 'or' before the last using display names", () => {
     const result = formatSupportedBankList();
-    expect(result).toBe("HDFC, ICICI, SBI or Axis Bank");
+    expect(result).toBe("HDFC, ICICI, SBI or Axis");
+  });
+
+  it("uses BANK_DISPLAY_NAMES for all banks", () => {
+    const result = formatSupportedBankList();
+    for (const bank of SUPPORTED_BANKS) {
+      const displayName = BANK_DISPLAY_NAMES[bank];
+      expect(result).toContain(displayName);
+    }
   });
 });
 
@@ -137,25 +177,55 @@ describe("getImportErrorLabel", () => {
 });
 
 describe("formatValidationError", () => {
-  describe("credits path formatting", () => {
-    it("converts credits.0.amountPaise to 'Row 1: amount could not be read'", () => {
+  describe("without sourceRowLookup (fallback to Transaction N)", () => {
+    it("converts credits.0.amountPaise to 'Transaction 1: amount could not be read'", () => {
       const result = formatValidationError("credits.0.amountPaise", "Amount must be a positive integer");
-      expect(result).toBe("Row 1: amount could not be read");
+      expect(result).toBe("Transaction 1: amount could not be read");
     });
 
-    it("converts credits.3.date to 'Row 4: date is not a valid date'", () => {
+    it("converts credits.3.date to 'Transaction 4: date is not a valid date'", () => {
       const result = formatValidationError("credits.3.date", "Date must be YYYY-MM-DD");
-      expect(result).toBe("Row 4: date is not a valid date");
+      expect(result).toBe("Transaction 4: date is not a valid date");
     });
 
     it("handles valueDate field", () => {
       const result = formatValidationError("credits.5.valueDate", "Value date must be YYYY-MM-DD");
-      expect(result).toBe("Row 6: value date is not a valid date");
+      expect(result).toBe("Transaction 6: value date is not a valid date");
     });
 
     it("handles generic 'must be' messages", () => {
       const result = formatValidationError("credits.2.rail", "Rail must be one of: NEFT, RTGS");
-      expect(result).toBe("Row 3: payment type is invalid");
+      expect(result).toBe("Transaction 3: payment type is invalid");
+    });
+  });
+
+  describe("with sourceRowLookup (shows spreadsheet row)", () => {
+    it("uses sourceRow when available", () => {
+      const sourceRowLookup = (idx: number) => {
+        const rows = [15, 16, 20, 25];
+        return rows[idx];
+      };
+      
+      const result = formatValidationError(
+        "credits.2.amountPaise",
+        "Amount must be a positive integer",
+        sourceRowLookup
+      );
+      expect(result).toBe("Row 20: amount could not be read");
+    });
+
+    it("falls back to Transaction N when sourceRow is undefined", () => {
+      const sourceRowLookup = (idx: number) => {
+        if (idx === 5) return undefined;
+        return idx + 10;
+      };
+      
+      const result = formatValidationError(
+        "credits.5.date",
+        "Date must be YYYY-MM-DD",
+        sourceRowLookup
+      );
+      expect(result).toBe("Transaction 6: date is not a valid date");
     });
   });
 
@@ -173,24 +243,41 @@ describe("formatValidationError", () => {
 });
 
 describe("formatShopifyGid", () => {
-  it("extracts resource type from a valid GID", () => {
-    expect(formatShopifyGid("gid://shopify/Customer/123456")).toBe("Customer");
+  describe("valid GID parsing - returns resource type", () => {
+    it("returns 'Customer' for a valid Customer GID", () => {
+      expect(formatShopifyGid("gid://shopify/Customer/123456")).toBe("Customer");
+    });
+
+    it("returns 'Order' for a valid Order GID", () => {
+      expect(formatShopifyGid("gid://shopify/Order/789")).toBe("Order");
+    });
+
+    it("returns 'DraftOrder' for a valid DraftOrder GID", () => {
+      expect(formatShopifyGid("gid://shopify/DraftOrder/42")).toBe("DraftOrder");
+    });
+
+    it("ignores fallback when GID parses successfully (fallback never swallows parsed value)", () => {
+      expect(formatShopifyGid("gid://shopify/Customer/123456", "Ignored Fallback")).toBe("Customer");
+      expect(formatShopifyGid("gid://shopify/Order/789", "Ignored Fallback")).toBe("Order");
+    });
   });
 
-  it("extracts resource type for Order GID", () => {
-    expect(formatShopifyGid("gid://shopify/Order/789")).toBe("Order");
-  });
+  describe("fallback only when parsing fails", () => {
+    it("uses fallback for invalid GID format", () => {
+      expect(formatShopifyGid("invalid-gid", "Unknown Customer")).toBe("Unknown Customer");
+    });
 
-  it("uses fallback when provided for valid GID", () => {
-    expect(formatShopifyGid("gid://shopify/Customer/123456", "Buyer")).toBe("Buyer");
-  });
+    it("uses fallback for malformed GID without numeric ID", () => {
+      expect(formatShopifyGid("gid://shopify/Customer/", "Fallback")).toBe("Fallback");
+    });
 
-  it("uses fallback for invalid GID format", () => {
-    expect(formatShopifyGid("invalid-gid", "Customer")).toBe("Customer");
-  });
+    it("uses fallback for non-numeric ID", () => {
+      expect(formatShopifyGid("gid://shopify/Customer/abc", "Fallback")).toBe("Fallback");
+    });
 
-  it("returns 'Customer' for invalid GID without fallback", () => {
-    expect(formatShopifyGid("not-a-gid")).toBe("Customer");
+    it("returns 'Customer' as default fallback for invalid GID without explicit fallback", () => {
+      expect(formatShopifyGid("not-a-gid")).toBe("Customer");
+    });
   });
 });
 
@@ -219,5 +306,11 @@ describe("no raw GID in UI", () => {
       const result = formatShopifyGid(gid);
       expect(result).not.toMatch(/^gid:\/\//);
     }
+  });
+
+  it("formatShopifyGid returns resource type without numeric ID", () => {
+    const result = formatShopifyGid("gid://shopify/Customer/12345");
+    expect(result).toBe("Customer");
+    expect(result).not.toContain("12345");
   });
 });

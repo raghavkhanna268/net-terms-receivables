@@ -732,7 +732,7 @@ export default function AccountPage() {
             heading={actionData.metafieldSyncPending ? "Partially saved" : "Saved"}
           >
             {actionData.metafieldSyncPending
-              ? "Credit settings saved. Changes apply at checkout, usually within a few minutes."
+              ? "Credit settings saved. Changes will apply at checkout once the sync to Shopify finishes. We keep retrying automatically."
               : "Credit settings saved successfully."}
           </s-banner>
         </s-section>
@@ -1120,7 +1120,7 @@ export default function AccountPage() {
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
-          Changes apply at checkout, usually within a few minutes.
+          Changes apply at checkout once they sync to Shopify.
         </s-paragraph>
       </s-section>
 

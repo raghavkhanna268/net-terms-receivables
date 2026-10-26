@@ -5,7 +5,6 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { getPendingDataRequests, purgeExpiredDataRequests } from "~/services/compliance";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { useState } from "react";
-import { formatShopifyGid } from "~/lib/copy-helpers";
 
 /**
  * S22 Admin route for GDPR/CCPA data request downloads.
@@ -141,10 +140,6 @@ export default function DataRequestsPage() {
                   <s-paragraph>
                     <s-text type="strong">Request ID:</s-text>{" "}
                     <s-text>{dr.requestId}</s-text>
-                  </s-paragraph>
-                  <s-paragraph>
-                    <s-text type="strong">Customer:</s-text>{" "}
-                    <s-text>{formatShopifyGid(dr.customerGid, "Customer")}</s-text>
                   </s-paragraph>
                   <s-paragraph>
                     <s-text type="strong">Received:</s-text>{" "}

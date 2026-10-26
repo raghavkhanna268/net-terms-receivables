@@ -639,42 +639,6 @@ export interface ParseErrorRow {
 }
 
 /**
- * Badge tone for error codes.
- */
-export type ErrorBadgeTone = "warning" | "critical";
-
-/**
- * Get badge tone for error code.
- * NORMALIZE_FAILED gets warning (recoverable), others get critical.
- * Exported for testing.
- */
-export function getErrorBadgeTone(code: string): ErrorBadgeTone {
-  return code === "NORMALIZE_FAILED" ? "warning" : "critical";
-}
-
-/**
- * Fixed error messages for each error code.
- * Raw parser messages are NOT shown to merchants.
- * Exported for testing.
- */
-export const ERROR_CODE_MESSAGES: Record<string, string> = {
-  ROW_PARSE_FAILED: "Could not parse this row",
-  NORMALIZE_FAILED: "Could not normalize transaction data",
-  NO_HEADER_ROW: "Could not find header row in file",
-  COLUMN_MAP_FAILED: "Could not map columns to expected format",
-  UNKNOWN_BANK_FORMAT: "Unrecognized bank statement format",
-};
-
-/**
- * Get fixed display message for an error code.
- * Never returns raw parser error messages.
- * Exported for testing.
- */
-export function getErrorDisplayMessage(code: string): string {
-  return ERROR_CODE_MESSAGES[code] ?? "Unknown error";
-}
-
-/**
  * Format row label for display.
  * Row 0 indicates a file-level error, not a specific row.
  * Exported for testing.
@@ -1052,21 +1016,25 @@ export default function ImportsPage() {
                 ) : (
                   <s-banner tone="critical" heading="Import failed">
                     {importResult.error}
-                    {importResult.details && importResult.details.length > 0 && (
-                      <s-unordered-list>
-                        {importResult.details.slice(0, 5).map((detail, idx) => {
-                          const parts = detail.split(": ");
-                          const path = parts[0] ?? "";
-                          const message = parts.slice(1).join(": ");
-                          return (
-                            <s-list-item key={idx}>{formatValidationError(path, message)}</s-list-item>
-                          );
-                        })}
-                        {importResult.details.length > 5 && (
-                          <s-list-item>...and {importResult.details.length - 5} more errors</s-list-item>
-                        )}
-                      </s-unordered-list>
-                    )}
+                    {importResult.details && importResult.details.length > 0 && (() => {
+                      const sourceRowLookup = (creditIndex: number) =>
+                        result?.credits[creditIndex]?.sourceRow;
+                      return (
+                        <s-unordered-list>
+                          {importResult.details.slice(0, 5).map((detail, idx) => {
+                            const parts = detail.split(": ");
+                            const path = parts[0] ?? "";
+                            const message = parts.slice(1).join(": ");
+                            return (
+                              <s-list-item key={idx}>{formatValidationError(path, message, sourceRowLookup)}</s-list-item>
+                            );
+                          })}
+                          {importResult.details.length > 5 && (
+                            <s-list-item>...and {importResult.details.length - 5} more errors</s-list-item>
+                          )}
+                        </s-unordered-list>
+                      );
+                    })()}
                   </s-banner>
                 )
               )}
