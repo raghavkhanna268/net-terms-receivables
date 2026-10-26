@@ -78,7 +78,7 @@ scopes = "read_draft_orders,read_payment_terms,write_companies,write_customers,w
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
-**Protected Customer Data:** `write_customers` (implies `read_customers`) requires Shopify PCD Level 1 approval plus Name and Email fields.
+**Protected Customer Data:** `write_customers` (implies `read_customers`) requires Shopify PCD approval, Level 2 (protected customer fields: Name, Email only).
 
 ---
 
@@ -165,7 +165,7 @@ Tests that mock `safeLog`, `toErrorCode`, or `shopHash` must be explicitly allow
 
 **Environment variable:** `CUSTOMER_PII_FIELDS`
 
-**Enabled in production** (`wrangler.jsonc:42`, PCD Level 1 + Name + Email per the comment at line 39).
+**Enabled in production** (`wrangler.jsonc:42`, PCD Level 2 (protected customer fields: Name, Email only) per the comment at line 39).
 
 When enabled (`"1"`), the app fetches and stores buyer email and display name in `s8_tagged_customers.email` and `s8_tagged_customers.display_name`.
 

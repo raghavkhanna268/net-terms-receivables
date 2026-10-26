@@ -138,6 +138,26 @@ def add_read_locations(d):
     inject_toml_scope(os.path.join(d, "shopify.app.toml"), "read_locations")
     inject_wrangler_scope(os.path.join(d, "wrangler.jsonc"), "read_locations")
 
+
+# 16. credit_status_guard: missing input_query file fails.
+def remove_credit_status_graphql(d):
+    os.remove(os.path.join(d, "extensions", "credit-check-validation", "src", "cart_validations_generate_run.graphql"))
+
+if scratch(remove_credit_status_graphql) == 0:
+    fails.append("credit_status_guard: missing input_query file not failed")
+
+# 17. credit_status_guard: input_query without credit_status fails.
+def remove_credit_status_content(d):
+    gql = os.path.join(d, "extensions", "credit-check-validation", "src", "cart_validations_generate_run.graphql")
+    open(gql, "w").write('query Input { cart { lines { id } } }\n')
+
+if scratch(remove_credit_status_content) == 0:
+    fails.append("credit_status_guard: input_query without credit_status not failed")
+
+# 18. credit_status_guard: valid input_query passes.
+if scratch(lambda d: None) != 0:
+    fails.append("credit_status_guard: valid input_query should pass")
+
 # Capture output to verify read_locations is named
 import io
 import contextlib
@@ -163,4 +183,4 @@ if fails:
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("shopify release guards self-test: OK (20/20)")
+print("shopify release guards self-test: OK (23/23)")
