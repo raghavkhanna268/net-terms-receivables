@@ -768,6 +768,100 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
         })
       ).rejects.toThrow("ROLLBACK_EXPECTED");
     });
+
+    it("cross-shop isolation: reinstalling shop A does NOT enqueue accounts from shop B (mutation b)", async () => {
+      vi.resetModules();
+
+      // Create a second INR shop (shop B) with an eligible account
+      const SHOP_B = `test-reinstall-enqueue-shopb-${TEST_SUFFIX}.myshopify.com`;
+      const [shopB] = await sql<{ id: string }[]>`
+        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+        VALUES (${SHOP_B}, 'Asia/Kolkata', 'INR', 'free', NOW(), NOW())
+        RETURNING id
+      `;
+
+      // Insert eligible accounts in both shops
+      const shopAAccountId = `shop-a-acct-${TEST_SUFFIX}`;
+      const shopBAccountId = `shop-b-acct-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${shopAAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/shop-a', 'gid://shopify/CompanyLocation/shop-a',
+           'Shop A Account', 'OK', true, NULL, NOW(), NOW()),
+          (${shopBAccountId}, ${shopB.id}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/shop-b', 'gid://shopify/CompanyLocation/shop-b',
+           'Shop B Account', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      // Reinstall shop A only
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      expect(enqueuedCount).toBe(1);
+
+      // Verify ALL queued messages belong to shop A
+      const allMessages = await sql<{ buyerAccountId: string }[]>`
+        SELECT message->>'buyerAccountId' AS "buyerAccountId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      `;
+
+      // Shop A's account should be enqueued
+      expect(allMessages.some(m => m.buyerAccountId === shopAAccountId)).toBe(true);
+      // Shop B's account should NOT be enqueued
+      expect(allMessages.some(m => m.buyerAccountId === shopBAccountId)).toBe(false);
+
+      // Cleanup shop B
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopB.id}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopB.id}`;
+    });
+
+    it("metafieldSyncedAt age filter: recently synced accounts are NOT enqueued (mutation n)", async () => {
+      vi.resetModules();
+
+      // Insert two accounts:
+      // - One synced just now (should NOT be enqueued)
+      // - One synced 2 days ago (should be enqueued)
+      const recentAccountId = `recent-sync-${TEST_SUFFIX}`;
+      const oldAccountId = `old-sync-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${recentAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/recent-sync', 'gid://shopify/CompanyLocation/recent-sync',
+           'Recently Synced', 'OK', true, NOW(), NOW(), NOW()),
+          (${oldAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/old-sync', 'gid://shopify/CompanyLocation/old-sync',
+           'Old Synced', 'OK', true, NOW() - INTERVAL '2 days', NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      expect(enqueuedCount).toBe(1);
+
+      // Verify only the old-synced account was enqueued
+      const messages = await sql<{ buyerAccountId: string }[]>`
+        SELECT message->>'buyerAccountId' AS "buyerAccountId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'shop' = ${INR_SHOP}
+      `;
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(oldAccountId);
+    });
   });
 
   describe("cap boundary and HELD-first ordering", () => {
