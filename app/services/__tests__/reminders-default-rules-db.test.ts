@@ -576,7 +576,7 @@ describeWithDb("Sequential DB", () => {
         VALUES (
           ${catchupInvoiceId}, ${SHOP_ID}, ${BUYER_ACCOUNT_ID},
           'gid://shopify/Order/catchup-e2e', '#CATCHUP-E2E', 10000.00, 10000.00,
-          'open', NOW() - INTERVAL '5 days', ${DUE_DATE_STR}::DATE, NOW(), NOW()
+          'open', NOW() - INTERVAL '5 days', ${DUE_DATE_STR}::DATE - INTERVAL '1 day', NOW(), NOW()
         )
       `;
 
