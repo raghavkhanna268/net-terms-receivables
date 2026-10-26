@@ -151,6 +151,19 @@ export const DEFAULT_DRAIN_CONFIG: DrainConfig = {
 };
 
 /**
+ * Maximum number of drain passes within a single tick.
+ * Bounds CPU usage on Workers Free tier while allowing chained stages
+ * to complete in one tick.
+ */
+export const MAX_DRAIN_PASSES = 4;
+
+/**
+ * Safety margin (ms) before timeBudgetMs at which no new pass should start.
+ * Ensures we don't start a pass that can't finish within the budget.
+ */
+export const PASS_START_MARGIN_MS = 3000;
+
+/**
  * Handler function type for sync messages.
  * Returns a SyncResult indicating success/failure.
  */
@@ -1903,14 +1916,36 @@ async function processBulkQueue(
 }
 
 /**
+ * Count total messages touched in a drain result.
+ * Used to determine if any messages were processed in a pass.
+ */
+function countMessagesTouched(result: DrainResult): number {
+  return (
+    result.processed +
+    result.skipped +
+    result.noHandler +
+    result.failed +
+    result.deadLettered +
+    result.deadLetterAlreadyGoneCount
+  );
+}
+
+/**
  * Run the queue drain.
  *
- * Processes messages from both s6_sync and s6_bulk queues,
- * respecting the time budget and batch size limits.
+ * Processes messages from both s6_sync and s6_bulk queues in multiple passes,
+ * allowing chained stages (a message that enqueues a follow-up) to complete
+ * within a single tick.
+ *
+ * Stops when ANY of these conditions is met:
+ * - Both queues return empty in a pass
+ * - A pass processed 0 messages in total
+ * - Elapsed time reaches the safety margin (timeBudgetMs - PASS_START_MARGIN_MS)
+ * - MAX_DRAIN_PASSES is reached
  *
  * @param sql - postgres.js SQL client
  * @param config - Drain configuration (optional, uses defaults)
- * @returns Drain result with statistics
+ * @returns Drain result with statistics aggregated across all passes
  */
 export async function runDrain(
   sql: Sql,
@@ -1918,14 +1953,53 @@ export async function runDrain(
 ): Promise<DrainResult> {
   const fullConfig = { ...DEFAULT_DRAIN_CONFIG, ...config };
   const startTime = Date.now();
+  const passStartMargin = fullConfig.timeBudgetMs - PASS_START_MARGIN_MS;
 
-  // Process sync queue first
-  let result = await processSyncQueue(sql, fullConfig, startTime);
+  const aggregatedResult: DrainResult = {
+    processed: 0,
+    failed: 0,
+    deadLettered: 0,
+    deadLetterAlreadyGoneCount: 0,
+    skipped: 0,
+    noHandler: 0,
+    timedOut: false,
+    elapsedMs: 0,
+    errors: [],
+  };
 
-  // If we have time, process bulk queue too
-  if (!result.timedOut) {
-    result = await processBulkQueue(sql, fullConfig, startTime, result);
+  for (let pass = 0; pass < MAX_DRAIN_PASSES; pass++) {
+    const elapsed = Date.now() - startTime;
+    if (elapsed >= passStartMargin) {
+      aggregatedResult.timedOut = true;
+      break;
+    }
+
+    const syncResult = await processSyncQueue(sql, fullConfig, startTime);
+
+    let passResult = syncResult;
+    if (!syncResult.timedOut) {
+      passResult = await processBulkQueue(sql, fullConfig, startTime, syncResult);
+    }
+
+    aggregatedResult.processed += passResult.processed;
+    aggregatedResult.failed += passResult.failed;
+    aggregatedResult.deadLettered += passResult.deadLettered;
+    aggregatedResult.deadLetterAlreadyGoneCount += passResult.deadLetterAlreadyGoneCount;
+    aggregatedResult.skipped += passResult.skipped;
+    aggregatedResult.noHandler += passResult.noHandler;
+    aggregatedResult.errors.push(...passResult.errors);
+
+    if (passResult.timedOut) {
+      aggregatedResult.timedOut = true;
+      break;
+    }
+
+    const passMessagesTouched = countMessagesTouched(passResult);
+    if (passMessagesTouched === 0) {
+      break;
+    }
   }
 
-  return result;
+  aggregatedResult.elapsedMs = Date.now() - startTime;
+  return aggregatedResult;
 }
