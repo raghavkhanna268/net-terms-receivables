@@ -207,17 +207,19 @@ describe("compliance.server", () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 3. DELETE s22_data_requests
+      // 4. DELETE s22_data_requests
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 4. SELECT buyerAccount
+      // 5. SELECT buyerAccount
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 6. DELETE PayerAlias
+      // 7. DELETE PayerAlias
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 7. UPDATE BuyerAccount
+      // 8. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -232,23 +234,26 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(2);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(3);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("redacts payments and deletes PayerAlias via Match→Invoice→BuyerAccount", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. SELECT buyerAccount
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 5. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 6. DELETE PayerAlias
+      // 7. DELETE PayerAlias
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 7. UPDATE BuyerAccount
+      // 8. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -260,17 +265,20 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(3);
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(2);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("handles customer with no data gracefully", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests
+      // 3. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. SELECT buyerAccount (not found)
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -285,17 +293,20 @@ describe("compliance.server", () => {
       expect(result.payerAliasesDeleted).toBe(0);
       expect(result.buyerAccountAnonymized).toBe(false);
       expect(result.paymentsRedacted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("deletes data requests for the customer", async () => {
       // Transaction operations use mockTx
       // 1. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. DELETE s8_draft_orders
+      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s22_data_requests - 3 requests exist
+      // 3. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s22_data_requests - 3 requests exist
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 4. SELECT buyerAccount (not found)
+      // 5. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -306,11 +317,13 @@ describe("compliance.server", () => {
 
       expect(result.dataRequestsDeleted).toBe(3);
       expect(result.payerAliasesDeleted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(0);
     });
 
     it("runs all operations in a single transaction", async () => {
       // Setup: customer has data to redact
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // b2b main contact update
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // data_requests
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]); // buyerAccount
@@ -322,6 +335,32 @@ describe("compliance.server", () => {
 
       // Verify sql.begin was called (ensures transaction wrapper)
       expect(mockSql.begin).toHaveBeenCalledTimes(1);
+    });
+
+    it("redacts B2B main contacts when mainContactCustomerId matches", async () => {
+      // Transaction operations use mockTx
+      // 1. DELETE s8_tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 2. UPDATE BuyerAccount B2B main contact fields - 2 company locations have this contact
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 3. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. SELECT buyerAccount (not found - this is a contact, not a tagged customer)
+      mockTx.mockResolvedValueOnce([]);
+
+      const result = await redactCustomer(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/contact-789"
+      );
+
+      expect(result.taggedCustomersDeleted).toBe(0);
+      expect(result.b2bMainContactsRedacted).toBe(2);
+      expect(result.draftOrdersDeleted).toBe(0);
+      expect(result.dataRequestsDeleted).toBe(0);
+      expect(result.buyerAccountAnonymized).toBe(false);
     });
   });
 
@@ -343,7 +382,7 @@ describe("compliance.server", () => {
         status: "open",
         created_at: new Date("2026-01-15"),
       }]);
-      // 3. SELECT BuyerAccount
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test Customer",
@@ -352,7 +391,9 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
-      // 4. SELECT Invoice
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -362,7 +403,7 @@ describe("compliance.server", () => {
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
       }]);
-      // 5. SELECT Match (payment matches)
+      // 6. SELECT Match (payment matches)
       mockSql.mockResolvedValueOnce([{
         id: "match-1",
         invoiceId: "inv-1",
@@ -510,7 +551,7 @@ describe("compliance.server", () => {
       }]);
       // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([]);
-      // 3. SELECT BuyerAccount
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Account Name",
@@ -519,7 +560,9 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
-      // 4. SELECT Invoice
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
       mockSql.mockResolvedValueOnce([{
         id: "inv-1",
         name: "#1001",
@@ -529,7 +572,7 @@ describe("compliance.server", () => {
         issuedAt: new Date("2026-01-10"),
         dueAt: new Date("2026-02-10"),
       }]);
-      // 5. SELECT Match - include payerText/narration in mock to prove they're dropped
+      // 6. SELECT Match - include payerText/narration in mock to prove they're dropped
       mockSql.mockResolvedValueOnce([{
         id: "match-1",
         invoiceId: "inv-1",
@@ -574,6 +617,7 @@ describe("compliance.server", () => {
       // This is a belt-and-suspenders check on top of the mapping test.
 
       // Setup: provide minimal mocks to get to the Match query
+      // 1. SELECT s8_tagged_customers
       mockSql.mockResolvedValueOnce([{
         tags: [],
         tag_active: true,
@@ -581,7 +625,9 @@ describe("compliance.server", () => {
         display_name: null,
         created_at: new Date(),
       }]);
+      // 2. SELECT s8_draft_orders
       mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId)
       mockSql.mockResolvedValueOnce([{
         id: "ba-1",
         name: "Test",
@@ -590,7 +636,11 @@ describe("compliance.server", () => {
         defaultTermsDays: 30,
         holdState: "OK",
       }]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
       mockSql.mockResolvedValueOnce([]);
+      // 5. SELECT Invoice
+      mockSql.mockResolvedValueOnce([]);
+      // 6. SELECT Match
       mockSql.mockResolvedValueOnce([]);
 
       await generateCustomerDataExport(
@@ -600,9 +650,9 @@ describe("compliance.server", () => {
         "req-sql-check"
       );
 
-      // The 5th call is the Match query
-      expect(mockSql).toHaveBeenCalledTimes(5);
-      const matchQueryCall = mockSql.mock.calls[4];
+      // The 6th call is the Match query
+      expect(mockSql).toHaveBeenCalledTimes(6);
+      const matchQueryCall = mockSql.mock.calls[5];
       
       // The template literal is passed as an array of strings
       // Convert to string to check what columns are selected
@@ -620,6 +670,86 @@ describe("compliance.server", () => {
       expect(queryText).toContain("m.amount");
       expect(queryText).toContain("m.state");
     });
+
+    it("includes B2B main contact accounts where mainContactCustomerId matches", async () => {
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId) - no direct match
+      mockSql.mockResolvedValueOnce([]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts)
+      mockSql.mockResolvedValueOnce([
+        {
+          id: "ba-b2b-1",
+          name: "Acme Corp HQ",
+          kind: "COMPANY",
+          mainContactEmail: "contact@acme.com",
+          mainContactName: "Contact Person",
+          mainContactCustomerId: "gid://shopify/Customer/789",
+        },
+        {
+          id: "ba-b2b-2",
+          name: "Acme Corp West",
+          kind: "COMPANY",
+          mainContactEmail: "contact@acme.com",
+          mainContactName: "Contact Person",
+          mainContactCustomerId: "gid://shopify/Customer/789",
+        },
+      ]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/789",
+        "req-b2b-main-contact"
+      );
+
+      expect(result.customerGid).toBe("gid://shopify/Customer/789");
+      expect(result.data.b2bMainContactAccounts).toHaveLength(2);
+      expect(result.data.b2bMainContactAccounts[0]).toEqual({
+        id: "ba-b2b-1",
+        name: "Acme Corp HQ",
+        kind: "COMPANY",
+        mainContactEmail: "contact@acme.com",
+        mainContactName: "Contact Person",
+        mainContactCustomerId: "gid://shopify/Customer/789",
+      });
+      expect(result.data.b2bMainContactAccounts[1]).toEqual({
+        id: "ba-b2b-2",
+        name: "Acme Corp West",
+        kind: "COMPANY",
+        mainContactEmail: "contact@acme.com",
+        mainContactName: "Contact Person",
+        mainContactCustomerId: "gid://shopify/Customer/789",
+      });
+    });
+
+    it("returns empty b2bMainContactAccounts when no match", async () => {
+      // 1. SELECT s8_tagged_customers
+      mockSql.mockResolvedValueOnce([{
+        tags: [],
+        tag_active: false,
+        email: null,
+        display_name: null,
+        created_at: new Date(),
+      }]);
+      // 2. SELECT s8_draft_orders
+      mockSql.mockResolvedValueOnce([]);
+      // 3. SELECT BuyerAccount (for customerId)
+      mockSql.mockResolvedValueOnce([]);
+      // 4. SELECT BuyerAccount (for mainContactCustomerId - B2B main contact accounts) - no match
+      mockSql.mockResolvedValueOnce([]);
+
+      const result = await generateCustomerDataExport(
+        mockSql,
+        "shop-123",
+        "gid://shopify/Customer/no-b2b-match",
+        "req-no-b2b"
+      );
+
+      expect(result.data.b2bMainContactAccounts).toHaveLength(0);
+    });
   });
 
   describe("persistDataRequest", () => {
@@ -631,7 +761,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-789",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, b2bMainContactAccounts: [], invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
@@ -653,7 +783,7 @@ describe("compliance.server", () => {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-duplicate",
         requestedAt: new Date().toISOString(),
-        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [], paymentMatches: [] },
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, b2bMainContactAccounts: [], invoices: [], paymentMatches: [] },
       };
 
       const result = await persistDataRequest(
