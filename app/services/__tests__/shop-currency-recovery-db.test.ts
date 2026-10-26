@@ -52,10 +52,11 @@ describeWithDb("hasFinancialRows DB integration", () => {
       VALUES (${BUYER_ID}, ${SHOP_WITH_INVOICE}, 'TAGGED_CUSTOMER', ${CUSTOMER_ID}, 'Test Buyer', NOW(), NOW())
     `;
 
-    // Create an Invoice for SHOP_WITH_INVOICE
+    // Create an Invoice for SHOP_WITH_INVOICE (must have orderId per Invoice_order_xor_draft constraint)
+    const ORDER_ID = `gid://shopify/Order/test-${TEST_SUFFIX}`;
     await sql`
-      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", "createdAt", "updatedAt")
-      VALUES (${`inv-${TEST_SUFFIX}`}, ${SHOP_WITH_INVOICE}, ${BUYER_ID}, '#1001', 1000, 1000, NOW(), NOW(), NOW())
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "createdAt", "updatedAt")
+      VALUES (${`inv-${TEST_SUFFIX}`}, ${SHOP_WITH_INVOICE}, ${BUYER_ID}, ${ORDER_ID}, '#1001', 1000, 1000, NOW(), NOW(), NOW())
     `;
 
     // Create a BankImport and Payment for SHOP_WITH_PAYMENT
