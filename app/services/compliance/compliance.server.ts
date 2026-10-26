@@ -872,7 +872,7 @@ export async function getPendingDataRequests(
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID (for access control)
  * @param requestId - Request ID
- * @returns Export data with row id, or null if not found/expired
+ * @returns Export data with row id, or null if not found/expired/pending
  */
 export async function getDataRequestExport(
   sql: Sql,
@@ -884,6 +884,7 @@ export async function getDataRequestExport(
     FROM s22_data_requests
     WHERE shop_id = ${shopId} 
       AND request_id = ${requestId}
+      AND export_data IS NOT NULL
       AND (expires_at IS NULL OR expires_at > NOW())
   `;
 

@@ -58,27 +58,29 @@ describe("app.data-requests.$id.download", () => {
   });
 
   describe("loader", () => {
-    it("returns 400 when request ID is missing", async () => {
+    it("returns 400 with Cache-Control: no-store when request ID is missing", async () => {
       const request = new Request("https://example.com/app/data-requests//download");
       const response = await loader(createMockLoaderArgs(request, {}));
 
       expect(response.status).toBe(400);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
       const json = (await response.json()) as { error: string };
       expect(json.error).toBe("Missing request ID");
     });
 
-    it("returns 404 when shop is not found", async () => {
+    it("returns 404 with Cache-Control: no-store when shop is not found", async () => {
       mockSql.mockResolvedValueOnce([]);
 
       const request = new Request("https://example.com/app/data-requests/req-123/download");
       const response = await loader(createMockLoaderArgs(request, { id: "req-123" }));
 
       expect(response.status).toBe(404);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
       const json = (await response.json()) as { error: string };
       expect(json.error).toBe("Shop not found");
     });
 
-    it("returns 404 when data request is not found or expired", async () => {
+    it("returns 404 with Cache-Control: no-store when data request is not found or expired", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       mockGetDataRequestExport.mockResolvedValueOnce(null);
 
@@ -86,6 +88,7 @@ describe("app.data-requests.$id.download", () => {
       const response = await loader(createMockLoaderArgs(request, { id: "req-123" }));
 
       expect(response.status).toBe(404);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
       const json = (await response.json()) as { error: string };
       expect(json.error).toBe("Data request not found or expired");
     });
