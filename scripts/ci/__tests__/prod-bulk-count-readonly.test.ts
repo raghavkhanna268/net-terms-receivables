@@ -28,6 +28,7 @@ const WORKFLOW_PATH = join(ROOT, ".github/workflows/prod-bulk-count.yml");
 const QUERY_PATH = join(ROOT, "scripts/readonly/bulk/s8-draft-orders.graphql");
 const JQ_PATH = join(ROOT, "scripts/ci/bulk-count/s8-draft-orders.jq");
 const GUARD_PATH = join(ROOT, "scripts/ci/bulk-count/guard_query.py");
+const GQL_ERR_JQ_PATH = join(ROOT, "scripts/ci/bulk-count/graphql-error-codes.jq");
 const FIXTURE_PATH = join(__dirname, "fixtures/bulk-count/s8-draft-orders.jsonl");
 
 /** sha256 of S8 PR-B's /workspace/s8-bulk-draft-orders-query.graphql. */
@@ -110,6 +111,12 @@ function runGuard(content: string, expected = "draftOrders"): { status: number |
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function gqlErrorCodes(response: unknown): { status: number | null; stdout: string } {
+  const input = typeof response === "string" ? response : JSON.stringify(response);
+  const r = spawnSync("jq", ["-r", "-f", GQL_ERR_JQ_PATH], { input, encoding: "utf-8" });
+  return { status: r.status, stdout: r.stdout.trim() };
 }
 
 function runJq(input: string): { status: number | null; stdout: string } {
@@ -211,6 +218,7 @@ describe("prod-bulk-count workflow", () => {
     it("workflow and jq filter never contain the word 'mutation'", () => {
       expect(raw).not.toMatch(/mutation/i);
       expect(readFileSync(JQ_PATH, "utf-8")).not.toMatch(/mutation/i);
+      expect(readFileSync(GQL_ERR_JQ_PATH, "utf-8")).not.toMatch(/mutation/i);
     });
 
     it("guard script names 'mutation' only on the pinned wrapper/keyword lines", () => {
@@ -221,7 +229,7 @@ describe("prod-bulk-count workflow", () => {
     });
 
     it("no write-style field name appears in the workflow or its scripts", () => {
-      for (const p of [WORKFLOW_PATH, JQ_PATH, GUARD_PATH, QUERY_PATH]) {
+      for (const p of [WORKFLOW_PATH, JQ_PATH, GQL_ERR_JQ_PATH, GUARD_PATH, QUERY_PATH]) {
         const found = (readFileSync(p, "utf-8").match(WRITE_FIELD_RE) ?? []).filter(
           (f) => !ALLOWED_WRITE_FIELDS.has(f)
         );
@@ -366,6 +374,62 @@ describe("prod-bulk-count workflow", () => {
       for (const marker of ["RECONCILE_WINDOW", "RECONCILE_IN_FLIGHT", "BULK_OP_IN_PROGRESS", "skipped_token_expired"]) {
         expect(script.indexOf(marker)).toBeLessThan(submit);
       }
+    });
+  });
+
+  describe("graphql_error_codes", () => {
+    it("the workflow prints the committed filter's output, never a default label", () => {
+      expect(script).toContain(
+        'GQL_ERR=$(jq -r -f scripts/ci/bulk-count/graphql-error-codes.jq "$WORK/resp.json" 2>/dev/null || echo PARSE_FAILED)'
+      );
+      expect(script).toContain('echo "graphql_error_codes=$GQL_ERR"');
+      expect(script).not.toContain("GQL_ERR:-");
+      expect(script).not.toMatch(/\.errors\[\]\?\.extensions\.code \/\//);
+    });
+
+    it("prints none for a successful response", () => {
+      const ok = {
+        data: { bulkOperationRunQuery: { bulkOperation: { id: "x", status: "CREATED" }, userErrors: [] } },
+        extensions: { cost: { requestedQueryCost: 10 } },
+      };
+      expect(gqlErrorCodes(ok)).toEqual({ status: 0, stdout: "none" });
+      expect(gqlErrorCodes({ ...ok, errors: null }).stdout).toBe("none");
+      expect(gqlErrorCodes({ ...ok, errors: [] }).stdout).toBe("none");
+    });
+
+    it("prints the code enum for a coded error", () => {
+      expect(gqlErrorCodes({ errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }] })).toEqual({
+        status: 0,
+        stdout: "THROTTLED",
+      });
+      expect(
+        gqlErrorCodes({
+          errors: [
+            { message: "a", extensions: { code: "ACCESS_DENIED" } },
+            { message: "b", extensions: { code: "THROTTLED" } },
+          ],
+        }).stdout
+      ).toBe("ACCESS_DENIED,THROTTLED");
+    });
+
+    it("prints UNKNOWN for an error without a code, or with a non-enum code", () => {
+      expect(gqlErrorCodes({ errors: [{ message: "Zebulon failed" }] })).toEqual({ status: 0, stdout: "UNKNOWN" });
+      expect(
+        gqlErrorCodes({
+          errors: [
+            { message: "x", extensions: { code: "lower case Zebulon" } },
+            { message: "y", extensions: { code: "ACCESS_DENIED" } },
+          ],
+        }).stdout
+      ).toBe("UNKNOWN,ACCESS_DENIED");
+      expect(gqlErrorCodes({ errors: "PLANTED free text" }).stdout).toBe("UNKNOWN");
+    });
+
+    it("never echoes free text and fails on a non-JSON body", () => {
+      const r = gqlErrorCodes({ errors: [{ message: "Zebulon 12345.67", extensions: { code: 42 } }] });
+      expect(r.stdout).toBe("UNKNOWN");
+      for (const p of PLANTED) expect(r.stdout).not.toContain(p);
+      expect(gqlErrorCodes("<html>Zebulon</html>").status).not.toBe(0);
     });
   });
 });
