@@ -844,10 +844,12 @@ async function processCustomerLines(
 
 /**
  * Load bulk operation progress from database.
+ * @param shop - Optional shop filter for post-lease re-read (prevents cross-shop collision)
  */
 export async function loadBulkOperationProgress(
   sql: Sql,
-  bulkOperationId: string
+  bulkOperationId: string,
+  shop?: string
 ): Promise<{
   byteOffset: number;
   completedAt: Date | null;
@@ -855,17 +857,30 @@ export async function loadBulkOperationProgress(
   chunkSize: number;
   failureCount: number;
 } | null> {
-  const [row] = await sql<{
-    byte_offset: string | null;
-    completed_at: Date | null;
-    closed_at: Date | null;
-    chunk_size: number;
-    failure_count: number;
-  }[]>`
-    SELECT byte_offset, completed_at, closed_at, chunk_size, failure_count
-    FROM s6_bulk_operations
-    WHERE bulk_operation_id = ${bulkOperationId}
-  `;
+  const [row] = shop
+    ? await sql<{
+        byte_offset: string | null;
+        completed_at: Date | null;
+        closed_at: Date | null;
+        chunk_size: number;
+        failure_count: number;
+      }[]>`
+        SELECT byte_offset, completed_at, closed_at, chunk_size, failure_count
+        FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${bulkOperationId}
+          AND shop = ${shop}
+      `
+    : await sql<{
+        byte_offset: string | null;
+        completed_at: Date | null;
+        closed_at: Date | null;
+        chunk_size: number;
+        failure_count: number;
+      }[]>`
+        SELECT byte_offset, completed_at, closed_at, chunk_size, failure_count
+        FROM s6_bulk_operations
+        WHERE bulk_operation_id = ${bulkOperationId}
+      `;
 
   if (!row) return null;
 
@@ -1187,7 +1202,8 @@ export async function processBulkOperation(
   // S25: Re-load progress AFTER acquiring the lease to get the latest state.
   // A concurrent processor could have modified progress between our initial check
   // and lease acquisition. Re-verify completed_at, closed_at, and failure_count.
-  const freshProgress = await loadBulkOperationProgress(sql, bulkOperationId);
+  // Post-lease re-read with shop filter to prevent cross-shop collision
+  const freshProgress = await loadBulkOperationProgress(sql, bulkOperationId, shop);
   if (!freshProgress) {
     return {
       success: false,

@@ -138,10 +138,11 @@ export async function claimReconcileStage(
   `;
   
   if (existingClaim?.bulk_operation_id) {
-    // S25: Verify the op row actually exists.
+    // S25: Verify the op row actually exists for THIS shop.
     const [opExists] = await sql<{ bulk_operation_id: string }[]>`
       SELECT bulk_operation_id FROM s6_bulk_operations
       WHERE bulk_operation_id = ${existingClaim.bulk_operation_id}
+        AND shop = ${shop}
     `;
     
     if (opExists) {
@@ -454,8 +455,28 @@ export async function startReconcileBulkOperation(
     // This ensures that if registerBulkOperation fails, the claim still has the op id,
     // preventing a retry from starting a SECOND Shopify op. The retry will see
     // "already_running" from claimReconcileStage and skip.
+    //
+    // FAIL-SAFE: If recordClaimBulkOperationId fails, retry up to 3 times. If all
+    // retries fail, re-throw so the claim stays with NULL bulk_operation_id but
+    // bulkOperationId is set, preventing release. The claim becomes reclaimable
+    // after CLAIM_RECLAIM_MINUTES, but claimReconcileStage will return "orphan"
+    // because the op row exists (once registered). If registration also fails,
+    // the orphan path adopts the existing Shopify op without starting a new one.
     if (chainKey) {
-      await recordClaimBulkOperationId(sql, chainKey, kind, shop, bulkOperationId);
+      let bindAttempts = 0;
+      const maxBindAttempts = 3;
+      while (bindAttempts < maxBindAttempts) {
+        try {
+          await recordClaimBulkOperationId(sql, chainKey, kind, shop, bulkOperationId);
+          break;
+        } catch (bindErr) {
+          bindAttempts++;
+          if (bindAttempts >= maxBindAttempts) {
+            throw bindErr;
+          }
+          await new Promise((r) => setTimeout(r, 100 * bindAttempts));
+        }
+      }
     }
 
     // Now register the bulk operation. If this fails, we do NOT release the claim
@@ -550,19 +571,11 @@ export async function enqueueReconcileStage(
   }
 
   // Guard: check and send in one transaction with FOR SHARE (#239, #293).
-  // FOR SHARE serializes with deleteShop's leading FOR UPDATE on the Shop row
-  // and with reinstall reset's UPDATE lock on the bulk operation row.
-  // S25: markNextStageEnqueued must be INSIDE the transaction to prevent races.
+  // LOCK ORDER: Shop row first, then s6_bulk_operations rows. This matches
+  // deleteShop and reinstall reset which also lock Shop first. Violating this
+  // order risks deadlock (40P01) when these paths run concurrently.
   const enqueued = await sql.begin(async (tx) => {
-    // S25: Atomically check if next stage was already enqueued
-    if (prevBulkOperationId) {
-      const markedEnqueued = await markNextStageEnqueued(tx, prevBulkOperationId, shop);
-      if (!markedEnqueued) {
-        // Already enqueued by another processor
-        return false;
-      }
-    }
-
+    // 1. Lock Shop row first (FOR SHARE serializes with deleteShop's FOR UPDATE)
     const [shopRow] = await tx<[{ id: string }?]>`
       SELECT id FROM "Shop"
       WHERE domain = ${shop}
@@ -573,6 +586,7 @@ export async function enqueueReconcileStage(
       return false;
     }
 
+    // 2. Check/update s6_bulk_operations rows (after Shop lock)
     // #293: Check that the previous stage's bulk operation is not closed
     if (prevBulkOperationId) {
       const [prevOp] = await tx<[{ bulk_operation_id: string }?]>`
@@ -582,6 +596,13 @@ export async function enqueueReconcileStage(
         FOR SHARE
       `;
       if (!prevOp) {
+        return false;
+      }
+
+      // S25: Atomically check if next stage was already enqueued (after Shop lock)
+      const markedEnqueued = await markNextStageEnqueued(tx, prevBulkOperationId, shop);
+      if (!markedEnqueued) {
+        // Already enqueued by another processor
         return false;
       }
     }

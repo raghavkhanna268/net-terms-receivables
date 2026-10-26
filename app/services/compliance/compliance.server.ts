@@ -138,6 +138,8 @@ export async function deleteShop(
   shopDomain: string
 ): Promise<DeleteShopResult> {
   return sql.begin(async (tx) => {
+    // LOCK ORDER: Shop row first, then s6_bulk_operations/claims rows. This order
+    // must match enqueueReconcileStage and reinstall reset to prevent deadlock.
     // Lock the Shop row to serialize with drain's FOR SHARE guards (#239) and
     // concurrent reinstalls. Fetch uninstalledAt to check if the shop reinstalled
     // within the 48h window before shop/redact arrived.
