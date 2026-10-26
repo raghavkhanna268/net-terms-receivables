@@ -75,12 +75,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response(null, { status: 500 });
   }
 
-  const { shop, topic, webhookId, payload } = await verifyWebhook(request, apiSecret, {
+  const { shop, topic, payload } = await verifyWebhook(request, apiSecret, {
     requireValidJson: true,
   });
   const normalizedTopic = normalizeWebhookTopic(topic);
 
-  console.log(`[Compliance] Received ${normalizedTopic} wh=${webhookId}`);
+  console.log(`[Compliance] Received ${normalizedTopic}`);
 
   const sql = getRequestSql();
 
@@ -95,14 +95,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       if (!typedPayload.customer?.id) {
         console.log(
-          `[Compliance] customers/data_request: No customer ID in payload wh=${webhookId}`
+          "[Compliance] customers/data_request: No customer ID in payload"
         );
         break;
       }
 
       if (!typedPayload.data_request?.id) {
         console.log(
-          `[Compliance] customers/data_request: No data_request.id in payload wh=${webhookId}`
+          "[Compliance] customers/data_request: No data_request.id in payload"
         );
         break;
       }
@@ -112,9 +112,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       `;
 
       if (!shopRecord) {
-        console.log(
-          `[Compliance] customers/data_request: Shop not found wh=${webhookId}`
-        );
+        console.log("[Compliance] customers/data_request: Shop not found");
         break;
       }
 
@@ -141,7 +139,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       console.log(
         `[Compliance] customers/data_request: ${alreadyExists ? "Duplicate" : "Created"} ` +
-          `data request id=${id} wh=${webhookId}`
+          `data request id=${id}`
       );
 
       // Send email notification to shop owner (gated on RESEND_API_KEY)
@@ -156,17 +154,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         );
         if (emailResult.sent) {
           console.log(
-            `[Compliance] customers/data_request: Email notification sent wh=${webhookId}`
+            "[Compliance] customers/data_request: Email notification sent"
           );
         } else if (emailResult.error) {
           console.log(
-            `[Compliance] customers/data_request: Email notification failed wh=${webhookId} error=email_send_failed`
+            "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
           );
         }
         // Note: skipped emails are logged inside sendDataRequestNotification
       } else {
         console.log(
-          `data_request_email_skipped wh=${webhookId} request_id=${requestId} reason=no_shop_email`
+          `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
         );
       }
       break;
@@ -181,7 +179,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       if (!typedPayload.customer?.id) {
         console.log(
-          `[Compliance] customers/redact: No customer ID in payload wh=${webhookId}`
+          "[Compliance] customers/redact: No customer ID in payload"
         );
         break;
       }
@@ -198,12 +196,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             `draft_orders=${counts.draftOrdersDeleted} data_requests=${counts.dataRequestsDeleted} ` +
             `payer_aliases=${counts.payerAliasesDeleted}, ` +
             `anonymized account=${counts.buyerAccountAnonymized}, ` +
-            `redacted payments=${counts.paymentsRedacted} shop_id=${shopRecord.id} wh=${webhookId}`
+            `redacted payments=${counts.paymentsRedacted} shop_id=${shopRecord.id}`
         );
       } else {
-        console.log(
-          `[Compliance] customers/redact: Shop not found wh=${webhookId}`
-        );
+        console.log("[Compliance] customers/redact: Shop not found");
       }
       break;
     }
@@ -231,7 +227,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } else if (result.deleted) {
         safeLog("info", "shop_redact_deleted", {
           shopHash: hash,
-          webhookId,
           sessionsDeleted: result.sessionsDeleted,
           refetchNullPurged: result.refetchNullPurged,
           bulkOperationsPurged: result.bulkOperationsPurged,
@@ -248,7 +243,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } else {
         safeLog("info", "shop_redact_not_found", {
           shopHash: hash,
-          webhookId,
         });
       }
       break;

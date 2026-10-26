@@ -21,11 +21,18 @@ import {
   type BuyerInvoiceRow,
 } from "~/lib/aging";
 import type { Sql } from "~/lib/db-light.server";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
+import {
+  isShopCurrencySupported,
+  NO_CURRENCY_SENTINEL,
+  validateCurrencyCode,
+} from "~/lib/shop-currency.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
+import { writeShopConfigMetafield } from "~/services/shop-config.server";
 
 const PAGE_SIZE = 20;
 
@@ -205,6 +212,137 @@ async function checkOnboardingRedirect(
   }
 }
 
+/**
+ * #292: Re-read currency on EVERY /app load.
+ * 
+ * Called on every load to catch:
+ * - Shops with hardcoded 'INR' rows (from bugs or manual data fixes)
+ * - Shops that switched away from INR
+ * - Shops that switched to INR (recovery)
+ * - Stale shop_config metafield (e.g., after-auth write failed)
+ * 
+ * Behavior (fail-closed throughout):
+ * - Always re-read from Shopify Admin API (includes shop_config metafield)
+ * - If fetched currency is XXX: return early without writing anything
+ * - Re-push shop_config when:
+ *   - shop_config is missing
+ *   - shop_config.currencyCode differs from fetched currency (stale)
+ *   - DB currency differs from fetched currency
+ * - Write shop_config metafield FIRST, only save DB on success
+ * - If read fails: keep current value
+ * 
+ * Never writes 'XXX' over a known value.
+ */
+async function checkAndRecoverCurrency(
+  sql: Sql,
+  shopDomain: string,
+  currentCurrency: string,
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+): Promise<string> {
+  try {
+    // Query includes shop_config metafield to detect stale values
+    const response = await admin.graphql(`
+      query ShopCurrencyAndId {
+        shop {
+          id
+          currencyCode
+          metafield(namespace: "$app", key: "shop_config") {
+            value
+          }
+        }
+      }
+    `);
+    const data = await response.json() as {
+      data?: {
+        shop?: {
+          id?: string;
+          currencyCode?: string;
+          metafield?: { value?: string } | null;
+        };
+      };
+    };
+
+    const shopId = data.data?.shop?.id;
+    const fetchedCurrency = validateCurrencyCode(data.data?.shop?.currencyCode);
+
+    // If read fails or returns invalid, keep current value
+    if (!fetchedCurrency || !shopId) {
+      return currentCurrency;
+    }
+
+    // If fetched currency is XXX (unknown), return early without writing anything
+    if (fetchedCurrency === NO_CURRENCY_SENTINEL) {
+      return currentCurrency;
+    }
+
+    // Parse shop_config metafield to check for staleness
+    let shopConfigCurrency: string | null = null;
+    const metafieldValue = data.data?.shop?.metafield?.value;
+    if (metafieldValue) {
+      try {
+        const parsed = JSON.parse(metafieldValue) as { currencyCode?: string };
+        shopConfigCurrency = parsed.currencyCode ?? null;
+      } catch {
+        // Invalid JSON - treat as missing
+      }
+    }
+
+    const hash = await shopHash(shopDomain);
+
+    // Determine if we need to re-push shop_config:
+    // 1. shop_config is missing (null)
+    // 2. shop_config.currencyCode differs from fetched currency (stale)
+    const shopConfigMissing = shopConfigCurrency === null;
+    const shopConfigStale = shopConfigCurrency !== null && shopConfigCurrency !== fetchedCurrency;
+    const dbNeedsUpdate = currentCurrency !== fetchedCurrency;
+
+    const needsShopConfigPush = shopConfigMissing || shopConfigStale || dbNeedsUpdate;
+
+    if (needsShopConfigPush) {
+      // Write shop_config metafield FIRST
+      const writeResult = await writeShopConfigMetafield(admin, shopId, fetchedCurrency);
+
+      if (!writeResult.success) {
+        // Metafield write failed: do NOT save currency, log and return current
+        // Next load will retry the metafield write
+        safeLog("warn", "currency_recovery_metafield_failed", {
+          shopHash: hash,
+          err: writeResult.error ?? "unknown",
+        });
+        return currentCurrency;
+      }
+
+      // Log specific scenario for debugging
+      if (shopConfigStale && !dbNeedsUpdate) {
+        safeLog("info", "shop_config_stale_repushed", { shopHash: hash });
+      }
+    }
+
+    // Update DB if needed
+    if (dbNeedsUpdate) {
+      await sql`
+        UPDATE "Shop" SET currency = ${fetchedCurrency}, "updatedAt" = NOW()
+        WHERE domain = ${shopDomain}
+      `;
+
+      if (fetchedCurrency === "INR" && currentCurrency !== "INR") {
+        safeLog("info", "currency_recovery_success", { shopHash: hash });
+      } else if (fetchedCurrency !== "INR" && currentCurrency === "INR") {
+        safeLog("info", "currency_switched_away", { shopHash: hash });
+      } else if (currentCurrency === NO_CURRENCY_SENTINEL) {
+        safeLog("info", "currency_xxx_resolved", { shopHash: hash });
+      }
+    }
+
+    return fetchedCurrency;
+  } catch {
+    // Read failed: keep current value (never overwrite known value with XXX)
+    const hash = await shopHash(shopDomain);
+    safeLog("warn", "currency_check_failed", { shopHash: hash });
+    return currentCurrency;
+  }
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Read cold once - layout and index get same value with same context object
   const cold = readColdOnce(context);
@@ -215,7 +353,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   // Time auth_index phase
   timing.startPhase("auth_index");
-  const { session, sessionToken, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
+  const { session, sessionToken, redirect: shopifyRedirect, admin } = await shopify.authenticate.admin(request);
   timing.endPhase("auth_index");
 
   const sql = getRequestSql();
@@ -235,6 +373,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
   timing.endPhase("shop_lookup");
+
+  // #292: Re-read currency for non-INR shops to enable recovery when shop changes to INR
+  const shopCurrency = shop
+    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin)
+    : NO_CURRENCY_SENTINEL;
 
   // Time onboarding_checks phase
   if (shop && !skipOnboarding) {
@@ -338,6 +481,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const storeHandle = shopDomain.replace(".myshopify.com", "");
   const gatingEnforced = isGatingEnforced();
 
+  // #292: Check if shop currency is supported (INR-only in v1)
+  // Uses shopCurrency which may have been retried if it was 'XXX'
+  const currencySupported = isShopCurrencySupported(shopCurrency);
+
   if (shop && !error) {
     const accessParams: Parameters<typeof recordAccess>[1] = {
       shopId: shop.id,
@@ -364,7 +511,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopName: storeHandle,
     shopDomain,
     storeHandle,
-    shopCurrency: shop?.currency ?? "INR",
+    shopCurrency,
+    currencySupported,
     plan: planData
       ? {
           key: resolvePlanKey(planData.plan.key),
@@ -723,6 +871,7 @@ export default function Index() {
     overLimitCount,
     error,
     newAccountsPausedBanner,
+    currencySupported,
   } = useLoaderData<typeof loader>();
 
   const planKey = (plan?.key ?? "none") as PlanKey;
@@ -742,6 +891,15 @@ export default function Index() {
 
   return (
     <s-page heading="Net Terms Receivables">
+      {/* #292: Currency Not Supported Banner */}
+      {!currencySupported && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      )}
+
       {/* T4: New accounts paused banner */}
       {newAccountsPausedBanner.show && (
         <s-section>
