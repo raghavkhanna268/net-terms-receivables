@@ -996,7 +996,10 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
       }
     });
 
-    it("clearUninstalledAtAndMetafieldErrors excludes no-owner and redacted accounts (#294 item 8)", async () => {
+    // The no-owner exclusion is defensive; BuyerAccount_kind_consistency (20261022000001)
+    // makes such rows impossible. Kept identical to enqueue_credit_status_recomputes Part 3.
+    // Only the redacted exclusion can be DB-tested.
+    it("clearUninstalledAtAndMetafieldErrors excludes redacted accounts but resets look-alikes (#294 item 8)", async () => {
       const TEST_SHOP = `test-exclusions-main-${TEST_SUFFIX}.myshopify.com`;
       const syncedAt = new Date("2026-10-14T10:00:00Z");
 
@@ -1006,92 +1009,70 @@ describeWithDb("reinstall clears metafieldSyncErrorCode and metafieldSyncErrorAt
         RETURNING id
       `;
 
-      // Temporarily drop the constraint to insert no-owner test rows
-      // (these can exist from legacy data before the constraint was added)
-      await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+      const beforeUpdate = new Date();
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", "customerId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          -- Redacted account (has _redacted_ with underscores) - should NOT be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/123_redacted_1698765432',
+           'Redacted Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Look-alike (no underscores around redacted) - SHOULD be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/9redacted9',
+           'Look-alike Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Eligible COMPANY account - should be reset
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/eligible', 'gid://shopify/CompanyLocation/eligible',
+           NULL,
+           'Eligible Account', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate})
+      `;
 
-      try {
-        const beforeUpdate = new Date();
-        await sql`
-          INSERT INTO "BuyerAccount" (
-            "shopId", kind, "companyId", "companyLocationId", "customerId", name,
-            "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
-            "metafieldSyncedAt", "syncPending",
-            "createdAt", "updatedAt"
-          )
-          VALUES
-            -- No-owner: COMPANY without companyLocationId
-            (${shopId}, 'COMPANY'::"AccountKind",
-             'gid://shopify/Company/no-owner-company', NULL, NULL,
-             'No Owner Company', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
-            -- No-owner: TAGGED_CUSTOMER without customerId
-            (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
-             NULL, NULL, NULL,
-             'No Owner Tagged', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
-            -- Redacted account
-            (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
-             NULL, NULL, 'gid://shopify/Customer/123_redacted_1698765432',
-             'Redacted Customer', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
-            -- Eligible account (should be reset)
-            (${shopId}, 'COMPANY'::"AccountKind",
-             'gid://shopify/Company/eligible', 'gid://shopify/CompanyLocation/eligible',
-             NULL,
-             'Eligible Account', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate})
-        `;
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
+        await import("../after-auth.server");
 
-        const { _clearUninstalledAtAndMetafieldErrorsForTesting } =
-          await import("../after-auth.server");
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
+      expect(result.wasReinstalled).toBe(true);
 
-        const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, TEST_SHOP);
-        expect(result.wasReinstalled).toBe(true);
+      const accounts = await sql<{
+        name: string;
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
+        updatedAt: Date;
+      }[]>`
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending", "updatedAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
+      `;
 
-        const accounts = await sql<{
-          name: string;
-          metafieldSyncErrorCode: string | null;
-          metafieldSyncErrorAt: Date | null;
-          metafieldSyncedAt: Date | null;
-          syncPending: boolean;
-          updatedAt: Date;
-        }[]>`
-          SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending", "updatedAt"
-          FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-          ORDER BY name
-        `;
+      expect(accounts).toHaveLength(3);
 
-        expect(accounts).toHaveLength(4);
-
-        // Eligible account should be reset
-        const eligible = accounts.find(a => a.name === "Eligible Account")!;
-        expect(eligible.metafieldSyncErrorCode).toBeNull();
-        expect(eligible.metafieldSyncErrorAt).toBeNull();
-        expect(eligible.metafieldSyncedAt).toBeNull();
-        expect(eligible.syncPending).toBe(true);
-
-        // No-owner and redacted accounts should be unchanged
-        for (const name of ["No Owner Company", "No Owner Tagged", "Redacted Customer"]) {
-          const account = accounts.find(a => a.name === name)!;
-          expect(account.metafieldSyncErrorCode).toBe("no_session");
-          expect(account.metafieldSyncErrorAt?.getTime()).toBe(syncedAt.getTime());
-          expect(account.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
-          expect(account.syncPending).toBe(false);
-          expect(account.updatedAt.getTime()).toBe(beforeUpdate.getTime());
-        }
-
-        // Clean up no-owner rows before restoring constraint
-        await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId} AND name IN ('No Owner Company', 'No Owner Tagged')`;
-      } finally {
-        // Restore the constraint
-        await sql`
-          ALTER TABLE "BuyerAccount" ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-            (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-            OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-          )
-        `;
+      // Eligible account and look-alike should be reset
+      for (const name of ["Eligible Account", "Look-alike Customer"]) {
+        const account = accounts.find(a => a.name === name)!;
+        expect(account.metafieldSyncErrorCode).toBeNull();
+        expect(account.metafieldSyncErrorAt).toBeNull();
+        expect(account.metafieldSyncedAt).toBeNull();
+        expect(account.syncPending).toBe(true);
       }
+
+      // Redacted account should be unchanged
+      const redacted = accounts.find(a => a.name === "Redacted Customer")!;
+      expect(redacted.metafieldSyncErrorCode).toBe("no_session");
+      expect(redacted.metafieldSyncErrorAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.syncPending).toBe(false);
+      expect(redacted.updatedAt.getTime()).toBe(beforeUpdate.getTime());
     });
   });
 
@@ -1552,7 +1533,10 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
       expect(otherShopAccount.syncPending).toBe(false);
     });
 
-    it("upsertShopOnAuth reinstall excludes no-owner and redacted accounts (#294 item 8)", async () => {
+    // The no-owner exclusion is defensive; BuyerAccount_kind_consistency (20261022000001)
+    // makes such rows impossible. Kept identical to enqueue_credit_status_recomputes Part 3.
+    // Only the redacted exclusion can be DB-tested.
+    it("upsertShopOnAuth reinstall excludes redacted accounts but resets look-alikes (#294 item 8)", async () => {
       const TEST_SHOP = `test-exclusions-upsert-${TEST_SUFFIX}.myshopify.com`;
       const syncedAt = new Date("2026-10-14T10:00:00Z");
 
@@ -1562,89 +1546,67 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
         RETURNING id
       `;
 
-      // Temporarily drop the constraint to insert no-owner test rows
-      // (these can exist from legacy data before the constraint was added)
-      await sql`ALTER TABLE "BuyerAccount" DROP CONSTRAINT "BuyerAccount_kind_consistency"`;
+      const beforeUpdate = new Date();
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", "customerId", name,
+          "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
+          "metafieldSyncedAt", "syncPending",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          -- Redacted account (has _redacted_ with underscores) - should NOT be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/456_redacted_1698765432',
+           'Redacted Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Look-alike (no underscores around redacted) - SHOULD be reset
+          (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/Xredacted-1',
+           'Look-alike Customer', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
+          -- Eligible COMPANY account - should be reset
+          (${shopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/eligible-upsert', 'gid://shopify/CompanyLocation/eligible-upsert',
+           NULL,
+           'Eligible Account', 'OK', 'no_session', ${syncedAt},
+           ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate})
+      `;
 
-      try {
-        const beforeUpdate = new Date();
-        await sql`
-          INSERT INTO "BuyerAccount" (
-            "shopId", kind, "companyId", "companyLocationId", "customerId", name,
-            "holdState", "metafieldSyncErrorCode", "metafieldSyncErrorAt",
-            "metafieldSyncedAt", "syncPending",
-            "createdAt", "updatedAt"
-          )
-          VALUES
-            -- No-owner: COMPANY without companyLocationId
-            (${shopId}, 'COMPANY'::"AccountKind",
-             'gid://shopify/Company/no-owner-upsert', NULL, NULL,
-             'No Owner Company', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
-            -- No-owner: TAGGED_CUSTOMER without customerId
-            (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
-             NULL, NULL, NULL,
-             'No Owner Tagged', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
-            -- Redacted account
-            (${shopId}, 'TAGGED_CUSTOMER'::"AccountKind",
-             NULL, NULL, 'gid://shopify/Customer/456_redacted_1698765432',
-             'Redacted Customer', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate}),
-            -- Eligible account (should be reset)
-            (${shopId}, 'COMPANY'::"AccountKind",
-             'gid://shopify/Company/eligible-upsert', 'gid://shopify/CompanyLocation/eligible-upsert',
-             NULL,
-             'Eligible Account', 'OK', 'no_session', ${syncedAt},
-             ${syncedAt}, false, ${beforeUpdate}, ${beforeUpdate})
-        `;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "INR");
 
-        const { upsertShopOnAuth } = await import("../after-auth.server");
-        await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "INR");
+      const accounts = await sql<{
+        name: string;
+        metafieldSyncErrorCode: string | null;
+        metafieldSyncErrorAt: Date | null;
+        metafieldSyncedAt: Date | null;
+        syncPending: boolean;
+        updatedAt: Date;
+      }[]>`
+        SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending", "updatedAt"
+        FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        ORDER BY name
+      `;
 
-        const accounts = await sql<{
-          name: string;
-          metafieldSyncErrorCode: string | null;
-          metafieldSyncErrorAt: Date | null;
-          metafieldSyncedAt: Date | null;
-          syncPending: boolean;
-          updatedAt: Date;
-        }[]>`
-          SELECT name, "metafieldSyncErrorCode", "metafieldSyncErrorAt", "metafieldSyncedAt", "syncPending", "updatedAt"
-          FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-          ORDER BY name
-        `;
+      expect(accounts).toHaveLength(3);
 
-        expect(accounts).toHaveLength(4);
-
-        // Eligible account should be reset
-        const eligible = accounts.find(a => a.name === "Eligible Account")!;
-        expect(eligible.metafieldSyncErrorCode).toBeNull();
-        expect(eligible.metafieldSyncErrorAt).toBeNull();
-        expect(eligible.metafieldSyncedAt).toBeNull();
-        expect(eligible.syncPending).toBe(true);
-
-        // No-owner and redacted accounts should be unchanged
-        for (const name of ["No Owner Company", "No Owner Tagged", "Redacted Customer"]) {
-          const account = accounts.find(a => a.name === name)!;
-          expect(account.metafieldSyncErrorCode).toBe("no_session");
-          expect(account.metafieldSyncErrorAt?.getTime()).toBe(syncedAt.getTime());
-          expect(account.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
-          expect(account.syncPending).toBe(false);
-          expect(account.updatedAt.getTime()).toBe(beforeUpdate.getTime());
-        }
-
-        // Clean up no-owner rows before restoring constraint
-        await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId} AND name IN ('No Owner Company', 'No Owner Tagged')`;
-      } finally {
-        // Restore the constraint
-        await sql`
-          ALTER TABLE "BuyerAccount" ADD CONSTRAINT "BuyerAccount_kind_consistency" CHECK (
-            (kind = 'COMPANY' AND "companyLocationId" IS NOT NULL AND "companyId" IS NOT NULL)
-            OR (kind = 'TAGGED_CUSTOMER' AND "customerId" IS NOT NULL)
-          )
-        `;
+      // Eligible account and look-alike should be reset
+      for (const name of ["Eligible Account", "Look-alike Customer"]) {
+        const account = accounts.find(a => a.name === name)!;
+        expect(account.metafieldSyncErrorCode).toBeNull();
+        expect(account.metafieldSyncErrorAt).toBeNull();
+        expect(account.metafieldSyncedAt).toBeNull();
+        expect(account.syncPending).toBe(true);
       }
+
+      // Redacted account should be unchanged
+      const redacted = accounts.find(a => a.name === "Redacted Customer")!;
+      expect(redacted.metafieldSyncErrorCode).toBe("no_session");
+      expect(redacted.metafieldSyncErrorAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.metafieldSyncedAt?.getTime()).toBe(syncedAt.getTime());
+      expect(redacted.syncPending).toBe(false);
+      expect(redacted.updatedAt.getTime()).toBe(beforeUpdate.getTime());
     });
   });
 });
