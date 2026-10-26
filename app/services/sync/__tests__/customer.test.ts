@@ -829,6 +829,16 @@ describeWithDb("Customer Sync", () => {
       expect(result.success).toBe(true);
       expect(result.action).toBe("created");
       expect(result.entityId).toBeDefined();
+
+      const [account] = await sql<
+        { defaultTermsDays: number | null; defaultTermsSource: string | null }[]
+      >`
+        SELECT "defaultTermsDays", "defaultTermsSource"
+        FROM "BuyerAccount"
+        WHERE "customerId" = ${customerId}
+      `;
+      expect(account.defaultTermsDays).toBe(30);
+      expect(account.defaultTermsSource).toBe("tag");
     });
 
     it("blank tag does not match any rule via webhook", async () => {

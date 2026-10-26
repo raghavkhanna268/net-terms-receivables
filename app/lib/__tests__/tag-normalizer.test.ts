@@ -258,6 +258,42 @@ describe("Tag-rule matching parity", () => {
       ruleTag: "wholesale",
       expectedTag: "wholesale",
     },
+    {
+      name: "no match - blank rule against empty customer tag",
+      customerTags: [""],
+      ruleTag: "",
+      expectedTag: null,
+    },
+    {
+      name: "no match - blank rule against whitespace customer tag",
+      customerTags: ["  "],
+      ruleTag: "",
+      expectedTag: null,
+    },
+    {
+      name: "no match - whitespace rule against empty customer tag",
+      customerTags: [""],
+      ruleTag: "   ",
+      expectedTag: null,
+    },
+    {
+      name: "no match - whitespace rule against whitespace customer tag",
+      customerTags: ["  "],
+      ruleTag: "   ",
+      expectedTag: null,
+    },
+    {
+      name: "no match - blank rule against real customer tag",
+      customerTags: ["wholesale"],
+      ruleTag: "",
+      expectedTag: null,
+    },
+    {
+      name: "no match - whitespace rule against real customer tag",
+      customerTags: ["wholesale"],
+      ruleTag: "   ",
+      expectedTag: null,
+    },
   ];
 
   describe("customer.server.ts findMatchingTagRule", () => {
