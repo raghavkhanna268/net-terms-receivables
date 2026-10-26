@@ -2,8 +2,9 @@
 --
 -- Updates s18_enqueue_reminders() Part 4 to order catch-up reminders by:
 -- 1. reminder_date ASC (oldest overdue first)
--- 2. outstanding DESC NULLS LAST (larger amounts first as tiebreaker)
--- 3. invoiceId ASC (deterministic final tiebreaker)
+-- 2. outstanding DESC (larger amounts first as tiebreaker)
+-- 3. invoiceId ASC (tiebreaker when amounts equal)
+-- 4. ruleId ASC (deterministic final tiebreaker for same invoice with multiple rules)
 --
 -- This ensures that when multiple delayed reminders have the same reminder date,
 -- the larger outstanding amounts are processed first.
@@ -220,7 +221,7 @@ BEGIN
                     = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
           )
         -- Order by oldest reminder date first within each batch
-        ORDER BY reminder_date ASC, i.outstanding DESC NULLS LAST, rl."invoiceId" ASC
+        ORDER BY reminder_date ASC, i.outstanding DESC, rl."invoiceId" ASC, rl."ruleId" ASC
     LOOP
         PERFORM pgmq.send(
             's6_sync'::TEXT,

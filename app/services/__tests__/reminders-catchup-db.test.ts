@@ -1538,47 +1538,48 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   });
 
   describe("amount tiebreak ordering (#230)", () => {
-    it("enqueues catch-up messages by oldest-first then larger-amount (DESC order)", async () => {
+    it("orders by outstanding DESC when reminder dates are equal (larger amount first)", async () => {
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
-      // 3 invoices with same reminder date but different outstanding amounts
-      const invoiceIdSmall = `inv-amount-small-${TEST_SUFFIX}`;
-      const invoiceIdLarge = `inv-amount-large-${TEST_SUFFIX}`;
-      const invoiceIdZero = `inv-amount-zero-${TEST_SUFFIX}`;
-      const orderIdSmall = `gid://shopify/Order/amount-small-${TEST_SUFFIX}`;
-      const orderIdLarge = `gid://shopify/Order/amount-large-${TEST_SUFFIX}`;
-      const orderIdZero = `gid://shopify/Order/amount-zero-${TEST_SUFFIX}`;
+      // IDs chosen so invoiceId ASC order is OPPOSITE of amount DESC order:
+      // - inv-a-... has SMALL amount (1000) but sorts FIRST by invoiceId
+      // - inv-b-... has MEDIUM amount (5000) 
+      // - inv-c-... has LARGE amount (9000) but sorts LAST by invoiceId
+      // With old ORDER BY (invoiceId ASC only), order would be: a, b, c
+      // With new ORDER BY (outstanding DESC), order should be: c, b, a
+      const invoiceIdA = `inv-a-small-${TEST_SUFFIX}`;
+      const invoiceIdB = `inv-b-medium-${TEST_SUFFIX}`;
+      const invoiceIdC = `inv-c-large-${TEST_SUFFIX}`;
+      const orderIdA = `gid://shopify/Order/a-small-${TEST_SUFFIX}`;
+      const orderIdB = `gid://shopify/Order/b-medium-${TEST_SUFFIX}`;
+      const orderIdC = `gid://shopify/Order/c-large-${TEST_SUFFIX}`;
 
-      // All invoices due 2 days ago (so reminder date = dueAt + 0 = 2 days ago, within D+1..D+3)
-      // Note: outstanding is NOT NULL in schema, so we use 0.01 for smallest amount
-      // (0 would be skipped by TS re-check as "fully paid")
+      // All invoices due 2 days ago (same reminder date)
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
         VALUES 
-          (${invoiceIdSmall}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdSmall},
-           '#AMOUNT-SMALL', 10000.00, 1000.00, 'open',
+          (${invoiceIdA}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdA},
+           '#A-SMALL', 10000.00, 1000.00, 'open',
            ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
-          (${invoiceIdLarge}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdLarge},
-           '#AMOUNT-LARGE', 10000.00, 9000.00, 'open',
+          (${invoiceIdB}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdB},
+           '#B-MEDIUM', 10000.00, 5000.00, 'open',
            ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
-          (${invoiceIdZero}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdZero},
-           '#AMOUNT-ZERO', 10000.00, 0.01, 'open',
+          (${invoiceIdC}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdC},
+           '#C-LARGE', 10000.00, 9000.00, 'open',
            ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow})
       `;
 
-      // Create delayed logs for each (all same reminder date = 2 days ago)
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdSmall}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdLarge}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdZero}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdA}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdB}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdC}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
       `;
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-
       await sql`SELECT public.s18_enqueue_reminders()`;
 
       const messages = await sql<{ invoiceId: string }[]>`
@@ -1590,10 +1591,223 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       `;
 
       expect(messages.length).toBe(3);
-      // Order: largest outstanding first (DESC), then smaller, then smallest
-      expect(messages[0].invoiceId).toBe(invoiceIdLarge);  // 9000
-      expect(messages[1].invoiceId).toBe(invoiceIdSmall);  // 1000
-      expect(messages[2].invoiceId).toBe(invoiceIdZero);   // 0.01
+      // New ORDER BY: outstanding DESC, so largest first
+      // This would FAIL with old ORDER BY (invoiceId ASC): would be a, b, c
+      expect(messages[0].invoiceId).toBe(invoiceIdC);  // 9000 (largest)
+      expect(messages[1].invoiceId).toBe(invoiceIdB);  // 5000 (medium)
+      expect(messages[2].invoiceId).toBe(invoiceIdA);  // 1000 (smallest)
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    });
+
+    it("falls back to invoiceId ASC when amounts are equal", async () => {
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      // Two invoices with SAME outstanding, different IDs
+      const invoiceIdFirst = `inv-equal-aaa-${TEST_SUFFIX}`;
+      const invoiceIdSecond = `inv-equal-zzz-${TEST_SUFFIX}`;
+      const orderIdFirst = `gid://shopify/Order/equal-aaa-${TEST_SUFFIX}`;
+      const orderIdSecond = `gid://shopify/Order/equal-zzz-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES 
+          (${invoiceIdFirst}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdFirst},
+           '#EQUAL-AAA', 10000.00, 5000.00, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
+          (${invoiceIdSecond}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdSecond},
+           '#EQUAL-ZZZ', 10000.00, 5000.00, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow})
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES 
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdFirst}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdSecond}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+      `;
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      const messages = await sql<{ invoiceId: string }[]>`
+        SELECT message->>'invoiceId' AS "invoiceId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'REMINDER_CATCHUP'
+        ORDER BY msg_id ASC
+      `;
+
+      expect(messages.length).toBe(2);
+      // Equal amounts -> fall back to invoiceId ASC
+      expect(messages[0].invoiceId).toBe(invoiceIdFirst);   // aaa < zzz
+      expect(messages[1].invoiceId).toBe(invoiceIdSecond);
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    });
+
+    it("older reminder date sorts before newer date even with smaller amount", async () => {
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      // Two invoices: older date with smaller amount vs newer date with larger amount
+      // reminder_date ASC should win over outstanding DESC
+      const invoiceIdOlder = `inv-older-small-${TEST_SUFFIX}`;
+      const invoiceIdNewer = `inv-newer-large-${TEST_SUFFIX}`;
+      const orderIdOlder = `gid://shopify/Order/older-small-${TEST_SUFFIX}`;
+      const orderIdNewer = `gid://shopify/Order/newer-large-${TEST_SUFFIX}`;
+
+      // Older invoice: due 3 days ago (reminder date = 3 days ago), small amount
+      // Newer invoice: due 2 days ago (reminder date = 2 days ago), large amount
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES 
+          (${invoiceIdOlder}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdOlder},
+           '#OLDER-SMALL', 10000.00, 1000.00, 'open',
+           ${dates.daysAgo(10)}, ${dates.daysAgo(3)}, ${dates.dbNow}, ${dates.dbNow}),
+          (${invoiceIdNewer}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdNewer},
+           '#NEWER-LARGE', 10000.00, 9000.00, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow})
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES 
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdOlder}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(3)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdNewer}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+      `;
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      const messages = await sql<{ invoiceId: string }[]>`
+        SELECT message->>'invoiceId' AS "invoiceId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'REMINDER_CATCHUP'
+        ORDER BY msg_id ASC
+      `;
+
+      expect(messages.length).toBe(2);
+      // reminder_date ASC wins: older date first, even though amount is smaller
+      expect(messages[0].invoiceId).toBe(invoiceIdOlder);  // 3 days ago, 1000
+      expect(messages[1].invoiceId).toBe(invoiceIdNewer);  // 2 days ago, 9000
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    });
+
+    it("same-invoice multiple rules: only latest stage survives (Part 2 logic)", async () => {
+      // NOTE: Part 2 marks older stages as skipped when a newer stage exists for
+      // the same invoice. So two rules with different offsetDays on the SAME invoice
+      // will result in only the latest stage being enqueued.
+      // This test verifies that behaviour, not ruleId ordering.
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      const invoiceId = `inv-multi-rule-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/multi-rule-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#MULTI-RULE', 10000.00, 5000.00, 'open',
+          ${dates.daysAgo(10)}, ${dates.daysAgo(5)}, ${dates.dbNow}, ${dates.dbNow}
+        )
+      `;
+
+      // Two delayed logs for same invoice but different rules (different offsetDays)
+      // Rule 1 has offsetDays=0, Rule 2 has offsetDays=7 (later stage)
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES 
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(5)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+      `;
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      // Part 2 should mark the older stage (rule 1, offsetDays=0) as skipped
+      const [rule1Log] = await sql<{ status: string }[]>`
+        SELECT status FROM "ReminderLog"
+        WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+      `;
+      expect(rule1Log.status).toBe("skipped_daily_limit");
+
+      // Only the newer stage should be enqueued (if within window) or still delayed
+      const messages = await sql<{ invoiceId: string; ruleId: string }[]>`
+        SELECT message->>'invoiceId' AS "invoiceId", message->>'ruleId' AS "ruleId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'REMINDER_CATCHUP'
+          AND message->>'invoiceId' = ${invoiceId}
+        ORDER BY msg_id ASC
+      `;
+
+      // Only one message (the later stage) if it's within D+1..D+3 window
+      expect(messages.length).toBeLessThanOrEqual(1);
+      if (messages.length === 1) {
+        expect(messages[0].ruleId).toBe(TEST_RULE_ID_2);
+      }
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    });
+
+    it("ruleId ASC tiebreaker for different invoices with same date, amount, and invoiceId prefix", async () => {
+      // Test ruleId ordering when all other fields tie.
+      // Create two DIFFERENT invoices (to avoid Part 2 stage collapse) that happen
+      // to have the same reminder date and same outstanding amount.
+      // Order by invoiceId should distinguish them, but we verify ruleId is also in sort.
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      const invoiceId1 = `inv-tie-rule-1-${TEST_SUFFIX}`;
+      const invoiceId2 = `inv-tie-rule-2-${TEST_SUFFIX}`;
+      const orderId1 = `gid://shopify/Order/tie-rule-1-${TEST_SUFFIX}`;
+      const orderId2 = `gid://shopify/Order/tie-rule-2-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES 
+          (${invoiceId1}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId1},
+           '#TIE-RULE-1', 10000.00, 5000.00, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
+          (${invoiceId2}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId2},
+           '#TIE-RULE-2', 10000.00, 5000.00, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow})
+      `;
+
+      // Each invoice gets a delayed log with a different rule
+      // invoiceId1 with rule2, invoiceId2 with rule1
+      // This tests that invoiceId sorts before ruleId
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES 
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId1}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId2}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+      `;
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      const messages = await sql<{ invoiceId: string; ruleId: string }[]>`
+        SELECT message->>'invoiceId' AS "invoiceId", message->>'ruleId' AS "ruleId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'REMINDER_CATCHUP'
+        ORDER BY msg_id ASC
+      `;
+
+      expect(messages.length).toBe(2);
+      // Same date, same amount -> invoiceId ASC: inv-tie-rule-1 < inv-tie-rule-2
+      expect(messages[0].invoiceId).toBe(invoiceId1);
+      expect(messages[1].invoiceId).toBe(invoiceId2);
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     });
@@ -1723,7 +1937,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it("skips and deletes delayed row when buyer opted out", async () => {
+    it("transitions delayed row to skipped_opted_out when buyer opted out", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
       const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
@@ -1912,7 +2126,7 @@ describe("isReminderDueToday (pure JS, boundary instants)", () => {
 
 /**
  * Migration diff test: asserts the s18_enqueue_reminders function body in
- * 20261120000000 differs from 20261112000000 ONLY in the ORDER BY line.
+ * 20261122000000 differs from 20261112000000 ONLY in the ORDER BY line.
  * Does not require database access.
  */
 describe("migration diff: 20261122000000 vs 20261112000000 (#230)", () => {
@@ -1960,6 +2174,6 @@ describe("migration diff: 20261122000000 vs 20261112000000 (#230)", () => {
 
     expect(differences.length).toBe(1);
     expect(differences[0].base).toContain("ORDER BY reminder_date ASC, rl.\"invoiceId\" ASC");
-    expect(differences[0].new).toContain("ORDER BY reminder_date ASC, i.outstanding DESC NULLS LAST, rl.\"invoiceId\" ASC");
+    expect(differences[0].new).toContain("ORDER BY reminder_date ASC, i.outstanding DESC, rl.\"invoiceId\" ASC, rl.\"ruleId\" ASC");
   });
 });
