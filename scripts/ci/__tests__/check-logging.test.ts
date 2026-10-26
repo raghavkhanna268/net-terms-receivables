@@ -1595,4 +1595,425 @@ const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});`
       expect(exitCode).toBe(0);
     });
   });
+
+  // =========================================================================
+  // #332: webhookId ban in logging contexts
+  // =========================================================================
+  describe("#332: webhookId ban", () => {
+    it("fails for safeLog with webhookId key (shorthand)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import { safeLog } from "~/lib/log.server";
+export function test(webhookId: string) { safeLog("info", "event", { webhookId }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+      expect(output).toContain("webhookId");
+    });
+
+    it("fails for safeLog with webhookId key (property assignment)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import { safeLog } from "~/lib/log.server";
+export function test(wh: string) { safeLog("info", "event", { webhookId: wh }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for console.log with webhookId key", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(webhookId: string) { console.log("Event", { webhookId }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for console.error with wh=${webhookId} template (webhookId identifier)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(webhookId: string) { console.error(`Processing wh=${webhookId}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for Sentry.setExtra with webhookId key", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(wh: string) { Sentry.setExtra("webhookId", wh); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for Sentry.setContext with webhookId in object", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `import * as Sentry from "@sentry/cloudflare";
+export function test(webhookId: string) { Sentry.setContext("hook", { webhookId }); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for template literal with ${webhookId}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(webhookId: string) { console.log(`Received: ${webhookId}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("fails for template literal with ${data.webhookId}", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        "export function test(data: { webhookId: string }) { console.log(`Received: ${data.webhookId}`); }"
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("banned-log-key");
+    });
+
+    it("passes for string literal with wh= prefix but no webhookId (public-logs ruling)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test() { console.log("wh=abc123"); }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for destructuring webhookId (not a log context)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(data: { webhookId: string }) {
+  const { webhookId } = data;
+  return webhookId;
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for webhookId in non-log function call", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export async function test(webhookId: string) {
+  await recordWebhookReceipt(tx, shop, webhookId, topic, timestamp);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for webhookId in queue message object (not a log call)", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(webhookId: string) {
+  const msg = { webhookId, payload: {} };
+  sendBulkMessage(msg);
+}`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    it("passes for type definition with webhookId", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `interface WebhookMessage { webhookId: string; topic: string; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+
+    // #340 Review: Additional patterns that must be caught
+    describe("direct call arguments", () => {
+      it("fails for console.log(\"x\", webhookId) - identifier as argument", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(webhookId: string) { console.log("x", webhookId); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("fails for console.log(m.webhookId) - property access as argument", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(m: { webhookId: string }) { console.log(m.webhookId); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("fails for safeLog with webhookId as direct argument", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import { safeLog } from "~/lib/log.server";
+export function test(webhookId: string) { safeLog("info", webhookId, {}); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+    });
+
+    describe("object values", () => {
+      it("fails for { id: webhookId } - banned identifier as value", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(webhookId: string) { console.log({ id: webhookId }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("fails for { id: m.webhookId } - banned property access as value", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(m: { webhookId: string }) { console.log({ id: m.webhookId }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("fails for safeLog with { hookId: msg.webhookId }", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import { safeLog } from "~/lib/log.server";
+export function test(msg: { webhookId: string }) { safeLog("info", "event", { hookId: msg.webhookId }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+    });
+
+    describe("string concatenation with webhookId", () => {
+      it("fails for \"wh=\" + webhookId (webhookId identifier banned)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(webhookId: string) { console.log("wh=" + webhookId); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("passes for \"wh=\" + id (id is not webhookId, public-logs ruling)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(id: string) { console.log("prefix wh=" + id + " suffix"); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("fails for m.webhookId in concatenation", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(m: { webhookId: string }) { console.log("id=" + m.webhookId); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+    });
+
+    describe("computed keys", () => {
+      it("fails for { [\"webhookId\"]: x } - computed string key", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(x: string) { console.log({ ["webhookId"]: x }); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+        expect(output).toContain("computed");
+      });
+
+      it("passes for { [dynamicKey]: x } - non-banned computed key", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(key: string, x: string) { console.log({ [key]: x }); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+    });
+
+    describe("AuditEvent metadata", () => {
+      it("fails for sql.json({ webhookId }) - shorthand in AuditEvent data", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export async function test(sql: any, webhookId: string) {
+  await sql\`INSERT INTO "AuditEvent" VALUES (\${sql.json({ webhookId })})\`;
+}`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+        expect(output).toContain("AuditEvent");
+      });
+
+      it("fails for sql.json({ id: webhookId }) - value in AuditEvent data", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export async function test(sql: any, webhookId: string) {
+  await sql\`INSERT INTO "AuditEvent" VALUES (\${sql.json({ id: webhookId })})\`;
+}`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("fails for tx.json({ webhookId: x }) - property in AuditEvent data", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export async function test(tx: any, x: string) {
+  await tx\`INSERT INTO "AuditEvent" VALUES (\${tx.json({ webhookId: x })})\`;
+}`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("fails for sql.json({ hook: m.webhookId }) - property access value", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export async function test(sql: any, m: { webhookId: string }) {
+  await sql\`INSERT INTO "AuditEvent" VALUES (\${sql.json({ hook: m.webhookId })})\`;
+}`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("passes for sql.json({ buyerAccountId }) - allowed key", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export async function test(sql: any, buyerAccountId: string) {
+  await sql\`INSERT INTO "AuditEvent" VALUES (\${sql.json({ buyerAccountId })})\`;
+}`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+    });
+
+    describe("wh= label allowed without webhookId (public-logs ruling)", () => {
+      it("passes for captureMessage with wh= + id (id is not webhookId)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import { captureMessage } from "./sentry";
+export function test(id: string) { captureMessage("Error wh=" + id); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("passes for Sentry.captureMessage with wh=${id} (id is not webhookId)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test(id: string) { Sentry.captureMessage(\`Error wh=\${id}\`); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("fails for captureMessage with wh=${webhookId} (webhookId identifier)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import * as Sentry from "@sentry/cloudflare";
+export function test(webhookId: string) { Sentry.captureMessage(\`Error wh=\${webhookId}\`); }`
+        );
+        const { exitCode, output } = runGuard();
+        expect(exitCode).not.toBe(0);
+        expect(output).toContain("banned-log-key");
+      });
+
+      it("passes for safeLog with { msg: \"wh=abc\" } (no webhookId identifier)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `import { safeLog } from "~/lib/log.server";
+export function test() { safeLog("info", "test", { msg: "wh=abc" }); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("passes for console.log with wh=${count} (count is not webhookId)", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(count: number) { console.log(\`wh=\${count}\`); }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+    });
+
+    describe("passing cases - legitimate uses", () => {
+      it("passes for recordAndEnqueueSync with webhookId", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export async function test(webhookId: string) {
+  await recordAndEnqueueSync(tx, shop, topic, gid, webhookId, triggeredAt);
+}`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("passes for recordWebhookReceipt with webhookId", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export async function test(webhookId: string) {
+  await recordWebhookReceipt(tx, shop, webhookId, topic, triggeredAt);
+}`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("passes for sendBulkMessage payload with webhookId", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function test(webhookId: string) {
+  sendBulkMessage({ webhookId, payload: {} });
+}`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+
+      it("passes for function parameter named webhookId", () => {
+        fs.writeFileSync(
+          path.join(appDir, "test.ts"),
+          `export function handleWebhook(webhookId: string): string { return webhookId; }`
+        );
+        const { exitCode } = runGuard();
+        expect(exitCode).toBe(0);
+      });
+    });
+  });
 });
