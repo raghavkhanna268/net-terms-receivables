@@ -199,9 +199,10 @@ describe("bulk-op-recovery", () => {
       const mockSql = Object.assign(
         vi.fn().mockImplementation(() => {
           callCount++;
-          // First call: findStaleBulkOperations; second call: findLeaseExpiredBulkOperations
+          // First call: findStaleBulkOperations; second call: findLeaseExpiredBulkOperations; third call: findStrandedBulkOperations
           if (callCount === 1) return Promise.resolve(findStaleResult);
           if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps must be array
+          if (callCount === 3) return Promise.resolve([]); // strandedOps must be array
           return Promise.resolve({ count: 1 });
         }),
         {
@@ -248,7 +249,8 @@ describe("bulk-op-recovery", () => {
         vi.fn().mockImplementation(() => {
           callCount++;
           if (callCount === 1) return Promise.resolve(findStaleResult);
-          if (callCount === 2) return Promise.resolve([]);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps
+          if (callCount === 3) return Promise.resolve([]); // strandedOps
           return Promise.resolve({ count: 1 });
         }),
         {
@@ -293,7 +295,8 @@ describe("bulk-op-recovery", () => {
         vi.fn().mockImplementation(() => {
           callCount++;
           if (callCount === 1) return Promise.resolve(findStaleResult);
-          if (callCount === 2) return Promise.resolve([]);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps
+          if (callCount === 3) return Promise.resolve([]); // strandedOps
           return Promise.resolve({ count: 1 });
         }),
         {
@@ -336,7 +339,8 @@ describe("bulk-op-recovery", () => {
         vi.fn().mockImplementation(() => {
           callCount++;
           if (callCount === 1) return Promise.resolve(findStaleResult);
-          if (callCount === 2) return Promise.resolve([]);
+          if (callCount === 2) return Promise.resolve([]); // leaseExpiredOps
+          if (callCount === 3) return Promise.resolve([]); // strandedOps
           return Promise.resolve({ count: 1 });
         }),
         {

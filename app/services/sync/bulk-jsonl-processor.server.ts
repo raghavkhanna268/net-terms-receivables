@@ -107,6 +107,10 @@ export const BULK_ERROR_CODES = {
   AUTH_NEEDS_REAUTH: "bulk_auth_needs_reauth",
   /** Non-retryable status fetch failure (not auth) - immediate DLQ */
   STATUS_FETCH_FAILED: "bulk_status_fetch_failed",
+  /** Operation row disappeared between lease acquisition and re-read */
+  OP_DISAPPEARED: "bulk_op_disappeared",
+  /** Operation row not found (not registered or deleted) */
+  OP_NOT_FOUND: "bulk_op_not_found",
 } as const;
 
 /**
@@ -1086,6 +1090,39 @@ export async function releaseProcessingLease(
 }
 
 /**
+ * Mark a bulk operation as terminal by setting failure_count to MAX.
+ * 
+ * S25-QA2: Prevents nightly DLQ loop where permanent failures (NO_RESULT_URL,
+ * CHUNK_HTTP_4XX, AUTH_NEEDS_REAUTH, STATUS_FETCH_FAILED, line-size cap) are
+ * dead-lettered but left with failure_count=0 and no completed_at/closed_at.
+ * findStrandedBulkOperations would re-enqueue such ops every night, creating
+ * duplicate DLQ rows.
+ * 
+ * Uses existing failure_count = MAX_FAILURE_COUNT mechanism (no migration needed).
+ * Owner-checked with processing_lease_token to ensure only the lease holder
+ * can mark the op terminal.
+ * 
+ * @returns true if the row was updated, false if row not found or lease lost
+ */
+export async function markBulkOperationTerminal(
+  sql: Sql,
+  bulkOperationId: string,
+  shop: string,
+  leaseToken: string
+): Promise<boolean> {
+  const result = await sql`
+    UPDATE s6_bulk_operations
+    SET failure_count = ${MAX_FAILURE_COUNT}
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND shop = ${shop}
+      AND processing_lease_token = ${leaseToken}
+      AND completed_at IS NULL
+      AND closed_at IS NULL
+  `;
+  return result.count > 0;
+}
+
+/**
  * Renew processing lease per chunk.
  * Only renews if the current token matches (owner-checked).
  * Returns true if renewed, false if renewal failed (lost lease).
@@ -1218,7 +1255,8 @@ export async function processBulkOperation(
     return {
       success: false,
       action: "skipped",
-      error: `Bulk operation not found: ${bulkOperationId}`,
+      error: BULK_ERROR_CODES.OP_NOT_FOUND,
+      errorCode: BULK_ERROR_CODES.OP_NOT_FOUND,
       status: "error",
       errorType: "permanent", // Bad data, operation not registered
     };
@@ -1267,7 +1305,8 @@ export async function processBulkOperation(
     return {
       success: false,
       action: "skipped",
-      error: `Bulk operation disappeared: ${bulkOperationId}`,
+      error: BULK_ERROR_CODES.OP_DISAPPEARED,
+      errorCode: BULK_ERROR_CODES.OP_DISAPPEARED,
       status: "error",
       errorType: "permanent",
     };
@@ -1360,6 +1399,8 @@ export async function processBulkOperation(
 
     // S25: partialDataUrl set or objectCount > 0 with no url is a permanent error
     if (status === "COMPLETED" && url === null && (partialDataUrl || (parsedObjectCount != null && parsedObjectCount > 0))) {
+      // S25-QA2: Mark op terminal to prevent nightly DLQ loop
+      await markBulkOperationTerminal(sql, bulkOperationId, shop, leaseToken);
       return {
         success: false,
         action: "skipped",
@@ -1372,7 +1413,7 @@ export async function processBulkOperation(
   }
 
   if (!statusResult.success || !statusResult.data?.url) {
-    // Auth-failure path: immediate DLQ without bumping failure_count.
+    // Auth-failure path: immediate DLQ, mark op terminal to prevent nightly re-enqueue.
     // Auth errors mean the shop needs re-authentication - no point retrying.
     // The shop's needs_reauth flag is already set by refreshOfflineTokenIfNeeded.
     if (statusResult.errorCode && AUTH_ERROR_CODES.has(statusResult.errorCode)) {
@@ -1381,6 +1422,8 @@ export async function processBulkOperation(
         bulkType,
         errorCode: statusResult.errorCode,
       });
+      // S25-QA2: Mark op terminal to prevent nightly DLQ loop
+      await markBulkOperationTerminal(sql, bulkOperationId, shop, leaseToken);
       return {
         success: false,
         action: "skipped",
@@ -1391,13 +1434,15 @@ export async function processBulkOperation(
       };
     }
 
-    // Other non-retryable failures: immediate DLQ without bumping failure_count.
+    // Other non-retryable failures: immediate DLQ, mark op terminal to prevent nightly re-enqueue.
     if (statusResult.retryable === false) {
       safeLog("warn", "bulk_op_status_fetch_failed", {
         shopId,
         bulkType,
         errorCode: statusResult.errorCode ?? "unknown",
       });
+      // S25-QA2: Mark op terminal to prevent nightly DLQ loop
+      await markBulkOperationTerminal(sql, bulkOperationId, shop, leaseToken);
       return {
         success: false,
         action: "skipped",
@@ -1443,6 +1488,8 @@ export async function processBulkOperation(
 
     if (httpErrorType === "permanent") {
       // Permanent error (4xx) - go straight to DLQ
+      // S25-QA2: Mark op terminal to prevent nightly DLQ loop
+      await markBulkOperationTerminal(sql, bulkOperationId, shop, leaseToken);
       return {
         success: false,
         action: "skipped",
@@ -1523,6 +1570,8 @@ export async function processBulkOperation(
 
     if (newChunkSize <= currentChunkSize) {
       // Already at max chunk size - line exceeds cap, terminal error (bad data)
+      // S25-QA2: Mark op terminal to prevent nightly DLQ loop
+      await markBulkOperationTerminal(sql, bulkOperationId, shop, leaseToken);
       return {
         success: false,
         action: "skipped",
