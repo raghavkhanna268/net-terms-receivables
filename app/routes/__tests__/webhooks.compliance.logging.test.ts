@@ -70,16 +70,16 @@ vi.mock("~/lib/webhook-receipts.server", () => ({
   deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
 }));
 
-const mockGraphql = vi.fn().mockResolvedValue({
-  json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
+const { mockAdmin, mockGetOfflineAdminContext } = vi.hoisted(() => {
+  const mockGraphql = vi.fn().mockResolvedValue({
+    json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
+  });
+  const mockAdmin = { graphql: mockGraphql };
+  const mockGetOfflineAdminContext = vi.fn().mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+  return { mockAdmin, mockGetOfflineAdminContext };
 });
-const mockUnauthenticatedAdmin = vi.fn().mockResolvedValue({ admin: { graphql: mockGraphql } });
-vi.mock("~/shopify.server", () => ({
-  getShopifyApp: () => ({
-    unauthenticated: {
-      admin: mockUnauthenticatedAdmin,
-    },
-  }),
+vi.mock("~/lib/offline-admin.server", () => ({
+  getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
 }));
 
 const mockGenerateCustomerDataExport = vi.fn();
@@ -127,7 +127,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     vi.clearAllMocks();
     mockSql.mockResolvedValue(mockSqlResult);
     mockTx.mockResolvedValue(Object.assign([], { count: 0 }));
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
+    process.env = { ...originalEnv, SHOPIFY_API_KEY: "test-api-key", SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
+    // Reset mock to default for each test
+    mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
@@ -441,7 +443,9 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
     mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
     mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
-    mockUnauthenticatedAdmin.mockResolvedValueOnce({ admin: { graphql: vi.fn().mockResolvedValue({ json: async () => ({ data: { shop: {} } }) }) } });
+    // Mock admin context with no shop email in GraphQL response
+    const noEmailAdmin = { graphql: vi.fn().mockResolvedValue({ json: async () => ({ data: { shop: {} } }) }) };
+    mockGetOfflineAdminContext.mockResolvedValueOnce({ success: true, admin: noEmailAdmin, retryable: false });
 
     const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
     const body = JSON.stringify(payload);

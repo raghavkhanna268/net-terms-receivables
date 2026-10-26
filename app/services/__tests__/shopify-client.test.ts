@@ -10,35 +10,27 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * - Request-path retry cap
  */
 
-// Mock the shopify app
+// Create a shared mock admin that can be referenced after hoisting
 const mockAdmin = {
   graphql: vi.fn(),
 };
-
-const mockShopifyApp = {
-  unauthenticated: {
-    admin: vi.fn().mockResolvedValue({ admin: mockAdmin }),
-  },
-};
-
-vi.mock("~/shopify.server", () => ({
-  getShopifyApp: () => mockShopifyApp,
-}));
 
 // Mock request context (for getRequestSql)
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => ({})),
 }));
 
-// Mock offline-token module - returns success by default
-vi.mock("~/lib/offline-token.server", () => ({
-  refreshOfflineTokenIfNeeded: vi.fn().mockResolvedValue({
-    success: true,
-    accessToken: "shpat_test_token",
-    expires: new Date(Date.now() + 60 * 60 * 1000),
-    wasRefreshed: false,
-  }),
-}));
+// Mock offline-admin module - the factory returns a function that creates the mock
+// We use a getter to access mockAdmin after hoisting
+vi.mock("~/lib/offline-admin.server", async () => {
+  return {
+    getOfflineAdminContext: vi.fn(),
+  };
+});
+
+// Import the mock after vi.mock declarations
+import { getOfflineAdminContext } from "~/lib/offline-admin.server";
+const mockGetOfflineAdminContext = vi.mocked(getOfflineAdminContext);
 
 // Import after mocks
 import {
@@ -59,6 +51,12 @@ describe("shopify-client.server", () => {
       SHOPIFY_API_KEY: "test-api-key",
       SHOPIFY_API_SECRET: "test-api-secret",
     };
+    // Set up default mock for getOfflineAdminContext to return success with mockAdmin
+    mockGetOfflineAdminContext.mockResolvedValue({
+      success: true,
+      admin: mockAdmin,
+      retryable: false,
+    });
   });
 
   afterEach(() => {
@@ -372,14 +370,15 @@ describe("shopify-client.server", () => {
     });
   });
 
-  describe("InvalidSession errors (hoisted admin client)", () => {
-    it("returns retryable error when unauthenticated.admin rejects with InvalidSession", async () => {
-      const { InvalidSession } = await import("@shopify/shopify-api");
-
-      // Make unauthenticated.admin reject with InvalidSession
-      mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
-        new InvalidSession("No session found for shop")
-      );
+  describe("Offline admin context errors", () => {
+    it("returns retryable error when getOfflineAdminContext returns admin_invalid_session", async () => {
+      mockGetOfflineAdminContext.mockResolvedValueOnce({
+        success: false,
+        errorCode: "admin_invalid_session",
+        error: "Invalid session after token refresh",
+        retryable: true,
+        needsReauth: false,
+      });
 
       const result = await shopifyGraphQL(
         "test-revoked-shop.myshopify.com",
@@ -387,19 +386,20 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
-      // P3: InvalidSession should be retryable - session refresh (#76) can recover
       expect(result.retryable).toBe(true);
       expect(result.retriesAttempted).toBe(0);
       expect(result.error).toContain("session");
-      // graphql should never be called since we failed at the admin client level
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
 
-    it("returns non-retryable error when 'No session found' (shop uninstalled)", async () => {
-      // 'No session found' means shop uninstalled or never installed - no recovery possible
-      mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
-        new Error("No session found for shop")
-      );
+    it("returns non-retryable error when getOfflineAdminContext returns no_session (shop uninstalled)", async () => {
+      mockGetOfflineAdminContext.mockResolvedValueOnce({
+        success: false,
+        errorCode: "admin_no_session",
+        error: "No session found",
+        retryable: false,
+        needsReauth: true,
+      });
 
       const result = await shopifyGraphQL(
         "test-missing-session.myshopify.com",
@@ -407,19 +407,20 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
-      // 'No session found' is non-retryable - shop uninstalled, no session to refresh
       expect(result.retryable).toBe(false);
       expect(result.retriesAttempted).toBe(0);
       expect(result.error).toContain("No session");
-      // graphql should never be called since we failed at the admin client level
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
 
-    it("returns retryable error for other session errors", async () => {
-      // Generic session errors (not 'No session found') may be recoverable
-      mockShopifyApp.unauthenticated.admin.mockRejectedValueOnce(
-        new Error("Session expired")
-      );
+    it("returns non-retryable error for invalid_grant (needs re-auth)", async () => {
+      mockGetOfflineAdminContext.mockResolvedValueOnce({
+        success: false,
+        errorCode: "invalid_grant",
+        error: "Session needs re-authentication",
+        retryable: false,
+        needsReauth: true,
+      });
 
       const result = await shopifyGraphQL(
         "test-expired-session.myshopify.com",
@@ -427,11 +428,28 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
-      // Other session errors are retryable - session refresh may recover
+      expect(result.retryable).toBe(false);
+      expect(result.retriesAttempted).toBe(0);
+      expect(mockAdmin.graphql).not.toHaveBeenCalled();
+    });
+
+    it("returns retryable error for transient admin errors", async () => {
+      mockGetOfflineAdminContext.mockResolvedValueOnce({
+        success: false,
+        errorCode: "admin_error",
+        error: "Failed to get admin context",
+        retryable: true,
+        needsReauth: false,
+      });
+
+      const result = await shopifyGraphQL(
+        "test-transient-error.myshopify.com",
+        "query { shop { name } }"
+      );
+
+      expect(result.success).toBe(false);
       expect(result.retryable).toBe(true);
       expect(result.retriesAttempted).toBe(0);
-      // Error message is generic (security rule - no raw error messages)
-      expect(result.error).toBe("Session error");
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
   });

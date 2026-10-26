@@ -33,7 +33,6 @@
  * - Queue/job paths: Up to 3 retries, 25s max wait (< 30s pgmq visibility timeout)
  */
 
-import { getShopifyApp } from "~/shopify.server";
 import {
   HttpResponseError,
   HttpRetriableError,
@@ -42,7 +41,7 @@ import {
   InvalidSession,
 } from "@shopify/shopify-api";
 import { getRequestSql } from "~/lib/request-context.server";
-import { refreshOfflineTokenIfNeeded } from "~/lib/offline-token.server";
+import { getOfflineAdminContext } from "~/lib/offline-admin.server";
 import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
@@ -231,8 +230,11 @@ export async function shopifyGraphQL<T = unknown>(
   let totalWaitTime = 0;
   let wasRateLimited = false;
 
-  // Refresh token if near expiry before getting admin client
-  // This ensures all Admin API calls use a valid token
+  // Get admin client with proper token refresh locking
+  // This ensures:
+  // 1. Token refresh is serialized per-shop via advisory lock
+  // 2. The admin client is only returned after token is confirmed fresh
+  // 3. Non-retryable failures are typed for proper DLQ handling
   const clientId = process.env.SHOPIFY_API_KEY;
   const clientSecret = process.env.SHOPIFY_API_SECRET;
   
@@ -251,68 +253,19 @@ export async function shopifyGraphQL<T = unknown>(
   }
 
   const sql = getRequestSql();
-  const refreshResult = await refreshOfflineTokenIfNeeded(
-    sql,
-    shop,
-    clientId,
-    clientSecret
-  );
+  const adminResult = await getOfflineAdminContext(sql, shop, clientId, clientSecret);
   
-  if (!refreshResult.success) {
-    // Token refresh failed - return non-retryable error
-    // This includes invalid_grant (needs re-auth) and no_refresh_token
+  if (!adminResult.success || !adminResult.admin) {
     return {
       success: false,
-      error: refreshResult.error ?? "Token refresh failed",
-      errorCode: refreshResult.errorCode ?? "token_refresh_failed",
-      retryable: false,
+      error: adminResult.error ?? "Failed to get admin context",
+      errorCode: adminResult.errorCode ?? "admin_error",
+      retryable: adminResult.retryable,
       retriesAttempted: 0,
     };
   }
 
-  // Hoist admin client outside retry loop - the session doesn't change between retries
-  // Wrap in try/catch to handle InvalidSession (missing/revoked offline session)
-  let admin: Awaited<ReturnType<ReturnType<typeof getShopifyApp>["unauthenticated"]["admin"]>>["admin"];
-  try {
-    const shopify = getShopifyApp();
-    const result = await shopify.unauthenticated.admin(shop);
-    admin = result.admin;
-  } catch (err) {
-    // InvalidSession - RETRYABLE (#76 session refresh can recover expired tokens)
-    if (err instanceof InvalidSession) {
-      return {
-        success: false,
-        error: "Invalid session",
-        errorCode: "invalid_session",
-        retryable: true, // Retryable: #76 session refresh can recover
-        retriesAttempted: 0,
-      };
-    }
-    // 'No session found' - NON-RETRYABLE (shop uninstalled or never installed)
-    const message = err instanceof Error ? err.message : "Unknown error";
-    if (message.includes("No session found") || message.includes("no session")) {
-      return {
-        success: false,
-        error: "No session found",
-        errorCode: "no_session",
-        retryable: false, // Non-retryable: no session to refresh
-        retriesAttempted: 0,
-      };
-    }
-    // Other session errors - check if they indicate missing vs expired
-    if (message.includes("session") || message.includes("Session")) {
-      // Session exists but may be expired - retryable
-      return {
-        success: false,
-        error: "Session error",
-        errorCode: "session_error",
-        retryable: true, // Retryable: may be recoverable
-        retriesAttempted: 0,
-      };
-    }
-    // Re-throw unexpected errors
-    throw err;
-  }
+  const admin = adminResult.admin;
 
   while (attempt <= maxRetries) {
     try {

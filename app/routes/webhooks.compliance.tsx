@@ -14,19 +14,31 @@ import {
   purgeExpiredDataRequests,
   sendDataRequestNotification,
 } from "~/services/compliance";
-import { getShopifyApp } from "~/shopify.server";
+import { getOfflineAdminContext } from "~/lib/offline-admin.server";
 import { safeLog, shopHash } from "~/lib/log.server";
+import type { Sql } from "~/lib/db-light.server";
 
 /**
  * Fetch shop owner email using the offline session admin client.
+ * Uses getOfflineAdminContext for proper token refresh locking.
  * Returns null if email cannot be fetched (no session, API error, etc.)
  */
-async function fetchShopOwnerEmail(shop: string): Promise<string | null> {
+async function fetchShopOwnerEmail(sql: Sql, shop: string): Promise<string | null> {
+  const clientId = process.env.SHOPIFY_API_KEY;
+  const clientSecret = process.env.SHOPIFY_API_SECRET;
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  const adminResult = await getOfflineAdminContext(sql, shop, clientId, clientSecret);
+
+  if (!adminResult.success || !adminResult.admin) {
+    return null;
+  }
+
   try {
-    const shopify = getShopifyApp();
-    const { admin } = await shopify.unauthenticated.admin(shop);
-    
-    const response = await admin.graphql(`
+    const response = await adminResult.admin.graphql(`
       query {
         shop {
           email
@@ -143,8 +155,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       );
 
       // Send email notification to shop owner (gated on RESEND_API_KEY)
-      // Fetch shop owner email via Admin API using offline session
-      const shopOwnerEmail = await fetchShopOwnerEmail(payloadShop);
+      // Fetch shop owner email via Admin API using offline session with proper locking
+      const shopOwnerEmail = await fetchShopOwnerEmail(sql, payloadShop);
 
       if (shopOwnerEmail) {
         const emailResult = await sendDataRequestNotification(
