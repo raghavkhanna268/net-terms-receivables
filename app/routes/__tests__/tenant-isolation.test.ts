@@ -21,6 +21,19 @@ import * as path from "path";
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+function extractLoaderResult<T>(result: unknown): T {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: T }).data;
+  }
+  return result as T;
+}
+
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
   ApiVersion: { October26: "2026-10" },
@@ -430,7 +443,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       expect(result.success).toBe(true);
 
       const afterSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_A_ID}`;
-      expect(afterSnapshot[0].state).toBe("rejected");
+      expect(afterSnapshot[0].state).toBe("unmatched");
 
       await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_A_ID}`;
     });
@@ -573,7 +586,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
   describe("app._index loader ?buyer param isolation (with deferred dashboardData)", () => {
     it("shop A cannot view shop B's buyer invoices via ?buyer param (negative)", async () => {
       expect.hasAssertions();
-      const url = new URL(`https://example.com/app?buyer=${BUYER_B_ID}`);
+      const url = new URL(`https://example.com/app?skipOnboarding=true&buyer=${BUYER_B_ID}`);
       const args = {
         request: new Request(url),
         context: createMockContext(SHOP_A_DOMAIN),
@@ -583,9 +596,10 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       } as unknown;
 
       const { loader } = await import("../app._index");
-      const result = (await loader(args as never)) as unknown as {
+      const rawResult = await loader(args as never);
+      const result = extractLoaderResult<{
         dashboardData: Promise<{ selectedBuyerInvoices: unknown; buyerLedger: { rows: Array<{ id: string }> } | null }> | null;
-      };
+      }>(rawResult);
 
       expect(result.dashboardData).toBeTruthy();
       const resolved = await result.dashboardData!;
@@ -596,7 +610,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
 
     it("shop A CAN view shop A's buyer invoices via ?buyer param (positive control)", async () => {
       expect.hasAssertions();
-      const url = new URL(`https://example.com/app?buyer=${BUYER_A_ID}`);
+      const url = new URL(`https://example.com/app?skipOnboarding=true&buyer=${BUYER_A_ID}`);
       const args = {
         request: new Request(url),
         context: createMockContext(SHOP_A_DOMAIN),
@@ -606,9 +620,10 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
       } as unknown;
 
       const { loader } = await import("../app._index");
-      const result = (await loader(args as never)) as unknown as {
+      const rawResult = await loader(args as never);
+      const result = extractLoaderResult<{
         dashboardData: Promise<{ selectedBuyerInvoices: { buyerName: string } | null }> | null;
-      };
+      }>(rawResult);
 
       expect(result.dashboardData).toBeTruthy();
       const resolved = await result.dashboardData!;
@@ -620,12 +635,20 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
   describe("List loaders return only shop A's data", () => {
     it("app._index loader returns shop A's buyers, not shop B's (dashboardData awaited)", async () => {
       expect.hasAssertions();
-      const args = createLoaderArgs("/app");
+      const url = new URL("https://example.com/app?skipOnboarding=true");
+      const args = {
+        request: new Request(url),
+        context: createMockContext(SHOP_A_DOMAIN),
+        params: {},
+        url,
+        pattern: "/app",
+      } as unknown;
 
       const { loader } = await import("../app._index");
-      const result = (await loader(args as never)) as unknown as {
+      const rawResult = await loader(args as never);
+      const result = extractLoaderResult<{
         dashboardData: Promise<{ buyerLedger: { rows: Array<{ name: string; id: string }> } | null }> | null;
-      };
+      }>(rawResult);
 
       expect(result.dashboardData).toBeTruthy();
       const resolved = await result.dashboardData!;
@@ -824,11 +847,11 @@ describeWithDb("Tenant Isolation - PLAN_GATING_ENFORCED=false", () => {
     };
 
     const { loader } = await import("../app._index");
-    const result = await loader(args as never);
+    const rawResult = await loader(args as never);
 
-    expect(result).not.toBeInstanceOf(Response);
+    expect(rawResult).not.toBeInstanceOf(Response);
 
-    const resultObj = result as unknown as Record<string, unknown>;
+    const resultObj = extractLoaderResult<Record<string, unknown>>(rawResult);
     expect(resultObj.gatingEnforced).toBe(false);
     expect(typeof resultObj.dashboardData).toBe("object");
   });
