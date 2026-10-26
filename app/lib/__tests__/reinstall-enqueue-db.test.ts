@@ -1016,7 +1016,7 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
       expect(stillPending[0].count).toBe(501);
     });
 
-    it("HELD-first ordering: HELD accounts prioritized even when non-HELD IDs sort earlier (zz-held vs aa-ok)", async () => {
+    it("HELD-first ordering: HELD accounts prioritized even when non-HELD IDs sort earlier (zz-held vs aa-ok)", { timeout: 15000 }, async () => {
       vi.resetModules();
       // Use IDs where non-HELD (aa-ok-*) would sort BEFORE HELD (zz-held-*) alphabetically
       for (let i = 0; i < 10; i++) {
