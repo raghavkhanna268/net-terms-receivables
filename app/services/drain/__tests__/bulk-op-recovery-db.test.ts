@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 vi.mock("../admin-client.server", () => ({
   adminGraphQL: vi.fn(),
@@ -42,6 +43,9 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
     await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_bulk_operations WHERE shop = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "bulk-op-recovery-db.test.ts");
+
     await sql.end();
   });
 
