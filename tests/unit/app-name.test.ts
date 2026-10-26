@@ -68,11 +68,6 @@ const PENDING_FOLLOWUP_ALLOWLIST: Array<{
     reason: "pending follow-up: remove after Developer PR merges",
   },
   {
-    file: "app/routes/privacy.tsx",
-    line: 266,
-    reason: "pending follow-up: rename in second PR (after #357 merged)",
-  },
-  {
     file: "app/services/compliance/__tests__/compliance.test.ts",
     line: 1051,
     reason: "pending follow-up: remove after Developer PR merges",
@@ -82,11 +77,6 @@ const PENDING_FOLLOWUP_ALLOWLIST: Array<{
     line: 1053,
     reason: "pending follow-up: remove after Developer PR merges",
   },
-  {
-    file: "app/routes/__tests__/privacy.test.ts",
-    line: 105,
-    reason: "pending follow-up: rename in second PR (after #357 merged)",
-  },
 ];
 
 export interface OldNameMatch {
@@ -94,6 +84,7 @@ export interface OldNameMatch {
   line: number;
   text: string;
   offset: number;
+  matchLength: number;
 }
 
 /**
@@ -127,6 +118,9 @@ export function scanForOldName(
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(normalized)) !== null) {
+    const normalizedMatchLength = match[0].length;
+    const normalizedMatchEnd = match.index + normalizedMatchLength;
+
     let originalOffset = 0;
     let normalizedOffset = 0;
 
@@ -144,14 +138,32 @@ export function scanForOldName(
       normalizedOffset++;
     }
 
-    const lineNumber = offsetToLine(content, originalOffset);
+    const matchStartOriginal = originalOffset;
+
+    while (normalizedOffset < normalizedMatchEnd && originalOffset < content.length) {
+      const char = content[originalOffset];
+      if (/\s/.test(char)) {
+        while (
+          originalOffset < content.length - 1 &&
+          /\s/.test(content[originalOffset + 1])
+        ) {
+          originalOffset++;
+        }
+      }
+      originalOffset++;
+      normalizedOffset++;
+    }
+
+    const matchLength = originalOffset - matchStartOriginal;
+    const lineNumber = offsetToLine(content, matchStartOriginal);
     const lineText = lines[lineNumber - 1] || "";
 
     matches.push({
       file: filePath,
       line: lineNumber,
       text: lineText.trim().slice(0, 100),
-      offset: originalOffset,
+      offset: matchStartOriginal,
+      matchLength,
     });
   }
 
@@ -173,12 +185,12 @@ function isPendingFollowup(filePath: string, lineNumber: number): boolean {
   );
 }
 
-function isAllowlisted(content: string, offset: number, matchLength: number): boolean {
-  const contextStart = Math.max(0, offset - 100);
-  const contextEnd = Math.min(content.length, offset + matchLength + 100);
-  const context = content.slice(contextStart, contextEnd);
+function isAllowlisted(content: string, offset: number): boolean {
+  const lineStart = content.lastIndexOf("\n", offset - 1) + 1;
+  const lineEnd = content.indexOf("\n", offset);
+  const line = content.slice(lineStart, lineEnd === -1 ? content.length : lineEnd);
 
-  return ALLOWLIST_PATTERNS.some(({ pattern }) => pattern.test(context));
+  return ALLOWLIST_PATTERNS.some(({ pattern }) => pattern.test(line));
 }
 
 function isInComment(content: string, offset: number): boolean {
@@ -192,7 +204,10 @@ function isInComment(content: string, offset: number): boolean {
   const lastBlockOpen = content.lastIndexOf("/*", offset);
   const lastBlockClose = content.lastIndexOf("*/", offset);
   if (lastBlockOpen !== -1 && lastBlockOpen > lastBlockClose) {
-    return true;
+    const nextClose = content.indexOf("*/", offset);
+    if (nextClose !== -1) {
+      return true;
+    }
   }
 
   return false;
@@ -293,7 +308,7 @@ describe("App Name Guard", () => {
           continue;
         }
 
-        if (isAllowlisted(content, match.offset, 22)) {
+        if (isAllowlisted(content, match.offset)) {
           continue;
         }
 
@@ -410,5 +425,68 @@ const b = "Net Terms Receivables";
     expect(matches.length).toBe(2);
     expect(matches[0].line).toBe(2);
     expect(matches[1].line).toBe(3);
+  });
+
+  it("computes matchLength from actual matched text", () => {
+    const fixture = `const name = "Net Terms Receivables";`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+    expect(matches[0].matchLength).toBe(21);
+  });
+
+  it("computes matchLength correctly for multi-line split name", () => {
+    const fixture = `const name = "Net Terms
+    Receivables";`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+    expect(matches[0].matchLength).toBeGreaterThan(22);
+  });
+});
+
+describe("isInComment (unit tests)", () => {
+  it("detects line comment", () => {
+    const fixture = `// Net Terms Receivables comment`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+  });
+
+  it("detects block comment", () => {
+    const fixture = `/* Net Terms Receivables */ const x = 1;`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+  });
+
+  it("unclosed /* does not mark rest of file as comment", () => {
+    const fixture = `const x = "text /* not a comment";
+const y = "Net Terms Receivables";`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+    expect(matches[0].line).toBe(2);
+  });
+
+  it("properly closed block comment is detected", () => {
+    const fixture = `/* 
+Net Terms Receivables 
+*/ const after = 1;`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+  });
+});
+
+describe("isAllowlisted (unit tests)", () => {
+  it("matches pattern on exact line containing match", () => {
+    const fixture = `const url = "github.com/user/net-terms-receivables";
+const name = "Net Terms Receivables";`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+    expect(matches[0].line).toBe(2);
+  });
+
+  it("does not match pattern from adjacent line", () => {
+    const fixture = `const url = "github.com/user/net-terms-receivables";
+const name = "Net Terms Receivables";`;
+    const matches = scanForOldName(fixture, "test-fixture.ts");
+    expect(matches.length).toBe(1);
+    expect(matches[0].text).toContain("Net Terms Receivables");
   });
 });
