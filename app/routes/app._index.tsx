@@ -811,6 +811,44 @@ function BuyerInvoiceList({
 }
 
 /**
+ * Filter UI for the buyer ledger: "Show: All | Over limit only".
+ * Only renders when there's a real choice to make:
+ * - gatingEnforced && overLimitCount > 0: user can filter to over-limit accounts
+ * - onlyOverLimit: user is on filtered view and needs a link back to All
+ * Exported for testing.
+ */
+export function FilterUI({
+  gatingEnforced,
+  overLimitCount,
+  onlyOverLimit,
+  sortBy,
+  sortOrder,
+}: {
+  gatingEnforced: boolean;
+  overLimitCount: number;
+  onlyOverLimit: boolean;
+  sortBy: string;
+  sortOrder: string;
+}) {
+  if (!((gatingEnforced && overLimitCount > 0) || onlyOverLimit)) {
+    return null;
+  }
+
+  return (
+    <s-paragraph>
+      <s-text type="strong">Show: </s-text>
+      {!onlyOverLimit ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
+      {gatingEnforced && overLimitCount > 0 && (
+        <>
+          {" | "}
+          {onlyOverLimit ? "Over limit only" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>Over limit only</s-link>}
+        </>
+      )}
+    </s-paragraph>
+  );
+}
+
+/**
  * Polaris skeleton component for the dashboard while data loads.
  * Matches the layout footprint of DashboardContent to minimize CLS.
  * Uses s-spinner with placeholder text in each section.
@@ -1057,17 +1095,13 @@ function DashboardContent({
                     </s-banner>
                   );
                 })()}
-                {/* Filter UI */}
-                <s-paragraph>
-                  <s-text type="strong">Show: </s-text>
-                  {!onlyOverLimit ? "All" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}`}>All</s-link>}
-                  {gatingEnforced && overLimitCount > 0 && (
-                    <>
-                      {" | "}
-                      {onlyOverLimit ? "Over limit only" : <s-link href={`?sortBy=${sortBy}&sortOrder=${sortOrder}&overlimit=true`}>Over limit only</s-link>}
-                    </>
-                  )}
-                </s-paragraph>
+                <FilterUI
+                  gatingEnforced={gatingEnforced}
+                  overLimitCount={overLimitCount}
+                  onlyOverLimit={onlyOverLimit}
+                  sortBy={sortBy}
+                  sortOrder={sortOrder}
+                />
                 {buyerLedger ? (
                   <BuyerLedgerTable
                     rows={buyerLedger.rows}

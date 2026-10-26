@@ -1245,3 +1245,107 @@ describe("BuyerLedgerTable render tests (T1)", () => {
     expect(html).toContain("All your buyers have paid their invoices");
   });
 });
+
+/**
+ * FilterUI render tests: verifies the "Show: All | Over limit only" filter
+ * is hidden when there's no choice and shown correctly when there is.
+ */
+describe("FilterUI render tests", () => {
+  const baseFilterProps = {
+    sortBy: "outstanding",
+    sortOrder: "desc",
+  };
+
+  it("(a) gating off: no Show: text rendered", async () => {
+    const { FilterUI } = await import("../app._index");
+    const html = renderToString(
+      createElement(FilterUI, {
+        ...baseFilterProps,
+        gatingEnforced: false,
+        overLimitCount: 0,
+        onlyOverLimit: false,
+      })
+    );
+
+    expect(html).toBe("");
+  });
+
+  it("(a) gating off with overLimitCount > 0: still no Show: text (gating takes precedence)", async () => {
+    const { FilterUI } = await import("../app._index");
+    const html = renderToString(
+      createElement(FilterUI, {
+        ...baseFilterProps,
+        gatingEnforced: false,
+        overLimitCount: 5,
+        onlyOverLimit: false,
+      })
+    );
+
+    expect(html).toBe("");
+  });
+
+  it("(a) gating on but overLimitCount = 0: no Show: text rendered", async () => {
+    const { FilterUI } = await import("../app._index");
+    const html = renderToString(
+      createElement(FilterUI, {
+        ...baseFilterProps,
+        gatingEnforced: true,
+        overLimitCount: 0,
+        onlyOverLimit: false,
+      })
+    );
+
+    expect(html).toBe("");
+  });
+
+  it("(b) gating on with overLimitCount > 0: shows All and Over limit only link", async () => {
+    const { FilterUI } = await import("../app._index");
+    const html = renderToString(
+      createElement(FilterUI, {
+        ...baseFilterProps,
+        gatingEnforced: true,
+        overLimitCount: 3,
+        onlyOverLimit: false,
+      })
+    );
+
+    expect(html).toContain("Show:");
+    expect(html).toContain("All");
+    expect(html).toContain("Over limit only");
+    expect(html).toContain("overlimit=true");
+  });
+
+  it("(c) onlyOverLimit=true: shows All as a link back", async () => {
+    const { FilterUI } = await import("../app._index");
+    const html = renderToString(
+      createElement(FilterUI, {
+        ...baseFilterProps,
+        gatingEnforced: true,
+        overLimitCount: 3,
+        onlyOverLimit: true,
+      })
+    );
+
+    expect(html).toContain("Show:");
+    expect(html).toContain('href="?sortBy=outstanding&amp;sortOrder=desc"');
+    expect(html).toContain(">All</s-link>");
+    expect(html).toContain("Over limit only");
+    expect(html).not.toContain("overlimit=true");
+  });
+
+  it("(c) onlyOverLimit=true with gating off: shows All link to get back (escape hatch)", async () => {
+    const { FilterUI } = await import("../app._index");
+    const html = renderToString(
+      createElement(FilterUI, {
+        ...baseFilterProps,
+        gatingEnforced: false,
+        overLimitCount: 0,
+        onlyOverLimit: true,
+      })
+    );
+
+    expect(html).toContain("Show:");
+    expect(html).toContain(">All</s-link>");
+    expect(html).not.toContain("Over limit only");
+  });
+});
