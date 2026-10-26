@@ -36,7 +36,7 @@
     // CI checks this with scripts/check-scope-sync.ts
     "SCOPES": "read_draft_orders,read_all_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations",
     "SHOPIFY_APP_URL": "https://net-terms-receivables.raghavkhanna.workers.dev",
-    // PCD Level 1 (Name, Email): requested/draft, not approved.
+    // PCD Level 2 (Name, Email): access request reviewed by Shopify with the App Store listing.
     // Enables fetching email and displayName in customer queries.
     // Phone and address are NEVER fetched regardless of this setting.
     "CUSTOMER_PII_FIELDS": "1",
@@ -47,7 +47,7 @@
     // S21: Plan gating enforcement. Set to "1" or "true" to enable.
     // When OFF (default): Plan resolution, banner, usage work but limits are not enforced.
     // When ON: Over-limit accounts are gated (gated_at set) and blocked from operations.
-    // Expected Partner Dashboard plan names: Free, Starter, Growth, Scale (case-insensitive)
+    // Expected plan names/handles: Starter, Growth, Unlimited (case-insensitive)
     "PLAN_GATING_ENFORCED": "false",
     // S18: Sender address for reminder and data-request emails (non-secret).
     // The domain must be verified in Resend. Sending also requires the
