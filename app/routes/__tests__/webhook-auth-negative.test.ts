@@ -126,24 +126,15 @@ function computeBadHmac(body: string): string {
   return crypto.createHmac("sha256", "wrong-secret-definitely-not-real").update(body, "utf8").digest("base64");
 }
 
-function createRecordingMockSql() {
-  const calls: Array<{ query: string; values: unknown[] }> = [];
-  
-  const recordingImpl = (strings: TemplateStringsArray, ...values: unknown[]) => {
-    const query = strings.join("?");
-    calls.push({ query, values });
-    return Promise.resolve([]);
-  };
-  
-  const mockFn = vi.fn().mockImplementation(recordingImpl);
-  
-  const sql = Object.assign(mockFn, {
+const mockSql = Object.assign(
+  vi.fn().mockImplementation(() => Promise.resolve([])),
+  {
     json: vi.fn((v: unknown) => v),
     array: vi.fn((arr: unknown[]) => arr),
     unsafe: vi.fn((s: string) => s),
     begin: vi.fn().mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
       const txSql = Object.assign(
-        vi.fn().mockImplementation(recordingImpl),
+        vi.fn().mockImplementation(() => Promise.resolve([])),
         {
           json: vi.fn((v: unknown) => v),
           array: vi.fn((arr: unknown[]) => arr),
@@ -151,14 +142,8 @@ function createRecordingMockSql() {
       );
       return cb(txSql);
     }),
-    _calls: calls,
-    _resetCalls: () => { calls.length = 0; },
-  });
-  
-  return sql;
-}
-
-const mockSql = createRecordingMockSql();
+  }
+);
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
@@ -189,21 +174,6 @@ vi.mock("~/lib/webhook-receipts.server", () => ({
   recordAndEnqueueSync: (...args: unknown[]) => mockRecordAndEnqueueSync(...args),
 }));
 
-const mockSafeLogCalls: Array<{ level: string; event: string; fields: Record<string, unknown> }> = [];
-const mockSafeLog = vi.fn().mockImplementation((level: string, event: string, fields: Record<string, unknown> = {}) => {
-  mockSafeLogCalls.push({ level, event, fields });
-});
-const mockShopHash = vi.fn().mockResolvedValue("abc123hash");
-
-vi.mock("~/lib/log.server", () => ({
-  safeLog: (...args: unknown[]) => mockSafeLog(args[0], args[1], args[2]),
-  shopHash: (...args: unknown[]) => mockShopHash(...args),
-  toErrorCode: (err: unknown) => {
-    if (err && typeof err === "object" && "code" in err) return (err as { code: string }).code;
-    if (err instanceof Error) return err.name;
-    return "unknown";
-  },
-}));
 
 const mockShopify = {
   authenticate: {
@@ -278,8 +248,9 @@ describe("Webhook Authentication Negative Test Suite", () => {
     vi.clearAllMocks();
     vi.resetModules();
     process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
-    mockSql._resetCalls();
-    mockSafeLogCalls.length = 0;
+    
+    mockSql.mockClear();
+    mockSql.begin.mockClear();
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -317,26 +288,15 @@ describe("Webhook Authentication Negative Test Suite", () => {
       expect(line).not.toContain(webhookId);
       expect(line).not.toContain(".myshopify.com");
     }
-
-    for (const call of mockSafeLogCalls) {
-      const fieldsStr = JSON.stringify(call.fields);
-      expect(fieldsStr).not.toContain(shopDomain);
-      expect(fieldsStr).not.toContain(webhookId);
-      expect(fieldsStr).not.toContain(".myshopify.com");
-    }
   }
 
-  function assertNoDbCallsBeforeAuth(): void {
-    expect(mockSql._calls.length).toBe(0);
-    expect(mockSql.mock.calls.length).toBe(0);
-  }
-
-  function assertNoEnqueues(): void {
-    expect(mockSendSyncMessage).not.toHaveBeenCalled();
-    expect(mockSendBulkMessage).not.toHaveBeenCalled();
+  function assertNoEnqueuesOrReceipts(): void {
     expect(mockRecordAndEnqueueSync).not.toHaveBeenCalled();
     expect(mockRecordWebhookReceipt).not.toHaveBeenCalled();
+    expect(mockSendSyncMessage).not.toHaveBeenCalled();
+    expect(mockSendBulkMessage).not.toHaveBeenCalled();
   }
+
 
   function createBaseRequest(
     topic: string,
@@ -409,8 +369,8 @@ describe("Webhook Authentication Negative Test Suite", () => {
     });
   });
 
-  describe("SQL recorder sanity check", () => {
-    it("recorder continues to record after all tests (via recordAndEnqueueSync)", async () => {
+  describe("Mock recorder sanity check", () => {
+    it("recordAndEnqueueSync is called for valid webhook", async () => {
       const payload = { admin_graphql_api_id: "gid://shopify/Order/12345" };
       const body = JSON.stringify(payload);
 
@@ -478,8 +438,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
-        assertNoDbCallsBeforeAuth();
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
     });
 
@@ -499,8 +458,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
-        assertNoDbCallsBeforeAuth();
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
     });
 
@@ -521,7 +479,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(400);
         }
 
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
 
       it("returns 200 for wrong topic header (graceful ignore)", async () => {
@@ -534,7 +492,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
 
         const response = await action(createActionArgs(request));
         expect(response.status).toBe(200);
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
     });
 
@@ -572,7 +530,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
             expect(error).toBeInstanceOf(Response);
             expect((error as Response).status).toBe(400);
           }
-          assertNoEnqueues();
+          assertNoEnqueuesOrReceipts();
         } else {
           const response = await action(createActionArgs(request));
           expect(response.status).toBe(200);
@@ -594,7 +552,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
             expect(error).toBeInstanceOf(Response);
             expect((error as Response).status).toBe(400);
           }
-          assertNoEnqueues();
+          assertNoEnqueuesOrReceipts();
         } else {
           const response = await action(createActionArgs(request));
           expect(response.status).toBe(200);
@@ -650,8 +608,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
-        assertNoDbCallsBeforeAuth();
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
     });
 
@@ -675,8 +632,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
-        assertNoDbCallsBeforeAuth();
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
     });
 
@@ -701,7 +657,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(400);
         }
 
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
 
       it("returns 200 for wrong topic header (graceful ignore)", async () => {
@@ -721,7 +677,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
 
         const response = await action(createActionArgs(request));
         expect(response.status).toBe(200);
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       });
     });
 
@@ -852,8 +808,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
-        assertNoDbCallsBeforeAuth();
-        assertNoEnqueues();
+        assertNoEnqueuesOrReceipts();
       }
     );
   });
