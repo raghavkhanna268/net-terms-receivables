@@ -561,6 +561,51 @@ describe("narration-parser", () => {
         expect(result.rail).toBe("UPI");
         expect(result.upiId).toBe("synt@oksynt");
       });
+
+      // Handle must end at separator or end of string
+      it("rejects handle with trailing non-separator chars", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-synt@oksynt.extra-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // Handle 'oksynt.extra' has a dot, so no valid VPA (matches cff6618 behavior)
+        expect(result.upiId).toBeUndefined();
+      });
+
+      // Reference number before VPA must not be swallowed
+      it("does NOT swallow ref number before VPA (mixed-case)", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-600000000001-9000000000@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // 600000000001 is a ref number, not part of VPA
+        expect(result.upiId).toBe("9000000000@oksynt");
+      });
+
+      it("does NOT swallow ref number before VPA (all-caps)", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-600000000001-9000000000@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000@oksynt");
+      });
+
+      // Phone format: 10-digit prefix + 1-3 digit suffix
+      it("extends for phone format in mixed-case", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-9000000000-1@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      it("extends for phone format in all-caps", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-9000000000-1@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
     });
   });
 

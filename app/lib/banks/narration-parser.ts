@@ -185,17 +185,17 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
   // Extension rules for hyphenated VPAs:
   // - Always take the segment directly before @ (the "at-segment")
   // - Extend backwards across '-' only when safe:
-  //   1. If earlier segment is all digits: always extend (phone VPAs like 9000000000-1@)
-  //   2. If text is mixed-case AND earlier segment is lowercase alphanumeric/dots/underscores: extend
-  //   3. If text is all-uppercase: only extend across all-digit segments
-  // This avoids swallowing uppercase name segments in all-caps narrations.
+  //   1. Phone format: at-segment is 1-3 digits AND preceding is exactly 10 digits (9000000000-1@)
+  //   2. Mixed-case text AND earlier segment is lowercase alphanumeric/dots/underscores: extend
+  // - Do NOT extend across arbitrary digit sequences (they may be reference numbers)
   // Ambiguity: in all-caps text, "SYNT-VENDOR@OKSYNT" extracts as "vendor@oksynt" because
   // we can't distinguish a hyphenated VPA from a name-VPA boundary.
   if (!result.upiId) {
     const atIdx = text.indexOf("@");
     if (atIdx > 0) {
       const afterAt = text.slice(atIdx + 1);
-      const handleMatch = afterAt.match(/^([a-zA-Z0-9]+)/);
+      // Handle must end at '-', '/', whitespace, or end of string
+      const handleMatch = afterAt.match(/^([a-zA-Z0-9]+)(?:[-/\s]|$)/);
       if (handleMatch) {
         const handle = handleMatch[1].toLowerCase();
         const beforeAt = text.slice(0, atIdx);
@@ -216,20 +216,32 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
           // Check if narration is all-uppercase (affects extension rules)
           const isAllCaps = text === text.toUpperCase();
           
-          // Extend backwards one segment at a time
-          for (let i = segments.length - 2; i >= 0; i--) {
-            const seg = segments[i];
-            if (!seg) break;
-            
-            if (/^\d+$/.test(seg)) {
-              // All-digit segment: always extend (phone VPA prefix)
-              localParts.unshift(seg);
-            } else if (!isAllCaps && /^[a-z0-9._]+$/.test(seg)) {
-              // Mixed-case text and lowercase segment: extend
-              localParts.unshift(seg);
-            } else {
-              // Stop: uppercase segment in all-caps text, or invalid chars
-              break;
+          // Phone format extension: at-segment is 1-3 digits, preceding is exactly 10 digits
+          // This is the only case where we extend across digit segments
+          if (segments.length >= 2) {
+            const prevSeg = segments[segments.length - 2];
+            if (
+              /^\d{1,3}$/.test(atSegment) &&
+              prevSeg &&
+              /^\d{10}$/.test(prevSeg)
+            ) {
+              localParts.unshift(prevSeg);
+            }
+          }
+          
+          // For mixed-case text, extend backwards across lowercase segments
+          // (only if we haven't already extended for phone format)
+          // Do NOT extend across all-digit segments (they may be reference numbers)
+          if (!isAllCaps && localParts.length === 1) {
+            for (let i = segments.length - 2; i >= 0; i--) {
+              const seg = segments[i];
+              if (!seg) break;
+              // Must be lowercase alphanumeric/dots/underscores, but NOT all digits
+              if (/^[a-z0-9._]+$/.test(seg) && !/^\d+$/.test(seg)) {
+                localParts.unshift(seg);
+              } else {
+                break;
+              }
             }
           }
           
