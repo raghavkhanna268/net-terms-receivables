@@ -471,9 +471,15 @@ describe("prod-diagnostics second-shop E2E mode", () => {
 
     it("adds no shop input: the only shop-like input is the pre-existing `shop`", () => {
       const names = Object.keys(wf.on.workflow_dispatch.inputs);
+      // e2e_second_shop and probe_reviewer_shop are booleans that pick a job;
+      // neither carries a shop value (the shop is selected in SQL).
       expect(names.filter((n) => /shop|domain|store/i.test(n)).sort()).toEqual(
-        ["e2e_second_shop", "shop"].sort()
+        ["e2e_second_shop", "probe_reviewer_shop", "shop"].sort()
       );
+      for (const n of ["e2e_second_shop", "probe_reviewer_shop"]) {
+        expect(wf.on.workflow_dispatch.inputs[n].type, n).toBe("boolean");
+        expect(wf.on.workflow_dispatch.inputs[n].default, n).toBe(false);
+      }
       // The e2e job never reads any input inside its steps; it rejects a
       // `shop` input from the event payload instead.
       expect(JSON.stringify(e2eSteps)).not.toMatch(/\$\{\{[^}]*inputs\./);
@@ -482,12 +488,15 @@ describe("prod-diagnostics second-shop E2E mode", () => {
       expect(selectStep.run).toContain("E2E_SHOP_INPUT_NOT_ALLOWED");
     });
 
-    it("runs only in e2e mode, and the default diagnostics job is skipped in e2e mode", () => {
+    it("runs only in e2e mode, and the default diagnostics job is skipped in e2e and reviewer modes", () => {
       expect(wf.jobs.e2e_second_shop.if).toBe(
-        "github.ref == 'refs/heads/main' && inputs.e2e_second_shop"
+        "github.ref == 'refs/heads/main' && inputs.e2e_second_shop && !inputs.probe_reviewer_shop"
       );
       expect(wf.jobs.diagnostics.if).toBe(
-        "github.ref == 'refs/heads/main' && !inputs.e2e_second_shop"
+        "github.ref == 'refs/heads/main' && !inputs.e2e_second_shop && !inputs.probe_reviewer_shop"
+      );
+      expect(wf.jobs.reviewer_shop_probe.if).toBe(
+        "github.ref == 'refs/heads/main' && inputs.probe_reviewer_shop"
       );
     });
 
