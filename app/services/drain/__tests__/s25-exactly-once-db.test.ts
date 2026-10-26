@@ -3136,15 +3136,15 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       }
     });
 
-    it("C15g: op already in DLQ is NOT returned by findStrandedBulkOperations (legacy exclusion)", async () => {
-      // Mutation test: removing the NOT EXISTS dlq subquery would cause this to fail
-      // This handles legacy rows that failed before the terminal-marking fix
+    it("C15g: op with TERMINAL DLQ row (permanent:*) is NOT returned by findStrandedBulkOperations", async () => {
+      // Mutation test: removing the terminal-scoped NOT EXISTS subquery would cause this to fail
+      // Terminal DLQ rows have error LIKE 'permanent:%' or error = 'bulk_stale_recovery'
       const { findStrandedBulkOperations } = await import("../bulk-op-recovery.server");
 
-      const DLQ_SHOP_ID = `shop-dlq-legacy-${TEST_SUFFIX}`;
-      const DLQ_SHOP_DOMAIN = `dlq-legacy-${TEST_SUFFIX}.myshopify.com`;
-      const dlqOpId = `gid://shopify/BulkOperation/dlq-legacy-${TEST_SUFFIX}`;
-      const normalOpId = `gid://shopify/BulkOperation/not-dlq-legacy-${TEST_SUFFIX}`;
+      const DLQ_SHOP_ID = `shop-dlq-terminal-${TEST_SUFFIX}`;
+      const DLQ_SHOP_DOMAIN = `test-dlq-terminal-${TEST_SUFFIX}.myshopify.com`;
+      const terminalOpId = `gid://shopify/BulkOperation/dlq-terminal-${TEST_SUFFIX}`;
+      const normalOpId = `gid://shopify/BulkOperation/not-dlq-terminal-${TEST_SUFFIX}`;
 
       try {
         await sql`
@@ -3152,15 +3152,14 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           VALUES (${DLQ_SHOP_ID}, ${DLQ_SHOP_DOMAIN}, 'INR', NOW(), NOW())
         `;
 
-        // Op that is already in DLQ (legacy case: failure_count=0, no completed_at/closed_at)
-        // This simulates a pre-fix op that failed permanently but wasn't marked terminal
+        // Op with terminal DLQ row (permanent:bulk_no_result_url)
         await sql`
           INSERT INTO s6_bulk_operations (
             bulk_operation_id, shop, bulk_type, origin, started_at,
             finish_received_at, processing_lease_until, completed_at, closed_at, failure_count
           )
           VALUES (
-            ${dlqOpId}, ${DLQ_SHOP_DOMAIN}, 'companies', 'reconcile',
+            ${terminalOpId}, ${DLQ_SHOP_DOMAIN}, 'companies', 'reconcile',
             NOW() - interval '2 hours',
             NOW() - interval '30 minutes',
             NULL,
@@ -3170,14 +3169,14 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           )
         `;
 
-        // Insert the DLQ row for this op
+        // Insert TERMINAL DLQ row (permanent:* format)
         await sql`
           INSERT INTO s6_dead_letter (original_queue, original_msg_id, message, error, dead_lettered_at)
           VALUES (
             's6_bulk',
-            'legacy-dlq-msg',
-            ${sql.json({ topic: "BULK_OPERATIONS_FINISH", shop: DLQ_SHOP_DOMAIN, bulkOperationId: dlqOpId, bulkType: "companies" })},
-            'bulk_no_result_url',
+            'terminal-dlq-msg',
+            ${sql.json({ topic: "BULK_OPERATIONS_FINISH", shop: DLQ_SHOP_DOMAIN, bulkOperationId: terminalOpId, bulkType: "companies" })},
+            'permanent:bulk_no_result_url',
             NOW() - interval '1 hour'
           )
         `;
@@ -3200,15 +3199,71 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
         const stranded = await findStrandedBulkOperations(sql, 10);
 
-        // Op in DLQ should NOT be found
-        const foundDlq = stranded.find((op) => op.bulk_operation_id === dlqOpId);
-        expect(foundDlq).toBeUndefined();
+        // Op with terminal DLQ should NOT be found
+        const foundTerminal = stranded.find((op) => op.bulk_operation_id === terminalOpId);
+        expect(foundTerminal).toBeUndefined();
 
         // Op not in DLQ SHOULD be found
         const foundNormal = stranded.find((op) => op.bulk_operation_id === normalOpId);
         expect(foundNormal).toBeDefined();
       } finally {
-        await sql`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${dlqOpId}`;
+        await sql`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${terminalOpId}`;
+        await sql`DELETE FROM s6_bulk_operations WHERE shop = ${DLQ_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${DLQ_SHOP_ID}`;
+      }
+    });
+
+    it("C15h: op with RETRYABLE-EXHAUSTION DLQ row (bulk_lease_contention) IS returned by findStrandedBulkOperations", async () => {
+      // Mutation test: broadening the DLQ exclusion to 'any DLQ row' would cause this to fail
+      // Retryable-exhaustion DLQ rows (bulk_lease_contention, uncaught exceptions) should NOT exclude the op
+      const { findStrandedBulkOperations } = await import("../bulk-op-recovery.server");
+
+      const DLQ_SHOP_ID = `shop-dlq-retryable-${TEST_SUFFIX}`;
+      const DLQ_SHOP_DOMAIN = `test-dlq-retryable-${TEST_SUFFIX}.myshopify.com`;
+      const retryableOpId = `gid://shopify/BulkOperation/dlq-retryable-${TEST_SUFFIX}`;
+
+      try {
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${DLQ_SHOP_ID}, ${DLQ_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Op with retryable-exhaustion DLQ row (bulk_lease_contention - no permanent: prefix)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at, closed_at, failure_count
+          )
+          VALUES (
+            ${retryableOpId}, ${DLQ_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL,
+            NULL,
+            0
+          )
+        `;
+
+        // Insert RETRYABLE-EXHAUSTION DLQ row (no permanent: prefix)
+        await sql`
+          INSERT INTO s6_dead_letter (original_queue, original_msg_id, message, error, dead_lettered_at)
+          VALUES (
+            's6_bulk',
+            'retryable-dlq-msg',
+            ${sql.json({ topic: "BULK_OPERATIONS_FINISH", shop: DLQ_SHOP_DOMAIN, bulkOperationId: retryableOpId, bulkType: "companies" })},
+            'bulk_lease_contention',
+            NOW() - interval '1 hour'
+          )
+        `;
+
+        const stranded = await findStrandedBulkOperations(sql, 10);
+
+        // Op with retryable-exhaustion DLQ SHOULD be found (recovery should retry it)
+        const foundRetryable = stranded.find((op) => op.bulk_operation_id === retryableOpId);
+        expect(foundRetryable).toBeDefined();
+      } finally {
+        await sql`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${retryableOpId}`;
         await sql`DELETE FROM s6_bulk_operations WHERE shop = ${DLQ_SHOP_DOMAIN}`;
         await sql`DELETE FROM "Shop" WHERE id = ${DLQ_SHOP_ID}`;
       }
@@ -3220,12 +3275,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // ==========================================================================
   describe("QA2: permanent failures mark op terminal (no nightly DLQ loop)", () => {
     it.each([
-      { name: "NO_RESULT_URL", errorCode: "bulk_no_result_url", setupMock: "no_result_url" },
-      { name: "CHUNK_HTTP_4XX", errorCode: "bulk_chunk_http_4xx", setupMock: "chunk_4xx" },
-      { name: "AUTH_NEEDS_REAUTH", errorCode: "bulk_auth_needs_reauth", setupMock: "auth_failure" },
-      { name: "STATUS_FETCH_FAILED", errorCode: "bulk_status_fetch_failed", setupMock: "status_fetch_failed" },
-      { name: "LINE_SIZE_CAP", errorCode: null, setupMock: "line_size_cap" },
-    ])("$name: drive permanent failure, run 3 recovery cycles, exactly 1 DLQ row", async ({ setupMock }) => {
+      { name: "NO_RESULT_URL", setupMock: "no_result_url", expectedDlqError: "permanent:bulk_no_result_url" },
+      { name: "CHUNK_HTTP_4XX", setupMock: "chunk_4xx", expectedDlqError: "permanent:bulk_chunk_http_4xx" },
+      { name: "AUTH_NEEDS_REAUTH", setupMock: "auth_failure", expectedDlqError: "permanent:bulk_auth_needs_reauth" },
+      { name: "STATUS_FETCH_FAILED", setupMock: "status_fetch_failed", expectedDlqError: "permanent:bulk_status_fetch_failed" },
+      { name: "LINE_SIZE_CAP", setupMock: "line_size_cap", expectedDlqError: "permanent:string_error" },
+    ])("$name: drive permanent failure, run 3 recovery cycles, exactly 1 DLQ row", async ({ setupMock, expectedDlqError }) => {
       const { runDrain, DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const { adminGraphQL } = await import("../admin-client.server");
@@ -3384,12 +3439,13 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         });
         expect(drainResult.deadLettered).toBe(1);
 
-        // Verify DLQ row exists after first drain
-        const [dlqAfterDrain] = await sql<{ count: string }[]>`
-          SELECT COUNT(*)::text as count FROM s6_dead_letter
+        // Verify DLQ row exists after first drain with exact error value
+        const [dlqAfterDrain] = await sql<{ count: string; error: string }[]>`
+          SELECT COUNT(*)::text as count, MAX(error) as error FROM s6_dead_letter
           WHERE original_queue = 's6_bulk' AND message->>'bulkOperationId' = ${bulkOpId}
         `;
         expect(parseInt(dlqAfterDrain.count, 10)).toBe(1);
+        expect(dlqAfterDrain.error).toBe(expectedDlqError);
 
         // Verify op is now terminal (failure_count = MAX)
         const [opAfterDrain] = await sql<{ failure_count: number }[]>`
@@ -3454,7 +3510,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const STUCK_SHOP_ID = `shop-stuck-orders-${TEST_SUFFIX}`;
-      const STUCK_SHOP_DOMAIN = `stuck-orders-${TEST_SUFFIX}.myshopify.com`;
+      const STUCK_SHOP_DOMAIN = `test-stuck-orders-${TEST_SUFFIX}.myshopify.com`;
       const stuckOpId1 = `gid://shopify/BulkOperation/stuck-orders-1-${TEST_SUFFIX}`;
       const stuckOpId2 = `gid://shopify/BulkOperation/stuck-orders-2-${TEST_SUFFIX}`;
       

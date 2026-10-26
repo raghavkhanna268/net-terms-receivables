@@ -204,6 +204,17 @@ export async function findLeaseExpiredBulkOperations(
  *
  * Uses finish_received_at threshold to avoid racing with in-flight processing.
  *
+ * DLQ exclusion: Only excludes ops with TERMINAL DLQ rows. Retryable-exhaustion
+ * DLQ rows (bulk_lease_contention at maxRetries, uncaught exceptions, unknown
+ * errorType) do NOT exclude the op - those represent transient failures that
+ * should be retried by recovery.
+ *
+ * Terminal DLQ rows are identified by (all must match):
+ * - original_queue = 's6_bulk'
+ * - message->>'shop' = same shop as the op
+ * - message->>'topic' = 'BULK_OPERATIONS_FINISH'
+ * - error LIKE 'permanent:%' OR error = 'bulk_stale_recovery'
+ *
  * @param sql - postgres.js SQL client
  * @param thresholdMinutes - Minutes after finish_received_at to consider stranded
  * @returns List of stranded operations
@@ -226,6 +237,10 @@ export async function findStrandedBulkOperations(
       AND NOT EXISTS (
         SELECT 1 FROM s6_dead_letter dlq
         WHERE dlq.message->>'bulkOperationId' = bo.bulk_operation_id
+          AND dlq.original_queue = 's6_bulk'
+          AND dlq.message->>'shop' = bo.shop
+          AND dlq.message->>'topic' = 'BULK_OPERATIONS_FINISH'
+          AND (dlq.error LIKE 'permanent:%' OR dlq.error = 'bulk_stale_recovery')
       )
     ORDER BY bo.started_at ASC
   `;
