@@ -71,9 +71,7 @@ vi.mock("@shopify/shopify-app-react-router/server", () => ({
 
 vi.mock("~/services/plan-welcome.server", () => ({
   processPlanWelcome: vi.fn().mockResolvedValue({
-    handled: false,
-    verified: false,
-    pending: false,
+    refreshed: false,
     skipped: true,
   }),
 }));

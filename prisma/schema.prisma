@@ -177,8 +177,6 @@ model Shop {
   isTest           Boolean   @default(false) @map("is_test")
   /// When the plan cache was last refreshed. TTL ~6h.
   planCachedAt     DateTime? @map("plan_cached_at") @db.Timestamptz
-  /// Unverified plan_handle from App Pricing welcome redirect. Cleared on verification.
-  planPendingHandle String?  @map("plan_pending_handle")
 
   // Relations - direct children with CASCADE
   accounts     BuyerAccount[]

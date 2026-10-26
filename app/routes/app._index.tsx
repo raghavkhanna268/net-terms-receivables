@@ -421,9 +421,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
 
   const urlPlanHandle = url.searchParams.get("plan_handle");
+  const urlChargeId = url.searchParams.get("charge_id");
   const urlShopParam = url.searchParams.get("shop");
-  if (urlPlanHandle) {
-    await processPlanWelcome(sql, shopDomain, urlShopParam, urlPlanHandle);
+  if (urlPlanHandle || urlChargeId) {
+    await processPlanWelcome(sql, shopDomain, urlShopParam, urlPlanHandle, urlChargeId);
   }
 
   const page = parsePositiveInt(url.searchParams.get("page"), 1);

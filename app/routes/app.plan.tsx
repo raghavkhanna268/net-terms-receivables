@@ -28,8 +28,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; plan_pending_handle: string | null }[]>`
-    SELECT id, plan_pending_handle FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string }[]>`
+    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   let planData: ResolvedPlan | null = null;
@@ -98,7 +98,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         )
       : { show: false, heading: "", bodyText: "", upgradeUrl: null },
     error,
-    pendingPlanHandle: shop?.plan_pending_handle ?? null,
   };
 };
 
@@ -150,7 +149,6 @@ export default function PlanPage() {
     upgradeUrl,
     newAccountsPausedBanner,
     error,
-    pendingPlanHandle,
   } = useLoaderData<typeof loader>();
 
   const planKey = (plan?.key ?? "none") as PlanKey;
@@ -186,16 +184,6 @@ export default function PlanPage() {
                 </a>
               </>
             )}
-          </s-banner>
-        </s-section>
-      )}
-
-      {/* Pending Plan Banner */}
-      {pendingPlanHandle && (
-        <s-section>
-          <s-banner tone="info" heading="Plan Selection Received">
-            Your plan selection has been received and is being confirmed with Shopify.
-            This may take a few moments.
           </s-banner>
         </s-section>
       )}
