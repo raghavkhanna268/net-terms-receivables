@@ -67,7 +67,7 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("test-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    await runAfterAuth("test-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -89,7 +89,7 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("test-log.myshopify.com", mockAdmin, mockWaitUntil);
+    await runAfterAuth("test-log.myshopify.com", mockAdmin, mockWaitUntil);
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -115,9 +115,9 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    expect(() =>
+    await expect(
       runAfterAuth("s13-test-failing-shop.myshopify.com", mockAdmin, mockWaitUntil)
-    ).not.toThrow();
+    ).resolves.not.toThrow();
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -145,7 +145,7 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("test-error-test-log-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    await runAfterAuth("test-error-test-log-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -172,7 +172,7 @@ describe("after-auth with payment customization (S13)", () => {
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-    runAfterAuth("s13-test-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    await runAfterAuth("s13-test-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
     let prevLen = 0;
     while (waitUntilPromises.length > prevLen) {
@@ -186,7 +186,7 @@ describe("after-auth with payment customization (S13)", () => {
     waitUntilPromises.length = 0;
     mockEnsurePaymentCustomization.mockResolvedValueOnce({ id: "pc-789", created: true });
 
-    runAfterAuth("s13-test-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
+    await runAfterAuth("s13-test-retry-shop.myshopify.com", mockAdmin, mockWaitUntil);
 
     prevLen = 0;
     while (waitUntilPromises.length > prevLen) {

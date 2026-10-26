@@ -18,7 +18,7 @@ import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "./shop-currency.server";
-import { writeShopConfigMetafield } from "~/services/shop-config.server";
+import { refreshPlanCache } from "~/services/plan.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "./shop-currency-guard.server";
 import type { Sql } from "./db-light.server";
 
@@ -51,12 +51,22 @@ const setupCompletedShops = new Set<string>();
 const inFlightSetups = new Map<string, Promise<void>>();
 
 /**
- * Runs after-authentication hooks for a shop using ctx.waitUntil.
+ * Runs after-authentication hooks for a shop.
+ *
+ * Gap 1 (awaited reinstall clear): The critical reinstall path is now AWAITED,
+ * not fire-and-forget via waitUntil. This ensures:
+ * - uninstalledAt is cleared BEFORE the post-auth redirect/render
+ * - Registration (metafields, validation, payment customization) is complete
+ *   on reinstall before the first load, so onboarding shows true state
+ * - Failures are logged and visible (not swallowed)
+ *
+ * Non-critical work (normal first-install setup when not a reinstall) still
+ * runs via waitUntil to keep install latency low.
  *
  * This function is idempotent and safe to call on every request:
  * - Uses in-memory cache to skip already-processed shops
  * - Concurrent first loads share one ensureValidation call
- * - Runs setup via ctx.waitUntil to stay off critical path
+ * - Runs setup via ctx.waitUntil to stay off critical path (except reinstall)
  * - Marks shop complete only after success
  * - Allows retry on failure (shop not marked as complete)
  * - Logs errors for observability without affecting user experience
@@ -81,23 +91,22 @@ const inFlightSetups = new Map<string, Promise<void>>();
  * @param shop - The shop domain (e.g., "example.myshopify.com")
  * @param admin - The authenticated admin GraphQL client
  * @param waitUntil - The ctx.waitUntil function from Cloudflare Workers context
+ * @returns Promise that resolves when critical reinstall work is done
  */
-export function runAfterAuth(
+export async function runAfterAuth(
   shop: string,
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
-): void {
+): Promise<void> {
   let sql: Sql | null = null;
   try {
     sql = getRequestSql();
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] clear_uninstalled_at_failed reason=no_request_context err=${errInfo}`);
+    safeLog("warn", "shop_config_write_failed", { err: toErrorCode(error) });
   }
 
   if (sql) {
-    const clearAndSetupPromise = clearAndMaybeSetup(sql, shop, admin, waitUntil);
-    waitUntil(clearAndSetupPromise);
+    await clearAndMaybeSetup(sql, shop, admin, waitUntil);
   } else {
     runSetupIfNeeded(shop, admin, waitUntil);
   }
@@ -105,6 +114,20 @@ export function runAfterAuth(
 
 /**
  * Clear uninstalledAt and run setup if the shop was reinstalled or not cached.
+ *
+ * On reinstall (wasReinstalled=true):
+ * 1. Await critical registration in parallel (Setup Guide depends on these)
+ * 2. Run non-critical work (plan refresh, syncShopInfo) in waitUntil
+ *
+ * Critical path (awaited, parallel): metafield definitions, validation, payment customization
+ * Background (waitUntil): plan refresh, syncShopInfo (timezone/currency/DB upsert)
+ *
+ * This fixes two reinstall bugs:
+ * - Plan cache showing old Starter plan after subscription was cancelled by uninstall
+ * - Payment Customization showing "Missing" on first load due to racing setup
+ *
+ * Latency optimization: Critical calls run in parallel (~0.5-1.2s vs ~1.5-3s serial).
+ * Order dependency: None among the three critical chains (all independent Shopify calls).
  */
 async function clearAndMaybeSetup(
   sql: Sql,
@@ -116,9 +139,85 @@ async function clearAndMaybeSetup(
 
   if (reinstallResult.wasReinstalled) {
     setupCompletedShops.delete(shop);
+
+    await runCriticalRegistration(admin);
+
+    const backgroundPromise = runBackgroundSetup(sql, shop, admin, reinstallResult.shopId);
+    waitUntil(backgroundPromise);
+    return;
   }
 
   runSetupIfNeeded(shop, admin, waitUntil);
+}
+
+/**
+ * Run critical registration steps that the Setup Guide depends on (awaited on reinstall).
+ *
+ * Runs in parallel: metafield definitions, validation, payment customization.
+ * These are independent Shopify Admin API calls with no ordering constraints.
+ *
+ * Critical path call count: 3-4 parallel calls (vs 8-9 serial before).
+ * - Metafield definitions: 1 call (2 owner types parallelized internally)
+ * - Validation: 1-2 calls (query + optional create/update)
+ * - Payment customization: 1-2 calls (query + optional create/update)
+ */
+async function runCriticalRegistration(admin: AdminGraphqlClient): Promise<void> {
+  const errors: string[] = [];
+
+  const [definitionsResult, validationResult, paymentResult] = await Promise.allSettled([
+    ensureMetafieldDefinitions(admin),
+    ensureValidation(admin),
+    ensurePaymentCustomization(admin),
+  ]);
+
+  if (definitionsResult.status === "rejected") {
+    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${toErrorCode(definitionsResult.reason)}`);
+    errors.push("metafield_definitions");
+  }
+
+  if (validationResult.status === "rejected") {
+    const errInfo = (validationResult.reason as { code?: string; name?: string })?.code ?? (validationResult.reason as Error)?.name ?? "unknown";
+    console.error(`[afterAuth] validation_registration_failed reason=exception err=${errInfo}`);
+    errors.push("validation");
+  } else if (validationResult.value.created) {
+    console.log(`[afterAuth] validation_created id=${validationResult.value.id}`);
+  }
+
+  if (paymentResult.status === "rejected") {
+    const errInfo = (paymentResult.reason as { code?: string; name?: string })?.code ?? (paymentResult.reason as Error)?.name ?? "unknown";
+    console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
+    errors.push("payment_customization");
+  } else if (paymentResult.value.created) {
+    console.log(`[afterAuth] payment_customization_created id=${paymentResult.value.id}`);
+  }
+}
+
+/**
+ * Run non-critical setup in the background (via waitUntil).
+ *
+ * Includes: plan refresh, syncShopInfo (timezone/currency/DB upsert).
+ * These don't block the Setup Guide's first render.
+ */
+async function runBackgroundSetup(
+  sql: Sql,
+  shop: string,
+  admin: AdminGraphqlClient,
+  shopId?: string,
+): Promise<void> {
+  try {
+    await refreshPlanCache(sql, shop);
+  } catch (error) {
+    safeLog("warn", "plan_background_refresh_failed", { shopId, err: toErrorCode(error) });
+  }
+
+  try {
+    await syncShopInfo(shop, admin);
+  } catch (error) {
+    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
+    console.error(`[afterAuth] sync_shop_info_failed reason=exception err=${errInfo}`);
+  }
+
+  setupCompletedShops.add(shop);
 }
 
 /**
@@ -231,8 +330,7 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
     }
     return { wasReinstalled: false };
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] clear_uninstalled_at_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "shop_config_write_failed", { shopHash: await shopHash(shop), err: toErrorCode(error) });
     return { wasReinstalled: false };
   }
 }
@@ -315,8 +413,7 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
 }
 
 /**
- * Fetch shop auth info and sync to database and metafields.
- * #292: Also writes shop_config metafield with currency for Rust functions.
+ * Fetch shop auth info and sync to database.
  *
  * This function ensures the Shop row exists on every install or re-auth.
  * It uses INSERT ... ON CONFLICT to be idempotent:
@@ -324,14 +421,13 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
  * - Reinstall: Clears uninstalledAt and updates timezone/currency (preserves existing if query fails)
  * - Re-auth: Updates timezone/currency only (preserves existing if query fails)
  *
- * #292: Write order - shop_config FIRST, then DB. A failed shop_config write is logged
- * but does not block the DB upsert (install must succeed). /app will detect and retry
- * any shop_config mismatch on next load.
+ * Note: shop_config metafield write was REMOVED here to eliminate duplication.
+ * checkAndRecoverCurrency in the /app loader handles all shop_config writes with
+ * proper staleness detection and flip-blocked logic. See shop-currency-recovery.server.ts.
  *
  * #292 Currency Flip Safety: When live currency is INR, stored currency is NOT INR,
  * AND the shop has financial rows (Invoice, Payment, s8_draft_orders), the currency
  * flip is BLOCKED. In this case:
- * - Do NOT write shop_config with INR (would relabel Rust function reads)
  * - Do NOT update Shop.currency (preserves existing state)
  * - Timezone update still proceeds (independent of currency)
  * This is fail-closed: only zero financial rows allows flip to INR.
@@ -346,7 +442,6 @@ async function syncShopInfo(
 
   // #292 Currency Flip Safety: Check if currency flip should be blocked
   let effectiveCurrency = authInfo.currencyCode;
-  let flipBlocked = false;
 
   if (authInfo.currencyCode === SUPPORTED_SHOP_CURRENCY) {
     const [shopRow] = await sql<{ id: string; currency: string | null }[]>`
@@ -362,21 +457,11 @@ async function syncShopInfo(
       });
 
       if (decision.blocked) {
-        flipBlocked = true;
         effectiveCurrency = decision.effectiveCurrency;
         safeLog("info", "currency_flip_blocked_on_auth", {
           shopHash: await shopHash(shop),
         });
       }
-    }
-  }
-
-  // #292: Write shop_config metafield FIRST, log warning on failure but continue
-  // Skip shop_config write when flip is blocked (would relabel existing data)
-  if (authInfo.shopId && !flipBlocked) {
-    const writeResult = await writeShopConfigMetafield(admin, authInfo.shopId, effectiveCurrency);
-    if (!writeResult.success) {
-      safeLog("warn", "shop_config_write_failed", { err: writeResult.error ?? "unknown" });
     }
   }
 

@@ -88,7 +88,8 @@ describe("after-auth", () => {
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-      runAfterAuth(
+      // runAfterAuth is now async, must await it
+      await runAfterAuth(
         "test-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
@@ -223,13 +224,14 @@ describe("after-auth", () => {
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-      expect(() =>
+      // runAfterAuth is now async; it should not reject even when validation fails
+      await expect(
         runAfterAuth(
           "test-failing-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           mockWaitUntil,
         ),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
 
       await Promise.allSettled(waitUntilPromises);
 
@@ -331,7 +333,8 @@ describe("after-auth", () => {
       const mockAdmin = createMockAdmin();
       const ctx = new ThisDependentCtx();
 
-      runAfterAuth(
+      // runAfterAuth is now async, must await it
+      await runAfterAuth(
         "test-bound-shop.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         (p) => ctx.waitUntil(p),
@@ -346,7 +349,7 @@ describe("after-auth", () => {
       });
     });
 
-    it("throws when waitUntil is passed unbound (loses this)", () => {
+    it("throws when waitUntil is passed unbound (loses this)", async () => {
       mockGetRequestSql.mockImplementationOnce(() => {
         throw new Error("No request context");
       });
@@ -361,13 +364,14 @@ describe("after-auth", () => {
 
       const unboundWaitUntil = ctx.waitUntil;
 
-      expect(() =>
+      // runAfterAuth is now async, so we need to await and catch the rejection
+      await expect(
         runAfterAuth(
           "test-unbound-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           unboundWaitUntil,
         ),
-      ).toThrow();
+      ).rejects.toThrow();
     });
 
     it("concurrent first loads share one ensureValidation call", async () => {
@@ -615,13 +619,14 @@ describe("after-auth", () => {
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-      expect(() =>
+      // runAfterAuth is now async; it should not reject even when clear fails
+      await expect(
         runAfterAuth(
           "test-clear-failed-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           mockWaitUntil,
         ),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
 
       await Promise.allSettled(waitUntilPromises);
 
@@ -629,16 +634,18 @@ describe("after-auth", () => {
         expect(_isShopSetupComplete("test-clear-failed-shop.myshopify.com")).toBe(true);
       });
 
+      // Now logs via safeLog with shop_config_write_failed (uses existing code for DB errors)
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[afterAuth] clear_uninstalled_at_failed"),
+        expect.stringContaining('"event":"shop_config_write_failed"'),
       );
 
       consoleSpy.mockRestore();
     });
 
     it("continues without clear when getRequestSql throws", async () => {
+      // safeLog("warn", ...) logs to console.warn, not console.error
       const consoleSpy = vi
-        .spyOn(console, "error")
+        .spyOn(console, "warn")
         .mockImplementation(() => {});
 
       mockGetRequestSql.mockImplementationOnce(() => {
@@ -654,13 +661,14 @@ describe("after-auth", () => {
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-      expect(() =>
+      // runAfterAuth is now async; it should not reject even when getRequestSql throws
+      await expect(
         runAfterAuth(
           "test-no-context-shop.myshopify.com",
           mockAdmin as Parameters<typeof runAfterAuth>[1],
           mockWaitUntil,
         ),
-      ).not.toThrow();
+      ).resolves.not.toThrow();
 
       await Promise.allSettled(waitUntilPromises);
 
@@ -668,8 +676,9 @@ describe("after-auth", () => {
         expect(_isShopSetupComplete("test-no-context-shop.myshopify.com")).toBe(true);
       });
 
+      // Now logs via safeLog with shop_config_write_failed (uses existing code for DB context errors)
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[afterAuth] clear_uninstalled_at_failed reason=no_request_context"),
+        expect.stringContaining('"event":"shop_config_write_failed"'),
       );
 
       consoleSpy.mockRestore();
@@ -724,8 +733,11 @@ describe("after-auth", () => {
     });
   });
 
-  describe("#292: shop_config metafield write on auth", () => {
-    it("shop_config is written with fetched currency during syncShopInfo", async () => {
+  describe("#292: shop_config metafield write deduplication", () => {
+    it("syncShopInfo does NOT write shop_config (removed to eliminate duplicate with checkAndRecoverCurrency)", async () => {
+      // This test ensures the duplicate shop_config write stays removed.
+      // The /app loader's checkAndRecoverCurrency handles all shop_config writes
+      // with proper staleness detection. See shop-currency-recovery.server.ts.
       const mockWriteShopConfigMetafield = vi.fn().mockResolvedValue({ success: true });
       vi.doMock("~/services/shop-config.server", () => ({
         writeShopConfigMetafield: mockWriteShopConfigMetafield,
@@ -761,8 +773,8 @@ describe("after-auth", () => {
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
 
-      runAfterAuth(
-        "test-shop-config-write.myshopify.com",
+      await runAfterAuth(
+        "test-no-shop-config-write.myshopify.com",
         mockAdmin as Parameters<typeof runAfterAuth>[1],
         mockWaitUntil,
       );
@@ -770,90 +782,11 @@ describe("after-auth", () => {
       await Promise.allSettled(waitUntilPromises);
 
       await vi.waitFor(() => {
-        expect(_isShopSetupComplete("test-shop-config-write.myshopify.com")).toBe(true);
+        expect(_isShopSetupComplete("test-no-shop-config-write.myshopify.com")).toBe(true);
       });
 
-      expect(mockWriteShopConfigMetafield).toHaveBeenCalledWith(
-        mockAdmin,
-        "gid://shopify/Shop/12345",
-        "USD",
-      );
-    });
-
-    it("shop_config_write_failed is logged via real safeLog on write failure, Shop upsert still runs", async () => {
-      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      const mockWriteShopConfigMetafield = vi
-        .fn()
-        .mockResolvedValue({ success: false, error: "user_errors" });
-      vi.doMock("~/services/shop-config.server", () => ({
-        writeShopConfigMetafield: mockWriteShopConfigMetafield,
-      }));
-
-      mockEnsureValidation.mockResolvedValue({
-        id: "gid://shopify/Validation/123",
-        created: true,
-      });
-
-      let upsertCalled = false;
-      mockSqlQuery.mockImplementation((strings: TemplateStringsArray) => {
-        const query = Array.isArray(strings) ? strings.join("") : String(strings);
-        if (query.includes("INSERT INTO") && query.includes('"Shop"')) {
-          upsertCalled = true;
-        }
-        return Promise.resolve([{ id: "shop-uuid-test", closed_count: 0 }]);
-      });
-
-      vi.resetModules();
-
-      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
-        await import("../after-auth.server");
-
-      _resetSetupCacheForTesting();
-
-      const mockAdmin = {
-        graphql: vi.fn().mockResolvedValue({
-          json: () =>
-            Promise.resolve({
-              data: {
-                shop: {
-                  id: "gid://shopify/Shop/99999",
-                  ianaTimezone: "America/Los_Angeles",
-                  currencyCode: "INR",
-                },
-              },
-            }),
-        }),
-      };
-
-      const waitUntilPromises: Promise<unknown>[] = [];
-      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
-
-      runAfterAuth(
-        "test-shop-config-fail.myshopify.com",
-        mockAdmin as Parameters<typeof runAfterAuth>[1],
-        mockWaitUntil,
-      );
-
-      await Promise.allSettled(waitUntilPromises);
-
-      await vi.waitFor(() => {
-        expect(_isShopSetupComplete("test-shop-config-fail.myshopify.com")).toBe(true);
-      });
-
-      const safeLogCall = consoleWarnSpy.mock.calls.find(
-        (call) =>
-          typeof call[0] === "string" && call[0].includes("shop_config_write_failed"),
-      );
-      expect(safeLogCall).toBeDefined();
-
-      const logOutput = safeLogCall![0] as string;
-      expect(logOutput).toContain('"event":"shop_config_write_failed"');
-      expect(logOutput).toContain('"err":"user_errors"');
-
-      expect(upsertCalled).toBe(true);
-
-      consoleWarnSpy.mockRestore();
+      // shop_config should NOT be written during syncShopInfo (duplicate removed)
+      expect(mockWriteShopConfigMetafield).not.toHaveBeenCalled();
     });
   });
 
