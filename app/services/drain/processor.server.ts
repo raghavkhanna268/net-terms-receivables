@@ -23,6 +23,7 @@ import {
   markWebhookProcessed,
 } from "~/services/sync/company.server";
 import { processCustomerWebhook, type CustomerPiiMode } from "~/services/sync/customer.server";
+import { validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 import { processDraftOrderWebhook } from "~/services/sync/draft-order.server";
 import { processCompanyLocationWebhook } from "~/services/sync/company-location.server";
@@ -38,9 +39,10 @@ import type {
 import {
   adminGraphQL,
   COMPANY_QUERY,
-  COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
   DRAFT_ORDER_QUERY,
+  getCompanyLocationQuery,
+  getCompanyLocationQueryWithoutContact,
 } from "./admin-client.server";
 import {
   fetchCustomerWithFallback,
@@ -208,6 +210,10 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
 /**
  * Handler for COMPANY_LOCATIONS_* topics.
  * Fetches the location via GraphQL and processes it.
+ *
+ * PII handling: Uses getRequestEnv() to read CUSTOMER_PII_FIELDS flag.
+ * When flag is on, mainContact.customer { email displayName } are stored.
+ * The query is built dynamically to only request PII when the flag is on.
  */
 async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check (S20: use shop for new table)
@@ -219,6 +225,9 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
     };
   }
 
+  // Get Worker env for PII flag (passed to sync functions)
+  const env = getRequestEnv() ?? {};
+
   // For DELETE, process without fetch
   if (message.topic === "COMPANY_LOCATIONS_DELETE") {
     const location: ShopifyCompanyLocation = {
@@ -226,15 +235,44 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId);
+    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId, env);
   }
+
+  // Build query dynamically based on PII flag (data minimization)
+  const query = getCompanyLocationQuery(env);
+  validateCustomerQuery(query, env);
 
   // Fetch location data via GraphQL
   const result = await adminGraphQL<{
     node: ShopifyCompanyLocation | null;
-  }>(message.shop, COMPANY_LOCATION_QUERY, { id: message.resourceGid });
+  }>(message.shop, query, { id: message.resourceGid });
 
   if (!result.success) {
+    // Handle access denied on mainContact gracefully - don't fail the whole sync
+    // Match only on errorCode, not message text (more reliable)
+    if (result.errorCode === "ACCESS_DENIED") {
+      safeLog("warn", "company_location_contact_access_denied", {
+        shopHash: await shopHash(message.shop),
+        locationGid: message.resourceGid,
+      });
+      // Retry with a query that completely omits mainContact
+      const baseResult = await adminGraphQL<{
+        node: ShopifyCompanyLocation | null;
+      }>(message.shop, getCompanyLocationQueryWithoutContact(), { id: message.resourceGid });
+      
+      if (baseResult.success && baseResult.data?.node) {
+        // Pass contactKnown=false to preserve any existing stored contact
+        return processCompanyLocationWebhook(
+          sql,
+          message.shop,
+          message.topic,
+          baseResult.data.node,
+          message.webhookId,
+          env,
+          false // contactKnown=false: preserve existing stored contact
+        );
+      }
+    }
     return {
       success: false,
       action: "skipped",
@@ -250,7 +288,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId);
+    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId, env);
   }
 
   return processCompanyLocationWebhook(
@@ -258,7 +296,8 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
     message.shop,
     message.topic,
     result.data.node,
-    message.webhookId
+    message.webhookId,
+    env
   );
 }
 
