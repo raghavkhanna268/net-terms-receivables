@@ -11,16 +11,19 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { syncClockToDb } from "../../../tests/helpers/db-clock";
 
-const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async () => {
-  return {
-    success: true,
-    data: {
-      metafieldsSet: {
-        metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-        userErrors: [],
+const { mockShopifyGraphQLRequest } = vi.hoisted(() => {
+  const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async () => {
+    return {
+      success: true,
+      data: {
+        metafieldsSet: {
+          metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
+          userErrors: [],
+        },
       },
-    },
-  };
+    };
+  });
+  return { mockShopifyGraphQLRequest };
 });
 
 vi.mock("../shopify-client.server", async (importOriginal) => {
