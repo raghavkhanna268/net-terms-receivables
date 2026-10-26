@@ -25,6 +25,10 @@ vi.mock("~/lib/request-context.server", () => ({
 vi.mock("~/services/gating.server", () => ({
   isAccountActive: vi.fn().mockReturnValue(true),
   isGatingEnforced: vi.fn().mockReturnValue(false),
+  getUsageStats: vi.fn().mockResolvedValue({
+    companies: { current: 5, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
+  }),
 }));
 
 vi.mock("~/services/credit-status.server", () => ({
