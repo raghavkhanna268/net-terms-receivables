@@ -243,6 +243,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
   let consoleErrorSpy: MockInstance;
   let consoleInfoSpy: MockInstance;
   let consoleDebugSpy: MockInstance;
+  let pendingWaitUntilPromises: Promise<unknown>[];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -251,6 +252,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
     
     mockSql.mockClear();
     mockSql.begin.mockClear();
+    pendingWaitUntilPromises = [];
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -259,7 +261,8 @@ describe("Webhook Authentication Negative Test Suite", () => {
     consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await Promise.allSettled(pendingWaitUntilPromises);
     process.env = originalEnv;
     consoleLogSpy.mockRestore();
     consoleWarnSpy.mockRestore();
@@ -288,6 +291,11 @@ describe("Webhook Authentication Negative Test Suite", () => {
       expect(line).not.toContain(webhookId);
       expect(line).not.toContain(".myshopify.com");
     }
+  }
+
+  function assertNoDbCallsBeforeAuth(): void {
+    expect(mockSql).not.toHaveBeenCalled();
+    expect(mockSql.begin).not.toHaveBeenCalled();
   }
 
   function assertNoEnqueuesOrReceipts(): void {
@@ -346,7 +354,11 @@ describe("Webhook Authentication Negative Test Suite", () => {
         sessionStorage: mockSessionStorage,
         cloudflare: {
           env: {},
-          ctx: { waitUntil: vi.fn() },
+          ctx: {
+            waitUntil: vi.fn((promise: Promise<unknown>) => {
+              pendingWaitUntilPromises.push(promise);
+            }),
+          },
         },
       },
       params: {},
@@ -438,6 +450,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
+        assertNoDbCallsBeforeAuth();
         assertNoEnqueuesOrReceipts();
       });
     });
@@ -458,6 +471,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
+        assertNoDbCallsBeforeAuth();
         assertNoEnqueuesOrReceipts();
       });
     });
@@ -479,6 +493,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(400);
         }
 
+        assertNoDbCallsBeforeAuth();
         assertNoEnqueuesOrReceipts();
       });
 
@@ -608,6 +623,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
+        assertNoDbCallsBeforeAuth();
         assertNoEnqueuesOrReceipts();
       });
     });
@@ -632,6 +648,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
+        assertNoDbCallsBeforeAuth();
         assertNoEnqueuesOrReceipts();
       });
     });
@@ -657,6 +674,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(400);
         }
 
+        assertNoDbCallsBeforeAuth();
         assertNoEnqueuesOrReceipts();
       });
 
@@ -808,6 +826,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
           expect((error as Response).status).toBe(401);
         }
 
+        assertNoDbCallsBeforeAuth();
         assertNoEnqueuesOrReceipts();
       }
     );
