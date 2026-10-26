@@ -855,7 +855,7 @@ describe("Reconcile Route (M5)", () => {
       expect(runMatcher).toHaveBeenCalled();
     });
 
-    it("loader returns currencySupported=false for non-INR shop", async () => {
+    it("loader returns notSupported=true for non-INR shop", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
@@ -886,11 +886,11 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      expect(result.currencySupported).toBe(false);
+      expect(result.notSupported).toBe(true);
       expect(result.shopCurrency).toBe("USD");
     });
 
-    it("loader returns currencySupported=true for INR shop", async () => {
+    it("loader returns notSupported=false for INR shop", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { getSuggestedMatches } = await import(
         "~/lib/matching/queries.server"
@@ -921,7 +921,7 @@ describe("Reconcile Route (M5)", () => {
         pattern: mockPattern,
       });
 
-      expect(result.currencySupported).toBe(true);
+      expect(result.notSupported).toBe(false);
       expect(result.shopCurrency).toBe("INR");
     });
   });

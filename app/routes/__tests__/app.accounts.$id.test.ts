@@ -135,8 +135,8 @@ describe("app.accounts.$id loader syncState", () => {
     mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
       const query = strings.join("?");
 
-      if (query.includes("SELECT id FROM \"Shop\"")) {
-        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
       }
 
       if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
@@ -326,8 +326,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"")) {
@@ -482,8 +482,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"")) {
@@ -527,8 +527,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"")) {
@@ -566,8 +566,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"") && !query.includes("reminderOptOutAt")) {
@@ -664,8 +664,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
@@ -704,8 +704,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
@@ -912,8 +912,8 @@ describe("app.accounts.$id action gated credit edit", () => {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
 
-      if (query.includes("SELECT id FROM \"Shop\"")) {
-        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
       }
 
       if (query.includes("SELECT id, gated_at") && query.includes("FROM \"BuyerAccount\"")) {
