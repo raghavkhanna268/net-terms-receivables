@@ -139,7 +139,7 @@ The merchant sets each buyer's credit limit and payment terms. When a buyer goes
 |--------------|---------|------|----------|
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All app data in transit | Global (Worker placed near ap-south-1) |
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored app data | AWS ap-south-1 (Mumbai, India) |
-| Resend, Inc. [TBD: Resend data region, pending DevOps confirmation] | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | [TBD: Resend data region, pending DevOps confirmation] |
+| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
 | Functional Software, Inc. (Sentry) | Error monitoring. Data is stored in Sentry's EU data region (Germany). [TBD: Sentry data scope] | Sanitized error and performance events | EU (Germany) |
 
 **Resend data handling:**
@@ -159,7 +159,7 @@ Payment reminder emails (sent to buyer email address):
 
 Resend is only used when email delivery is configured; emails are not sent otherwise.
 
-**International transfer:** Reminder emails are processed by Resend [TBD: Resend data region, pending DevOps confirmation]
+**International transfer:** Reminder emails are processed by Resend in Japan (ap-northeast-1 data region)
 
 ---
 

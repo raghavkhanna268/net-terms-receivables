@@ -363,9 +363,10 @@ describe("privacy.md content requirements", () => {
     expect(privacyContent).toContain("Termwise: Net Terms & Credit");
   });
 
-  it("contains Resend in subprocessor table with TBD region", () => {
-    expect(privacyContent).toContain("Resend, Inc.");
-    expect(privacyContent).toContain("[TBD: Resend data region, pending DevOps confirmation]");
+  it("contains exact Resend subprocessor wording", () => {
+    expect(privacyContent).toContain(
+      "Resend, Inc., Tokyo, Japan (ap-northeast-1) data region"
+    );
   });
 
   it("contains exact backup retention sentence", () => {
@@ -402,9 +403,10 @@ describe("merchant-terms.md content requirements", () => {
     expect(termsContent).toContain("raghavkhanna468@gmail.com");
   });
 
-  it("contains Resend in sub-processors table with TBD region", () => {
-    expect(termsContent).toContain("Resend, Inc.");
-    expect(termsContent).toContain("[TBD: Resend data region, pending DevOps confirmation]");
+  it("contains exact Resend subprocessor wording", () => {
+    expect(termsContent).toContain(
+      "Resend, Inc., Tokyo, Japan (ap-northeast-1) data region"
+    );
   });
 
   it("specifies liability cap of 12 months' fees", () => {
