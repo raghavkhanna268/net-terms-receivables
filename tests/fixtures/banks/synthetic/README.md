@@ -82,7 +82,8 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 - `hdfc-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 - `hdfc-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
 - `hdfc-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
-- `hdfc-synthetic.xls` - **BIFF8 .xls matching real HDFC export layout** (SYNTHETIC, generated)
+- `hdfc-review-synthetic.csv` - **App Store reviewer file (FICTIONAL)** - Minimal statement with pinned parse/match behavior for reviewer demonstrations. Contains NEFT, UPI, IMPS credits and one debit. All data is entirely fictional.
+- `hdfc-synthetic.xls` - **BIFF8 .xls** (SYNTHETIC, generated from value-free structural layout specs)
 - `hdfc-synthetic.csv` - CSV twin of above with identical transactions (SYNTHETIC, generated)
 
 ### ICICI Fixtures
@@ -90,7 +91,7 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 - `icici-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 - `icici-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
 - `icici-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
-- `icici-synthetic.xls` - **BIFF8 .xls matching real ICICI export layout** (SYNTHETIC, generated)
+- `icici-synthetic.xls` - **BIFF8 .xls** (SYNTHETIC, generated from value-free structural layout specs)
 - `icici-synthetic.csv` - CSV twin of above with identical transactions (SYNTHETIC, generated)
 
 ### SBI Fixtures (UNVERIFIED)
@@ -113,8 +114,8 @@ XLSX fixtures are generated from CSV source files using `scripts/generate-xlsx-f
 Run `npx tsx scripts/generate-xlsx-fixtures.ts` to regenerate them after modifying CSV sources.
 
 ### Real-Layout BIFF8 .xls Fixtures
-The `*-synthetic.xls` and matching `*-synthetic.csv` files are generated from real bank export layout specs.
-They reproduce the exact structure of actual HDFC and ICICI .xls exports including:
+The `*-synthetic.xls` and matching `*-synthetic.csv` files are generated from value-free structural layout specs; all values are fictional.
+They reproduce the structural format of HDFC and ICICI .xls exports including:
 
 **ICICI (`icici-synthetic.xls`):**
 - 12-row preamble with merges (title, account info, filters)
@@ -132,7 +133,6 @@ They reproduce the exact structure of actual HDFC and ICICI .xls exports includi
 - Mixed cell types: text for dates/narration/ref, NUMERIC for amounts
 - Blank (no cell) on non-applicable amount side (not 0.00)
 - Full footer: summary values row (numeric, no labels), Dr/Cr counts, generation line, end marker
-- Note: Summary-values row (numeric, no text label) triggers one expected ROW_PARSE_FAILED
 
 **Features covered by both:**
 - UPI credits and debits with various narration forms

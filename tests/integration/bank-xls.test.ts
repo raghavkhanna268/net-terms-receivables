@@ -2,12 +2,13 @@
  * Integration tests for BIFF8 .xls bank statement parsing.
  * 
  * Tests that:
- * 1. .xls and CSV twins produce identical normalized transactions
+ * 1. .xls and CSV twins produce identical normalized transactions (all fields)
  * 2. Row counts, credits/debits, and parse errors are pinned
  * 3. Specific edge cases (overflow rows, hyphen VPA, ref≠RRN, 15-digit ref) parse correctly
- * 4. Credit transactions score against realistic fictional invoices
+ * 4. Credit transactions score against realistic fictional invoices with pinned results
  * 
  * All fixture data is SYNTHETIC with SYNT markers - not real bank data.
+ * Covers issue #334 (alphabetic hyphenated VPAs).
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -16,28 +17,32 @@ import { join } from "path";
 import { parseBankStatement } from "../../app/lib/banks/index.js";
 import type { ParseResult, NormalisedTxn } from "../../app/lib/banks/types.js";
 import {
-  scorePaymentToInvoice,
+  scoreMultiInvoiceMatch,
   extractInvoiceRefs,
   CONFIDENCE_THRESHOLD,
   type InvoiceForScoring,
   type PaymentForScoring,
   type BuyerForScoring,
+  type MatchReason,
 } from "../../app/lib/matching/score.js";
 
 const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
 
-/**
- * Get confidence band from score.
- */
-function getConfidenceBand(score: number): "high" | "medium" | "low" {
+type ConfidenceBand = "high" | "medium" | "low";
+
+function getConfidenceBand(score: number): ConfidenceBand {
   if (score >= CONFIDENCE_THRESHOLD) return "high";
   if (score >= 50) return "medium";
   return "low";
 }
 
+function formatReasons(reasons: MatchReason[]): string {
+  return reasons.map((r) => `${r.type}(+${r.points})`).join(", ");
+}
+
 /**
  * Compare two transaction arrays for equivalence.
- * Compares key fields that should be identical between .xls and CSV parsing.
+ * Compares ALL normalized fields that should be identical between .xls and CSV parsing.
  */
 function assertTransactionsEquivalent(
   xlsTxns: NormalisedTxn[],
@@ -49,107 +54,66 @@ function assertTransactionsEquivalent(
   for (let i = 0; i < xlsTxns.length; i++) {
     const xls = xlsTxns[i];
     const csv = csvTxns[i];
+    const ctx = `${bankName} row ${i + 1}`;
     
-    expect(xls.date).toBe(csv.date);
-    expect(xls.amountPaise).toBe(csv.amountPaise);
-    expect(xls.direction).toBe(csv.direction);
-    expect(xls.parsed.rail).toBe(csv.parsed.rail);
+    // Core fields
+    expect(xls.date, `${ctx} date`).toBe(csv.date);
+    expect(xls.valueDate, `${ctx} valueDate`).toBe(csv.valueDate);
+    expect(xls.amountPaise, `${ctx} amountPaise`).toBe(csv.amountPaise);
+    expect(xls.direction, `${ctx} direction`).toBe(csv.direction);
+    expect(xls.refNo, `${ctx} refNo`).toBe(csv.refNo);
+    expect(xls.balancePaise, `${ctx} balancePaise`).toBe(csv.balancePaise);
+    expect(xls.dedupeKey, `${ctx} dedupeKey`).toBe(csv.dedupeKey);
     
-    if (xls.parsed.upiId || csv.parsed.upiId) {
-      expect(xls.parsed.upiId).toBe(csv.parsed.upiId);
-    }
-    if (xls.parsed.utr || csv.parsed.utr) {
-      expect(xls.parsed.utr).toBe(csv.parsed.utr);
-    }
+    // Parsed fields
+    expect(xls.parsed.rail, `${ctx} rail`).toBe(csv.parsed.rail);
+    expect(xls.parsed.upiId, `${ctx} upiId`).toBe(csv.parsed.upiId);
+    expect(xls.parsed.utr, `${ctx} utr`).toBe(csv.parsed.utr);
+    expect(xls.parsed.payerName, `${ctx} payerName`).toBe(csv.parsed.payerName);
+    expect(xls.parsed.payerBank, `${ctx} payerBank`).toBe(csv.parsed.payerBank);
   }
 }
 
 /**
- * Create fictional invoices for scoring tests.
- * These are synthetic invoices that realistically match the fixture transactions.
+ * Synthetic buyer for scoring tests.
  */
-function createFictionalInvoices(): InvoiceForScoring[] {
-  return [
-    {
-      id: "inv-001",
-      name: "#1001",
-      orderId: "gid://shopify/Order/1001",
-      outstandingPaise: 5000000n, // 50,000.00
-      buyerAccountId: "buyer-synt-vendor",
-      dueAt: new Date("2030-10-20"),
-    },
-    {
-      id: "inv-002",
-      name: "#1002",
-      orderId: "gid://shopify/Order/1002",
-      outstandingPaise: 2500000n, // 25,000.00
-      buyerAccountId: "buyer-synt-wholesaler",
-      dueAt: new Date("2030-10-21"),
-    },
-    {
-      id: "inv-003",
-      name: "INV-2030-0001",
-      orderId: null,
-      outstandingPaise: 3333333n, // 33,333.33
-      buyerAccountId: "buyer-synt-long",
-      dueAt: new Date("2030-10-25"),
-    },
-    {
-      id: "inv-004",
-      name: "#1004",
-      orderId: "gid://shopify/Order/1004",
-      outstandingPaise: 7500000n, // 75,000.00
-      buyerAccountId: "buyer-synt-corporate",
-      dueAt: new Date("2030-10-22"),
-    },
-    {
-      id: "inv-005",
-      name: "#1005",
-      orderId: "gid://shopify/Order/1005",
-      outstandingPaise: 1500000n, // 15,000.00
-      buyerAccountId: "buyer-synt-retailer",
-      dueAt: new Date("2030-10-23"),
-    },
-  ];
-}
+const SYNTHETIC_BUYER: BuyerForScoring = {
+  id: "buyer-synt-vendor",
+  name: "SYNT VENDOR PVT LTD",
+  aliases: ["synt vendor", "synt vendor pvt ltd"],
+  email: null,
+};
 
 /**
- * Create fictional buyers for scoring tests.
+ * Synthetic invoices for scoring tests.
+ * Amounts match fixture transactions for exact/partial match testing.
  */
-function createFictionalBuyers(): BuyerForScoring[] {
-  return [
-    {
-      id: "buyer-synt-vendor",
-      name: "SYNT VENDOR PVT LTD",
-      aliases: ["synt vendor", "syntvendor"],
-      email: null,
-    },
-    {
-      id: "buyer-synt-wholesaler",
-      name: "SYNT WHOLESALER CO",
-      aliases: ["synt wholesaler", "syntwholesaler"],
-      email: null,
-    },
-    {
-      id: "buyer-synt-long",
-      name: "SYNT LONG NAME ENTERPRISE PVT LTD",
-      aliases: ["synt long name", "syntlongbusiness"],
-      email: null,
-    },
-    {
-      id: "buyer-synt-corporate",
-      name: "SYNT CORPORATE COLLECTIONS PVT LTD",
-      aliases: ["synt corporate", "cms synt"],
-      email: null,
-    },
-    {
-      id: "buyer-synt-retailer",
-      name: "SYNT RETAILER",
-      aliases: ["synt retailer", "syntretail"],
-      email: null,
-    },
-  ];
-}
+const SYNTHETIC_INVOICES: InvoiceForScoring[] = [
+  {
+    id: "inv-001",
+    name: "#1001",
+    orderId: "gid://shopify/Order/1001",
+    outstandingPaise: 5123456n, // Matches ICICI first UPI credit (51234.56)
+    buyerAccountId: "buyer-synt-vendor",
+    dueAt: new Date("2030-10-20"),
+  },
+  {
+    id: "inv-002",
+    name: "#1002", 
+    orderId: "gid://shopify/Order/1002",
+    outstandingPaise: 2468013n, // Matches second credit (24680.13)
+    buyerAccountId: "buyer-synt-vendor",
+    dueAt: new Date("2030-10-21"),
+  },
+  {
+    id: "inv-003",
+    name: "INV-2030-0001",
+    orderId: null,
+    outstandingPaise: 3210987n, // Matches overflow row credit (32109.87)
+    buyerAccountId: "buyer-synt-vendor",
+    dueAt: new Date("2030-10-25"),
+  },
+];
 
 describe("ICICI BIFF8 .xls real-layout parsing", () => {
   let xlsResult: ParseResult;
@@ -208,7 +172,7 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
   });
 
   describe(".xls and CSV produce identical normalized transactions", () => {
-    it("all transactions match between .xls and CSV", () => {
+    it("all transactions match between .xls and CSV (all fields)", () => {
       assertTransactionsEquivalent(xlsResult.transactions, csvResult.transactions, "ICICI");
     });
   });
@@ -220,7 +184,7 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
         t.narration.includes("SYNT-INV-2030-0001")
       );
       expect(overflowTxn).toBeDefined();
-      expect(overflowTxn!.amountPaise).toBe(3333333);
+      expect(overflowTxn!.amountPaise).toBe(3210987); // 32109.87
       expect(overflowTxn!.direction).toBe("CR");
     });
 
@@ -230,11 +194,11 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
         t.narration.includes("SYNT-SETTLE-2030")
       );
       expect(lastOverflowTxn).toBeDefined();
-      expect(lastOverflowTxn!.amountPaise).toBe(2222222);
+      expect(lastOverflowTxn!.amountPaise).toBe(2109876); // 21098.76
       expect(lastOverflowTxn!.direction).toBe("CR");
     });
 
-    it("parses VPA with hyphen", () => {
+    it("parses VPA with hyphen (#334)", () => {
       const hyphenVpaTxn = xlsResult.transactions.find(t => 
         t.narration.includes("synt-pay@oksynt")
       );
@@ -268,7 +232,7 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
       );
       expect(interestTxn).toBeDefined();
       expect(interestTxn!.direction).toBe("CR");
-      expect(interestTxn!.amountPaise).toBe(123456);
+      expect(interestTxn!.amountPaise).toBe(123456); // 1234.56
     });
 
     it("parses value date != transaction date case", () => {
@@ -288,13 +252,18 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
     });
   });
 
-  describe("credit transaction scoring", () => {
-    const invoices = createFictionalInvoices();
-    const buyers = createFictionalBuyers();
-
-    it("scores first UPI credit against matching invoice", () => {
+  describe("credit transaction scoring (pinned)", () => {
+    /**
+     * First UPI credit: 51,234.56 from SYNT VENDOR PVT LTD
+     * 
+     * Score breakdown:
+     * - amount_exact: +20 (payment matches invoice-001 exactly)
+     * - payer_alias: +10 (SYNT VENDOR matches buyer alias)
+     * Total: 30 points -> low band
+     */
+    it("pins first UPI credit score: 30 points, low band", () => {
       const credit = xlsResult.transactions.find(t => 
-        t.direction === "CR" && t.narration.includes("SYNT VENDOR PVT LTD")
+        t.direction === "CR" && t.narration.includes("SYNT VENDOR PVT LTD") && t.amountPaise === 5123456
       );
       expect(credit).toBeDefined();
 
@@ -307,18 +276,26 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
         rail: credit!.parsed.rail,
       };
 
-      const extractedRefs = extractInvoiceRefs(credit!.narration);
-      const buyer = buyers.find(b => b.id === "buyer-synt-vendor")!;
-      const invoice = invoices.find(i => i.buyerAccountId === "buyer-synt-vendor")!;
+      const result = scoreMultiInvoiceMatch(payment, SYNTHETIC_INVOICES, SYNTHETIC_BUYER);
+      expect(result).not.toBeNull();
 
-      const result = scorePaymentToInvoice(payment, invoice, buyer, extractedRefs);
-      
-      expect(result.score).toBeGreaterThan(0);
-      // Score depends on amount match + name match; band varies based on match quality
-      expect(["low", "medium"]).toContain(getConfidenceBand(result.score));
+      const allocation = result!.allocations[0];
+      expect(allocation.invoiceId).toBe("inv-001");
+      expect(allocation.score).toBe(30);
+      expect(getConfidenceBand(allocation.score)).toBe("low");
+      expect(allocation.allocatedPaise).toBe(5123456n);
+      expect(formatReasons(allocation.reasons)).toBe("amount_exact(+20), payer_alias(+10)");
     });
 
-    it("scores CMS credit against matching invoice", () => {
+    /**
+     * CMS credit: 76,543.21 from SYNT CORPORATE COLLECTIONS
+     * 
+     * Score breakdown:
+     * - amount_overpayment: +10 (payment exceeds invoice outstanding)
+     * - payer_name: +8 (fuzzy match on buyer.name, floor(10 * 0.8))
+     * Total: 18 points -> low band
+     */
+    it("pins CMS credit score: 18 points, low band", () => {
       const cmsTxn = xlsResult.transactions.find(t => 
         t.parsed.rail === "CMS" && t.narration.includes("SYNT CORPORATE COLLECTIONS")
       );
@@ -333,13 +310,13 @@ describe("ICICI BIFF8 .xls real-layout parsing", () => {
         rail: cmsTxn!.parsed.rail,
       };
 
-      const extractedRefs = extractInvoiceRefs(cmsTxn!.narration);
-      const buyer = buyers.find(b => b.id === "buyer-synt-corporate")!;
-      const invoice = invoices.find(i => i.buyerAccountId === "buyer-synt-corporate")!;
+      const result = scoreMultiInvoiceMatch(payment, SYNTHETIC_INVOICES, SYNTHETIC_BUYER);
+      expect(result).not.toBeNull();
 
-      const result = scorePaymentToInvoice(payment, invoice, buyer, extractedRefs);
-      
-      expect(result.score).toBeGreaterThan(0);
+      const allocation = result!.allocations[0];
+      expect(allocation.score).toBe(18);
+      expect(getConfidenceBand(allocation.score)).toBe("low");
+      expect(formatReasons(allocation.reasons)).toBe("amount_overpayment(+10), payer_name(+8)");
     });
   });
 });
@@ -401,13 +378,13 @@ describe("HDFC BIFF8 .xls real-layout parsing", () => {
   });
 
   describe(".xls and CSV produce identical normalized transactions", () => {
-    it("all transactions match between .xls and CSV", () => {
+    it("all transactions match between .xls and CSV (all fields)", () => {
       assertTransactionsEquivalent(xlsResult.transactions, csvResult.transactions, "HDFC");
     });
   });
 
   describe("edge case handling", () => {
-    it("parses hyphenated VPA (7-segment form)", () => {
+    it("parses hyphenated phone VPA (#334)", () => {
       const hyphenVpaTxn = xlsResult.transactions.find(t => 
         t.narration.includes("9000000000-1@oksynt")
       );
@@ -445,7 +422,7 @@ describe("HDFC BIFF8 .xls real-layout parsing", () => {
       );
       expect(atwTxn).toBeDefined();
       expect(atwTxn!.direction).toBe("DR");
-      expect(atwTxn!.amountPaise).toBe(1000000);
+      expect(atwTxn!.amountPaise).toBe(1000000); // 10,000.00
     });
 
     it("parses interest credit correctly", () => {
@@ -454,7 +431,7 @@ describe("HDFC BIFF8 .xls real-layout parsing", () => {
       );
       expect(interestTxn).toBeDefined();
       expect(interestTxn!.direction).toBe("CR");
-      expect(interestTxn!.amountPaise).toBe(123456);
+      expect(interestTxn!.amountPaise).toBe(123456); // 1234.56
     });
 
     it("parses value date != date case", () => {
@@ -483,13 +460,18 @@ describe("HDFC BIFF8 .xls real-layout parsing", () => {
     });
   });
 
-  describe("credit transaction scoring", () => {
-    const invoices = createFictionalInvoices();
-    const buyers = createFictionalBuyers();
-
-    it("scores first UPI credit against matching invoice", () => {
+  describe("credit transaction scoring (pinned)", () => {
+    /**
+     * First UPI credit: 51,234.56 from SYNT VENDOR PVT LTD
+     * 
+     * Score breakdown:
+     * - amount_exact: +20 (payment matches invoice-001 exactly)
+     * - payer_alias: +10 (SYNT VENDOR matches buyer alias)
+     * Total: 30 points -> low band
+     */
+    it("pins first UPI credit score: 30 points, low band", () => {
       const credit = xlsResult.transactions.find(t => 
-        t.direction === "CR" && t.narration.includes("SYNT VENDOR PVT LTD")
+        t.direction === "CR" && t.narration.includes("SYNT VENDOR PVT LTD") && t.amountPaise === 5123456
       );
       expect(credit).toBeDefined();
 
@@ -502,18 +484,26 @@ describe("HDFC BIFF8 .xls real-layout parsing", () => {
         rail: credit!.parsed.rail,
       };
 
-      const extractedRefs = extractInvoiceRefs(credit!.narration);
-      const buyer = buyers.find(b => b.id === "buyer-synt-vendor")!;
-      const invoice = invoices.find(i => i.buyerAccountId === "buyer-synt-vendor")!;
+      const result = scoreMultiInvoiceMatch(payment, SYNTHETIC_INVOICES, SYNTHETIC_BUYER);
+      expect(result).not.toBeNull();
 
-      const result = scorePaymentToInvoice(payment, invoice, buyer, extractedRefs);
-      
-      expect(result.score).toBeGreaterThan(0);
-      // Score depends on amount match + name match; band varies based on match quality
-      expect(["low", "medium"]).toContain(getConfidenceBand(result.score));
+      const allocation = result!.allocations[0];
+      expect(allocation.invoiceId).toBe("inv-001");
+      expect(allocation.score).toBe(30);
+      expect(getConfidenceBand(allocation.score)).toBe("low");
+      expect(allocation.allocatedPaise).toBe(5123456n);
+      expect(formatReasons(allocation.reasons)).toBe("amount_exact(+20), payer_alias(+10)");
     });
 
-    it("scores hyphenated VPA credit", () => {
+    /**
+     * Hyphenated VPA credit: 24,680.13 from SYNT WHOLESALER
+     * 
+     * Score breakdown:
+     * - amount_exact: +20 (payment matches invoice-002 exactly)
+     * - payer_name: +8 (fuzzy match on buyer.name, floor(10 * 0.8))
+     * Total: 28 points -> low band
+     */
+    it("pins hyphenated VPA credit score: 28 points, low band", () => {
       const hyphenCredit = xlsResult.transactions.find(t => 
         t.direction === "CR" && t.narration.includes("9000000000-1@oksynt")
       );
@@ -528,13 +518,14 @@ describe("HDFC BIFF8 .xls real-layout parsing", () => {
         rail: hyphenCredit!.parsed.rail,
       };
 
-      const extractedRefs = extractInvoiceRefs(hyphenCredit!.narration);
-      const buyer = buyers.find(b => b.id === "buyer-synt-wholesaler")!;
-      const invoice = invoices.find(i => i.buyerAccountId === "buyer-synt-wholesaler")!;
+      const result = scoreMultiInvoiceMatch(payment, SYNTHETIC_INVOICES, SYNTHETIC_BUYER);
+      expect(result).not.toBeNull();
 
-      const result = scorePaymentToInvoice(payment, invoice, buyer, extractedRefs);
-      
-      expect(result.score).toBeGreaterThan(0);
+      const allocation = result!.allocations[0];
+      expect(allocation.invoiceId).toBe("inv-002");
+      expect(allocation.score).toBe(28);
+      expect(getConfidenceBand(allocation.score)).toBe("low");
+      expect(formatReasons(allocation.reasons)).toBe("amount_exact(+20), payer_name(+8)");
     });
   });
 });

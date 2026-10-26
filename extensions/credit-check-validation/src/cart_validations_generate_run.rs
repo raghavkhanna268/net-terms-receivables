@@ -1082,4 +1082,93 @@ mod tests {
         let result = run_test(&input).unwrap();
         assert!(result.operations.is_empty(), "Shared fixture usdCurrency should pass for USD cart under limit");
     }
+
+    // =========================================================================
+    // #292 G2: Malformed shop_config tests (fail-closed for over-limit)
+    // =========================================================================
+
+    #[test]
+    fn test_malformed_shop_config_held_buyer_still_blocks() {
+        // #292 G2: A HELD buyer is still blocked even with malformed shop_config
+        let input = make_input_with_step_and_shop_config(
+            "100.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "HELD buyer must be blocked even with malformed shop_config");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_malformed_shop_config_over_limit_fails_closed() {
+        // #292 G2: Over-limit buyer fails closed even with malformed shop_config
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",  // 6000000 paise - would exceed limit
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Over-limit buyer must be blocked even with malformed shop_config (fail-closed)");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("credit limit"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_malformed_shop_config_no_credit_status_passes() {
+        // #292 G2: Ordinary cart with no credit_status and malformed shop_config passes
+        let input = make_input_with_step_and_shop_config(
+            "100.00",
+            "INR",
+            None,  // No credit_status
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Ordinary cart with no credit_status should pass even with malformed shop_config");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_wrong_schema_version_over_limit_blocks() {
+        // #292 G2: Over-limit buyer with wrong schemaVersion in shop_config fails closed
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"schemaVersion": 999, "currencyCode": "INR"}"#),  // Wrong schemaVersion
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Over-limit with wrong schemaVersion shop_config must block (fail-closed)");
+    }
+
+    #[test]
+    fn test_malformed_shop_config_missing_currency_code_over_limit_blocks() {
+        // #292 G2: Over-limit buyer with missing currencyCode in shop_config fails closed
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"schemaVersion": 1}"#),  // Missing currencyCode
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Over-limit with missing currencyCode shop_config must block (fail-closed)");
+    }
 }

@@ -42,15 +42,21 @@ interface IciciTxn {
   overflowRemarks?: string; // For narration continuation
 }
 
+/** Round to 2 decimal places to avoid float noise */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 function generateIciciTransactions(): IciciTxn[] {
   // Generate synthetic transactions matching the spec
-  // Mix: 7 credits, ~10 debits, with required edge cases
+  // Mix: 9 credits, 6 debits, with required edge cases
+  // Amounts use odd patterns like 12345.67 to be obviously invented
   const txns: IciciTxn[] = [];
-  let balance = 100000.00; // Starting balance
+  let balance = 98765.43; // Starting balance - odd pattern
   let sno = 1;
 
   // UPI credit - 7 segment form
-  balance += 50000.00;
+  balance = round2(balance + 51234.56);
   txns.push({
     sno: sno++,
     valueDate: "15/10/2030",
@@ -58,12 +64,12 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "UPI/SYNT VENDOR PVT LTD/syntvendor@oksynt/Invoice Payment/SYNT BANK/600000000001/SYNT000001",
     withdrawal: "0.00",
-    deposit: "50000.00",
+    deposit: "51234.56",
     balance: balance.toFixed(2),
   });
 
   // UPI credit - 8 segment with trailing slash
-  balance += 25000.00;
+  balance = round2(balance + 24680.13);
   txns.push({
     sno: sno++,
     valueDate: "16/10/2030",
@@ -71,12 +77,12 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "UPI/SYNT WHOLESALER CO/syntwholesale@oksynt/Order ref 1001/SYNT CO-OP BANK/600000000002/SYNT000002/",
     withdrawal: "0.00",
-    deposit: "25000.00",
+    deposit: "24680.13",
     balance: balance.toFixed(2),
   });
 
   // UPI credit - VPA with NO @ (alphanumeric 10+ chars)
-  balance += 15000.00;
+  balance = round2(balance + 13579.24);
   txns.push({
     sno: sno++,
     valueDate: "17/10/2030",
@@ -84,12 +90,12 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "UPI/SYNT RETAILER/SYNT9000000001/Advance payment/SYNT BANK/600000000003/SYNT000003",
     withdrawal: "0.00",
-    deposit: "15000.00",
+    deposit: "13579.24",
     balance: balance.toFixed(2),
   });
 
   // UPI credit with hyphenated VPA
-  balance += 12500.00;
+  balance = round2(balance + 11235.81);
   txns.push({
     sno: sno++,
     valueDate: "18/10/2030",
@@ -97,12 +103,12 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "UPI/SYNT TRADERS/synt-pay@oksynt/Monthly dues/SYNT BANK/600000000004/SYNT000004",
     withdrawal: "0.00",
-    deposit: "12500.00",
+    deposit: "11235.81",
     balance: balance.toFixed(2),
   });
 
   // CMS collection credit 1
-  balance += 75000.00;
+  balance = round2(balance + 76543.21);
   txns.push({
     sno: sno++,
     valueDate: "19/10/2030",
@@ -110,12 +116,12 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "CMS/ SYNT00123456 78/SYNT CORPORATE COLLECTIONS PVT LTD",
     withdrawal: "0.00",
-    deposit: "75000.00",
+    deposit: "76543.21",
     balance: balance.toFixed(2),
   });
 
   // CMS collection credit 2
-  balance += 45000.00;
+  balance = round2(balance + 43210.98);
   txns.push({
     sno: sno++,
     valueDate: "20/10/2030",
@@ -123,64 +129,64 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "CMS/ SYNT00789012 34/SYNT ENTERPRISES LTD",
     withdrawal: "0.00",
-    deposit: "45000.00",
+    deposit: "43210.98",
     balance: balance.toFixed(2),
   });
 
   // UPI debit
-  balance -= 1500.00;
+  balance = round2(balance - 1357.91);
   txns.push({
     sno: sno++,
     valueDate: "21/10/2030",
     txnDate: "21/10/2030",
     cheque: "",
     remarks: "UPI/SYNT STORE/syntstore@oksynt/Purchase/SYNT BANK/600000000005/SYNT000005",
-    withdrawal: "1500.00",
+    withdrawal: "1357.91",
     deposit: "0.00",
     balance: balance.toFixed(2),
   });
 
   // ACH debit
-  balance -= 5500.00;
+  balance = round2(balance - 5432.10);
   txns.push({
     sno: sno++,
     valueDate: "22/10/2030",
     txnDate: "22/10/2030",
     cheque: "",
     remarks: "ACH/SYNT INSURANCE CO/SYNP0001/Premium payment 123456789 87654321",
-    withdrawal: "5500.00",
+    withdrawal: "5432.10",
     deposit: "0.00",
     balance: balance.toFixed(2),
   });
 
   // Value Date != Transaction Date (one day difference)
-  balance -= 2200.00;
+  balance = round2(balance - 2109.87);
   txns.push({
     sno: sno++,
     valueDate: "23/10/2030",
     txnDate: "24/10/2030", // Different from value date
     cheque: "",
     remarks: "UPI/SYNT UTILITY/syntutility@oksynt/Electricity bill/SYNT BANK/600000000006/SYNT000006",
-    withdrawal: "2200.00",
+    withdrawal: "2109.87",
     deposit: "0.00",
     balance: balance.toFixed(2),
   });
 
   // UPI debit
-  balance -= 850.00;
+  balance = round2(balance - 876.54);
   txns.push({
     sno: sno++,
     valueDate: "24/10/2030",
     txnDate: "24/10/2030",
     cheque: "",
     remarks: "UPI/SYNT RESTAURANT/syntfood@oksynt/Dinner/SYNT BANK/600000000007/SYNT000007",
-    withdrawal: "850.00",
+    withdrawal: "876.54",
     deposit: "0.00",
     balance: balance.toFixed(2),
   });
 
   // Interest-style single-segment credit
-  balance += 1234.56;
+  balance = round2(balance + 1234.56);
   txns.push({
     sno: sno++,
     valueDate: "25/10/2030",
@@ -193,20 +199,20 @@ function generateIciciTransactions(): IciciTxn[] {
   });
 
   // UPI debit - short form
-  balance -= 999.99;
+  balance = round2(balance - 987.65);
   txns.push({
     sno: sno++,
     valueDate: "26/10/2030",
     txnDate: "26/10/2030",
     cheque: "",
     remarks: "UPI/SYNT MALL/syntmall@oksynt/Shopping/SYNT BANK/600000000008/SYNT000008/",
-    withdrawal: "999.99",
+    withdrawal: "987.65",
     deposit: "0.00",
     balance: balance.toFixed(2),
   });
 
   // MID-DATA OVERFLOW ROW: Long narration that requires overflow
-  balance += 33333.33;
+  balance = round2(balance + 32109.87);
   txns.push({
     sno: sno++,
     valueDate: "27/10/2030",
@@ -214,26 +220,26 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "UPI/SYNT LONG NAME ENTERPRISE PVT LTD/syntlongbusiness@oksynt/Payment for invoice ",
     withdrawal: "0.00",
-    deposit: "33333.33",
+    deposit: "32109.87",
     balance: balance.toFixed(2),
     overflowRemarks: "SYNT-INV-2030-0001/SYNT PARTNER BANK/600000000009/SYNT000009",
   });
 
   // More UPI debits
-  balance -= 450.00;
+  balance = round2(balance - 432.10);
   txns.push({
     sno: sno++,
     valueDate: "28/10/2030",
     txnDate: "28/10/2030",
     cheque: "",
     remarks: "UPI/SYNT PETROL/syntfuel@oksynt/Fuel/SYNT BANK/600000000010/SYNT000010",
-    withdrawal: "450.00",
+    withdrawal: "432.10",
     deposit: "0.00",
     balance: balance.toFixed(2),
   });
 
   // LAST TRANSACTION WITH OVERFLOW (edge case - overflow right before legend)
-  balance += 22222.22;
+  balance = round2(balance + 21098.76);
   txns.push({
     sno: sno++,
     valueDate: "29/10/2030",
@@ -241,7 +247,7 @@ function generateIciciTransactions(): IciciTxn[] {
     cheque: "",
     remarks: "UPI/SYNT FINAL PAYMENT CORP/syntfinalpay@oksynt/Settlement of account ref ",
     withdrawal: "0.00",
-    deposit: "22222.22",
+    deposit: "21098.76",
     balance: balance.toFixed(2),
     overflowRemarks: "SYNT-SETTLE-2030/SYNT CLEARING BANK/600000000011/SYNT000011/",
   });
@@ -411,83 +417,83 @@ interface HdfcTxn {
 
 function generateHdfcTransactions(): { txns: HdfcTxn[]; openingBalance: number } {
   const txns: HdfcTxn[] = [];
-  const openingBalance = 100000.00;
+  const openingBalance = 98765.43; // Odd pattern starting balance
   let balance = openingBalance;
 
   // UPI credit - 6 segment form
-  balance += 50000;
+  balance = round2(balance + 51234.56);
   txns.push({
     date: "15/10/30",
     narration: "UPI-SYNT VENDOR PVT LTD-syntvendor@oksynt-SYNT0000001-600000000001-Invoice Payment",
     ref: "0000600000000001",
     valueDate: "15/10/30",
     withdrawal: null,
-    deposit: 50000,
+    deposit: 51234.56,
     balance,
   });
 
   // UPI credit - 7 segment with hyphenated VPA
-  balance += 25000;
+  balance = round2(balance + 24680.13);
   txns.push({
     date: "16/10/30",
     narration: "UPI-SYNT WHOLESALER-9000000000-1@oksynt-SYNT0000002-600000000002-Order payment",
     ref: "0000600000000002",
     valueDate: "16/10/30",
     withdrawal: null,
-    deposit: 25000,
+    deposit: 24680.13,
     balance,
   });
 
   // UPI credit with ref ≠ 0000+RRN
-  balance += 15000;
+  balance = round2(balance + 13579.24);
   txns.push({
     date: "17/10/30",
     narration: "UPI-SYNT RETAILER-syntretail@oksynt-SYNT0000003-600000000003-Advance",
     ref: "1234600000000003", // Different from 0000+RRN
     valueDate: "17/10/30",
     withdrawal: null,
-    deposit: 15000,
+    deposit: 13579.24,
     balance,
   });
 
   // UPI credit with 15-digit ref
-  balance += 12500;
+  balance = round2(balance + 11235.81);
   txns.push({
     date: "18/10/30",
     narration: "UPI-SYNT TRADERS-synttraders@oksynt-SYNT0000004-600000000004-Monthly dues",
     ref: "ABC6000000000004", // 3 letters + 13 digits = 16 chars but pattern variant
     valueDate: "18/10/30",
     withdrawal: null,
-    deposit: 12500,
+    deposit: 11235.81,
     balance,
   });
 
   // UPI debit
-  balance -= 1500;
+  balance = round2(balance - 1357.91);
   txns.push({
     date: "19/10/30",
     narration: "UPI-SYNT STORE-syntstore@oksynt-SYNT0000005-600000000005-Purchase",
     ref: "0000600000000005",
     valueDate: "19/10/30",
-    withdrawal: 1500,
+    withdrawal: 1357.91,
     deposit: null,
     balance,
   });
 
   // Card AUTOPAY debit
-  balance -= 5500;
+  balance = round2(balance - 5432.10);
   txns.push({
     date: "20/10/30",
     narration: "DC 1000000000000001 AUTOPAY SI-SYNTMERCHANT",
     ref: "0000000000123456",
     valueDate: "20/10/30",
-    withdrawal: 5500,
+    withdrawal: 5432.10,
     deposit: null,
     balance,
   });
 
   // ATM withdrawal
-  balance -= 10000;
+  balance = round2(balance - 10000);
   txns.push({
     date: "21/10/30",
     narration: "ATW-SYNTCARD0000-SYNTATM00-SYNTCITY",
@@ -499,31 +505,31 @@ function generateHdfcTransactions(): { txns: HdfcTxn[]; openingBalance: number }
   });
 
   // Value Date != Date
-  balance -= 2200;
+  balance = round2(balance - 2109.87);
   txns.push({
     date: "22/10/30",
     narration: "UPI-SYNT UTILITY-syntutility@oksynt-SYNT0000006-600000000006-Electricity",
     ref: "0000600000000006",
     valueDate: "23/10/30", // Different
-    withdrawal: 2200,
+    withdrawal: 2109.87,
     deposit: null,
     balance,
   });
 
   // UPI debit with double space in name (spec mentions this)
-  balance -= 850;
+  balance = round2(balance - 876.54);
   txns.push({
     date: "23/10/30",
     narration: "UPI-SYNT  DOUBLE SPACE CO-syntdouble@oksynt-SYNT0000007-600000000007-Test",
     ref: "0000600000000007",
     valueDate: "23/10/30",
-    withdrawal: 850,
+    withdrawal: 876.54,
     deposit: null,
     balance,
   });
 
   // Interest credit
-  balance += 1234.56;
+  balance = round2(balance + 1234.56);
   txns.push({
     date: "24/10/30",
     narration: "INTEREST PAID SYNT 01-OCT-2030",
@@ -535,62 +541,62 @@ function generateHdfcTransactions(): { txns: HdfcTxn[]; openingBalance: number }
   });
 
   // ME DC SI debit (mandate)
-  balance -= 999.99;
+  balance = round2(balance - 987.65);
   txns.push({
     date: "25/10/30",
     narration: "ME DC SI SYNT0001 SYNT SUBSCRIPTION SERVICES",
     ref: "0000000000456789",
     valueDate: "25/10/30",
-    withdrawal: 999.99,
+    withdrawal: 987.65,
     deposit: null,
     balance,
   });
 
   // UPI credit
-  balance += 33333.33;
+  balance = round2(balance + 32109.87);
   txns.push({
     date: "26/10/30",
     narration: "UPI-SYNT LONG ENTERPRISE-syntlong@oksynt-SYNT0000008-600000000008-Payment",
     ref: "0000600000000008",
     valueDate: "26/10/30",
     withdrawal: null,
-    deposit: 33333.33,
+    deposit: 32109.87,
     balance,
   });
 
   // 15-digit ref row (as mentioned in spec)
-  balance -= 450;
+  balance = round2(balance - 432.10);
   txns.push({
     date: "27/10/30",
     narration: "UPI-SYNT PETROL-syntfuel@oksynt-SYNT0000009-600000000009-Fuel",
     ref: "000600000000009", // 15 digits
     valueDate: "27/10/30",
-    withdrawal: 450,
+    withdrawal: 432.10,
     deposit: null,
     balance,
   });
 
   // DC POS debit
-  balance -= 750;
+  balance = round2(balance - 765.43);
   txns.push({
     date: "28/10/30",
     narration: "DC SYNT POS SYNTPOS 123456-SYNT0000000001",
     ref: "0000000000567890",
     valueDate: "28/10/30",
-    withdrawal: 750,
+    withdrawal: 765.43,
     deposit: null,
     balance,
   });
 
   // Final UPI credit
-  balance += 22222.22;
+  balance = round2(balance + 21098.76);
   txns.push({
     date: "29/10/30",
     narration: "UPI-SYNT FINAL CORP-syntfinal@oksynt-SYNT0000010-600000000010-Settlement",
     ref: "0000600000000010",
     valueDate: "29/10/30",
     withdrawal: null,
-    deposit: 22222.22,
+    deposit: 21098.76,
     balance,
   });
 
