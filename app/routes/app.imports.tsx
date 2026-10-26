@@ -29,6 +29,12 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import {
+  formatSupportedBankList,
+  getImportErrorLabel,
+  formatValidationError,
+  pluralize,
+} from "~/lib/copy-helpers";
 
 /**
  * Maximum rows per import request.
@@ -906,7 +912,7 @@ export default function ImportsPage() {
       <s-section heading="Upload Statement">
         <s-stack>
           <s-paragraph>
-            Upload an HDFC or ICICI bank statement (CSV, XLS, or XLSX). The file
+            Upload a bank statement from {formatSupportedBankList()} (CSV, XLS, or XLSX). The file
             is parsed entirely in your browser — no raw data is sent to our
             servers.
           </s-paragraph>
@@ -946,8 +952,7 @@ export default function ImportsPage() {
             <s-stack>
               {result.bank === "UNKNOWN" ? (
                 <s-banner tone="warning" heading="Unknown bank format">
-                  Could not detect HDFC or ICICI format. Please ensure you are
-                  uploading a standard bank statement export.
+                  We couldn&apos;t recognise this statement. Upload a standard export from {formatSupportedBankList()}.
                 </s-banner>
               ) : (
                 <>
@@ -974,17 +979,14 @@ export default function ImportsPage() {
 
               {result.errors.length > 0 && (() => {
                 const summary = summarizeParseErrors(result.errors);
+                const rowWord = pluralize(summary.totalCount, "row");
                 return (
-                  <s-banner tone="warning" heading={`${summary.totalCount} row(s) could not be parsed`}>
+                  <s-banner tone="warning" heading={`${summary.totalCount} ${rowWord} couldn't be read`}>
                     <s-unordered-list>
                       {summary.initialErrors.map((err, idx) => (
                         <s-list-item key={idx}>
-                          <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
-                          {" "}
-                          <s-badge tone={getErrorBadgeTone(err.code)}>
-                            {err.code}
-                          </s-badge>
-                          {" "}{getErrorDisplayMessage(err.code)}
+                          <s-text type="strong">{formatErrorRowLabel(err.row)}:</s-text>
+                          {" "}{getImportErrorLabel(err.code)}
                         </s-list-item>
                       ))}
                     </s-unordered-list>
@@ -998,12 +1000,8 @@ export default function ImportsPage() {
                         <s-unordered-list>
                           {summary.overflowErrors.map((err, idx) => (
                             <s-list-item key={`overflow-${idx}`}>
-                              <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
-                              {" "}
-                              <s-badge tone={getErrorBadgeTone(err.code)}>
-                                {err.code}
-                              </s-badge>
-                              {" "}{getErrorDisplayMessage(err.code)}
+                              <s-text type="strong">{formatErrorRowLabel(err.row)}:</s-text>
+                              {" "}{getImportErrorLabel(err.code)}
                             </s-list-item>
                           ))}
                         </s-unordered-list>
@@ -1056,9 +1054,14 @@ export default function ImportsPage() {
                     {importResult.error}
                     {importResult.details && importResult.details.length > 0 && (
                       <s-unordered-list>
-                        {importResult.details.slice(0, 5).map((detail, idx) => (
-                          <s-list-item key={idx}>{detail}</s-list-item>
-                        ))}
+                        {importResult.details.slice(0, 5).map((detail, idx) => {
+                          const parts = detail.split(": ");
+                          const path = parts[0] ?? "";
+                          const message = parts.slice(1).join(": ");
+                          return (
+                            <s-list-item key={idx}>{formatValidationError(path, message)}</s-list-item>
+                          );
+                        })}
                         {importResult.details.length > 5 && (
                           <s-list-item>...and {importResult.details.length - 5} more errors</s-list-item>
                         )}

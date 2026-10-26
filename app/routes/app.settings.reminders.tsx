@@ -42,6 +42,7 @@ import type {
   DelayedReminder,
 } from "~/services/reminder-status.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { pluralizeWithCount } from "~/lib/copy-helpers";
 
 const VALID_INTENTS = ["toggle_enabled", "update_rule", "create_rule", "delete_rule"] as const;
 type ReminderIntent = (typeof VALID_INTENTS)[number];
@@ -243,11 +244,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
 function RuleOffsetLabel({ offsetDays }: { offsetDays: number }) {
   if (offsetDays < 0) {
-    return <>{Math.abs(offsetDays)} days before due</>;
+    return <>{pluralizeWithCount(Math.abs(offsetDays), "day")} before due</>;
   } else if (offsetDays === 0) {
     return <>On due date</>;
   } else {
-    return <>{offsetDays} days overdue</>;
+    return <>{pluralizeWithCount(offsetDays, "day")} overdue</>;
   }
 }
 
@@ -577,8 +578,7 @@ export default function RemindersSettingsPage() {
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
-          Each reminder is sent only once per invoice, even if the job runs
-          multiple times.
+          Each reminder is sent only once per invoice.
         </s-paragraph>
       </s-section>
 
@@ -593,8 +593,8 @@ export default function RemindersSettingsPage() {
 
       <s-section slot="aside" heading="Opted-Out Buyers">
         <s-paragraph>
-          The buyer unsubscribed from reminder emails. Only you can turn
-          reminders back on for them.
+          These buyers unsubscribed from reminder emails. Only you can turn
+          reminders back on for them, from the buyer&apos;s account page.
         </s-paragraph>
       </s-section>
 

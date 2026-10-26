@@ -962,7 +962,7 @@ describe("T4 Index component wiring with usage null", () => {
 /**
  * S21 Plan Gating: Gated accounts in dashboard.
  * Verifies that gated accounts have is_gated set and are included in totals.
- * The UI uses is_gated to render the "over plan limit" badge.
+ * The UI uses is_gated to render the "Over plan limit" badge.
  */
 describe("S21 gated accounts in dashboard listing and totals", () => {
   const TEST_SHOP = "test-gated-dash.myshopify.com";
@@ -1112,7 +1112,7 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
  * Render tests for BuyerLedgerTable (T1 plan-limit gating).
  *
  * Verifies that all accounts are rendered (no hiding) regardless of gating,
- * and that "over plan limit" badges only appear when gating is enforced.
+ * and that "Over plan limit" badges only appear when gating is enforced.
  */
 describe("BuyerLedgerTable render tests (T1)", () => {
   const baseLedgerRows = [
@@ -1163,7 +1163,7 @@ describe("BuyerLedgerTable render tests (T1)", () => {
     onPreviousPage: "?page=0",
   };
 
-  it("gating OFF, none plan over limit: renders ALL account rows, no 'over plan limit' badges", async () => {
+  it("gating OFF, none plan over limit: renders ALL account rows, no 'Over plan limit' badges", async () => {
     const { BuyerLedgerTable } = await import("../app._index");
     const html = renderToString(
       createElement(BuyerLedgerTable, {
@@ -1181,8 +1181,8 @@ describe("BuyerLedgerTable render tests (T1)", () => {
     // This verifies no accounts are hidden (all 3 from input are shown)
     expect(baseLedgerRows.every(row => html.includes(row.buyer_name))).toBe(true);
 
-    // No "over plan limit" badge when gating is OFF
-    expect(html).not.toContain("over plan limit");
+    // No "Over plan limit" badge when gating is OFF
+    expect(html).not.toContain("Over plan limit");
   });
 
   it("gating OFF, starter plan over limit: renders ALL account rows, no badges", async () => {
@@ -1205,12 +1205,12 @@ describe("BuyerLedgerTable render tests (T1)", () => {
     const renderedCount = baseLedgerRows.filter(row => html.includes(row.buyer_name)).length;
     expect(renderedCount).toBe(inputCount);
 
-    // No "over plan limit" badge
-    expect(html).not.toContain("over plan limit");
+    // No "Over plan limit" badge
+    expect(html).not.toContain("Over plan limit");
     expect(html).not.toContain("Limit Reached");
   });
 
-  it("gating ON, none plan over limit: renders ALL accounts, shows 'over plan limit' badges on gated rows", async () => {
+  it("gating ON, none plan over limit: renders ALL accounts, shows 'Over plan limit' badges on gated rows", async () => {
     const { BuyerLedgerTable } = await import("../app._index");
     const html = renderToString(
       createElement(BuyerLedgerTable, {
@@ -1224,8 +1224,8 @@ describe("BuyerLedgerTable render tests (T1)", () => {
     expect(html).toContain("Buyer Two Ltd");
     expect(html).toContain("Buyer Three Inc");
 
-    // "over plan limit" badges ARE shown for gated accounts (2 of them)
-    const badgeCount = (html.match(/over plan limit/g) || []).length;
+    // "Over plan limit" badges ARE shown for gated accounts (2 of them)
+    const badgeCount = (html.match(/Over plan limit/g) || []).length;
     expect(badgeCount).toBe(2); // Two accounts have is_gated: true
   });
 

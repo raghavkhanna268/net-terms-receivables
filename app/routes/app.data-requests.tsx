@@ -5,6 +5,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { getPendingDataRequests, purgeExpiredDataRequests } from "~/services/compliance";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { useState } from "react";
+import { formatShopifyGid } from "~/lib/copy-helpers";
 
 /**
  * S22 Admin route for GDPR/CCPA data request downloads.
@@ -111,9 +112,9 @@ export default function DataRequestsPage() {
     <s-page heading="Customer Data Requests">
       <s-section heading="GDPR/CCPA Data Requests">
         <s-paragraph>
-          When customers request their data under GDPR or CCPA, Shopify sends a
-          webhook to the app. This page shows pending requests and allows you to
-          download the data exports.
+          When a customer requests their data under GDPR or CCPA, Shopify
+          notifies Termwise and we prepare an export here. This page shows
+          pending requests and allows you to download the data exports.
         </s-paragraph>
 
         {error && (
@@ -143,7 +144,7 @@ export default function DataRequestsPage() {
                   </s-paragraph>
                   <s-paragraph>
                     <s-text type="strong">Customer:</s-text>{" "}
-                    <s-text>{dr.customerGid}</s-text>
+                    <s-text>{formatShopifyGid(dr.customerGid, "Customer")}</s-text>
                   </s-paragraph>
                   <s-paragraph>
                     <s-text type="strong">Received:</s-text>{" "}

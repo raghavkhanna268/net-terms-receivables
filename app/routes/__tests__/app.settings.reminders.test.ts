@@ -1969,8 +1969,8 @@ describe("Opted-out buyer helper text", () => {
     const html = renderToString(createElement(RemindersSettingsPage));
 
     // Check the VERBATIM helper text
-    expect(html).toContain("The buyer unsubscribed from reminder emails");
-    expect(html).toContain("Only you can turn reminders back on for them");
+    expect(html).toContain("These buyers unsubscribed from reminder emails");
+    expect(html).toContain("Only you can turn reminders back on for them, from the buyer");
   });
 
   it("renders the skippedOptedOut count in status section", async () => {
