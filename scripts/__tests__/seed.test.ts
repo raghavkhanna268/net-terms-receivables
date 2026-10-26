@@ -130,14 +130,15 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
       { id: "gid://shopify/PaymentTermsTemplate/30", name: "Net 30", paymentTermsType: "NET", dueInDays: 30 },
       { id: "gid://shopify/PaymentTermsTemplate/60", name: "Net 60", paymentTermsType: "NET", dueInDays: 60 },
     ],
-    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
-    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0, customers: 0 },
+    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, customers: 0 },
+    updatedCount: { customers: 0 },
     adoptedCount: { companies: 0 },
     driftedCount: { companies: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     skippedReasons: [],
     deletedCount: { companies: 0, orders: 0 },
-    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0 },
+    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0, customers: 0 },
     resetApply: false,
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
@@ -493,7 +494,7 @@ describe("Reviewer demo seed flag gating", () => {
     expect(REVIEWER_DEMO_COMPANY_SEED.key).toBe("company-reviewer-demo");
     expect(REVIEWER_DEMO_COMPANY_SEED.name).toBe("Test Buyer Co");
     expect(REVIEWER_DEMO_COMPANY_SEED.city).toBe("Bengaluru");
-    expect(REVIEWER_DEMO_COMPANY_SEED.contact.email).toContain("@test-buyer.example");
+    expect(REVIEWER_DEMO_COMPANY_SEED.contact.email).toBe("ntr-seed-company-reviewer-demo@example.com");
   });
 
   it("REVIEWER_DEMO_ORDERS has correct amounts and names", () => {

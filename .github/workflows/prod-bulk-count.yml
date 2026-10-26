@@ -211,8 +211,10 @@ jobs:
           jq -n --rawfile q "$QUERY_FILE" '{query: $q}' > "$WORK/req-submit.json"
           HTTP=$(gql "$WORK/req-submit.json")
           echo "submit_http_status=$HTTP"
-          GQL_ERR=$(jq -r '[.errors[]?.extensions.code // "UNKNOWN" | if test("^[A-Z_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$WORK/resp.json" 2>/dev/null || echo PARSE_FAILED)
-          echo "graphql_error_codes=${GQL_ERR:-none}"
+          # none on success; sanitized code enums (UNKNOWN if uncoded) on error.
+          GQL_ERR=$(jq -r -f scripts/ci/bulk-count/graphql-error-codes.jq "$WORK/resp.json" 2>/dev/null || echo PARSE_FAILED)
+          [[ "$GQL_ERR" =~ ^[A-Z_]{1,40}(,[A-Z_]{1,40})*$|^none$ ]] || GQL_ERR=PARSE_FAILED
+          echo "graphql_error_codes=$GQL_ERR"
           UE_COUNT=$(jq -r '(.data.bulkOperationRunQuery.userErrors // []) | length' "$WORK/resp.json" 2>/dev/null || echo 0)
           [[ "$UE_COUNT" =~ ^[0-9]+$ ]] || UE_COUNT=0
           if [ "$UE_COUNT" -gt 0 ]; then echo "userErrors_present=true"; else echo "userErrors_present=false"; fi

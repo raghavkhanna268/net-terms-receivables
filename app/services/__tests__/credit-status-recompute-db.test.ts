@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { syncClockToDb } from "../../../tests/helpers/db-clock";
 
 // Track metafield write calls
 let metafieldWriteCount = 0;
@@ -747,6 +748,10 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
   });
 
   beforeEach(async () => {
+    // Sync JS clock to DB clock to ensure dedupe date keys match
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await syncClockToDb(sql);
+
     // Clean up queue messages and s6_processed_webhooks (including archived and DLQ) by shop domain
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -760,6 +765,10 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
       SET "holdState" = 'OK', "holdReasonCode" = NULL, bypass = false, gated_at = NULL, "manualHold" = false
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("enqueues message for account with overdue invoice and holdState OK", async () => {
@@ -1264,6 +1273,10 @@ describeWithDb("Part 3 resync pass (#204)", () => {
   });
 
   beforeEach(async () => {
+    // Sync JS clock to DB clock to ensure dedupe date keys match
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await syncClockToDb(sql);
+
     _resyncMockShouldFail = false;
     _resyncMockErrorCode = undefined;
     _resyncMockRetryable = undefined;
@@ -1285,6 +1298,10 @@ describeWithDb("Part 3 resync pass (#204)", () => {
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe("resync selection criteria", () => {
@@ -2101,6 +2118,10 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
   });
 
   beforeEach(async () => {
+    // Sync JS clock to DB clock to ensure dedupe date keys match
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await syncClockToDb(sql);
+
     mockShouldFail = false;
     // Reset mock and restore default implementation
     mockShopifyGraphQLRequest.mockReset();
@@ -2135,6 +2156,10 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
     await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe("non-retryable errors return retryable:false on first read (real handler)", () => {
@@ -3708,6 +3733,7 @@ describeWithDb("leak checks (#204)", () => {
 
 describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
   let sql: ReturnType<typeof postgres>;
+  let dbNow: Date;
   const TEST_SUFFIX = Date.now().toString(36) + "-backoff";
   const TEST_SHOP_ID = `shop-backoff-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `backoff-test-${TEST_SUFFIX}.myshopify.com`;
@@ -3750,6 +3776,10 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
   });
 
   beforeEach(async () => {
+    // Sync JS clock to DB clock for backoff calculations
+    vi.useFakeTimers({ toFake: ["Date"] });
+    dbNow = await syncClockToDb(sql);
+
     mockShouldFail = false;
     mockShopifyGraphQLRequest.mockReset();
     mockShopifyGraphQLRequest.mockImplementation(async () => {
@@ -3789,6 +3819,10 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_re%:' + TEST_ACCOUNT_ID + '%'}`;
     metafieldWriteCount = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("retryable failure sets metafieldSyncErrorAt only if NULL (preserves streak start)", async () => {
@@ -3961,13 +3995,17 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
     // Account is OK and will stay OK (no overdue invoices)
     // Since hold is UNCHANGED, metafield write should be SKIPPED by backoff
     
+    // Compute timestamps from synced dbNow to avoid JS/DB clock skew
+    const threeDAysAgo = new Date(dbNow.getTime() - 3 * 24 * 60 * 60 * 1000);
+    const tenDaysAgo = new Date(dbNow.getTime() - 10 * 24 * 60 * 60 * 1000);
+    
     // Account starts OK with no overdue invoices
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK',
           "syncPending" = true,
-          "metafieldSyncedAt" = NOW() - INTERVAL '10 days',
-          "metafieldSyncErrorAt" = NOW() - INTERVAL '3 days',
+          "metafieldSyncedAt" = ${tenDaysAgo},
+          "metafieldSyncErrorAt" = ${threeDAysAgo},
           "metafieldSyncErrorCode" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
@@ -4014,11 +4052,14 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
 
   it("recompute proceeds when backoff has elapsed (day 4 after failure)", async () => {
     // Set up: error started 4 days ago (allowed retry day)
+    // Compute timestamps from synced dbNow to avoid JS/DB clock skew
+    const fourDaysAgo = new Date(dbNow.getTime() - 4 * 24 * 60 * 60 * 1000);
+    
     await sql`
       UPDATE "BuyerAccount"
       SET "syncPending" = true,
           "metafieldSyncedAt" = NULL,
-          "metafieldSyncErrorAt" = NOW() - INTERVAL '4 days',
+          "metafieldSyncErrorAt" = ${fourDaysAgo},
           "metafieldSyncErrorCode" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
@@ -4088,12 +4129,16 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
 
   it("backoff skip logs credit_status_sync_backoff_skip via safeLog", async () => {
     // Set up: error started 3 days ago, during backoff period
+    // Compute timestamps from synced dbNow to avoid JS/DB clock skew
+    const threeDaysAgo = new Date(dbNow.getTime() - 3 * 24 * 60 * 60 * 1000);
+    const tenDaysAgo = new Date(dbNow.getTime() - 10 * 24 * 60 * 60 * 1000);
+    
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK',
           "syncPending" = true,
-          "metafieldSyncedAt" = NOW() - INTERVAL '10 days',
-          "metafieldSyncErrorAt" = NOW() - INTERVAL '3 days',
+          "metafieldSyncedAt" = ${tenDaysAgo},
+          "metafieldSyncErrorAt" = ${threeDaysAgo},
           "metafieldSyncErrorCode" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
@@ -4123,12 +4168,16 @@ describeWithDb("backoff for persistent retryable sync failures (#212)", () => {
 
   it("drain handler returns backoff-specific skipReason", async () => {
     // Set up: error started 3 days ago, during backoff period
+    // Compute timestamps from synced dbNow to avoid JS/DB clock skew
+    const threeDaysAgo = new Date(dbNow.getTime() - 3 * 24 * 60 * 60 * 1000);
+    const tenDaysAgo = new Date(dbNow.getTime() - 10 * 24 * 60 * 60 * 1000);
+    
     await sql`
       UPDATE "BuyerAccount"
       SET "holdState" = 'OK',
           "syncPending" = true,
-          "metafieldSyncedAt" = NOW() - INTERVAL '10 days',
-          "metafieldSyncErrorAt" = NOW() - INTERVAL '3 days',
+          "metafieldSyncedAt" = ${tenDaysAgo},
+          "metafieldSyncErrorAt" = ${threeDaysAgo},
           "metafieldSyncErrorCode" = NULL
       WHERE id = ${TEST_ACCOUNT_ID}
     `;
