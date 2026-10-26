@@ -40,4 +40,4 @@ RESEND_TEST_RECIPIENTS=ops@test-example.com
 
 # Option 2: Supabase session pooler (for testing against real DB)
 # Get this from Supabase Dashboard > Project Settings > Database > Connection string (Session mode, port 5432)
-# CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres.zpgwwepehatywxeizowd:[password]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+# CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres.<project-ref>:[password]@<pooler-host>:5432/postgres

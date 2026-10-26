@@ -20,6 +20,13 @@ vi.mock("~/services/compliance", () => ({
   markDataRequestDownloaded: (...args: unknown[]) => mockMarkDataRequestDownloaded(...args),
 }));
 
+const mockRecordAccess = vi.fn();
+
+vi.mock("~/services/access-log.server", () => ({
+  recordAccess: (...args: unknown[]) => mockRecordAccess(...args),
+  getActorFromSessionToken: vi.fn(() => ({ type: "user", id: "test-user" })),
+}));
+
 const mockAuthenticate = vi.fn();
 
 function createMockLoaderArgs(
@@ -58,27 +65,29 @@ describe("app.data-requests.$id.download", () => {
   });
 
   describe("loader", () => {
-    it("returns 400 when request ID is missing", async () => {
+    it("returns 400 with Cache-Control: no-store when request ID is missing", async () => {
       const request = new Request("https://example.com/app/data-requests//download");
       const response = await loader(createMockLoaderArgs(request, {}));
 
       expect(response.status).toBe(400);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
       const json = (await response.json()) as { error: string };
       expect(json.error).toBe("Missing request ID");
     });
 
-    it("returns 404 when shop is not found", async () => {
+    it("returns 404 with Cache-Control: no-store when shop is not found", async () => {
       mockSql.mockResolvedValueOnce([]);
 
       const request = new Request("https://example.com/app/data-requests/req-123/download");
       const response = await loader(createMockLoaderArgs(request, { id: "req-123" }));
 
       expect(response.status).toBe(404);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
       const json = (await response.json()) as { error: string };
       expect(json.error).toBe("Shop not found");
     });
 
-    it("returns 404 when data request is not found or expired", async () => {
+    it("returns 404 with Cache-Control: no-store when data request is not found or expired", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       mockGetDataRequestExport.mockResolvedValueOnce(null);
 
@@ -86,11 +95,14 @@ describe("app.data-requests.$id.download", () => {
       const response = await loader(createMockLoaderArgs(request, { id: "req-123" }));
 
       expect(response.status).toBe(404);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
       const json = (await response.json()) as { error: string };
       expect(json.error).toBe("Data request not found or expired");
+      expect(mockMarkDataRequestDownloaded).not.toHaveBeenCalled();
+      expect(mockRecordAccess).not.toHaveBeenCalled();
     });
 
-    it("returns JSON with Content-Disposition when export is found", async () => {
+    it("returns JSON with Content-Disposition using DB row id when export is found", async () => {
       const exportData = {
         customerGid: "gid://shopify/Customer/456",
         requestId: "req-123",
@@ -104,7 +116,7 @@ describe("app.data-requests.$id.download", () => {
       };
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      mockGetDataRequestExport.mockResolvedValueOnce(exportData);
+      mockGetDataRequestExport.mockResolvedValueOnce({ id: "db-row-uuid-456", exportData });
 
       const request = new Request("https://example.com/app/data-requests/req-123/download");
       const response = await loader(createMockLoaderArgs(request, { id: "req-123" }));
@@ -112,12 +124,30 @@ describe("app.data-requests.$id.download", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("Content-Type")).toBe("application/json");
       expect(response.headers.get("Content-Disposition")).toBe(
-        'attachment; filename="customer-data-req-123.json"'
+        'attachment; filename="customer-data-db-row-uuid-456.json"'
       );
 
       const json = (await response.json()) as { customerGid: string; requestId: string };
       expect(json.customerGid).toBe("gid://shopify/Customer/456");
       expect(json.requestId).toBe("req-123");
+    });
+
+    it("includes Cache-Control: no-store header", async () => {
+      const exportData = {
+        customerGid: "gid://shopify/Customer/456",
+        requestId: "req-123",
+        requestedAt: "2026-01-01T00:00:00.000Z",
+        data: { taggedCustomer: null, draftOrders: [], buyerAccount: null, invoices: [] },
+      };
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockGetDataRequestExport.mockResolvedValueOnce({ id: "db-row-id", exportData });
+
+      const request = new Request("https://example.com/app/data-requests/req-123/download");
+      const response = await loader(createMockLoaderArgs(request, { id: "req-123" }));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
     });
 
     it("marks request as downloaded after successful delivery", async () => {
@@ -129,7 +159,7 @@ describe("app.data-requests.$id.download", () => {
       };
 
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      mockGetDataRequestExport.mockResolvedValueOnce(exportData);
+      mockGetDataRequestExport.mockResolvedValueOnce({ id: "db-row-id", exportData });
 
       const request = new Request("https://example.com/app/data-requests/req-123/download");
       await loader(createMockLoaderArgs(request, { id: "req-123" }));
@@ -166,7 +196,7 @@ describe("app.data-requests.$id.download", () => {
 
       // Shop with USD currency - export should still work
       mockSql.mockResolvedValueOnce([{ id: "shop-usd", currency: "USD" }]);
-      mockGetDataRequestExport.mockResolvedValueOnce(exportData);
+      mockGetDataRequestExport.mockResolvedValueOnce({ id: "db-row-usd", exportData });
 
       const request = new Request("https://example.com/app/data-requests/req-usd-456/download");
       const response = await loader(createMockLoaderArgs(request, { id: "req-usd-456" }));
@@ -194,7 +224,7 @@ describe("app.data-requests.$id.download", () => {
 
       // Shop with NULL currency - export should still work
       mockSql.mockResolvedValueOnce([{ id: "shop-null", currency: null }]);
-      mockGetDataRequestExport.mockResolvedValueOnce(exportData);
+      mockGetDataRequestExport.mockResolvedValueOnce({ id: "db-row-null", exportData });
 
       const request = new Request("https://example.com/app/data-requests/req-null-789/download");
       const response = await loader(createMockLoaderArgs(request, { id: "req-null-789" }));

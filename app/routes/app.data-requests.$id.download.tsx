@@ -29,7 +29,7 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
   if (!requestId) {
     return new Response(JSON.stringify({ error: "Missing request ID" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 
@@ -42,7 +42,7 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
   if (!shop) {
     return new Response(JSON.stringify({ error: "Shop not found" }), {
       status: 404,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 
@@ -50,12 +50,12 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
   // This is a compliance export of stored rows for customers/data_request webhooks.
   // It must return whatever data exists regardless of shop currency.
 
-  const exportData = await getDataRequestExport(sql, shop.id, requestId);
+  const result = await getDataRequestExport(sql, shop.id, requestId);
 
-  if (!exportData) {
+  if (!result) {
     return new Response(JSON.stringify({ error: "Data request not found or expired" }), {
       status: 404,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 
@@ -69,11 +69,12 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
 
   await markDataRequestDownloaded(sql, shop.id, requestId);
 
-  return new Response(JSON.stringify(exportData, null, 2), {
+  return new Response(JSON.stringify(result.exportData, null, 2), {
     status: 200,
     headers: {
       "Content-Type": "application/json",
-      "Content-Disposition": `attachment; filename="customer-data-${requestId}.json"`,
+      "Content-Disposition": `attachment; filename="customer-data-${result.id}.json"`,
+      "Cache-Control": "no-store",
     },
   });
 };
