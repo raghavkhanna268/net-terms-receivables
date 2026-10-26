@@ -1280,3 +1280,221 @@ describe("Active subscriptions probe (counts/booleans only)", () => {
     expect(probe("not json")).toContain("active_subscriptions=error parse_failed");
   });
 });
+
+/**
+ * Second-shop sync failure detail: which getInitialSyncState() condition
+ * fired, per s6_bulk_operations row and per DLQ row (index + enums/counts),
+ * and the Shopify-side status of each bulk op (enums only).
+ */
+describe("prod-diagnostics second-shop sync failure detail", () => {
+  const PLANTED_GID = "gid://shopify/BulkOperation/987654321";
+  const PLANTED_CUSTOMER_GID = "gid://shopify/Customer/555";
+  let dbStep: WorkflowStep;
+  let adminStep: WorkflowStep;
+
+  beforeAll(() => {
+    const wf = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = wf.jobs?.e2e_second_shop?.steps ?? [];
+    dbStep = steps.find((s) => s.name === "E2E DB checks") as WorkflowStep;
+    adminStep = steps.find((s) => s.name === "E2E Admin checks") as WorkflowStep;
+    expect(dbStep).toBeDefined();
+    expect(adminStep).toBeDefined();
+  });
+
+  function withFile<T>(content: string, fn: (path: string) => T): T {
+    const dir = mkdtempSync(join(tmpdir(), "diag-e2e-detail-"));
+    try {
+      const f = join(dir, "f");
+      writeFileSync(f, content);
+      return fn(f);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  describe("DB sync detail", () => {
+    const START = "# E2E sync detail summary";
+    const END = "# End E2E sync detail";
+
+    it("SQL mirrors getInitialSyncState() incl. closed_at IS NULL, and is filtered by the selected shop", () => {
+      const run = dbStep.run ?? "";
+      // Status mirror and detail block both ignore reinstall_reset rows.
+      expect((run.match(/AND closed_at IS NULL/g) ?? []).length).toBe(3);
+      expect(run).toContain("live AS (SELECT * FROM bulk WHERE closed_at IS NULL AND origin = 'reconcile')");
+      expect(run).toContain("FROM s6_bulk_operations b WHERE b.shop = :'shop'");
+      expect(run).toContain("WHERE r.shop = :'shop' AND r.topic = 'BULK_OPERATIONS_FINISH'");
+      for (const key of [
+        "e2e_sync_failure_reason",
+        "e2e_sync_failed_companies_failure_count",
+        "e2e_sync_failed_customers_failure_count",
+        "e2e_sync_failed_orders_failure_count",
+        "e2e_sync_linked_dlq_rows",
+        "e2e_bulk_finish_receipts",
+        "e2e_bulk_ops_closed",
+      ]) {
+        expect(run).toContain(`'${key}'`);
+      }
+      for (const k of ["type", "origin", "stage", "open", "closed_reason", "failure_count", "age_min", "finish_receipt", "finish_msg"]) {
+        expect(run).toContain(`'${k}'`);
+      }
+      for (const k of ["queue", "topic", "error_disposition", "error_code", "attempt_count", "age_min", "bulk_op"]) {
+        expect(run).toContain(`'${k}'`);
+      }
+      // Never selects the error text, the GID or payload columns into the output.
+      expect(run).not.toMatch(/'e2e_[a-z0-9_]*'\s*,\s*(d\.)?error\b/);
+      expect(run).not.toMatch(/\(\d+,\s*'[a-z_0-9]+',\s*[a-z]?\.?(bulk_operation_id|error|message)\b[^>]/);
+      expect(run).toContain("E2E_SYNC_DETAIL_QUERY_FAILED");
+    });
+
+    it("prints allow-listed lines and redacts GIDs, domains, names and free text", () => {
+      const rows = [
+        "e2e_sync_mirror_ignores_closed|true",
+        "e2e_sync_failed_companies_failure_count|false",
+        "e2e_sync_linked_dlq_rows|2",
+        "e2e_sync_failure_reason|dlq_reconcile_orders",
+        "e2e_bulk_op_1_type|companies",
+        "e2e_bulk_op_1_open|true",
+        "e2e_bulk_op_1_age_min|143",
+        "e2e_bulk_op_1_finish_msg|none",
+        "e2e_dlq_row_1_topic|RECONCILE_ORDERS",
+        "e2e_dlq_row_1_error_code|graphql_error:THROTTLED",
+        "e2e_dlq_row_1_attempt_count|unknown",
+        `e2e_dlq_row_2_error_code|${E2E_PLANTED_DOMAIN}`,
+        `e2e_dlq_row_2_topic|${E2E_PLANTED_NAME}`,
+        `e2e_bulk_op_2_type|${PLANTED_GID}`,
+        `e2e_dlq_row_2_queue|${E2E_PLANTED_EMAIL}`,
+        `${E2E_PLANTED_DOMAIN}|1`,
+        `not_an_e2e_key|1`,
+      ].join("\n");
+      withFile(rows + "\n", (f) => {
+        const r = runE2eSnippet(dbStep.run ?? "", START, END, { env: { DETAIL_OUT: f } });
+        expect(r.stderr).toBe("");
+        expect(r.status).toBe(0);
+        const lines = r.stdout.trim().split("\n");
+        expect(lines).toEqual([
+          "e2e_sync_mirror_ignores_closed=true",
+          "e2e_sync_failed_companies_failure_count=false",
+          "e2e_sync_linked_dlq_rows=2",
+          "e2e_sync_failure_reason=dlq_reconcile_orders",
+          "e2e_bulk_op_1_type=companies",
+          "e2e_bulk_op_1_open=true",
+          "e2e_bulk_op_1_age_min=143",
+          "e2e_bulk_op_1_finish_msg=none",
+          "e2e_dlq_row_1_topic=RECONCILE_ORDERS",
+          "e2e_dlq_row_1_error_code=graphql_error:THROTTLED",
+          "e2e_dlq_row_1_attempt_count=unknown",
+          "e2e_dlq_row_2_error_code=invalid",
+          "e2e_dlq_row_2_topic=invalid",
+          "e2e_bulk_op_2_type=invalid",
+          "e2e_dlq_row_2_queue=invalid",
+        ]);
+        expectNoPlanted(r.stdout);
+        expect(r.stdout).not.toMatch(/gid:\/\//);
+      });
+    });
+  });
+
+  describe("Admin bulk op status", () => {
+    const START = "# E2E bulk op status (enums only)";
+    const END = "# End E2E bulk op status";
+
+    function runAdmin(ids: string, curlBody: unknown, curlStatus = "200") {
+      const dir = mkdtempSync(join(tmpdir(), "diag-e2e-bulk-"));
+      try {
+        const idsFile = join(dir, "ids");
+        writeFileSync(idsFile, ids);
+        const queryFile = join(dir, "query");
+        writeFileSync(queryFile, "");
+        const resp = join(dir, "resp");
+        writeFileSync(resp, "");
+        const r = runE2eSnippet(adminStep.run ?? "", START, END, {
+          env: {
+            E2E_SHOP_DOMAIN: E2E_PLANTED_DOMAIN,
+            BULK_IDS_FILE: idsFile,
+            BULK_QUERY_FILE: queryFile,
+            HTTP_RESPONSE: resp,
+          },
+          curlBody: typeof curlBody === "string" ? curlBody : JSON.stringify(curlBody),
+          curlStatus,
+        });
+        return { ...r, query: readFileSync(queryFile, "utf-8") };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("is a read-only nodes(ids:) query; ids go only in the request body file", () => {
+      const run = adminStep.run ?? "";
+      expect(run).toContain("nodes(ids: $ids) { ... on BulkOperation { status errorCode type } }");
+      expect(run).toContain('--data-binary "@$BULK_QUERY_FILE"');
+      expect(run).toContain("ORDER BY started_at, bulk_operation_id");
+    });
+
+    it("prints row index + status/errorCode/type enums; never the GID", () => {
+      const ids = [
+        "gid://shopify/BulkOperation/1",
+        PLANTED_CUSTOMER_GID,
+        "gid://shopify/BulkOperation/3",
+        "gid://shopify/BulkOperation/4",
+      ].join("\n") + "\n";
+      const r = runAdmin(ids, {
+        data: {
+          nodes: [
+            { status: "COMPLETED", errorCode: null, type: "QUERY", url: `https://${E2E_PLANTED_DOMAIN}/x`, id: PLANTED_GID },
+            { status: "RUNNING", errorCode: null, type: "QUERY" },
+            null,
+          ],
+        },
+      });
+      expect(r.stderr).toBe("");
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim().split("\n")).toEqual([
+        "e2e_bulk_shopify_rows=4",
+        "e2e_bulk_shopify_invalid_ids=1",
+        "e2e_bulk_shopify=ok",
+        "e2e_bulk_op_2_shopify_status=invalid_id",
+        "e2e_bulk_op_1_shopify_status=COMPLETED",
+        "e2e_bulk_op_1_shopify_error_code=null",
+        "e2e_bulk_op_1_shopify_type=QUERY",
+        "e2e_bulk_op_3_shopify_status=RUNNING",
+        "e2e_bulk_op_3_shopify_error_code=null",
+        "e2e_bulk_op_3_shopify_type=QUERY",
+        "e2e_bulk_op_4_shopify_status=not_found",
+        "e2e_bulk_shopify_running=1",
+        "e2e_bulk_shopify_created=0",
+      ]);
+      // Invalid ids are never sent; valid ones only in the body file.
+      const q = JSON.parse(r.query);
+      expect(q.variables.ids).toEqual([
+        "gid://shopify/BulkOperation/1",
+        "gid://shopify/BulkOperation/3",
+        "gid://shopify/BulkOperation/4",
+      ]);
+      expect(r.stdout).not.toMatch(/gid:\/\//);
+      expectNoPlanted(r.stdout);
+    });
+
+    it("maps non-enum values to INVALID and soft-fails with fixed lines", () => {
+      const ok = runAdmin("gid://shopify/BulkOperation/1\n", {
+        data: { nodes: [{ status: E2E_PLANTED_NAME, errorCode: E2E_PLANTED_DOMAIN, type: "QUERY" }] },
+      });
+      expect(ok.stdout).toContain("e2e_bulk_op_1_shopify_status=INVALID");
+      expect(ok.stdout).toContain("e2e_bulk_op_1_shopify_error_code=INVALID");
+      const http = runAdmin("gid://shopify/BulkOperation/1\n", E2E_PLANTED_DOMAIN, "401");
+      expect(http.stdout).toContain("e2e_bulk_shopify=error http_status=401");
+      const parse = runAdmin("gid://shopify/BulkOperation/1\n", `not json ${E2E_PLANTED_NAME}`);
+      expect(parse.stdout).toContain("e2e_bulk_shopify=error parse_failed");
+      const gql = runAdmin("gid://shopify/BulkOperation/1\n", {
+        errors: [{ message: E2E_PLANTED_NAME, extensions: { code: "THROTTLED" } }],
+      });
+      expect(gql.stdout).toContain("e2e_bulk_shopify=error error_codes=THROTTLED");
+      const none = runAdmin("", {});
+      expect(none.stdout).toContain("e2e_bulk_shopify=skipped_no_ids");
+      for (const r of [ok, http, parse, gql, none]) {
+        expect(r.status).toBe(0);
+        expectNoPlanted(r.stdout);
+        expect(r.stdout).not.toMatch(/gid:\/\//);
+      }
+    });
+  });
+});

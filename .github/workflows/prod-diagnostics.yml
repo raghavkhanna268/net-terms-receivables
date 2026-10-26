@@ -1942,16 +1942,19 @@ jobs:
           comp AS (
             SELECT bulk_operation_id, completed_at, failure_count, started_at FROM bulk
             WHERE origin = 'reconcile' AND reconcile_stage = 'companies'
+              AND closed_at IS NULL
             ORDER BY started_at DESC LIMIT 1),
           cust AS (
             SELECT bulk_operation_id, completed_at, failure_count FROM bulk
             WHERE origin = 'reconcile' AND reconcile_stage = 'customers'
               AND started_at >= (SELECT started_at FROM comp)
+              AND closed_at IS NULL
             ORDER BY started_at DESC LIMIT 1),
           ord AS (
             SELECT bulk_operation_id, completed_at, failure_count FROM bulk
             WHERE origin = 'reconcile' AND reconcile_stage = 'orders'
               AND started_at >= (SELECT started_at FROM comp)
+              AND closed_at IS NULL
             ORDER BY started_at DESC LIMIT 1),
           ids AS (
             SELECT bulk_operation_id FROM comp
@@ -2029,6 +2032,133 @@ jobs:
             echo "uninstalled=$UNINSTALLED"
           } >> "$GITHUB_OUTPUT"
           # End E2E DB summary
+
+          # E2E sync detail (allow-listed shapes only)
+          DETAIL_OUT=$(mktemp)
+          trap 'rm -f "${DB_OUT:-}" "$DETAIL_OUT"' EXIT
+          if ! psql -X -v ON_ERROR_STOP=1 -t -A -F '|' \
+            -v shop="$E2E_SHOP_DOMAIN" "$DATABASE_URL" > "$DETAIL_OUT" <<'EOSQL'
+          WITH bulk AS (
+            SELECT b.*, row_number() OVER (ORDER BY b.started_at, b.bulk_operation_id) AS n
+            FROM s6_bulk_operations b WHERE b.shop = :'shop'),
+          live AS (SELECT * FROM bulk WHERE closed_at IS NULL AND origin = 'reconcile'),
+          comp AS (SELECT * FROM live WHERE reconcile_stage = 'companies' ORDER BY started_at DESC LIMIT 1),
+          cust AS (SELECT * FROM live WHERE reconcile_stage = 'customers'
+                     AND started_at >= (SELECT started_at FROM comp) ORDER BY started_at DESC LIMIT 1),
+          ord AS (SELECT * FROM live WHERE reconcile_stage = 'orders'
+                    AND started_at >= (SELECT started_at FROM comp) ORDER BY started_at DESC LIMIT 1),
+          ids AS (
+            SELECT bulk_operation_id FROM comp
+            UNION ALL SELECT bulk_operation_id FROM cust
+            UNION ALL SELECT bulk_operation_id FROM ord),
+          linked AS (
+            SELECT d.* FROM s6_dead_letter d
+            WHERE d.message->>'bulkOperationId' IN (SELECT bulk_operation_id FROM ids)
+              AND d.message->>'topic' IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'BULK_OPERATIONS_FINISH')),
+          dlq AS (
+            SELECT d.*, row_number() OVER (ORDER BY d.dead_lettered_at, d.id) AS n,
+              regexp_match(d.error, '^(?:(non_retryable|permanent):)?([A-Za-z][A-Za-z0-9_]{0,63}|graphql_error:[A-Za-z0-9_,]{1,200})$') AS m
+            FROM s6_dead_letter d
+            WHERE d.message->>'shop' = :'shop'
+               OR d.message->>'bulkOperationId' IN (SELECT bulk_operation_id FROM bulk)),
+          fin AS (
+            SELECT b.n,
+              EXISTS (SELECT 1 FROM pgmq.q_s6_bulk q WHERE q.message->>'bulkOperationId' = b.bulk_operation_id) AS queued,
+              EXISTS (SELECT 1 FROM pgmq.a_s6_bulk a WHERE a.message->>'bulkOperationId' = b.bulk_operation_id) AS archived,
+              EXISTS (SELECT 1 FROM s6_dead_letter d WHERE d.original_queue = 's6_bulk'
+                        AND d.message->>'bulkOperationId' = b.bulk_operation_id) AS dead_lettered,
+              EXISTS (
+                SELECT 1 FROM webhook_receipts r
+                WHERE r.shop = :'shop' AND r.topic = 'BULK_OPERATIONS_FINISH'
+                  AND r.webhook_id IN (
+                    SELECT q.message->>'webhookId' FROM pgmq.q_s6_bulk q WHERE q.message->>'bulkOperationId' = b.bulk_operation_id
+                    UNION ALL SELECT a.message->>'webhookId' FROM pgmq.a_s6_bulk a WHERE a.message->>'bulkOperationId' = b.bulk_operation_id
+                    UNION ALL SELECT d.message->>'webhookId' FROM s6_dead_letter d WHERE d.original_queue = 's6_bulk'
+                                AND d.message->>'bulkOperationId' = b.bulk_operation_id)) AS receipt
+            FROM bulk b),
+          scalars(o, k, v) AS (VALUES
+            (1, 'e2e_sync_mirror_ignores_closed', 'true'),
+            (2, 'e2e_sync_companies_op_present', (EXISTS (SELECT 1 FROM comp))::text),
+            (3, 'e2e_sync_customers_op_present', (EXISTS (SELECT 1 FROM cust))::text),
+            (4, 'e2e_sync_orders_op_present', (EXISTS (SELECT 1 FROM ord))::text),
+            (5, 'e2e_sync_failed_companies_failure_count', (EXISTS (SELECT 1 FROM comp WHERE failure_count >= 5))::text),
+            (6, 'e2e_sync_failed_customers_failure_count', (EXISTS (SELECT 1 FROM cust WHERE failure_count >= 5))::text),
+            (7, 'e2e_sync_failed_orders_failure_count', (EXISTS (SELECT 1 FROM ord WHERE failure_count >= 5))::text),
+            (8, 'e2e_sync_linked_dlq_rows', (SELECT COUNT(*) FROM linked)::text),
+            (9, 'e2e_sync_failure_reason', CASE
+                WHEN NOT EXISTS (SELECT 1 FROM comp) THEN 'not_started'
+                WHEN EXISTS (SELECT 1 FROM comp WHERE failure_count >= 5) THEN 'companies_failure_count'
+                WHEN EXISTS (SELECT 1 FROM cust WHERE failure_count >= 5) THEN 'customers_failure_count'
+                WHEN EXISTS (SELECT 1 FROM ord WHERE failure_count >= 5) THEN 'orders_failure_count'
+                WHEN EXISTS (SELECT 1 FROM linked) THEN
+                  'dlq_' || COALESCE((SELECT lower(l.message->>'topic') FROM linked l ORDER BY l.dead_lettered_at, l.id LIMIT 1), 'unknown')
+                ELSE 'none' END),
+            (10, 'e2e_bulk_ops_closed', (SELECT COUNT(*) FROM bulk WHERE closed_at IS NOT NULL)::text),
+            (11, 'e2e_bulk_finish_receipts', (SELECT COUNT(*) FROM webhook_receipts WHERE shop = :'shop' AND topic = 'BULK_OPERATIONS_FINISH')::text),
+            (12, 'e2e_bulk_ops_listed', (SELECT COUNT(*) FROM bulk WHERE n <= 10)::text),
+            (13, 'e2e_dlq_rows_listed', (SELECT COUNT(*) FROM dlq WHERE n <= 10)::text)),
+          bulk_rows AS (
+            SELECT b.n, x.o, 'e2e_bulk_op_' || b.n || '_' || x.k AS k, x.v
+            FROM bulk b JOIN fin f ON f.n = b.n
+            CROSS JOIN LATERAL (VALUES
+              (1, 'type', b.bulk_type),
+              (2, 'origin', b.origin),
+              (3, 'stage', COALESCE(b.reconcile_stage, 'null')),
+              (4, 'in_sync_mirror', (b.bulk_operation_id IN (SELECT bulk_operation_id FROM ids))::text),
+              (5, 'open', (b.completed_at IS NULL)::text),
+              (6, 'closed_reason', COALESCE(b.closed_reason, 'null')),
+              (7, 'failure_count', b.failure_count::text),
+              (8, 'age_min', floor(extract(epoch FROM (now() - b.started_at)) / 60)::bigint::text),
+              (9, 'completed_after_min', COALESCE(floor(extract(epoch FROM (b.completed_at - b.started_at)) / 60)::bigint::text, 'null')),
+              (10, 'finish_receipt', f.receipt::text),
+              (11, 'finish_msg', CASE WHEN f.dead_lettered THEN 'dead_lettered' WHEN f.queued THEN 'queued'
+                                      WHEN f.archived THEN 'archived' ELSE 'none' END),
+              (12, 'dlq_rows', (SELECT COUNT(*) FROM s6_dead_letter d WHERE d.message->>'bulkOperationId' = b.bulk_operation_id)::text)
+            ) AS x(o, k, v)
+            WHERE b.n <= 10),
+          dlq_rows AS (
+            SELECT d.n, x.o, 'e2e_dlq_row_' || d.n || '_' || x.k AS k, x.v
+            FROM dlq d
+            CROSS JOIN LATERAL (VALUES
+              (1, 'queue', CASE WHEN d.original_queue IN ('s6_sync', 's6_bulk') THEN d.original_queue ELSE 'other' END),
+              (2, 'topic', CASE WHEN d.message->>'topic' ~ '^[A-Z][A-Z0-9_]{0,47}$' THEN d.message->>'topic' ELSE 'invalid' END),
+              (3, 'error_disposition', CASE WHEN d.error IS NULL THEN 'null'
+                                            WHEN d.m IS NOT NULL THEN COALESCE(d.m[1], 'none')
+                                            WHEN d.error LIKE 'Non-retryable error:%' THEN 'non_retryable'
+                                            ELSE 'none' END),
+              (4, 'error_code', CASE WHEN d.error IS NULL THEN 'null'
+                                     WHEN d.m IS NOT NULL THEN d.m[2]
+                                     WHEN d.error LIKE 'No handler registered for topic after %' THEN 'no_handler'
+                                     ELSE 'legacy_unclassified' END),
+              (5, 'attempt_count', CASE WHEN d.message->>'attemptCount' ~ '^[0-9]{1,6}$' THEN d.message->>'attemptCount' ELSE 'unknown' END),
+              (6, 'sanitized', COALESCE(d.message->>'sanitized' = 'true', false)::text),
+              (7, 'age_min', floor(extract(epoch FROM (now() - d.dead_lettered_at)) / 60)::bigint::text),
+              (8, 'bulk_op', COALESCE((SELECT b.n::text FROM bulk b WHERE b.bulk_operation_id = d.message->>'bulkOperationId'), 'none')),
+              (9, 'in_sync_mirror', (d.id IN (SELECT id FROM linked))::text)
+            ) AS x(o, k, v)
+            WHERE d.n <= 10)
+          SELECT k, v FROM (
+            SELECT 1 AS g, 0 AS n, o, k, v FROM scalars
+            UNION ALL SELECT 2, n, o, k, v FROM bulk_rows
+            UNION ALL SELECT 3, n, o, k, v FROM dlq_rows
+          ) t
+          ORDER BY g, n, o;
+          EOSQL
+          then
+            echo "e2e_sync_detail=error code=E2E_SYNC_DETAIL_QUERY_FAILED"
+            : > "$DETAIL_OUT"
+          fi
+          # E2E sync detail summary
+          # Keys are e2e_<fixed name> with a row index; values are ints, booleans,
+          # lowercase codes or UPPER_CASE Shopify enums. Anything else -> invalid.
+          DETAIL_KEY_RE='^e2e_(sync|bulk|dlq)_[a-z0-9_]{1,56}$'
+          DETAIL_VALUE_RE='^([0-9]{1,12}|true|false|null|unknown|none|[a-z][a-z0-9_]{0,47}|[A-Z][A-Z0-9_]{0,47}|graphql_error:[A-Z0-9_,]{1,80})$'
+          while IFS='|' read -r k v; do
+            [[ "$k" =~ $DETAIL_KEY_RE ]] || continue
+            [[ "$v" =~ $DETAIL_VALUE_RE ]] || v=invalid
+            echo "$k=$v"
+          done < "$DETAIL_OUT"
+          # End E2E sync detail
 
       # Admin API (queries only) with the selected shop's offline token.
       # NOTE: webhookSubscriptions returns only shop-specific (API-created)
@@ -2140,3 +2270,67 @@ jobs:
                 "e2e_payment_customization_enabled_count=\([$pc[] | select(.enabled == true)] | length)"' "$HTTP_RESPONSE"
           fi
           # End E2E Admin query and summary
+
+          # Shopify-side state of this shop's s6_bulk_operations rows, in the
+          # same row order as the "E2E sync detail" lines (started_at, id).
+          # Read with a nodes(ids:) query; ids go in the request body file and
+          # are never printed. Output: row index + status/errorCode/type enums.
+          BULK_IDS_FILE=$(mktemp)
+          BULK_QUERY_FILE=$(mktemp)
+          trap 'cleanup; rm -f "$BULK_IDS_FILE" "$BULK_QUERY_FILE"' EXIT
+          if ! psql -X -v ON_ERROR_STOP=1 -t -A -v shop="$E2E_SHOP_DOMAIN" "$DATABASE_URL" > "$BULK_IDS_FILE" <<'EOSQL'
+          SELECT bulk_operation_id FROM s6_bulk_operations
+          WHERE shop = :'shop'
+          ORDER BY started_at, bulk_operation_id
+          LIMIT 10;
+          EOSQL
+          then
+            echo "e2e_bulk_shopify=error code=E2E_BULK_IDS_QUERY_FAILED"
+            : > "$BULK_IDS_FILE"
+          fi
+          # E2E bulk op status (enums only)
+          BULK_IDS_JSON=$(jq -R -s -c '
+            split("\n") | map(select(length > 0))
+            | to_entries
+            | map({n: (.key + 1), id: (if (.value | test("^gid://shopify/BulkOperation/[0-9]{1,20}$")) then .value else null end)})' "$BULK_IDS_FILE")
+          echo "e2e_bulk_shopify_rows=$(jq 'length' <<< "$BULK_IDS_JSON")"
+          echo "e2e_bulk_shopify_invalid_ids=$(jq '[.[] | select(.id == null)] | length' <<< "$BULK_IDS_JSON")"
+          if [ "$(jq '[.[] | select(.id != null)] | length' <<< "$BULK_IDS_JSON")" = "0" ]; then
+            echo "e2e_bulk_shopify=skipped_no_ids"
+          else
+            jq -c '{query: "query E2eBulkOps($ids: [ID!]!) { nodes(ids: $ids) { ... on BulkOperation { status errorCode type } } }",
+                    variables: {ids: [.[] | select(.id != null) | .id]}}' <<< "$BULK_IDS_JSON" > "$BULK_QUERY_FILE"
+            : > "$HTTP_RESPONSE"
+            BULK_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+              -X POST \
+              --config "$CURL_CONFIG" \
+              --data-binary "@$BULK_QUERY_FILE" \
+              "https://${E2E_SHOP_DOMAIN}/admin/api/2026-10/graphql.json" || echo "000")
+            if [ "$BULK_STATUS" != "200" ]; then
+              echo "e2e_bulk_shopify=error http_status=$BULK_STATUS"
+            elif ! jq -e . "$HTTP_RESPONSE" >/dev/null 2>&1; then
+              echo "e2e_bulk_shopify=error parse_failed"
+            elif jq -e '(.errors | length) > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+              echo "e2e_bulk_shopify=error error_codes=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN" | tostring | if test("^[A-Z0-9_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$HTTP_RESPONSE")"
+            else
+              jq -r --argjson rows "$BULK_IDS_JSON" '
+                def okenum: type == "string" and test("^[A-Z0-9_]{1,40}$");
+                def en: if . == null then "null" elif okenum then . else "INVALID" end;
+                ([$rows[] | select(.id != null) | .n]) as $ns
+                | (.data.nodes // []) as $nodes
+                | "e2e_bulk_shopify=ok",
+                  ($rows[] | select(.id == null) | "e2e_bulk_op_\(.n)_shopify_status=invalid_id"),
+                  (range(0; $ns | length) as $i
+                   | ($nodes[$i]) as $op
+                   | if ($op | type) != "object" or ($op | has("status") | not) then
+                       "e2e_bulk_op_\($ns[$i])_shopify_status=not_found"
+                     else
+                       "e2e_bulk_op_\($ns[$i])_shopify_status=\($op.status | en)",
+                       "e2e_bulk_op_\($ns[$i])_shopify_error_code=\($op.errorCode | en)",
+                       "e2e_bulk_op_\($ns[$i])_shopify_type=\($op.type | en)"
+                     end),
+                  "e2e_bulk_shopify_running=\([$nodes[]? | select(type == "object" and .status == "RUNNING")] | length)",
+                  "e2e_bulk_shopify_created=\([$nodes[]? | select(type == "object" and .status == "CREATED")] | length)"' "$HTTP_RESPONSE"
+            fi
+          fi
+          # End E2E bulk op status
