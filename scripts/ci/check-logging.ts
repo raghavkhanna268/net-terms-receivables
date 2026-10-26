@@ -15,7 +15,7 @@
 import * as ts from "typescript";
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 // ============================================================================
 // Configuration
@@ -55,6 +55,23 @@ const TOKEN_KEY_PATTERNS = [
  * P2: Must include shpca_/shppa_ (customer/partner access tokens).
  */
 const TOKEN_PREFIX_PATTERN = /shpat_|shpua_|shpss_|shpca_|shppa_/;
+
+/**
+ * Explicitly banned keys in logging contexts (#332).
+ * These keys must NEVER appear in safeLog, console.*, Sentry.*, or AuditEvent metadata.
+ * Unlike SENSITIVE_PATTERN which uses substring matching, these are exact matches.
+ */
+const BANNED_LOG_KEYS = new Set([
+  "webhookId",
+  "webhook_id",
+]);
+
+/**
+ * Check if a key is explicitly banned in logging contexts.
+ */
+function isBannedLogKey(key: string): boolean {
+  return BANNED_LOG_KEYS.has(key);
+}
 
 /**
  * Normalize a key for matching: convert snake_case to camelCase equivalent
@@ -315,11 +332,11 @@ function walkDirectory(
 // Text-based Script Analysis (P1.2 regression fix)
 // ============================================================================
 
-function analyzeScriptFile(filePath: string): Violation[] {
+function analyzeScriptFile(filePath: string, rootDir: string): Violation[] {
   const violations: Violation[] = [];
   const content = fs.readFileSync(filePath, "utf-8");
   const lines = content.split("\n");
-  const relPath = path.relative(REPO_ROOT, filePath);
+  const relPath = path.relative(rootDir, filePath);
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -380,7 +397,7 @@ function analyzeScriptFile(filePath: string): Violation[] {
 // AST Analysis
 // ============================================================================
 
-function analyzeFile(filePath: string): Violation[] {
+function analyzeFile(filePath: string, rootDir: string): Violation[] {
   const violations: Violation[] = [];
   const sourceText = fs.readFileSync(filePath, "utf-8");
   const sourceFile = ts.createSourceFile(
@@ -391,7 +408,7 @@ function analyzeFile(filePath: string): Violation[] {
     filePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
   );
 
-  const relPath = path.relative(REPO_ROOT, filePath);
+  const relPath = path.relative(rootDir, filePath);
 
   // Also check for token prefixes in TS files (but not in safeLog helper or regex patterns)
   const lines = sourceText.split("\n");
@@ -445,6 +462,99 @@ function checkCallExpression(
   const methodName = callName.split(".").pop() ?? callName;
   if (SENTRY_METHODS.has(methodName)) {
     checkSentryCall(call, methodName, sourceFile, relPath, violations);
+  }
+
+  // Check sql.json / tx.json for AuditEvent metadata (#332)
+  // These calls are used to serialize metadata in AuditEvent inserts.
+  // We flag webhookId in these calls because it could end up in AuditEvent.data.
+  // Note: We cannot statically determine if the call is actually within an AuditEvent
+  // INSERT (the INSERT is in the parent tagged template, and the json call is an
+  // interpolated expression). For safety, we flag all sql.json/tx.json objects
+  // containing banned keys. This may produce false positives if sql.json is used
+  // for non-AuditEvent data, but in this codebase sql.json is primarily used for
+  // AuditEvent.data fields.
+  if (callName === "sql.json" || callName === "tx.json" || callName === "json") {
+    const firstArg = call.arguments[0];
+    if (firstArg && ts.isObjectLiteralExpression(firstArg)) {
+      checkAuditEventMetadata(firstArg, sourceFile, relPath, violations);
+    }
+  }
+}
+
+/**
+ * Check AuditEvent metadata objects for banned keys (#332).
+ * Called for sql.json / tx.json arguments which serialize AuditEvent.data.
+ */
+function checkAuditEventMetadata(
+  obj: ts.ObjectLiteralExpression,
+  sourceFile: ts.SourceFile,
+  relPath: string,
+  violations: Violation[]
+): void {
+  for (const prop of obj.properties) {
+    let keyName: string | null = null;
+
+    if (ts.isPropertyAssignment(prop)) {
+      if (ts.isIdentifier(prop.name)) {
+        keyName = prop.name.text;
+      } else if (ts.isStringLiteral(prop.name)) {
+        keyName = prop.name.text;
+      } else if (ts.isComputedPropertyName(prop.name)) {
+        const nameExpr = prop.name.expression;
+        if (ts.isStringLiteral(nameExpr) && isBannedLogKey(nameExpr.text)) {
+          const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+          violations.push({
+            file: relPath,
+            line: line + 1,
+            column: character + 1,
+            rule: "banned-log-key",
+            message: `Banned computed key in AuditEvent metadata: ["${nameExpr.text}"] (removed per #332)`,
+            snippet: truncate(prop.getText(), 100),
+          });
+        }
+      }
+
+      // Check value for banned identifiers or property access
+      const value = prop.initializer;
+      if (ts.isIdentifier(value) && isBannedLogKey(value.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned identifier as AuditEvent metadata value: ${value.text} (removed per #332)`,
+          snippet: truncate(prop.getText(), 100),
+        });
+      }
+      if (ts.isPropertyAccessExpression(value) && isBannedLogKey(value.name.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned property access as AuditEvent metadata value: .${value.name.text} (removed per #332)`,
+          snippet: truncate(prop.getText(), 100),
+        });
+      }
+    }
+
+    if (ts.isShorthandPropertyAssignment(prop)) {
+      keyName = prop.name.text;
+    }
+
+    if (keyName && isBannedLogKey(keyName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned key in AuditEvent metadata: ${keyName} (removed per #332)`,
+        snippet: truncate(prop.getText(), 100),
+      });
+    }
   }
 }
 
@@ -548,6 +658,18 @@ function checkArgument(
   // No argIndex > 0 condition - check ALL arguments
   if (ts.isIdentifier(arg)) {
     const name = arg.text;
+    // Check for banned identifiers (#332) - e.g., console.log("x", webhookId)
+    if (isBannedLogKey(name)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned identifier passed as argument: ${name} (removed per #332)`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
     // Check for error-like identifiers
     if (isErrorLikeIdentifier(name)) {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
@@ -577,6 +699,18 @@ function checkArgument(
   // Check property access arguments (P2.4) - e.g., console.error("x", err.message), console.log("x", session.shop)
   if (ts.isPropertyAccessExpression(arg)) {
     const propName = arg.name.text;
+    // Check for banned property names (#332) - e.g., console.log("x", m.webhookId)
+    if (isBannedLogKey(propName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned property access passed as argument: .${propName} (removed per #332)`,
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
     // Check for .message/.stack
     if (propName === "message" || propName === "stack") {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
@@ -880,9 +1014,20 @@ function checkSentryCall(
     const keyArg = call.arguments[0];
     const valueArg = call.arguments[1];
 
-    // Check key
+    // Check key for banned keys (#332)
     if (ts.isStringLiteral(keyArg)) {
       const keyName = keyArg.text;
+      if (isBannedLogKey(keyName)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(keyArg.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned key in Sentry ${methodName}: ${keyName} (removed per #332)`,
+          snippet: truncate(call.getText(sourceFile), 100),
+        });
+      }
       if (isSensitiveKey(keyName) && !SAFE_KEY_ALLOWLIST[keyName]) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(keyArg.getStart());
         violations.push({
@@ -928,8 +1073,8 @@ function checkSentryCall(
           file: relPath,
           line: v.line,
           column: v.column,
-          rule: "shop-interpolation",
-          message: `Template in Sentry call interpolates sensitive variable: ${v.expr}`,
+          rule: v.rule ?? "shop-interpolation",
+          message: v.message ?? `Template in Sentry call interpolates sensitive variable: ${v.expr}`,
           snippet: v.snippet,
         });
       }
@@ -1141,6 +1286,23 @@ function checkObjectLiteral(
         keyName = prop.name.text;
       } else if (ts.isStringLiteral(prop.name)) {
         keyName = prop.name.text;
+      } else if (ts.isComputedPropertyName(prop.name)) {
+        // Computed property name: { ["webhookId"]: x } or { [key]: x }
+        const nameExpr = prop.name.expression;
+        if (ts.isStringLiteral(nameExpr)) {
+          const computedKey = nameExpr.text;
+          if (isBannedLogKey(computedKey)) {
+            const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+            violations.push({
+              file: relPath,
+              line: line + 1,
+              column: character + 1,
+              rule: "banned-log-key",
+              message: `Banned computed key in log argument: ["${computedKey}"] (removed per #332)`,
+              snippet: truncate(prop.getText(), 100),
+            });
+          }
+        }
       }
 
       // Check the value (P2.4)
@@ -1202,6 +1364,19 @@ function checkObjectLiteral(
       }
     }
 
+    // Check if key is explicitly banned (#332)
+    if (keyName && isBannedLogKey(keyName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned key in log argument: ${keyName} (removed per #332)`,
+        snippet: truncate(prop.getText(), 100),
+      });
+    }
+
     // Check if key is sensitive
     if (keyName && isSensitiveKey(keyName) && !SAFE_KEY_ALLOWLIST[keyName]) {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(prop.getStart());
@@ -1227,9 +1402,21 @@ function checkPropertyValue(
   violations: Violation[],
   _depth: number
 ): void {
-  // Check identifier values: { store: shop }
+  // Check identifier values: { store: shop } or { id: webhookId }
   if (ts.isIdentifier(value)) {
     const name = value.text;
+    // Check for banned identifiers (#332) - e.g., { id: webhookId }
+    if (isBannedLogKey(name)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned identifier as value: ${name} (removed per #332)`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
     if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
       violations.push({
@@ -1255,9 +1442,21 @@ function checkPropertyValue(
     }
   }
 
-  // Check property access: { error: err.message } or { x: foo.stack }
+  // Check property access: { error: err.message } or { x: foo.stack } or { id: m.webhookId }
   if (ts.isPropertyAccessExpression(value)) {
     const propName = value.name.text;
+    // Check for banned property access (#332) - e.g., { id: m.webhookId }
+    if (isBannedLogKey(propName)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "banned-log-key",
+        message: `Banned property access as value: .${propName} (removed per #332)`,
+        snippet: truncate(value.getText(), 100),
+      });
+    }
     if (propName === "message" || propName === "stack") {
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(value.getStart());
       violations.push({
@@ -1340,7 +1539,7 @@ function checkArrayLiteral(
 }
 
 /**
- * Check string concatenation for sensitive identifiers (P2.7).
+ * Check string concatenation for sensitive identifiers (P2.7) and banned keys (#332).
  */
 function checkStringConcatenation(
   expr: ts.BinaryExpression,
@@ -1351,6 +1550,18 @@ function checkStringConcatenation(
   function checkOperand(operand: ts.Node): void {
     if (ts.isIdentifier(operand)) {
       const name = operand.text;
+      // Check for banned identifiers (#332) - e.g., "wh=" + webhookId
+      if (isBannedLogKey(name)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned identifier in string concatenation: ${name} (removed per #332)`,
+          snippet: truncate(expr.getText(sourceFile), 100),
+        });
+      }
       if (isSensitiveIdentifier(name) && !SAFE_KEY_ALLOWLIST[name]) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
         violations.push({
@@ -1369,6 +1580,18 @@ function checkStringConcatenation(
     }
     if (ts.isPropertyAccessExpression(operand)) {
       const propName = operand.name.text;
+      // Check for banned property access (#332) - e.g., "wh=" + m.webhookId
+      if (isBannedLogKey(propName)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "banned-log-key",
+          message: `Banned property access in string concatenation: .${propName} (removed per #332)`,
+          snippet: truncate(expr.getText(sourceFile), 100),
+        });
+      }
       if (isSensitiveIdentifier(propName) && !SAFE_KEY_ALLOWLIST[propName]) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(operand.getStart());
         violations.push({
@@ -1396,6 +1619,40 @@ function checkTemplateLiteral(
   function checkTemplateSpan(span: ts.TemplateSpan): void {
     const expr = span.expression;
     const exprText = expr.getText(sourceFile);
+
+    // Check for banned webhookId identifier (#332)
+    if (ts.isIdentifier(expr)) {
+      const name = expr.text;
+      if (isBannedLogKey(name)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: name,
+          snippet: truncate(span.getText(sourceFile), 80),
+          rule: "banned-log-key",
+          message: `Banned identifier in template literal: \${${name}} (removed per #332)`,
+        });
+        return;
+      }
+    }
+
+    // Check for banned property access like ${x.webhookId} (#332)
+    if (ts.isPropertyAccessExpression(expr)) {
+      const propName = expr.name.text;
+      if (isBannedLogKey(propName)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+        violations.push({
+          line: line + 1,
+          column: character + 1,
+          expr: exprText.trim(),
+          snippet: truncate(span.getText(sourceFile), 80),
+          rule: "banned-log-key",
+          message: `Banned property in template literal: .${propName} (removed per #332)`,
+        });
+        return;
+      }
+    }
 
     // Gap 3: Check for bare error-like identifiers (${err}, ${error}, etc.)
     // These should be flagged unless wrapped in a safe call like toErrorCode(err)
@@ -1998,44 +2255,63 @@ function groupViolations(violations: Violation[]): Map<string, Violation[]> {
 // Main
 // ============================================================================
 
-function main(): void {
-  console.log("=== AST-based Logging Guard Check ===\n");
+/**
+ * Result of running the logging guard analysis.
+ */
+export interface AnalysisResult {
+  exitCode: number;
+  output: string;
+}
 
-  const { tsFiles, scriptFiles, testFiles } = findSourceFiles(REPO_ROOT);
-  console.log(`Scanning ${tsFiles.length} TypeScript files, ${scriptFiles.length} script files, and ${testFiles.length} test files...\n`);
+/**
+ * Run the logging guard analysis on a directory.
+ * This is the single implementation - main() is a thin wrapper.
+ *
+ * @param rootDir - Root directory to scan
+ * @param allowlistFile - Path to logging allowlist file
+ * @param loggerMockAllowlistFile - Path to logger mock allowlist file (required)
+ * @returns Analysis result with exit code and output
+ */
+export function runAnalysis(
+  rootDir: string,
+  allowlistFile: string,
+  loggerMockAllowlistFile: string
+): AnalysisResult {
+  const outputLines: string[] = [];
+  const log = (msg: string) => outputLines.push(msg);
+
+  const { tsFiles, scriptFiles, testFiles } = findSourceFiles(rootDir);
+
+  log("=== AST-based Logging Guard Check ===\n");
+  log(`Scanning ${tsFiles.length} TypeScript files, ${scriptFiles.length} script files, and ${testFiles.length} test files...\n`);
 
   const allViolations: Violation[] = [];
   const loggerMockViolations: Violation[] = [];
 
-  // Analyze TypeScript files (full logging check)
   for (const file of tsFiles) {
-    const violations = analyzeFile(file);
+    const violations = analyzeFile(file, rootDir);
     allViolations.push(...violations);
   }
 
-  // Analyze script files (text-based)
   for (const file of scriptFiles) {
-    const violations = analyzeScriptFile(file);
+    const violations = analyzeScriptFile(file, rootDir);
     allViolations.push(...violations);
   }
 
-  // Gap 4: Analyze test files for token-prefix and domain-literal only
   for (const testFile of testFiles) {
     const violations = analyzeTestFile(testFile);
     allViolations.push(...violations);
   }
 
-  // Gap 5: Analyze test files for logger mocks
   for (const testFile of testFiles) {
     const violations = analyzeTestFileForLoggerMocks(testFile);
     loggerMockViolations.push(...violations);
   }
 
   const grouped = groupViolations(allViolations);
-  const allowlist = loadAllowlist(ALLOWLIST_FILE);
-
-  // Load logger mock allowlist
-  const { entries: loggerMockAllowlist, invalidEntries: invalidLoggerMockEntries } = loadLoggerMockAllowlist(LOGGER_MOCK_ALLOWLIST_FILE);
+  const allowlist = loadAllowlist(allowlistFile);
+  const { entries: loggerMockAllowlist, invalidEntries: invalidLoggerMockEntries } =
+    loadLoggerMockAllowlist(loggerMockAllowlistFile);
 
   let newViolations = 0;
   const overAllowlist: Array<{
@@ -2046,7 +2322,6 @@ function main(): void {
   }> = [];
   const staleEntries: Array<{ key: string; allowed: number; found: number }> = [];
 
-  // Check for violations exceeding allowlist
   for (const [key, violations] of grouped) {
     const found = violations.length;
     const allowed = allowlist.get(key) ?? 0;
@@ -2057,7 +2332,6 @@ function main(): void {
     }
   }
 
-  // Check for stale allowlist entries (P2.6: fail on stale/over-counted)
   for (const [key, allowed] of allowlist) {
     const found = grouped.get(key)?.length ?? 0;
     if (found < allowed) {
@@ -2065,7 +2339,6 @@ function main(): void {
     }
   }
 
-  // Gap 5: Check logger mock violations against allowlist
   const newLoggerMockViolations: Violation[] = [];
   const loggerMockFilesWithViolations = new Set<string>();
   for (const v of loggerMockViolations) {
@@ -2075,101 +2348,93 @@ function main(): void {
     }
   }
 
-  // Check for stale logger mock allowlist entries (ratchet)
   const staleLoggerMockEntries: Array<{ path: string; reason: string }> = [];
-  for (const [path, reason] of loggerMockAllowlist) {
-    if (!loggerMockFilesWithViolations.has(path)) {
-      staleLoggerMockEntries.push({ path, reason });
+  for (const [pathKey, reason] of loggerMockAllowlist) {
+    if (!loggerMockFilesWithViolations.has(pathKey)) {
+      staleLoggerMockEntries.push({ path: pathKey, reason });
     }
   }
 
-  // Report results
-  console.log("=== Results ===\n");
+  log("=== Results ===\n");
 
   let shouldFail = false;
 
-  if (newViolations === 0 && staleEntries.length === 0 && 
+  if (newViolations === 0 && staleEntries.length === 0 &&
       newLoggerMockViolations.length === 0 && staleLoggerMockEntries.length === 0 &&
       invalidLoggerMockEntries.length === 0) {
-    console.log("\x1b[32m✓ No logging violations found\x1b[0m");
-    process.exit(0);
+    log("\x1b[32m✓ No logging violations found\x1b[0m");
+    return { exitCode: 0, output: outputLines.join("\n") };
   }
 
   if (newViolations > 0) {
     shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${newViolations} NEW logging violation(s) above allowlist:\x1b[0m\n`
-    );
+    log(`\x1b[31m✗ Found ${newViolations} NEW logging violation(s) above allowlist:\x1b[0m\n`);
 
     for (const { key, found, allowed, violations } of overAllowlist) {
-      console.log(`  ${key}: found ${found}, allowed ${allowed}`);
+      log(`  ${key}: found ${found}, allowed ${allowed}`);
       for (const v of violations.slice(0, 5)) {
-        console.log(`    ${v.file}:${v.line} ${v.message}`);
-        console.log(`      ${v.snippet}`);
+        log(`    ${v.file}:${v.line} ${v.message}`);
+        log(`      ${v.snippet}`);
       }
       if (violations.length > 5) {
-        console.log(`    ... and ${violations.length - 5} more`);
+        log(`    ... and ${violations.length - 5} more`);
       }
-      console.log();
+      log("");
     }
 
-    console.log("\x1b[33mTo fix: Update the code to use safeLog with shopId/shopHash.\x1b[0m");
-    console.log("\x1b[33mTo allowlist (temporary): add/update entry in scripts/ci/logging-allowlist.txt\x1b[0m");
-    console.log("\x1b[33mFormat: file:rule:count\x1b[0m\n");
+    log("\x1b[33mTo fix: Update the code to use safeLog with shopId/shopHash.\x1b[0m");
+    log("\x1b[33mTo allowlist (temporary): add/update entry in scripts/ci/logging-allowlist.txt\x1b[0m");
+    log("\x1b[33mFormat: file:rule:count\x1b[0m\n");
   }
 
-  // P2.6: Stale entries now FAIL (ratchet)
   if (staleEntries.length > 0) {
     shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${staleEntries.length} stale/over-counted allowlist entry(ies):\x1b[0m\n`
-    );
+    log(`\x1b[31m✗ Found ${staleEntries.length} stale/over-counted allowlist entry(ies):\x1b[0m\n`);
     for (const { key, allowed, found } of staleEntries) {
-      console.log(`  ${key}: allowed ${allowed}, found only ${found}`);
+      log(`  ${key}: allowed ${allowed}, found only ${found}`);
     }
-    console.log("\n\x1b[33mTo fix: Reduce the count in logging-allowlist.txt to match actual violations.\x1b[0m\n");
+    log("\n\x1b[33mTo fix: Reduce the count in logging-allowlist.txt to match actual violations.\x1b[0m\n");
   }
 
-  // Gap 5: Report logger mock violations
   if (newLoggerMockViolations.length > 0) {
     shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${newLoggerMockViolations.length} logger mock violation(s):\x1b[0m\n`
-    );
+    log(`\x1b[31m✗ Found ${newLoggerMockViolations.length} logger mock violation(s):\x1b[0m\n`);
     for (const v of newLoggerMockViolations) {
-      console.log(`  ${v.file}:${v.line} ${v.message}`);
-      console.log(`    ${v.snippet}`);
+      log(`  ${v.file}:${v.line} ${v.message}`);
+      log(`    ${v.snippet}`);
     }
-    console.log("\n\x1b[33mTo fix: Use the real safeLog/toErrorCode/shopHash instead of mocking.\x1b[0m");
-    console.log("\x1b[33mTo allowlist (with justification): add entry to scripts/ci/logger-mock-allowlist.txt\x1b[0m");
-    console.log("\x1b[33mFormat: path: reason (reason must not be 'legacy')\x1b[0m\n");
+    log("\n\x1b[33mTo fix: Use the real safeLog/toErrorCode/shopHash instead of mocking.\x1b[0m");
+    log("\x1b[33mTo allowlist (with justification): add entry to scripts/ci/logger-mock-allowlist.txt\x1b[0m");
+    log("\x1b[33mFormat: path: reason (reason must not be 'legacy')\x1b[0m\n");
   }
 
-  // Gap 5: Stale logger mock allowlist entries FAIL (ratchet)
   if (staleLoggerMockEntries.length > 0) {
     shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${staleLoggerMockEntries.length} stale logger-mock-allowlist entry(ies):\x1b[0m\n`
-    );
+    log(`\x1b[31m✗ Found ${staleLoggerMockEntries.length} stale logger-mock-allowlist entry(ies):\x1b[0m\n`);
     for (const { path: entryPath, reason } of staleLoggerMockEntries) {
-      console.log(`  ${entryPath}: ${reason}`);
+      log(`  ${entryPath}: ${reason}`);
     }
-    console.log("\n\x1b[33mTo fix: Remove the stale entry from scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
+    log("\n\x1b[33mTo fix: Remove the stale entry from scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
   }
 
-  // P3: Invalid logger mock allowlist entries (empty or 'legacy' reason)
   if (invalidLoggerMockEntries.length > 0) {
     shouldFail = true;
-    console.log(
-      `\x1b[31m✗ Found ${invalidLoggerMockEntries.length} invalid logger-mock-allowlist entry(ies):\x1b[0m\n`
-    );
+    log(`\x1b[31m✗ Found ${invalidLoggerMockEntries.length} invalid logger-mock-allowlist entry(ies):\x1b[0m\n`);
     for (const { line, text, issue } of invalidLoggerMockEntries) {
-      console.log(`  Line ${line}: ${text} (${issue})`);
+      log(`  Line ${line}: ${text} (${issue})`);
     }
-    console.log("\n\x1b[33mTo fix: Provide a valid reason (not 'legacy' or empty) in scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
+    log("\n\x1b[33mTo fix: Provide a valid reason (not 'legacy' or empty) in scripts/ci/logger-mock-allowlist.txt\x1b[0m\n");
   }
 
-  process.exit(shouldFail ? 1 : 0);
+  return { exitCode: shouldFail ? 1 : 0, output: outputLines.join("\n") };
 }
 
-main();
+function main(): void {
+  const result = runAnalysis(REPO_ROOT, ALLOWLIST_FILE, LOGGER_MOCK_ALLOWLIST_FILE);
+  console.log(result.output);
+  process.exit(result.exitCode);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main();
+}

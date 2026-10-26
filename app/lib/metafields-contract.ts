@@ -195,6 +195,63 @@ export const METAFIELD = {
 } as const;
 
 /**
+ * #292: Shop config metafield written during OAuth and read by Rust functions.
+ * Contains shop currency for INR-only validation.
+ */
+export const SHOP_CONFIG_METAFIELD = {
+  namespace: "$app",
+  key: "shop_config",
+  type: "json",
+} as const;
+
+/**
+ * #292: The shop config metafield schema.
+ * Written by after-auth and read by Rust functions to determine shop currency.
+ */
+export interface ShopConfig {
+  /** Schema version for forward compatibility. Always 1 for this version. */
+  schemaVersion: 1;
+  /** ISO 4217 currency code (e.g., INR, USD). */
+  currencyCode: string;
+}
+
+/**
+ * #292: Serialize a ShopConfig to a JSON string for metafieldsSet.
+ */
+export function serializeShopConfig(currencyCode: string): string {
+  const config: ShopConfig = {
+    schemaVersion: 1,
+    currencyCode,
+  };
+  return JSON.stringify(config);
+}
+
+/**
+ * #292: Parse a ShopConfig from a JSON string.
+ * Returns null for invalid or malformed JSON (fail-open behavior).
+ */
+export function parseShopConfig(json: string): ShopConfig | null {
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+
+    if (parsed.schemaVersion !== 1) {
+      return null;
+    }
+
+    if (typeof parsed.currencyCode !== "string") {
+      return null;
+    }
+
+    return {
+      schemaVersion: 1,
+      currencyCode: parsed.currencyCode,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Input for serializing credit status from database values.
  * Amounts are already in paise (bigint).
  */

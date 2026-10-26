@@ -18,6 +18,9 @@ import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, useR
 import { useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
+import { buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import {
   fetchShopOnboardingData,
   computeOnboardingState,
@@ -35,11 +38,15 @@ import { ensureMetafieldDefinitions, getMetafieldDefinitionSpecs } from "~/lib/m
 import { METAFIELD } from "~/lib/metafields-contract";
 import {
   getInitialSyncState,
+  getInitialSyncStateWithRecovery,
   enqueueInitialSync,
   canStartSync as canStartSyncServer,
   type InitialSyncStatus,
   type InitialSyncState,
 } from "~/lib/initial-sync.server";
+import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
+import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 
 /**
  * Client-side version of canStartSync to avoid importing server-only module in client code.
@@ -352,14 +359,38 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       state: null,
       registrationStatus: null,
       initialSyncState: null,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      } as NewAccountsPausedBannerState,
     };
   }
+
+  // #292 G1: Read stored currency, then recover if needed (same as /app)
+  // Pass dbData.shopId to avoid re-querying the shop row in checkAndRecoverCurrency
+  const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  // Defensive: handle null/undefined result with fail-closed defaults
+  const currencyResult = await checkAndRecoverCurrency(
+    sql,
+    shopDomain,
+    storedCurrency,
+    admin,
+    dbData.shopId,
+  );
+  const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
+  const currencySupported = isShopCurrencySupported(shopCurrency);
 
   const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
     fetchValidationInfo(admin),
     fetchPaymentCustomizationInfo(admin),
     checkMetafieldDefinitionsStatus(admin),
-    getInitialSyncState(sql, shopDomain),
+    getInitialSyncStateWithRecovery(sql, shopDomain),
   ]);
 
   const validation = validationResult.info;
@@ -390,6 +421,34 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     metafieldStatus
   );
 
+  const gatingEnforced = isGatingEnforced();
+  let newAccountsPausedBanner: NewAccountsPausedBannerState = {
+    show: false,
+    heading: "",
+    bodyText: "",
+    upgradeUrl: null,
+  };
+
+  if (gatingEnforced) {
+    try {
+      const usage = await getUsageStats(sql, dbData.shopId);
+      const upgradeUrl = (() => {
+        const handle = getAppHandle();
+        if (handle === null) return null;
+        return buildPlanSelectionUrl(shopDomain, handle);
+      })();
+      newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+        usage.companies.current,
+        usage.companies.limit,
+        gatingEnforced,
+        upgradeUrl
+      );
+    } catch (err) {
+      safeLog("warn", "usage_stats_error", { shopHash: await shopHash(shopDomain), err: toErrorCode(err) });
+      // Fail soft: no banner on error
+    }
+  }
+
   return {
     error: null,
     state: {
@@ -402,6 +461,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopId: dbData.shopId,
     registrationStatus,
     initialSyncState: syncState,
+    newAccountsPausedBanner,
+    currencySupported,
+    currencyFlipBlocked,
   };
 };
 
@@ -538,6 +600,28 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   if (actionType === "start_sync") {
+    // #292 G1: Recover currency first, then check if supported
+    // Pass shop.id to avoid re-querying the shop row in checkAndRecoverCurrency
+    // Defensive: handle null/undefined result with fail-closed defaults
+    const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
+      SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+    `;
+    const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+    const currencyResult = await checkAndRecoverCurrency(
+      sql,
+      shopDomain,
+      storedCurrency,
+      admin,
+      shop.id,
+    );
+    if (!isShopCurrencySupported(currencyResult?.currency ?? NO_CURRENCY_SENTINEL)) {
+      return {
+        success: false,
+        error: "Sync not available for non-INR stores",
+        action: "start_sync",
+      };
+    }
+
     const syncState = await getInitialSyncState(sql, shopDomain);
 
     if (!canStartSyncServer(syncState.status)) {
@@ -623,8 +707,8 @@ function RegistrationStatusSection({
 
       <s-table>
         <s-table-header-row>
-          <s-table-header>Item</s-table-header>
-          <s-table-header>Status</s-table-header>
+          <s-table-header listSlot="primary">Item</s-table-header>
+          <s-table-header listSlot="inline">Status</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {items.map((item) => (
@@ -684,11 +768,11 @@ function InitialSyncSection({
 
       <s-paragraph>
         {syncState.status === "not_started" &&
-          "Sync your B2B companies and orders to import existing buyer accounts and invoices."}
+          "Sync your B2B companies, tagged customers, and orders to import existing buyer accounts and invoices."}
         {syncState.status === "in_progress" &&
-          "Syncing B2B companies and orders. This may take a few minutes."}
+          "Syncing B2B companies, tagged customers, and orders. This may take a few minutes."}
         {syncState.status === "done" &&
-          "B2B companies and orders have been synced."}
+          "B2B companies, tagged customers, and orders have been synced."}
         {syncState.status === "failed" &&
           "Sync failed. You can retry to attempt the sync again."}
       </s-paragraph>
@@ -724,10 +808,10 @@ function OnboardingChecklist({
 
       <s-table>
         <s-table-header-row>
-          <s-table-header>Status</s-table-header>
-          <s-table-header>Step</s-table-header>
-          <s-table-header>Details</s-table-header>
-          <s-table-header>Action</s-table-header>
+          <s-table-header listSlot="inline">Status</s-table-header>
+          <s-table-header listSlot="primary">Step</s-table-header>
+          <s-table-header listSlot="secondary">Details</s-table-header>
+          <s-table-header listSlot="labeled">Action</s-table-header>
         </s-table-header-row>
         <s-table-body>
           {steps.map((step) => (
@@ -757,7 +841,7 @@ function OnboardingChecklist({
 const POLL_INTERVAL_MS = 5000;
 
 export default function OnboardingPage() {
-  const { error, state, registrationStatus, initialSyncState } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported, currencyFlipBlocked } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -815,6 +899,42 @@ export default function OnboardingPage() {
 
   return (
     <s-page heading="Setup Guide">
+      {/* #292: Currency Flip Blocked Banner (non-INR→INR with existing data) */}
+      {currencyFlipBlocked && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Conversion Not Available">
+            {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
+            Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
+          </s-banner>
+        </s-section>
+      )}
+
+      {/* #292: Currency Not Supported Banner (non-INR shop without blocked flip) */}
+      {!currencySupported && !currencyFlipBlocked && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      )}
+
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
+
       {actionData?.success && actionData.action === "retry_registration" && (
         <s-section>
           <s-banner tone="success" heading="Retry Complete">
@@ -860,13 +980,13 @@ export default function OnboardingPage() {
       {state.isComplete && (
         <s-section>
           <s-banner tone="success" heading="Setup Complete">
-            You&apos;ve completed all setup steps. Your store is ready to use Net
-            Terms Receivables!
+            You&apos;ve completed all setup steps. Your store is ready to use
+            Termwise!
           </s-banner>
         </s-section>
       )}
 
-      <s-section heading="Get Started with Net Terms">
+      <s-section heading="Get Started with Termwise">
         <s-stack gap="base">
           <s-paragraph>
             Complete these steps to set up net terms management for your store.

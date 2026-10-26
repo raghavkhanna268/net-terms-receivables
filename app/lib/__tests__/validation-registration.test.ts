@@ -17,7 +17,7 @@ describe("validation-registration", () => {
                         shopifyFunction: {
                           handle: "credit-check-validation",
                         },
-                        title: "Net Terms Credit Check",
+                        title: "Termwise Credit Check",
                         enabled: true,
                       },
                     },
@@ -61,7 +61,7 @@ describe("validation-registration", () => {
                       shopifyFunction: {
                         handle: "credit-check-validation",
                       },
-                      title: "Net Terms Credit Check",
+                      title: "Termwise Credit Check",
                       enabled: true,
                     },
                     userErrors: [],
@@ -83,7 +83,7 @@ describe("validation-registration", () => {
       expect(createCall[1]).toEqual({
         variables: {
           functionHandle: "credit-check-validation",
-          title: "Net Terms Credit Check",
+          title: "Termwise Credit Check",
         },
       });
     });
@@ -202,7 +202,7 @@ describe("validation-registration", () => {
                       shopifyFunction: {
                         handle: "credit-check-validation",
                       },
-                      title: "Net Terms Credit Check",
+                      title: "Termwise Credit Check",
                       enabled: true,
                     },
                     userErrors: [],

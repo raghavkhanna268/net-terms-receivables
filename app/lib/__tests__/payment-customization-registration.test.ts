@@ -29,7 +29,7 @@ describe("payment-customization-registration", () => {
                   node: {
                     id: "gid://shopify/PaymentCustomization/123",
                     shopifyFunction: { handle: "hide-terms-payment" },
-                    title: "Net Terms Payment Hide",
+                    title: "Termwise Payment Hide",
                     enabled: true,
                   },
                 },
@@ -67,7 +67,7 @@ describe("payment-customization-registration", () => {
               paymentCustomization: {
                 id: "gid://shopify/PaymentCustomization/456",
                 shopifyFunction: { handle: "hide-terms-payment" },
-                title: "Net Terms Payment Hide",
+                title: "Termwise Payment Hide",
                 enabled: true,
               },
               userErrors: [],
@@ -119,7 +119,7 @@ describe("payment-customization-registration", () => {
                   node: {
                     id: "gid://shopify/PaymentCustomization/789",
                     shopifyFunction: { handle: "hide-terms-payment" },
-                    title: "Net Terms Payment Hide",
+                    title: "Termwise Payment Hide",
                     enabled: true,
                   },
                 },
@@ -186,7 +186,7 @@ describe("payment-customization-registration", () => {
                   node: {
                     id: "gid://shopify/PaymentCustomization/123",
                     shopifyFunction: { handle: "hide-terms-payment" },
-                    title: "Net Terms Payment Hide",
+                    title: "Termwise Payment Hide",
                     enabled: true,
                   },
                 },

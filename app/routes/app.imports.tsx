@@ -25,8 +25,10 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
 import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
 import type { PaymentRail } from "~/lib/banks/types";
-import { checkImportLimit, enforceImportLimit, UpgradeRequiredError } from "~/services/gating.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
+import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 /**
  * Maximum rows per import request.
@@ -61,8 +63,8 @@ export function computeDateBounds(now: Date = new Date()): { minDateIso: string;
 /**
  * Valid payment rails for Indian bank transfers.
  */
-const VALID_RAILS = new Set(["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CHEQUE", "OTHER"]);
-type ValidRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CHEQUE" | "OTHER";
+const VALID_RAILS = new Set(["NEFT", "RTGS", "IMPS", "UPI", "ACH", "CMS", "CHEQUE", "OTHER"]);
+type ValidRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CMS" | "CHEQUE" | "OTHER";
 
 /**
  * Valid bank types.
@@ -243,11 +245,11 @@ export function validateImportRequest(body: unknown): { valid: ImportRequest | n
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; currency: string }[]>`
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
@@ -256,22 +258,32 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopDomain,
       shopCurrency: "INR",
       maxImportRows: MAX_IMPORT_ROWS,
-      importsThisMonth: { current: 0, limit: -1, allowed: true },
+      notSupported: false,
     };
   }
 
-  // Get import usage for the current month (IST calendar month)
-  const importCheck = await checkImportLimit(sql, shop.id);
+  // #292: Check currency gate - if not supported, return minimal payload (no preview)
+  if (!isCurrencyGateOpen(shop.currency)) {
+    return {
+      shopDomain,
+      shopCurrency: getEffectiveCurrency(shop.currency),
+      maxImportRows: MAX_IMPORT_ROWS,
+      notSupported: true,
+    };
+  }
+
+  recordAccess(sql, {
+    shopId: shop.id,
+    actor: getActorFromSessionToken(sessionToken, session),
+    action: "imports",
+    recordType: "BankImport",
+  });
 
   return {
     shopDomain,
     shopCurrency: shop.currency ?? "INR",
     maxImportRows: MAX_IMPORT_ROWS,
-    importsThisMonth: {
-      current: importCheck.currentUsage,
-      limit: importCheck.limit,
-      allowed: importCheck.allowed,
-    },
+    notSupported: false,
   };
 };
 
@@ -295,7 +307,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { minDateIso, maxDateIso } = computeDateBounds(now);
 
   // Get shop ID and currency
-  const [shop] = await sql<{ id: string; currency: string }[]>`
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
@@ -306,8 +318,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     );
   }
 
-  // INR only for now (Indian bank statements)
-  if (shop.currency !== "INR") {
+  // #292: Check currency gate - INR only for bank imports
+  if (!isCurrencyGateOpen(shop.currency)) {
     return Response.json(
       { success: false, error: "Only INR currency is supported for bank imports" },
       { status: 400 }
@@ -350,23 +362,6 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   const shopId = shop.id;
-
-  // Enforce monthly import allowance before creating any records
-  try {
-    await enforceImportLimit(sql, shopId);
-  } catch (err) {
-    if (err instanceof UpgradeRequiredError) {
-      return Response.json(
-        {
-          success: false,
-          error: `Monthly import limit reached. You have used ${err.currentUsage} of ${err.limit} imports this month. Upgrade your plan for unlimited imports.`,
-          limitReached: true,
-        },
-        { status: 403 }
-      );
-    }
-    throw err;
-  }
 
   try {
     // Compute dedupe keys server-side for all credits
@@ -605,7 +600,6 @@ interface ImportResult {
   importId?: string;
   error?: string;
   details?: string[];
-  limitReached?: boolean;
   counts?: {
     inserted: number;
     duplicates: number;
@@ -773,7 +767,8 @@ function RailBadge({ rail }: { rail: string }) {
 }
 
 export default function ImportsPage() {
-  const { shopCurrency, maxImportRows, importsThisMonth } = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
+  const { shopCurrency, maxImportRows, notSupported } = loaderData;
   const fetcher = useFetcher<ImportResult>();
 
   const [status, setStatus] = useState<ParseStatus>("idle");
@@ -782,16 +777,12 @@ export default function ImportsPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [overLimitError, setOverLimitError] = useState<{ rowCount: number; limit: number } | null>(null);
-  // Track whether error list is expanded to show all errors
   const [errorsExpanded, setErrorsExpanded] = useState(false);
-  // Track a reset key to properly clear importResult when user resets
   const [resetKey, setResetKey] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isImporting = fetcher.state === "submitting";
 
-  // Update import result when fetcher completes (transitions from non-idle to idle)
-  // Using effect to avoid re-setting on every render
   const prevFetcherState = useRef(fetcher.state);
   useEffect(() => {
     if (prevFetcherState.current !== "idle" && fetcher.state === "idle" && fetcher.data) {
@@ -896,6 +887,19 @@ export default function ImportsPage() {
     }
   }, []);
 
+  // #292: When currency not supported, show only the banner (after all hooks)
+  if (notSupported) {
+    return (
+      <s-page heading="Import Bank Statement">
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
+
   return (
     <s-page heading="Import Bank Statement" key={resetKey}>
       {/* File upload section */}
@@ -907,26 +911,6 @@ export default function ImportsPage() {
             servers.
           </s-paragraph>
 
-          {/* Monthly import usage */}
-          {importsThisMonth.limit !== -1 && (
-            <s-banner 
-              tone={importsThisMonth.allowed ? "info" : "warning"} 
-              heading="Monthly import allowance"
-            >
-              {importsThisMonth.allowed ? (
-                <>
-                  You have used <s-text type="strong">{importsThisMonth.current}</s-text> of{" "}
-                  <s-text type="strong">{importsThisMonth.limit}</s-text> imports this month.
-                </>
-              ) : (
-                <>
-                  You have reached your monthly import limit ({importsThisMonth.current}/{importsThisMonth.limit}).{" "}
-                  <s-link href="/app/plan">Upgrade your plan</s-link> for unlimited imports.
-                </>
-              )}
-            </s-banner>
-          )}
-
           <s-banner tone="info" heading="Per-import limit">
             Each import can include up to <s-text type="strong">{maxImportRows.toLocaleString()}</s-text> credit rows.
             For larger statements, split them into multiple files.
@@ -937,7 +921,7 @@ export default function ImportsPage() {
             type="file"
             accept=".csv,.xls,.xlsx"
             onChange={handleFileSelect}
-            disabled={status === "loading" || !importsThisMonth.allowed}
+            disabled={status === "loading"}
             style={{ marginBottom: "1rem" }}
           />
 
@@ -1068,7 +1052,7 @@ export default function ImportsPage() {
                     </s-paragraph>
                   </s-banner>
                 ) : (
-                  <s-banner tone="critical" heading={importResult.limitReached ? "Monthly import limit reached" : "Import failed"}>
+                  <s-banner tone="critical" heading="Import failed">
                     {importResult.error}
                     {importResult.details && importResult.details.length > 0 && (
                       <s-unordered-list>
@@ -1088,7 +1072,7 @@ export default function ImportsPage() {
                 <s-button variant="secondary" onClick={handleReset}>
                   Upload Another File
                 </s-button>
-                {result.bank !== "UNKNOWN" && result.creditCount > 0 && !importResult?.success && !overLimitError && importsThisMonth.allowed && (
+                {result.bank !== "UNKNOWN" && result.creditCount > 0 && !importResult?.success && !overLimitError && (
                   <s-button 
                     variant="primary" 
                     onClick={handleImport}
@@ -1106,12 +1090,12 @@ export default function ImportsPage() {
             <s-section heading={`Credit Transactions (${result.credits.length})`}>
               <s-table>
                 <s-table-header-row>
-                  <s-table-header>Date</s-table-header>
-                  <s-table-header format="currency">Amount</s-table-header>
-                  <s-table-header>Rail</s-table-header>
-                  <s-table-header>UTR/RRN</s-table-header>
-                  <s-table-header>Payer</s-table-header>
-                  <s-table-header>Narration</s-table-header>
+                  <s-table-header listSlot="labeled">Date</s-table-header>
+                  <s-table-header listSlot="labeled" format="currency">Amount</s-table-header>
+                  <s-table-header listSlot="inline">Rail</s-table-header>
+                  <s-table-header listSlot="primary">UTR/RRN</s-table-header>
+                  <s-table-header listSlot="labeled">Payer</s-table-header>
+                  <s-table-header listSlot="secondary">Narration</s-table-header>
                 </s-table-header-row>
                 <s-table-body>
                   {result.credits.slice(0, 50).map((txn, idx) => (
@@ -1206,7 +1190,7 @@ export default function ImportsPage() {
         </s-paragraph>
         <s-unordered-list>
           <s-list-item>Transaction date and amount</s-list-item>
-          <s-list-item>Payment rail (NEFT/RTGS/IMPS/UPI)</s-list-item>
+          <s-list-item>Payment rail (NEFT/RTGS/IMPS/UPI/CMS)</s-list-item>
           <s-list-item>UTR or reference number</s-list-item>
           <s-list-item>Remitter name and narration (for matching)</s-list-item>
         </s-unordered-list>

@@ -94,8 +94,8 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
       VALUES 
-        (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'gated-buyer@test.com', 'Gated Buyer', NOW()),
-        (${TEST_SHOP_ID}, ${TEST_NONGATED_CUSTOMER_ID}, 'nongated-buyer@test.com', 'Non-Gated Buyer', NOW())
+        (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'gated-buyer@test-example.com', 'Gated Buyer', NOW()),
+        (${TEST_SHOP_ID}, ${TEST_NONGATED_CUSTOMER_ID}, 'nongated-buyer@test-example.com', 'Non-Gated Buyer', NOW())
       ON CONFLICT (shop_id, customer_id) DO NOTHING
     `;
 
@@ -208,7 +208,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   describe("2. sendPaymentReminder - real DB with gating", () => {
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-buyer@test-example.com,nongated-buyer@test-example.com" };
 
     it("skips gated account with gating ON - NO ReminderLog, NO cap consumed", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
@@ -444,71 +444,35 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
   });
 
-  describe("4. Bulk import - checkImportLimit with real DB", () => {
-    it("blocks import when at limit with gating ON (free plan)", async () => {
+  describe("4. Bank imports - unlimited on all plans (T5)", () => {
+    it("getUsageStats returns unlimited importsThisMonth with gating ON", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
-      // Create one import this month (free plan limit is 1)
-      const importId = `import-limit-test-${TEST_SUFFIX}`;
+      // Create several imports this month
       await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', 10, NOW())
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES 
+          (${TEST_SHOP_ID}, 'hdfc', 'import1.xlsx', 10, NOW()),
+          (${TEST_SHOP_ID}, 'hdfc', 'import2.xlsx', 10, NOW()),
+          (${TEST_SHOP_ID}, 'hdfc', 'import3.xlsx', 10, NOW())
       `;
 
-      const { checkImportLimit } = await import("../gating.server");
-      const result = await checkImportLimit(sql, TEST_SHOP_ID);
+      const { getUsageStats } = await import("../gating.server");
+      const stats = await getUsageStats(sql, TEST_SHOP_ID);
 
-      expect(result.allowed).toBe(false);
-      expect(result.currentUsage).toBe(1);
-      expect(result.limit).toBe(1);
-      expect(result.reason).toContain("Import limit reached");
+      // importsThisMonth should always be unlimited
+      expect(stats.importsThisMonth.limit).toBe(-1);
+      expect(stats.importsThisMonth.current).toBe(0);
     });
 
-    it("allows import when under limit with gating ON (free plan)", async () => {
-      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
-
-      // No imports this month
-      const { checkImportLimit } = await import("../gating.server");
-      const result = await checkImportLimit(sql, TEST_SHOP_ID);
-
-      expect(result.allowed).toBe(true);
-      expect(result.currentUsage).toBe(0);
-      expect(result.limit).toBe(1);
-    });
-
-    it("allows import when gating OFF regardless of limit", async () => {
+    it("getUsageStats returns unlimited importsThisMonth with gating OFF", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "0");
 
-      // Create one import this month
-      const importId = `import-limit-off-${TEST_SUFFIX}`;
-      await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', 10, NOW())
-      `;
+      const { getUsageStats } = await import("../gating.server");
+      const stats = await getUsageStats(sql, TEST_SHOP_ID);
 
-      const { checkImportLimit } = await import("../gating.server");
-      const result = await checkImportLimit(sql, TEST_SHOP_ID);
-
-      expect(result.allowed).toBe(true);
-      expect(result.reason).toContain("Gating not enforced");
-    });
-
-    it("allows unlimited imports for starter+ plans with gating ON", async () => {
-      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
-
-      // Upgrade shop to starter
-      await sql`UPDATE "Shop" SET plan_key = 'starter' WHERE id = ${TEST_SHOP_ID}`;
-
-      try {
-        const { checkImportLimit } = await import("../gating.server");
-        const result = await checkImportLimit(sql, TEST_SHOP_ID);
-
-        expect(result.allowed).toBe(true);
-        expect(result.limit).toBe(-1); // Unlimited
-      } finally {
-        // Restore to free plan
-        await sql`UPDATE "Shop" SET plan_key = 'free' WHERE id = ${TEST_SHOP_ID}`;
-      }
+      // importsThisMonth should always be unlimited
+      expect(stats.importsThisMonth.limit).toBe(-1);
     });
   });
 
@@ -543,16 +507,49 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
       };
     }
 
+    interface AccountsActionResult {
+      success: boolean;
+      error?: string;
+      metafieldSyncPending?: boolean;
+      upgradeRequired?: boolean;
+      code?: string;
+      ok?: boolean;
+    }
+
+    interface AccountsActionResultWithStatus {
+      data: AccountsActionResult;
+      status: number | undefined;
+    }
+
+    function extractAccountsActionDataWithStatus(result: unknown): AccountsActionResultWithStatus {
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        "type" in result &&
+        (result as { type: string }).type === "DataWithResponseInit" &&
+        "data" in result &&
+        "init" in result
+      ) {
+        const typed = result as unknown as { data: AccountsActionResult; init: { status?: number } | null };
+        return {
+          data: typed.data,
+          status: typed.init?.status,
+        };
+      }
+      return { data: result as AccountsActionResult, status: undefined };
+    }
+
     /**
      * Call the real accounts action inside request context.
      * Dynamically imports request-context after vi.resetModules() to use the same fresh instance.
+     * Returns both the data and HTTP status for assertions.
      */
     async function callAccountsAction(
       testSql: ReturnType<typeof postgres>,
       shopDomain: string,
       accountId: string,
       formFields: Record<string, string>
-    ): Promise<{ success: boolean; error?: string; metafieldSyncPending?: boolean }> {
+    ): Promise<AccountsActionResultWithStatus> {
       const request = createAccountsRequest(formFields, accountId);
       const context = createMockContext(shopDomain);
       const url = new URL(request.url);
@@ -569,7 +566,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           url,
           pattern: "/app/accounts/:id",
         });
-        return result as { success: boolean; error?: string; metafieldSyncPending?: boolean };
+        return extractAccountsActionDataWithStatus(result);
       });
     }
 
@@ -587,9 +584,13 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         creditLimit: "200000",
       });
 
-      // Should be rejected
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Cannot edit gated accounts");
+      // Should be rejected with 403 response containing upgradeRequired flag
+      expect(result.status).toBe(403);
+      expect(result.data.success).toBe(false);
+      expect(result.data.ok).toBe(false);
+      expect(result.data.upgradeRequired).toBe(true);
+      expect(result.data.code).toBe("plan_limit_account_gated");
+      expect(result.data.error).toContain("plan limit");
 
       // DB row should be unchanged
       const [afterAccount] = await sql<{ creditLimit: string }[]>`
@@ -607,8 +608,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         creditLimit: "200000",
       });
 
-      // Should succeed
-      expect(result.success).toBe(true);
+      // Should succeed (no special status code)
+      expect(result.status).toBeUndefined();
+      expect(result.data.success).toBe(true);
 
       // DB row should be updated
       const [afterAccount] = await sql<{ creditLimit: string }[]>`
@@ -631,8 +633,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         creditLimit: "150000",
       });
 
-      // Should succeed when gating is OFF
-      expect(result.success).toBe(true);
+      // Should succeed when gating is OFF (no special status code)
+      expect(result.status).toBeUndefined();
+      expect(result.data.success).toBe(true);
 
       // Restore original credit limit
       await sql`
@@ -657,8 +660,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           holdReasonCode: "MANUAL_HOLD",
         });
 
-        // Should succeed - holds are NOT gated
-        expect(result.success).toBe(true);
+        // Should succeed - holds are NOT gated (no special status code)
+        expect(result.status).toBeUndefined();
+        expect(result.data.success).toBe(true);
 
         // DB row should be updated
         const [afterAccount] = await sql<{ manualHold: boolean; holdState: string }[]>`
@@ -695,8 +699,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           holdReasonCode: "MANUAL_HOLD",
         });
 
-        // Should succeed - holds are NOT gated
-        expect(result.success).toBe(true);
+        // Should succeed - holds are NOT gated (no special status code)
+        expect(result.status).toBeUndefined();
+        expect(result.data.success).toBe(true);
 
         // DB credit limit should be UNCHANGED (noLimit was ignored)
         const [afterAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`
@@ -736,8 +741,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
           holdReasonCode: "MANUAL_HOLD",
         });
 
-        // Should succeed - holds are NOT gated
-        expect(result.success).toBe(true);
+        // Should succeed - holds are NOT gated (no special status code)
+        expect(result.status).toBeUndefined();
+        expect(result.data.success).toBe(true);
 
         // DB credit limit should be UNCHANGED (creditLimit was ignored)
         const [afterAccount] = await sql<{ creditLimit: string; manualHold: boolean; holdState: string }[]>`

@@ -16,32 +16,11 @@ import {
   getGatedAccountCount,
   isGatingEnforced,
 } from "~/services/gating.server";
-import {
-  type PlanKey,
-  type FeatureKey,
-  ALL_PLAN_KEYS,
-  ALL_FEATURE_KEYS,
-  getPlanConfig,
-  planHasFeature,
-  planLimit,
-} from "~/lib/entitlements";
-import {
-  PLAN_DISPLAY_NAMES,
-  FEATURE_DISPLAY_NAMES,
-} from "~/components/UpgradePrompt";
-import { buildOverLimitBannerState } from "~/lib/over-limit-banner";
+import type { PlanKey } from "~/lib/entitlements";
+import { PLAN_DISPLAY_NAMES } from "~/components/UpgradePrompt";
+import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { safeLog, toErrorCode } from "~/lib/log.server";
-
-const FEATURE_DESCRIPTIONS: Record<FeatureKey, string> = {
-  aging_dashboard: "Track outstanding receivables with aging buckets",
-  unlimited_imports: "Import unlimited bank statements per month",
-  matching: "Automatic matching of payments to invoices",
-  reminders: "Send payment reminders to buyers",
-  credit_holds: "Automatic credit holds for overdue accounts",
-  pdf_statements: "Generate PDF statements for buyers",
-  payer_memory: "Remember payer preferences and patterns",
-  audit_export: "Export audit logs for compliance",
-};
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify } = context;
@@ -61,13 +40,22 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   let gatedCount = 0;
   let error: string | null = null;
 
+  const gatingEnforced = isGatingEnforced();
+
   if (shop) {
     try {
-      [planData, usage, gatedCount] = await Promise.all([
+      // Always call getUsageStats for usage display. Only skip getGatedAccountCount when flag off.
+      const results = await Promise.all([
         resolvePlan(sql, shopDomain),
-        getUsageStats(sql, shop.id),
-        getGatedAccountCount(sql, shop.id),
+        getUsageStats(sql, shop.id).catch((err) => {
+          safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+          return null;
+        }),
+        gatingEnforced ? getGatedAccountCount(sql, shop.id) : Promise.resolve(0),
       ]);
+      planData = results[0];
+      usage = results[1];
+      gatedCount = results[2];
     } catch (err) {
       safeLog("error", "app.plan.load_plan_data_failed", { err: toErrorCode(err) });
       error = "Failed to load plan information. Please try again.";
@@ -75,7 +63,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   }
 
   const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const gatingEnforced = isGatingEnforced();
 
   return {
     storeHandle,
@@ -87,13 +74,29 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           isTest: planData.isTest,
         }
       : null,
-    usage: usage ?? {
-      companies: { current: 0, limit: 3 },
-      importsThisMonth: { current: 0, limit: 1 },
-    },
+    usage,
     gatedCount,
     gatingEnforced,
-    appHandle: process.env.APP_HANDLE ?? "net-terms-receivables",
+    upgradeUrl: (() => {
+      const handle = getAppHandle();
+      if (handle === null) {
+        safeLog("warn", "plan_url_app_handle_missing", {});
+        return null;
+      }
+      return buildPlanSelectionUrl(shopDomain, handle);
+    })(),
+    newAccountsPausedBanner: (gatingEnforced && usage)
+      ? buildNewAccountsPausedBannerState(
+          usage.companies.current,
+          usage.companies.limit,
+          gatingEnforced,
+          (() => {
+            const handle = getAppHandle();
+            if (handle === null) return null;
+            return buildPlanSelectionUrl(shopDomain, handle);
+          })()
+        )
+      : { show: false, heading: "", bodyText: "", upgradeUrl: null },
     error,
   };
 };
@@ -102,134 +105,89 @@ function formatLimit(limit: number): string {
   return limit === -1 ? "Unlimited" : String(limit);
 }
 
-function UsageDisplay({
+/**
+ * UsageDisplay component for showing usage statistics with optional badges.
+ * Exported for testing.
+ */
+export function UsageDisplay({
   current,
   limit,
   label,
+  gatingEnforced,
 }: {
   current: number;
   limit: number;
   label: string;
+  gatingEnforced: boolean;
 }) {
   const isUnlimited = limit === -1;
   const isAtLimit = !isUnlimited && current >= limit;
   const isNearLimit = !isUnlimited && current >= limit * 0.8 && current < limit;
 
+  // When gating is off, just show the count without limit comparison
+  // This avoids showing confusing '0 / 0' for no-plan shops
+  const usageText = gatingEnforced
+    ? `${current} / ${formatLimit(limit)}`
+    : `${current}`;
+
   return (
     <s-paragraph>
       <s-text type="strong">{label}: </s-text>
-      <s-text>
-        {current} / {formatLimit(limit)}
-      </s-text>
-      {isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
-      {!isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
+      <s-text>{usageText}</s-text>
+      {gatingEnforced && isAtLimit && <s-badge tone="critical">At Limit</s-badge>}
+      {gatingEnforced && !isAtLimit && isNearLimit && <s-badge tone="warning">Near Limit</s-badge>}
     </s-paragraph>
-  );
-}
-
-function FeatureComparisonTable({ currentPlanKey }: { currentPlanKey: PlanKey }) {
-  return (
-    <s-table>
-      <s-table-header-row>
-        <s-table-header>Feature</s-table-header>
-        {ALL_PLAN_KEYS.map((planKey) => (
-          <s-table-header key={planKey}>
-            {PLAN_DISPLAY_NAMES[planKey]}
-            {planKey === currentPlanKey && " ✓"}
-          </s-table-header>
-        ))}
-      </s-table-header-row>
-      <s-table-body>
-        {ALL_FEATURE_KEYS.map((feature) => (
-          <s-table-row key={feature}>
-            <s-table-cell>
-              <s-text type="strong">{FEATURE_DISPLAY_NAMES[feature]}</s-text>
-              <br />
-              <s-text>{FEATURE_DESCRIPTIONS[feature]}</s-text>
-            </s-table-cell>
-            {ALL_PLAN_KEYS.map((planKey) => {
-              const plan = getPlanConfig(planKey);
-              const hasFeature = planHasFeature(plan, feature);
-              return (
-                <s-table-cell key={`${feature}-${planKey}`}>
-                  {hasFeature ? (
-                    <s-text tone="success">✓</s-text>
-                  ) : (
-                    <s-text>—</s-text>
-                  )}
-                </s-table-cell>
-              );
-            })}
-          </s-table-row>
-        ))}
-        <s-table-row>
-          <s-table-cell>
-            <s-text type="strong">Company Limit</s-text>
-            <br />
-            <s-text>Maximum buyer accounts</s-text>
-          </s-table-cell>
-          {ALL_PLAN_KEYS.map((planKey) => {
-            const plan = getPlanConfig(planKey);
-            const limit = planLimit(plan, "companies");
-            return (
-              <s-table-cell key={`companies-${planKey}`}>
-                <s-text>{formatLimit(limit)}</s-text>
-              </s-table-cell>
-            );
-          })}
-        </s-table-row>
-        <s-table-row>
-          <s-table-cell>
-            <s-text type="strong">Monthly Import Limit</s-text>
-            <br />
-            <s-text>Bank statement imports per month</s-text>
-          </s-table-cell>
-          {ALL_PLAN_KEYS.map((planKey) => {
-            const plan = getPlanConfig(planKey);
-            const limit = planLimit(plan, "importsPerMonth");
-            return (
-              <s-table-cell key={`imports-${planKey}`}>
-                <s-text>{formatLimit(limit)}</s-text>
-              </s-table-cell>
-            );
-          })}
-        </s-table-row>
-      </s-table-body>
-    </s-table>
   );
 }
 
 export default function PlanPage() {
   const {
-    storeHandle,
     plan,
     usage,
     gatedCount,
     gatingEnforced,
-    appHandle,
+    upgradeUrl,
+    newAccountsPausedBanner,
     error,
   } = useLoaderData<typeof loader>();
 
-  const planKey = (plan?.key ?? "free") as PlanKey;
-  const planName = plan?.name ?? "Free";
+  const planKey = (plan?.key ?? "none") as PlanKey;
+  const planName = plan?.name ?? "No Plan";
   const isTest = plan?.isTest ?? false;
   const displayPlanName = PLAN_DISPLAY_NAMES[planKey] || planName;
 
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
+  const companiesUsed = usage?.companies.current ?? 0;
+  const companiesLimit = usage?.companies.limit ?? -1;
+  // Plan-limit checks only apply when gating is enforced AND usage is available
+  // With none=0, every shop would show "at limit" if we didn't gate this
+  const companiesAtLimit = gatingEnforced && usage && companiesLimit !== -1 && companiesUsed >= companiesLimit;
 
-  const companiesUsed = usage.companies.current;
-  const companiesLimit = usage.companies.limit;
-  const companiesAtLimit = companiesLimit !== -1 && companiesUsed >= companiesLimit;
+  const importsUsed = usage?.importsThisMonth.current ?? 0;
+  const importsLimit = usage?.importsThisMonth.limit ?? -1;
+  const importsAtLimit = gatingEnforced && usage && importsLimit !== -1 && importsUsed >= importsLimit;
 
-  const importsUsed = usage.importsThisMonth.current;
-  const importsLimit = usage.importsThisMonth.limit;
-  const importsAtLimit = importsLimit !== -1 && importsUsed >= importsLimit;
-
-  const canUpgrade = planKey !== "scale";
+  const canUpgrade = planKey !== "unlimited";
   const hasLimitReached = companiesAtLimit || importsAtLimit;
 
   return (
     <s-page heading="Plan & Usage">
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
+
       {/* Error State */}
       {error && (
         <s-section>
@@ -254,33 +212,40 @@ export default function PlanPage() {
             </s-stack>
           </s-section>
 
-          {/* Usage Statistics */}
-          <s-section heading="Usage">
-            <s-stack>
-              <UsageDisplay
-                current={companiesUsed}
-                limit={companiesLimit}
-                label="Buyer Accounts"
-              />
-              <UsageDisplay
-                current={importsUsed}
-                limit={importsLimit}
-                label="Bank Imports This Month"
-              />
+          {/* Usage Statistics - only show when usage data is available */}
+          {usage && (
+            <s-section heading="Usage">
+              <s-stack>
+                <UsageDisplay
+                  current={companiesUsed}
+                  limit={companiesLimit}
+                  label="Buyer Accounts"
+                  gatingEnforced={gatingEnforced}
+                />
+                <UsageDisplay
+                  current={importsUsed}
+                  limit={importsLimit}
+                  label="Bank Imports This Month"
+                  gatingEnforced={gatingEnforced}
+                />
+              </s-stack>
+            </s-section>
+          )}
 
-              {(() => {
-                const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
-                return bannerState.show && (
-                  <s-banner tone="warning" heading={bannerState.heading}>
-                    <s-text>
-                      {bannerState.bodyText}
-                      {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
-                    </s-text>
-                  </s-banner>
-                );
-              })()}
-            </s-stack>
-          </s-section>
+          {/* Over-limit banner - shows gated accounts even when usage unavailable */}
+          {(() => {
+            const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
+            return bannerState.show && (
+              <s-section>
+                <s-banner tone="warning" heading={bannerState.heading}>
+                  <s-text>
+                    {bannerState.bodyText}
+                    {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                  </s-text>
+                </s-banner>
+              </s-section>
+            );
+          })()}
 
           {/* Upgrade Prompt */}
           {canUpgrade && (
@@ -295,13 +260,6 @@ export default function PlanPage() {
                       {importsAtLimit ? " importing bank statements" : ""}.
                     </s-text>
                   </s-banner>
-                ) : hasLimitReached && !gatingEnforced ? (
-                  <s-banner tone="info" heading="Usage Note">
-                    <s-text>
-                      You&apos;ve reached the plan limit, but limits are not currently
-                      enforced.
-                    </s-text>
-                  </s-banner>
                 ) : (
                   <s-paragraph>
                     <s-text>
@@ -310,27 +268,24 @@ export default function PlanPage() {
                   </s-paragraph>
                 )}
 
-                <s-button href={upgradeUrl} target="_top" variant="primary">
-                  View Plans & Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="primary">
+                    View Plans & Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-section>
           )}
 
-          {planKey === "scale" && (
+          {planKey === "unlimited" && (
             <s-section heading="Plan Status">
-              <s-banner tone="success" heading="Scale Plan">
+              <s-banner tone="success" heading="Unlimited Plan">
                 <s-text>
-                  You&apos;re on the Scale plan with unlimited companies and all features.
+                  You&apos;re on the Unlimited plan with unlimited buyer accounts and priority support.
                 </s-text>
               </s-banner>
             </s-section>
           )}
-
-          {/* Feature Comparison */}
-          <s-section heading="Plan Comparison">
-            <FeatureComparisonTable currentPlanKey={planKey} />
-          </s-section>
         </>
       )}
 

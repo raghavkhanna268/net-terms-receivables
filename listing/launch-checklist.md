@@ -1,4 +1,4 @@
-# Launch Checklist — Net Terms Receivables
+# Launch Checklist — Termwise: Net Terms & Credit
 
 > **Status:** Pre-launch checklist for App Store review and production readiness.
 > Items marked ⚠️ are blocking. Items marked **TBD** require decisions.
@@ -70,7 +70,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] **⚠️ Protected Customer Data (PCD) Access Request**
   - Required for: `write_customers`, `write_orders` scopes (write grants read)
   - **Status:** Level 1 plus Name and Email fields already requested in the Partner Dashboard (see [docs/privacy.md](../docs/privacy.md), Protected Customer Data note)
-  - **Owner:** Raghav (Partner Dashboard)
+  - **Owner:** Raghav (Partner Dashboard) — cite [docs/privacy.md Section 2.3](../docs/privacy.md#23-tagged-customer-data) and [Appendix A](../docs/privacy.md#appendix-a-shopify-oauth-scopes)
   - [ ] **PCD Level 1** — Customer data excluding name, address, phone, and email fields
     - [ ] File PCD access request form in Partner Dashboard
     - [ ] Justify data access requirements
@@ -85,7 +85,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 - [ ] **⚠️ Privacy policy URL hosted and accessible**
   - Draft: `docs/privacy.md`
   - [ ] **TBD:** Host on public URL (e.g., /privacy route in app, or external URL)
-  - [ ] Fill in all **TBD** items in privacy policy
+  - [ ] **Raghav: fill privacy.md TBDs** (legal entity, contact email, DPO, effective date, DPA links for Cloudflare and Supabase, Sentry data region)
   - [ ] Legal review of privacy policy
 
 ### GDPR Webhooks

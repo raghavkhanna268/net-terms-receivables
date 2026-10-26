@@ -82,6 +82,7 @@ UTR (Unique Transaction Reference) formats are based on RBI and bank documentati
 - `hdfc-retail-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
 - `hdfc-malformed-synthetic.csv` - Malformed rows for error handling tests (SYNTHETIC)
 - `hdfc-malformed-synthetic.xlsx` - XLSX version of above (SYNTHETIC)
+- `hdfc-review-synthetic.csv` - **App Store reviewer file (FICTIONAL)** - Minimal statement with pinned parse/match behavior for reviewer demonstrations. Contains NEFT, UPI, IMPS credits and one debit. All data is entirely fictional.
 
 ### ICICI Fixtures
 - `icici-retail-synthetic.csv` - Standard retail savings format (SYNTHETIC)

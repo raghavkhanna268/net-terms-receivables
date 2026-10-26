@@ -65,7 +65,7 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
 
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
-      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'cap-buyer@example.test', 'Cap Test Buyer', NOW())
+      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'cap-buyer@test-example.com', 'Cap Test Buyer', NOW())
       ON CONFLICT (shop_id, customer_id) DO NOTHING
     `;
 
@@ -218,7 +218,7 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
   describe("sendPaymentReminder - multiple invoices same day", () => {
     it("two different invoices on the same day both send", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "cap-buyer@test-example.com" };
 
       const invoiceId1 = `inv-multi-1-${TEST_SUFFIX}`;
       const invoiceId2 = `inv-multi-2-${TEST_SUFFIX}`;
@@ -275,7 +275,7 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
   describe("sendPaymentReminder - idempotency under concurrency", () => {
     it("concurrent sendPaymentReminder calls for the same invoice and rule give exactly 1 fetch and exactly 1 ReminderLog row", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "cap-buyer@test-example.com" };
 
       const invoiceId = `inv-idem-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/idem-${TEST_SUFFIX}`;

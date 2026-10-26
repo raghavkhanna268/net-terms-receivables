@@ -34,16 +34,16 @@
   "vars": {
     // Must match shopify.app.toml access_scopes exactly. See docs/scopes.md for audit.
     // CI checks this with scripts/check-scope-sync.ts
-    "SCOPES": "read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations",
+    "SCOPES": "read_draft_orders,read_all_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations",
     "SHOPIFY_APP_URL": "https://net-terms-receivables.raghavkhanna.workers.dev",
-    // Protected Customer Data: Level 1 + Name + Email (confirmed 2026-10-23).
+    // PCD Level 1 (Name, Email): requested/draft, not approved.
     // Enables fetching email and displayName in customer queries.
     // Phone and address are NEVER fetched regardless of this setting.
     "CUSTOMER_PII_FIELDS": "1",
     // S21: App handle for managed pricing page URL.
     // Must match the app name in Partner Dashboard exactly (lowercase, hyphens).
     // Used to build upgrade URL: https://admin.shopify.com/store/{store}/charges/{app_handle}/pricing_plans
-    "APP_HANDLE": "net-terms-receivables",
+    "APP_HANDLE": "net-terms-receivables-1",
     // S21: Plan gating enforcement. Set to "1" or "true" to enable.
     // When OFF (default): Plan resolution, banner, usage work but limits are not enforced.
     // When ON: Over-limit accounts are gated (gated_at set) and blocked from operations.
@@ -60,4 +60,6 @@
   // Secrets are configured via wrangler CLI, not in this file:
   // wrangler secret put SHOPIFY_API_KEY
   // wrangler secret put SHOPIFY_API_SECRET
+  // wrangler secret put REMINDER_UNSUBSCRIBE_SECRET
+  // wrangler secret put REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS  # optional, for key rotation
 }
