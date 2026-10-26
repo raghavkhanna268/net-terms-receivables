@@ -240,6 +240,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
 
     it("flag false sends to gated account on send path", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
       const { sendPaymentReminder } = await import("../reminders.server");
 
       const invoiceId = `inv-send-gated-false-${TEST_SUFFIX}`;
@@ -259,8 +260,31 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
       }
     });
 
+    it("flag '1' does NOT skip gated account (only exact 'true' enables gating)", async () => {
+      (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "1";
+      vi.resetModules();
+      const { sendPaymentReminder } = await import("../reminders.server");
+
+      const invoiceId = `inv-send-gated-one-${TEST_SUFFIX}`;
+      await createInvoiceDueToday(TEST_GATED_ACCOUNT_ID, invoiceId, "#SEND-GATED-ONE");
+
+      const luxonSpy = await setupNoonMock();
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "email-gated-one" }) });
+      vi.stubGlobal("fetch", mockFetch);
+
+      try {
+        const result = await sendPaymentReminder(sql, TEST_SHOP_ID, invoiceId, TEST_RULE_ID, 0, testTimezone, validEnv);
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+        expect(mockFetch).toHaveBeenCalled();
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
     it("flag true skips gated account on send path with no claim/cap", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
+      vi.resetModules();
       const { sendPaymentReminder } = await import("../reminders.server");
 
       const invoiceId = `inv-send-gated-true-${TEST_SUFFIX}`;
@@ -299,6 +323,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
 
     it("flag false sends to gated account on catch-up path", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
       const { sendCatchupReminder } = await import("../reminders.server");
 
       const invoiceId = `inv-catchup-gated-false-${TEST_SUFFIX}`;
@@ -329,6 +354,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
 
     it("flag true skips gated account on catch-up path with no claim/cap", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
+      vi.resetModules();
       const { sendCatchupReminder } = await import("../reminders.server");
 
       const invoiceId = `inv-catchup-gated-true-${TEST_SUFFIX}`;
@@ -376,6 +402,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
 
     it("stage 1 delayed + stage 2 due today: exactly 1 Resend call", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
       const { sendPaymentReminder, sendCatchupReminder } = await import("../reminders.server");
 
       const invoiceId = `inv-race-${TEST_SUFFIX}`;
@@ -434,6 +461,7 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
 
     it("catch-up reverts claim on send failure", async () => {
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
       const { sendCatchupReminder } = await import("../reminders.server");
 
       const invoiceId = `inv-revert-${Date.now()}-${TEST_SUFFIX}`;

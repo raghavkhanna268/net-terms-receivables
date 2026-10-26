@@ -25,7 +25,7 @@
  * - reactivateGatedAccounts() uses the same lock
  *
  * Environment:
- * - PLAN_GATING_ENFORCED: Set to '1' or 'true' to enable enforcement
+ * - PLAN_GATING_ENFORCED: Set to the exact string 'true' to enable enforcement
  *   Default is off (plan resolution, banner, usage work but no blocking)
  */
 
@@ -36,16 +36,11 @@ import {
   isLimitExceeded,
 } from "~/lib/entitlements";
 
-/**
- * Check if plan gating enforcement is enabled.
- * Default is OFF (plan resolution, banner, usage work but no blocking).
- *
- * Only the exact string 'true' enables gating. '1', 'TRUE', ' true', etc. do NOT.
- */
-export function isGatingEnforced(): boolean {
-  const env = process.env.PLAN_GATING_ENFORCED as string | undefined;
-  return env === "true";
-}
+// Import from the tiny leaf module for use within this file
+import { isGatingEnforced } from "./gating-flag.server";
+
+// Re-export so existing imports keep working
+export { isGatingEnforced };
 
 /**
  * Build the lock key string for the ba_limit advisory lock.

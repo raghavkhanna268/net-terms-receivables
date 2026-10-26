@@ -49,23 +49,15 @@ import {
   isAllowlistEnforced,
 } from "./recipient-allowlist.server";
 import { sendViaResend } from "./resend-client.server";
+import { isGatingEnforced } from "./gating-flag.server";
 
 /**
- * Check if plan gating enforcement is enabled.
- * Reads PLAN_GATING_ENFORCED from environment variable.
- * 
+ * Check if a buyer account is active (not gated) for reminder purposes.
+ *
  * NOTE: SQL enqueue does NOT filter gated accounts. TS is the sole gating point.
  * This prevents SQL and TS from disagreeing on gating policy. A gated invoice
  * may be re-enqueued on its due day or within D+1..D+3, but TS drops it before
  * any Resend call. The re-enqueue is bounded by the catch-up window.
- */
-function isGatingEnforced(): boolean {
-  const env = process.env.PLAN_GATING_ENFORCED as string | undefined;
-  return env === "1" || env === "true";
-}
-
-/**
- * Check if a buyer account is active (not gated) for reminder purposes.
  * @param gatedAt - The gated_at timestamp from BuyerAccount
  */
 function isAccountActive(gatedAt: Date | null): boolean {
