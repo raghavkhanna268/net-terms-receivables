@@ -8,7 +8,7 @@
  * All payer names, UTRs, and emails are fabricated with test-* patterns.
  */
 
-import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach, afterAll } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { parseBankStatement } from "~/lib/banks/index";
@@ -70,6 +70,8 @@ import {
 } from "~/lib/matching/score";
 import { isCurrencyGateOpen } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { requestContext } from "~/lib/request-context.server";
+import { action as importAction } from "~/routes/app.imports";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -105,6 +107,46 @@ function getUtcDateString(daysAgo: number): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - daysAgo);
   return d.toISOString().slice(0, 10);
+}
+
+function createMockRequest(body: unknown): Request {
+  return new Request("http://localhost/app/imports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function createMockContext(shopDomain: string) {
+  return {
+    shopify: {
+      authenticate: {
+        admin: vi.fn().mockResolvedValue({
+          session: { shop: shopDomain },
+        }),
+      },
+    },
+  };
+}
+
+async function callImportAction(
+  sql: ReturnType<typeof postgres>,
+  shopDomain: string,
+  body: unknown
+): Promise<Response> {
+  const request = createMockRequest(body);
+  const context = createMockContext(shopDomain);
+  const url = new URL(request.url);
+
+  return requestContext.run({ getSql: () => sql }, async () => {
+    return importAction({
+      request,
+      context: context as never,
+      params: {},
+      url,
+      pattern: "/app/imports",
+    });
+  });
 }
 
 describe("Bank Import Critical Path Tests", () => {
@@ -665,12 +707,45 @@ Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balanc
 
 describeWithDb("Bank Import Critical Path (DB-backed)", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  const TEST_SHOP_DOMAIN = `test-critical-${TEST_SUFFIX}.myshopify.com`;
+  
+  interface TestShopData {
+    shopId: string;
+    shopDomain: string;
+    buyerAccountId: string;
+  }
+  
+  const createdShops: TestShopData[] = [];
+  
+  let testSuffix: string;
+  let testShopDomain: string;
   let testShopId: string;
   let testBuyerAccountId: string;
   let testInvoiceId: string;
   let testInvoiceId2: string;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    for (const shop of createdShops) {
+      try {
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${shop.shopDomain}`;
+        await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${shop.shopDomain}`;
+        await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${shop.shopId}`;
+        await sql`DELETE FROM "Match" WHERE "shopId" = ${shop.shopId}`;
+        await sql`DELETE FROM "Payment" WHERE "shopId" = ${shop.shopId}`;
+        await sql`DELETE FROM "BankImport" WHERE "shopId" = ${shop.shopId}`;
+        await sql`DELETE FROM "PayerAlias" WHERE "buyerAccountId" = ${shop.buyerAccountId}`;
+        await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shop.shopId}`;
+        await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shop.shopId}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${shop.shopId}`;
+      } catch {
+        // Ignore cleanup errors for already-deleted rows
+      }
+    }
+    await sql.end();
+  });
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -678,11 +753,12 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
     enqueueRecomputeCallCount = 0;
     enqueueRecomputeInvoiceIds = [];
 
-    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+    testSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    testShopDomain = `test-critical-${testSuffix}.myshopify.com`;
 
     const [shop] = await sql<{ id: string }[]>`
       INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
-      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'UTC', NOW(), NOW())
+      VALUES (${testShopDomain}, 'INR', 'UTC', NOW(), NOW())
       RETURNING id
     `;
     testShopId = shop.id;
@@ -694,13 +770,15 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, 'COMPANY',
-        ${"co-crit-" + TEST_SUFFIX},
-        ${"loc-crit-" + TEST_SUFFIX},
+        ${"co-crit-" + testSuffix},
+        ${"loc-crit-" + testSuffix},
         'Critical Path Test Wholesale Corp', 500000.00, 'OK', false, false, NOW(), NOW()
       )
       RETURNING id
     `;
     testBuyerAccountId = buyer.id;
+
+    createdShops.push({ shopId: testShopId, shopDomain: testShopDomain, buyerAccountId: testBuyerAccountId });
 
     const [invoice] = await sql<{ id: string }[]>`
       INSERT INTO "Invoice" (
@@ -709,7 +787,7 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
-        ${"order-crit-" + TEST_SUFFIX}, '#91001', 85000.00, 85000.00, 'open',
+        ${"order-crit-" + testSuffix}, '#91001', 85000.00, 85000.00, 'open',
         NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', 'schedule', NOW(), NOW()
       )
       RETURNING id
@@ -723,7 +801,7 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
-        ${"order-crit2-" + TEST_SUFFIX}, '#91002', 85000.00, 85000.00, 'open',
+        ${"order-crit2-" + testSuffix}, '#91002', 85000.00, 85000.00, 'open',
         NOW() - INTERVAL '5 days', NOW() + INTERVAL '25 days', 'schedule', NOW(), NOW()
       )
       RETURNING id
@@ -736,10 +814,10 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
     `;
   });
 
-  afterAll(async () => {
-    if (sql && testShopId) {
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-      await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+  afterEach(async () => {
+    if (testShopId) {
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${testShopDomain}`;
+      await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${testShopDomain}`;
       await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${testShopId}`;
       await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
       await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
@@ -748,9 +826,6 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
       await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
       await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
-    }
-    if (sql) {
-      await sql.end();
     }
   });
 
@@ -833,11 +908,16 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
       })
     );
 
+    const [payment] = await sql<{ id: string }[]>`
+      SELECT id FROM "Payment" WHERE "shopId" = ${testShopId} AND utr = ${syntheticUtr}
+    `;
+    expect(payment).toBeDefined();
+
     await runMatcher(sql, testShopId, { limit: 10 });
 
     const [match] = await sql<{ id: string; invoice_id: string }[]>`
       SELECT id, "invoiceId" as invoice_id FROM "Match"
-      WHERE "shopId" = ${testShopId} AND state = 'suggested'
+      WHERE "shopId" = ${testShopId} AND "paymentId" = ${payment.id} AND state = 'suggested'
       ORDER BY score DESC LIMIT 1
     `;
     expect(match).toBeDefined();
@@ -881,23 +961,19 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
       })
     );
 
+    const [payment] = await sql<{ id: string }[]>`
+      SELECT id FROM "Payment" WHERE "shopId" = ${testShopId} AND utr = ${syntheticUtr}
+    `;
+    expect(payment).toBeDefined();
+
     await runMatcher(sql, testShopId, { limit: 10 });
 
     const [match] = await sql<{ id: string; invoice_id: string }[]>`
       SELECT id, "invoiceId" as invoice_id FROM "Match"
-      WHERE "shopId" = ${testShopId} AND state = 'suggested' AND "invoiceId" = ${testInvoiceId2}
+      WHERE "shopId" = ${testShopId} AND "paymentId" = ${payment.id} AND state = 'suggested'
       ORDER BY score DESC LIMIT 1
     `;
-    
-    if (!match) {
-      const [anyMatch] = await sql<{ id: string; invoice_id: string }[]>`
-        SELECT id, "invoiceId" as invoice_id FROM "Match"
-        WHERE "shopId" = ${testShopId} AND state = 'suggested'
-        ORDER BY score DESC LIMIT 1
-      `;
-      expect(anyMatch).toBeDefined();
-      return;
-    }
+    expect(match).toBeDefined();
 
     await confirmMatch(sql, testShopId, match.id, "test-user");
 
@@ -1011,20 +1087,39 @@ describeWithDb("Bank Import Critical Path (DB-backed)", () => {
     expect(parseFloat(invoice2After.outstanding)).toBe(85000);
   });
 
-  it("INR-only: non-INR shop currency gate blocks imports", async () => {
+  it("INR-only: import action rejects non-INR shop with merchant message", async () => {
+    const usdSuffix = `${Date.now().toString(36)}-usd-${Math.random().toString(36).slice(2, 6)}`;
+    const usdShopDomain = `test-usd-${usdSuffix}.myshopify.com`;
+    
     const [usdShop] = await sql<{ id: string }[]>`
       INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
-      VALUES (${"test-usd-" + TEST_SUFFIX + ".myshopify.com"}, 'USD', 'UTC', NOW(), NOW())
+      VALUES (${usdShopDomain}, 'USD', 'UTC', NOW(), NOW())
       RETURNING id
     `;
+    
+    createdShops.push({ shopId: usdShop.id, shopDomain: usdShopDomain, buyerAccountId: "" });
 
-    try {
-      const isSupported = isCurrencyGateOpen("USD");
-      expect(isSupported).toBe(false);
+    const importPayload = {
+      bank: "HDFC",
+      fileName: "usd-shop-test.csv",
+      credits: [
+        {
+          date: getUtcDateString(2),
+          amountPaise: 5000000,
+          rail: "NEFT",
+          utr: makeValidNeftUtr("13000000006"),
+          payerName: "TEST BUYER",
+          narration: "NEFT CR-TEST BUYER-PAYMENT",
+        },
+      ],
+    };
 
-      expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("store owner must change the store currency to Indian Rupee (INR)");
-    } finally {
-      await sql`DELETE FROM "Shop" WHERE id = ${usdShop.id}`;
-    }
+    const response = await callImportAction(sql, usdShopDomain, importPayload);
+    
+    expect(response.status).toBe(400);
+    
+    const data = await response.json() as { success: boolean; error: string };
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("Only INR currency is supported for bank imports");
   });
 });
