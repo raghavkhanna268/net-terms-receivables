@@ -76,9 +76,9 @@ Termwise is a B2B net-terms receivables management app for Shopify merchants. It
 
 **How do you minimize data access?**
 
-- We fetch only the fields needed for receivables: order ID, name, timestamps (createdAt, processedAt, updatedAt, cancelledAt, closedAt), displayFinancialStatus, displayFulfillmentStatus, totalPriceSet, totalOutstandingSet, paymentTerms, purchasingEntity (company/location IDs), and customer (ID and tags only)
-- We do NOT fetch line items, shipping addresses, or customer contact details (email, phone, address)
-- Protected Customer Data (PCD) Level 1 (Name, Email): requested/draft, not approved (per `docs/scopes.md`); phone and address fields are never fetched
+- The bulk order query fetches only receivables fields: order ID, name, timestamps (createdAt, processedAt, updatedAt, cancelledAt, closedAt), displayFinancialStatus, displayFulfillmentStatus, totalPriceSet, totalOutstandingSet, paymentTerms (including paymentSchedules with dueAt, issuedAt, completedAt, amount), purchasingEntity (company/location IDs), and customer (ID and tags only—no email in orders)
+- The bulk order query does NOT fetch line items, shipping addresses, or customer contact details (email, phone, address). Note: customer email and displayName ARE fetched separately in the customer sync (`CUSTOMER_PII_FIELDS`, gated by PCD approval) for labels, payment matching and reminders (`docs/scopes.md:165`)
+- Protected Customer Data (PCD) Level 1 (Name, Email): completed, pending Shopify review, not yet approved (per `docs/scopes.md`); phone and address fields are never fetched
 - Data request exports (`s22_data_requests`) have 30-day expiration with auto-purge; GDPR `customers/redact` webhook deletes customer-linked data
 - All data is deleted on `shop/redact` webhook (48 hours post-uninstall)
 
