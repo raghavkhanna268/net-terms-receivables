@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { sendBulkMessage } from "~/lib/pgmq.server";
 import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * Webhook handler for bulk operation completion.
@@ -49,9 +50,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   if (status !== "COMPLETED") {
-    console.log(
-      `[webhooks.bulk_operations.finish] Ignoring non-completed operation: ${status}`
-    );
+    const hash = await shopHash(shop);
+    safeLog("info", "bulk_finish_ignored_status", {
+      shopHash: hash,
+      status,
+    });
     return new Response(null, { status: 200 });
   }
 
@@ -61,9 +64,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const bulkType = await lookupBulkOperationType(sql, bulkOperationId);
 
   if (!bulkType) {
-    console.warn(
-      `[webhooks.bulk_operations.finish] Unknown bulk operation ${bulkOperationId}, skipping`
-    );
+    const hash = await shopHash(shop);
+    safeLog("warn", "bulk_finish_unknown_op", {
+      shopHash: hash,
+    });
     return new Response(null, { status: 200 });
   }
 

@@ -19,9 +19,10 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { sendBulkMessage, type BulkMessage, BULK_OPERATIONS_FINISH_TOPIC } from "~/lib/pgmq.server";
+import { sendBulkMessage, type BulkMessage, BULK_OPERATIONS_FINISH_TOPIC, S6_QUEUES } from "~/lib/pgmq.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "./admin-client.server";
 import { safeLog, shopHash } from "~/lib/log.server";
+import { BULK_ERROR_CODES } from "~/services/sync/bulk-jsonl-processor.server";
 
 /**
  * Maximum number of stale operations to check on page load.
@@ -105,11 +106,13 @@ interface StaleBulkOperation {
 /**
  * Find stale bulk operations that need recovery.
  *
- * An operation is stale if:
+ * S25: An operation is stale if:
  * - completed_at IS NULL (not finished)
  * - closed_at IS NULL (not closed by reinstall reset)
  * - failure_count < MAX_FAILURE_COUNT (not already marked failed)
- * - started_at < NOW() - STALE_THRESHOLD_MINUTES
+ * - finish_received_at IS NULL (never received the finish webhook)
+ * - processing_lease_until IS NULL OR < NOW() (not currently being processed)
+ * - started_at < NOW() - STALE_THRESHOLD_MINUTES (old enough)
  * - Shop is still installed (uninstalledAt IS NULL)
  *
  * @param sql - postgres.js SQL client
@@ -127,6 +130,8 @@ export async function findStaleBulkOperations(
     WHERE bo.completed_at IS NULL
       AND bo.closed_at IS NULL
       AND bo.failure_count < ${MAX_FAILURE_COUNT}
+      AND bo.finish_received_at IS NULL
+      AND (bo.processing_lease_until IS NULL OR bo.processing_lease_until < NOW())
       AND bo.started_at < NOW() - INTERVAL '1 minute' * ${thresholdMinutes}
       AND s."uninstalledAt" IS NULL
     ORDER BY bo.started_at ASC
@@ -164,28 +169,70 @@ async function queryShopifyBulkOperationStatus(
 /**
  * Mark a bulk operation as failed by setting failure_count to MAX_FAILURE_COUNT.
  *
+ * S25: Also writes a DLQ row with error code bulk_stale_recovery so the FAILED
+ * initial-sync state can be explained.
+ *
  * Uses conditional UPDATE with completed_at IS NULL and shop to avoid race with
  * concurrent finish webhook processing and cross-shop mismatches.
  *
  * @param sql - postgres.js SQL client
  * @param bulkOperationId - Bulk operation GID
  * @param shop - Shop domain
+ * @param bulkType - Type of bulk operation (for DLQ message)
+ * @param shopifyStatus - Shopify status that caused the failure
  * @returns True if the row was updated, false if already completed
  */
 export async function markBulkOperationFailed(
   sql: Sql,
   bulkOperationId: string,
-  shop: string
+  shop: string,
+  bulkType?: "companies" | "orders" | "customers",
+  _shopifyStatus?: string
 ): Promise<boolean> {
-  const result = await sql`
-    UPDATE s6_bulk_operations
-    SET failure_count = ${MAX_FAILURE_COUNT}
-    WHERE bulk_operation_id = ${bulkOperationId}
-      AND shop = ${shop}
-      AND completed_at IS NULL
-      AND closed_at IS NULL
-  `;
-  return result.count > 0;
+  return sql.begin(async (tx) => {
+    const result = await tx`
+      UPDATE s6_bulk_operations
+      SET failure_count = ${MAX_FAILURE_COUNT}
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND shop = ${shop}
+        AND completed_at IS NULL
+        AND closed_at IS NULL
+      RETURNING bulk_operation_id, bulk_type
+    `;
+    
+    if (result.count === 0) {
+      return false;
+    }
+    
+    // S25: Write DLQ row with bulk_stale_recovery error code
+    const opBulkType = bulkType || result[0]?.bulk_type || "unknown";
+    const dlqMessage: BulkMessage = {
+      topic: BULK_OPERATIONS_FINISH_TOPIC,
+      shop,
+      webhookId: `stale-recovery:${bulkOperationId}`,
+      bulkOperationId,
+      bulkType: opBulkType as "companies" | "orders" | "customers",
+      enqueuedAt: new Date().toISOString(),
+    };
+    
+    await tx`
+      INSERT INTO s6_dead_letter (
+        original_queue,
+        original_msg_id,
+        message,
+        error,
+        dead_lettered_at
+      ) VALUES (
+        ${S6_QUEUES.BULK},
+        ${`stale-recovery-${bulkOperationId}`},
+        ${tx.json(dlqMessage)},
+        ${BULK_ERROR_CODES.STALE_RECOVERY},
+        NOW()
+      )
+    `;
+    
+    return true;
+  });
 }
 
 /**
@@ -273,7 +320,7 @@ async function recoverSingleOperation(
   }
 
   if (status === null) {
-    const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop);
+    const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop, op.bulk_type, "NOT_FOUND");
     return {
       bulkOperationId: op.bulk_operation_id,
       shop: op.shop,
@@ -296,7 +343,7 @@ async function recoverSingleOperation(
     case "FAILED":
     case "CANCELED":
     case "EXPIRED": {
-      const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop);
+      const marked = await markBulkOperationFailed(sql, op.bulk_operation_id, op.shop, op.bulk_type, status);
       return {
         bulkOperationId: op.bulk_operation_id,
         shop: op.shop,

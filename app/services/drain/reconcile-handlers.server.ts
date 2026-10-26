@@ -28,7 +28,7 @@ import type { Sql } from "~/lib/db-light.server";
 import type { SyncResult } from "~/services/sync/types";
 import type { ReconcileStage } from "~/services/sync/bulk-operations.server";
 import { markWebhookProcessed } from "~/services/sync/company.server";
-import { safeLog, shopHash } from "~/lib/log.server";
+import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 import { adminGraphQL } from "./admin-client.server";
 import {
   getBulkCompaniesQuery,
@@ -39,6 +39,13 @@ import {
 import { getBulkCustomersQuery, validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getTagRules } from "~/services/sync/customer.server";
 import { getRequestEnv } from "~/lib/request-context.server";
+import { markNextStageEnqueued } from "~/services/sync/bulk-jsonl-processor.server";
+
+/**
+ * Claim age threshold in minutes for re-claimable claims.
+ * S25: A claim with bulk_operation_id NULL older than this can be reclaimed.
+ */
+const CLAIM_RECLAIM_MINUTES = 5;
 
 /**
  * Extract manualKey from a webhookId if it follows the manual pattern.
@@ -48,6 +55,130 @@ import { getRequestEnv } from "~/lib/request-context.server";
 export function extractManualKey(webhookId: string): string | undefined {
   const match = webhookId.match(/^reconcile:[^:]+:(manual:\d+):/);
   return match ? match[1] : undefined;
+}
+
+/**
+ * Extract chain key from a webhookId.
+ * S25: The chain_key is the day or manual key portion.
+ * 
+ * Patterns:
+ * - reconcile:<shop>:<YYYY-MM-DD>:<stage> -> YYYY-MM-DD
+ * - reconcile:<shop>:manual:<timestamp>:<stage> -> manual:<timestamp>
+ */
+export function extractChainKey(webhookId: string): string | undefined {
+  // Try manual pattern first
+  const manualMatch = webhookId.match(/^reconcile:[^:]+:(manual:\d+):/);
+  if (manualMatch) {
+    return manualMatch[1];
+  }
+  // Try date pattern
+  const dateMatch = webhookId.match(/^reconcile:[^:]+:(\d{4}-\d{2}-\d{2}):/);
+  if (dateMatch) {
+    return dateMatch[1];
+  }
+  return undefined;
+}
+
+/**
+ * Claim a reconcile stage for exactly-once stage starts.
+ * S25: INSERT ON CONFLICT DO NOTHING RETURNING to prevent duplicate ops.
+ * 
+ * A claim with bulk_operation_id NULL older than CLAIM_RECLAIM_MINUTES is re-claimable.
+ * This handles the case where a mutation failed after claiming.
+ * 
+ * @returns true if claimed, false if already claimed by another
+ */
+export async function claimReconcileStage(
+  sql: Sql,
+  chainKey: string,
+  stage: ReconcileStage,
+  shop: string
+): Promise<boolean> {
+  // First try to insert
+  const insertResult = await sql`
+    INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop)
+    VALUES (${chainKey}, ${stage}, ${shop})
+    ON CONFLICT (chain_key, stage) DO NOTHING
+    RETURNING chain_key
+  `;
+  
+  if (insertResult.count > 0) {
+    return true;
+  }
+  
+  // Conflict - check if it's re-claimable (bulk_operation_id NULL and old)
+  const updateResult = await sql`
+    UPDATE s6_reconcile_stage_claims
+    SET claimed_at = now(), bulk_operation_id = NULL
+    WHERE chain_key = ${chainKey}
+      AND stage = ${stage}
+      AND shop = ${shop}
+      AND bulk_operation_id IS NULL
+      AND claimed_at < now() - interval '${sql.unsafe(String(CLAIM_RECLAIM_MINUTES))} minutes'
+    RETURNING chain_key
+  `;
+  
+  return updateResult.count > 0;
+}
+
+/**
+ * Record the bulk_operation_id on a claim after successful mutation.
+ */
+export async function recordClaimBulkOperationId(
+  sql: Sql,
+  chainKey: string,
+  stage: ReconcileStage,
+  bulkOperationId: string
+): Promise<void> {
+  await sql`
+    UPDATE s6_reconcile_stage_claims
+    SET bulk_operation_id = ${bulkOperationId}
+    WHERE chain_key = ${chainKey}
+      AND stage = ${stage}
+  `;
+}
+
+/**
+ * Release a claim on retryable error.
+ * S25: Sets bulk_operation_id to NULL so the claim can be reclaimed after CLAIM_RECLAIM_MINUTES.
+ */
+export async function releaseReconcileStageClaim(
+  sql: Sql,
+  chainKey: string,
+  stage: ReconcileStage
+): Promise<void> {
+  await sql`
+    UPDATE s6_reconcile_stage_claims
+    SET bulk_operation_id = NULL, claimed_at = now()
+    WHERE chain_key = ${chainKey}
+      AND stage = ${stage}
+  `;
+}
+
+/**
+ * Delete claims for a shop (used on uninstall/shop-redact).
+ */
+export async function deleteShopReconcileClaims(
+  sql: Sql,
+  shop: string
+): Promise<number> {
+  const result = await sql`
+    DELETE FROM s6_reconcile_stage_claims
+    WHERE shop = ${shop}
+  `;
+  return result.count;
+}
+
+/**
+ * Purge old reconcile stage claims (older than 30 days).
+ * S25: Called by nightly reconcile or cron.
+ */
+export async function purgeOldReconcileClaims(sql: Sql): Promise<number> {
+  const result = await sql`
+    DELETE FROM s6_reconcile_stage_claims
+    WHERE claimed_at < now() - interval '30 days'
+  `;
+  return result.count;
 }
 
 /**
@@ -140,6 +271,7 @@ async function buildReconcileMutation(
 /**
  * Start a reconcile bulk operation for a shop.
  *
+ * S25: Uses claim mechanism to prevent duplicate ops per chain stage.
  * Executes a bulkOperationRunQuery mutation and registers the operation
  * for tracking. The BULK_OPERATIONS_FINISH webhook will handle completion.
  *
@@ -158,6 +290,24 @@ export async function startReconcileBulkOperation(
   kind: ReconcileStage,
   webhookId: string
 ): Promise<StartReconcileResult> {
+  // S25: Extract chain key and claim the stage before mutation
+  const chainKey = extractChainKey(webhookId);
+  if (chainKey) {
+    const claimed = await claimReconcileStage(sql, chainKey, kind, shop);
+    if (!claimed) {
+      // Another processor already claimed this stage
+      safeLog("info", "reconcile_stage_already_claimed", {
+        shopHash: await shopHash(shop),
+        stage: kind,
+      });
+      return {
+        success: true,
+        action: "skipped",
+        skipReason: "Stage already claimed by another processor",
+      };
+    }
+  }
+
   const mutation = await buildReconcileMutation(sql, shop, kind);
 
   if (!mutation) {
@@ -186,21 +336,51 @@ export async function startReconcileBulkOperation(
   }>(shop, mutation);
 
   if (!result.success) {
+    // S25: Release claim on retryable error so it can be reclaimed
+    if (chainKey && result.retryable !== false) {
+      try {
+        await releaseReconcileStageClaim(sql, chainKey, kind);
+      } catch (releaseErr) {
+        safeLog("warn", "reconcile_claim_release_failed", {
+          shopHash: await shopHash(shop),
+          stage: kind,
+          err: toErrorCode(releaseErr),
+        });
+      }
+    }
     return {
       success: false,
       action: "skipped",
       error: result.error,
+      retryable: result.retryable,
     };
   }
 
   const parsed = parseBulkOperationResult(result.data ?? null);
 
   if (!parsed.success || !parsed.bulkOperationId) {
+    // S25: Release claim on failure so it can be reclaimed
+    if (chainKey) {
+      try {
+        await releaseReconcileStageClaim(sql, chainKey, kind);
+      } catch (releaseErr) {
+        safeLog("warn", "reconcile_claim_release_failed", {
+          shopHash: await shopHash(shop),
+          stage: kind,
+          err: toErrorCode(releaseErr),
+        });
+      }
+    }
     return {
       success: false,
       action: "skipped",
       error: parsed.error || "Failed to start bulk operation",
     };
+  }
+
+  // S25: Record bulk_operation_id on the claim after successful mutation
+  if (chainKey) {
+    await recordClaimBulkOperationId(sql, chainKey, kind, parsed.bulkOperationId);
   }
 
   await registerBulkOperation(
@@ -247,6 +427,9 @@ export async function startReconcileBulkOperation(
  * enqueued (the reset already closed the pipeline). This serializes with the
  * reinstall reset's UPDATE lock on the bulk operation row.
  *
+ * S25: Sets next_stage_enqueued_at atomically before enqueuing to prevent
+ * duplicate nextStage enqueues.
+ *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
  * @param stage - Stage to enqueue (customers or orders)
@@ -261,6 +444,15 @@ export async function enqueueReconcileStage(
   manualKey?: string,
   prevBulkOperationId?: string
 ): Promise<boolean> {
+  // S25: First check if next stage was already enqueued
+  if (prevBulkOperationId) {
+    const markedEnqueued = await markNextStageEnqueued(sql, prevBulkOperationId);
+    if (!markedEnqueued) {
+      // Already enqueued by another processor
+      return false;
+    }
+  }
+
   let webhookId: string;
   if (manualKey) {
     webhookId = `reconcile:${shop}:${manualKey}:${stage}`;

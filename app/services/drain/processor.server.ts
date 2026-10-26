@@ -1500,6 +1500,17 @@ async function processBulkQueue(
         const errorType = bulkResult.errorType;
         const errorCode = bulkResult.errorCode ?? toErrorCode(bulkResult.error);
 
+        // S25: Log failed message with safe fields
+        const hash = await shopHash(msg.message.shop);
+        safeLog("warn", "bulk_message_failed", {
+          topic: msg.message.topic,
+          queue: S6_QUEUES.BULK,
+          errorCode,
+          readCt: msg.read_ct,
+          retryable: errorType === "retryable",
+          shopHash: hash,
+        });
+
         if (errorType === "permanent") {
           // Permanent error (4xx, bad data, exhausted retries) - go to DLQ
           const dlqd = await moveToDeadLetter(
@@ -1516,10 +1527,27 @@ async function processBulkQueue(
             result.deadLetterAlreadyGoneCount++;
           }
         } else if (errorType === "retryable") {
-          // Retryable error - leave message in queue for retry via read_ct
-          // The failure_count was already incremented by processBulkOperation
-          // Message will be retried on next read (visibility timeout reset)
-          result.failed++;
+          // S25: Cap lease contention retries at maxRetries - send to DLQ
+          if (errorCode === "bulk_lease_contention" && msg.read_ct >= config.maxRetries) {
+            const dlqd = await moveToDeadLetter(
+              sql,
+              S6_QUEUES.BULK,
+              msg.msg_id,
+              msg.message,
+              errorCode,
+              msg.read_ct
+            );
+            if (dlqd) {
+              result.deadLettered++;
+            } else {
+              result.deadLetterAlreadyGoneCount++;
+            }
+          } else {
+            // Retryable error - leave message in queue for retry via read_ct
+            // The failure_count was already incremented by processBulkOperation
+            // Message will be retried on next read (visibility timeout reset)
+            result.failed++;
+          }
         } else {
           // Unknown error type or legacy path - use read_ct for DLQ
           if (msg.read_ct >= config.maxRetries) {
