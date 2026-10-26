@@ -30,7 +30,7 @@ By installing or using the App, you agree to these Terms.
 The App provides:
 - B2B invoice tracking and credit management
 - Bank payment reconciliation for matching bank transfers to invoices
-- Payment reminder emails to buyers (not yet enabled)
+- Payment reminder emails to buyers
 - Checkout validation for credit limits and holds
 
 ### 3. Merchant Responsibilities
