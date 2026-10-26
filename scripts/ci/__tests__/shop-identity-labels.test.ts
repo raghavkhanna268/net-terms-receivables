@@ -138,8 +138,12 @@ describe.each(SHOP_LABEL_SCRIPTS)("scripts/readonly/%s.sql", (name) => {
 });
 
 describe("scripts/readonly (all)", () => {
-  it("only the listed scripts label shops, and none uses shop_idx", () => {
-    const files = readdirSync(READONLY_DIR).filter((f) => f.endsWith(".sql"));
+  it("only the listed scripts label shops, and none numbers shops as shop_idx", () => {
+    // initial-sync-timing (#465) uses shop_idx only as its 1 | 2 | reviewer
+    // selector input, not as sort-order numbering; it is out of scope here.
+    const files = readdirSync(READONLY_DIR).filter(
+      (f) => f.endsWith(".sql") && f !== "initial-sync-timing.sql",
+    );
     const labelled = files
       .filter((f) => readFileSync(join(READONLY_DIR, f), "utf8").includes("shop_kind"))
       .map((f) => f.replace(/\.sql$/, ""))
@@ -157,9 +161,16 @@ describe("prod-readonly-query.yml", () => {
   const run = step.run ?? "";
 
   it("adds no free-text inputs", () => {
+    // shop_idx is #465's choice input (1 | 2 | reviewer) for initial-sync-timing
     expect(Object.keys(wf.on.workflow_dispatch.inputs).sort()).toEqual(
-      ["location_id", "msg_ids", "query", "since"],
+      ["location_id", "msg_ids", "query", "shop_idx", "since"],
     );
+    expect((wf.on.workflow_dispatch.inputs.shop_idx as { type?: string }).type).toBe("choice");
+  });
+
+  it("validates and masks E2E_SHOP exactly once", () => {
+    expect(run.match(/E2E="\$\{E2E_SHOP:-\}"/g)).toHaveLength(1);
+    expect(run.match(/echo "::add-mask::\$E2E"/g)).toHaveLength(1);
   });
 
   it("passes both secrets as validated, masked psql vars", () => {
