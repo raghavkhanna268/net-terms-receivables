@@ -421,7 +421,6 @@ async function executeBackstop(
 
     if (backstopResult.applied) {
       safeLog("info", "backstop_applied", {
-        orderGid,
         fulfillmentOrdersHeldCount: backstopResult.fulfillmentOrdersHeld,
       });
     }
@@ -443,7 +442,6 @@ async function executeBackstop(
     const isRetryableError = e instanceof RetryableBackstopError;
 
     safeLog("warn", "backstop_error", {
-      orderGid,
       err: errorCode,
       retryable: isRetryableError,
     });
@@ -473,7 +471,6 @@ async function runBackstopOnly(sql: Sql, message: SyncMessage): Promise<SyncResu
 
   if (!invoiceInfo) {
     safeLog("info", "backstop_redelivery_skipped", {
-      orderGid: message.resourceGid,
       reason: "no_invoice",
     });
     return {

@@ -96,7 +96,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   safeLog("info", "webhook_orders_enqueued", {
     topic: normalizedTopic,
-    orderGid: resourceGid,
   });
 
   return new Response(null, { status: 200 });

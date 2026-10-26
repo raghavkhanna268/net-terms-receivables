@@ -221,7 +221,7 @@ describe("webhooks.orders logging", () => {
     );
   });
 
-  it("success enqueue path emits webhook_orders_enqueued event with topic and orderGid", async () => {
+  it("success enqueue path emits webhook_orders_enqueued event with topic but no orderGid", async () => {
     const testWebhookId = "test-wh-event-check";
     const testOrderGid = "gid://shopify/Order/12345";
     mockVerifyWebhook.mockResolvedValue({
@@ -248,7 +248,9 @@ describe("webhooks.orders logging", () => {
 
     expect(outputStr).toContain("webhook_orders_enqueued");
     expect(outputStr).toContain("ORDERS_CREATE");
-    expect(outputStr).toContain("orderGid");
+    expect(outputStr).not.toContain("orderGid");
+    expect(outputStr).not.toContain("gid://shopify/");
+    expect(outputStr).not.toContain(testOrderGid);
     expect(outputStr).not.toContain(TEST_SHOP);
   });
 });
