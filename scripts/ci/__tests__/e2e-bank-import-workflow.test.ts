@@ -184,7 +184,9 @@ describe("output is counts/booleans/enums only", () => {
     ["fixture_credits", 1.5],
     ["result", "Test Buyer Co"],
     ["result", "10000.00"],
-    ["result", "2026-11-05"],
+    ["result", "2026-10-22"],
+    ["reviewer_demo_invoices_present", "#1001"],
+    ["reviewer_demo_invoices_present", -1],
     ["result", "0b5c3c1e-1111-4222-8333-444455556666"],
     ["result", E2E],
     ["narration", "x"],
@@ -221,7 +223,9 @@ describe("e2e-bank-import-filter.sh", () => {
         "narration=NEFT-SYNT0001-TEST BUYER CO",
         "result=Test Buyer Co",
         "amount=10000.00",
-        "date=2026-11-05",
+        "date=2026-10-22",
+        "reviewer_demo_invoices_present=2",
+        "reviewer_demo_invoices_present=#1001,#1002",
         "error_code=0b5c3c1e-1111-4222-8333-444455556666",
         "Error: duplicate key value violates unique constraint",
         "    at Object.<anonymous> (/x.ts:1:1)",
@@ -230,7 +234,15 @@ describe("e2e-bank-import-filter.sh", () => {
     );
     expect(res.status).toBe(0);
     expect(res.stdout).toBe(
-      ["mode=dry_run", "fixture_credits=3", "app_would_reject=false", "result=imported", "filtered_lines_dropped=9", ""].join(
+      [
+        "mode=dry_run",
+        "fixture_credits=3",
+        "app_would_reject=false",
+        "reviewer_demo_invoices_present=2",
+        "result=imported",
+        "filtered_lines_dropped=10",
+        "",
+      ].join(
         "\n"
       )
     );

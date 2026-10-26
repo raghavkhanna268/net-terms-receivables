@@ -34,10 +34,17 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 const ROOT = process.cwd();
-// Fixture credits are dated 2026-11; pin "now" so the app's date bounds pass.
-const NOW_IN_BOUNDS = new Date("2026-11-20T06:00:00Z");
-// Fixture dates are > now + 7 days here, so the app would reject the file.
-const NOW_OUT_OF_BOUNDS = new Date("2026-10-01T06:00:00Z");
+// Fixture rows are dated 2026-10-22..25; pin "now" so the app's date bounds
+// (now - 2 years .. now + 7 days, computeDateBounds) pass.
+const NOW_IN_BOUNDS = new Date("2026-10-26T06:00:00Z");
+// Fixture dates are > now + 7 days (upper bound) / < now - 2 years (lower
+// bound) here, so the app would reject the file.
+const NOW_OUT_OF_BOUNDS = new Date("2026-10-10T06:00:00Z");
+const NOW_PAST_LOWER_BOUND = new Date("2028-10-26T06:00:00Z");
+// Like seed --reviewer-demo: orders processed 5 days before the seed run
+// (seeded 2026-10-26), Net 30. Invoice.issuedAt = order processedAt.
+const DEMO_ISSUED_AT = new Date("2026-10-21T10:47:00Z");
+const DEMO_DUE_AT = new Date("2026-11-20T10:47:00Z");
 
 function collector() {
   const lines: string[] = [];
@@ -120,7 +127,7 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
         VALUES (
           ${`invoice-e2e-import-${n}-${runId}`}, ${shopId}, ${buyerId},
           ${`gid://shopify/Order/e2e-import-${n}-${runId}`}, ${`#${n}`}, ${amount}, 'open', ${amount},
-          NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+          ${DEMO_ISSUED_AT}, ${DEMO_DUE_AT}, NOW(), NOW()
         )
       `;
     }
@@ -148,6 +155,7 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
     await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
 
     expect(c.out.mode).toBe("dry_run");
+    expect(c.out.reviewer_demo_invoices_present).toBe(2);
     expect(c.out.fixture_bank).toBe("hdfc");
     expect(c.out.fixture_credits).toBe(3);
     expect(c.out.app_would_reject).toBe(false);
@@ -170,6 +178,7 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
     await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
 
     expect(c.out.mode).toBe("apply");
+    expect(c.out.reviewer_demo_invoices_present).toBe(2);
     expect(c.out.result).toBe("imported");
     expect(c.out.rolled_back).toBe(false);
     expect(c.out.import_ids_created).toBe(1);
@@ -202,6 +211,7 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
     for (const dryRun of [false, true]) {
       const c = collector();
       await runE2eBankImport({ sql, env, dryRun, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+      expect(c.out.reviewer_demo_invoices_present).toBe(2);
       expect(c.out.already_imported).toBe(true);
       expect(c.out.noop).toBe(true);
       expect(c.out.result).toBe("noop_already_imported");
@@ -217,6 +227,7 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
       runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit })
     ).rejects.toMatchObject({ code: "shop_currency_not_inr" });
     expect(c.out.shop_currency_inr).toBe(false);
+    expect(c.out.reviewer_demo_invoices_present).toBeUndefined();
     expect((await counts()).imports).toBe("0");
   });
 
@@ -237,18 +248,64 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
     expect((await counts()).imports).toBe("0");
   });
 
-  it("apply refuses rows outside the app's date bounds; dry run flags them", async () => {
+  it.each([
+    ["upper", NOW_OUT_OF_BOUNDS],
+    ["lower", NOW_PAST_LOWER_BOUND],
+  ])("apply refuses rows outside the app's %s date bound; dry run flags them", async (_bound, now) => {
     const c = collector();
     await expect(
-      runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_OUT_OF_BOUNDS, emit: c.emit })
+      runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now, emit: c.emit })
     ).rejects.toMatchObject({ code: "rows_outside_date_bounds" });
     expect(c.out.app_would_reject).toBe(true);
+    expect(c.out.rows_outside_date_bounds).toBe(3);
+    expect(c.out.reviewer_demo_invoices_present).toBe(2);
     expect((await counts()).imports).toBe("0");
 
     const d = collector();
-    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_OUT_OF_BOUNDS, emit: d.emit });
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now, emit: d.emit });
     expect(d.out.app_would_reject).toBe(true);
     expect(d.out.result).toBe("dry_run_ok");
+    expect((await counts()).imports).toBe("0");
+  });
+
+  it("fixture is inside the app's date bounds for real 'now' values through 2028", async () => {
+    for (const now of [NOW_IN_BOUNDS, new Date("2026-12-31T00:00:00Z"), new Date("2028-10-20T00:00:00Z")]) {
+      const c = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now, emit: c.emit });
+      expect(c.out.rows_outside_date_bounds).toBe(0);
+      expect(c.out.app_would_reject).toBe(false);
+    }
+    expect((await counts()).imports).toBe("0");
+  });
+
+  it("reviewer_demo_invoices_present is a read-only 0-2 count printed before any write", async () => {
+    const rename = async (from: string, to: string) => {
+      await sql`UPDATE "Invoice" SET name = ${to} WHERE "shopId" = ${shopId} AND name = ${from}`;
+    };
+    try {
+      await rename("#1002", "#9002");
+      const one = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: one.emit });
+      expect(one.out.reviewer_demo_invoices_present).toBe(1);
+
+      await rename("#1001", "#9001");
+      const none = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: none.emit });
+      expect(none.out.reviewer_demo_invoices_present).toBe(0);
+      expect(none.lines).toContain("reviewer_demo_invoices_present=0");
+    } finally {
+      await rename("#9001", "#1001");
+      await rename("#9002", "#1002");
+    }
+
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const keys = c.lines.map((l) => l.split("=")[0]);
+    const at = keys.indexOf("reviewer_demo_invoices_present");
+    expect(at).toBe(keys.indexOf("shop_currency_inr") + 1);
+    expect(at).toBeLessThan(keys.indexOf("already_imported"));
+    expect(at).toBeLessThan(keys.indexOf("statement_lines_inserted"));
+    expect(c.lines[at]).toBe("reviewer_demo_invoices_present=2");
     expect((await counts()).imports).toBe("0");
   });
 

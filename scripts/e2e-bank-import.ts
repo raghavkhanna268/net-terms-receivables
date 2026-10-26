@@ -24,6 +24,8 @@
  *   (both come only from the E2E_SHOP secret via scripts/ci/e2e-shop-guard.sh)
  * - The Shop row must exist and its stored currency must be exactly INR
  *   (and pass the app's isCurrencyGateOpen)
+ * - Then prints reviewer_demo_invoices_present=<0-2> (read-only count of
+ *   invoices named #1001 / #1002 for the shop; never names, ids or amounts)
  * - Fixture must parse as HDFC with >= 1 credit and pass validateImportRequest
  * - Apply mode refuses rows outside the app's date bounds (computeDateBounds);
  *   dry run reports app_would_reject=true and still computes counts
@@ -80,6 +82,7 @@ export const OUTPUT_KEYS = [
   "shop_guard",
   "shop_found",
   "shop_currency_inr",
+  "reviewer_demo_invoices_present",
   "fixture_bank",
   "fixture_rows_total",
   "fixture_rows_skipped",
@@ -252,6 +255,16 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
   const inr = shop.currency === "INR" && isCurrencyGateOpen(shop.currency);
   emit("shop_currency_inr", inr);
   if (!inr) throw new E2eImportError("shop_currency_not_inr");
+
+  // 2b. Read-only: how many of the reviewer-demo invoices (#1001, #1002) exist
+  // for this shop (0-2). Runs in both modes before any write. Count only: no
+  // names, ids or amounts are printed.
+  const [demo] = await sql<{ n: string }[]>`
+    SELECT COUNT(DISTINCT name)::text AS n
+    FROM "Invoice"
+    WHERE "shopId" = ${shop.id} AND name IN ('#1001', '#1002')
+  `;
+  emit("reviewer_demo_invoices_present", Number(demo?.n ?? 0));
 
   // 3. Parse + validate the fixed fixture with the app's code
   const fixture = await loadFixturePayload(rootDir);

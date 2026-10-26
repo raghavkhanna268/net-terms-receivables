@@ -12,6 +12,9 @@
 # - scripts/e2e-bank-import.ts fails closed (non-zero, before any write) on a
 #   missing DATABASE_URL / SHOP, SHOP != ALLOWED_DEV_STORE, no Shop row, or a
 #   Shop currency that is not INR
+# - Before any write (dry run and live) it prints the read-only count
+#   reviewer_demo_invoices_present=<0-2>: how many invoices named #1001 / #1002
+#   exist for the e2e shop (count only, never names, ids or amounts)
 # - Uses the app's real path: parseBankStatement -> mapCreditsForImport ->
 #   validateImportRequest + date bounds -> insertBankImportRows (shared with
 #   the Imports action) -> runMatcher (creates 'suggested' matches only).
