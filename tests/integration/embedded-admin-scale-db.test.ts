@@ -684,7 +684,8 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
         pagination: { page: number; pageSize: number; totalCount: number };
       };
 
-      expect(data.matches.length).toBeLessThanOrEqual(20);
+      expect(data.matches.length).toBe(20);
+      expect(data.pagination.totalCount).toBeGreaterThan(20);
       expect(data.pagination.pageSize).toBe(20);
       expect(data.pagination.page).toBe(1);
     });
