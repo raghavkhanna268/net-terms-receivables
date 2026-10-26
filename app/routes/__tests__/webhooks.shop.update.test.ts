@@ -538,7 +538,7 @@ describe("webhooks.shop.update", () => {
       expectNoShopDomainInLogs();
     });
 
-    it("flip blocked path logs no shop domain", async () => {
+    it("flip blocked path logs no shop domain and logs flip_blocked event", async () => {
       setupShopInDb("USD", true);
       setupAdminApiResponse("INR");
 
@@ -550,6 +550,22 @@ describe("webhooks.shop.update", () => {
       await args._waitUntil.mock.calls[0][0];
 
       expectNoShopDomainInLogs();
+
+      const allLogCalls = [
+        ...consoleSpy.log.mock.calls,
+        ...consoleSpy.warn.mock.calls,
+        ...consoleSpy.error.mock.calls,
+      ];
+      const flipBlockedLog = allLogCalls.find((call) => {
+        const msg = String(call[0] ?? "");
+        return msg.includes("shop_update_webhook_flip_blocked");
+      });
+      expect(flipBlockedLog).toBeDefined();
+
+      const logJson = JSON.parse(String(flipBlockedLog![0]));
+      expect(logJson.event).toBe("shop_update_webhook_flip_blocked");
+      expect(logJson.shopHash).toBeDefined();
+      expect(Object.keys(logJson)).toEqual(["event", "shopHash"]);
     });
   });
 });

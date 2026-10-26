@@ -13,8 +13,10 @@ import type { Sql } from "~/lib/db-light.server";
  *
  * When a shop's currency changes (INR to non-INR or back), this webhook:
  * 1. Re-reads the live currencyCode from the Admin API (don't trust payload alone)
- * 2. Writes the $app:shop_config metafield FIRST (fail-closed)
- * 3. Updates Shop.currency only if metafield write succeeds
+ * 2. Checks currency flip guard (#364): blocks flip to INR when shop has
+ *    financial rows (Invoice, Payment, s8_draft_orders) via decideShopCurrencyUpdate
+ * 3. Writes the $app:shop_config metafield FIRST (fail-closed)
+ * 4. Updates Shop.currency only if metafield write succeeds
  *
  * Idempotency:
  * - Duplicate deliveries: If nothing changed, no writes occur
@@ -23,6 +25,7 @@ import type { Sql } from "~/lib/db-light.server";
  *
  * Fail-closed:
  * - Never write XXX (unknown) currency
+ * - Block flip to INR when shop has financial rows (guard, #364)
  * - If shop_config write fails, don't update Shop.currency
  * - If Admin API read fails, do nothing
  *
