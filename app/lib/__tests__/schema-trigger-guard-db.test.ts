@@ -46,10 +46,7 @@ const EXPECTED_TRIGGERS: Array<{
   // Snake_case tables with update_updated_at_column() -> NEW.updated_at
   { table: "s8_tagged_customers", trigger: "trigger_s8_tagged_customers_updated_at", fn: "update_updated_at_column", behavioural: false, reason: "FK to Shop" },
   { table: "s8_draft_orders", trigger: "trigger_s8_draft_orders_updated_at", fn: "update_updated_at_column", behavioural: false, reason: "FK to Shop, s8_tagged_customers" },
-
-  // s18_shop_reminder_settings uses set_updated_at() but has snake_case updated_at
-  // This WILL FAIL the catalog check until PR #490 is merged
-  { table: "s18_shop_reminder_settings", trigger: "s18_shop_reminder_settings_updated_at", fn: "set_updated_at", behavioural: false, reason: "FK to Shop" },
+  { table: "s18_shop_reminder_settings", trigger: "s18_shop_reminder_settings_updated_at", fn: "update_updated_at_column", behavioural: false, reason: "FK to Shop" },
 ];
 
 interface TriggerInfo {
