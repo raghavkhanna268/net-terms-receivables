@@ -717,4 +717,471 @@ describeWithDb("Draft Order Sync", () => {
       expect(records).toHaveLength(0);
     });
   });
+
+  describe("#423 draft-order changes trigger credit-status recompute", () => {
+    const TEST_423_SUFFIX = Date.now().toString(36) + "-423";
+    const TEST_INR_SHOP_DOMAIN = `test-423-inr-${TEST_423_SUFFIX}.myshopify.com`;
+    const TEST_INR_SHOP_ID = `shop-423-inr-${TEST_423_SUFFIX}`;
+    const TEST_USD_SHOP_DOMAIN = `test-423-usd-${TEST_423_SUFFIX}.myshopify.com`;
+    const TEST_USD_SHOP_ID = `shop-423-usd-${TEST_423_SUFFIX}`;
+    const TEST_ACCOUNT_A = `account-423-a-${TEST_423_SUFFIX}`;
+    const TEST_ACCOUNT_B = `account-423-b-${TEST_423_SUFFIX}`;
+    const TEST_COMPANY_A_ID = `gid://shopify/Company/co-423-a-${TEST_423_SUFFIX}`;
+    const TEST_LOCATION_A_ID = `gid://shopify/CompanyLocation/loc-423-a-${TEST_423_SUFFIX}`;
+    const TEST_COMPANY_B_ID = `gid://shopify/Company/co-423-b-${TEST_423_SUFFIX}`;
+    const TEST_LOCATION_B_ID = `gid://shopify/CompanyLocation/loc-423-b-${TEST_423_SUFFIX}`;
+
+    beforeAll(async () => {
+      // Create INR shop
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${TEST_INR_SHOP_ID}, ${TEST_INR_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+      `;
+      // Create USD shop (non-INR)
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+        VALUES (${TEST_USD_SHOP_ID}, ${TEST_USD_SHOP_DOMAIN}, 'USD', NOW(), NOW())
+      `;
+      // Create buyer account A
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_ACCOUNT_A}, ${TEST_INR_SHOP_ID}, 'COMPANY', ${TEST_COMPANY_A_ID}, ${TEST_LOCATION_A_ID}, 'Test Account A',
+          NOW(), NOW()
+        )
+      `;
+      // Create buyer account B
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_ACCOUNT_B}, ${TEST_INR_SHOP_ID}, 'COMPANY', ${TEST_COMPANY_B_ID}, ${TEST_LOCATION_B_ID}, 'Test Account B',
+          NOW(), NOW()
+        )
+      `;
+    });
+
+    afterAll(async () => {
+      await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${TEST_INR_SHOP_ID}, ${TEST_USD_SHOP_ID})`;
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${TEST_INR_SHOP_DOMAIN}, ${TEST_USD_SHOP_DOMAIN})`;
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-423-" + TEST_423_SUFFIX + "%"}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_INR_SHOP_ID}`;
+      await sql`DELETE FROM "Shop" WHERE id IN (${TEST_INR_SHOP_ID}, ${TEST_USD_SHOP_ID})`;
+    });
+
+    beforeEach(async () => {
+      await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${TEST_INR_SHOP_ID}, ${TEST_USD_SHOP_ID})`;
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${TEST_INR_SHOP_DOMAIN}, ${TEST_USD_SHOP_DOMAIN})`;
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-423-" + TEST_423_SUFFIX + "%"}`;
+    });
+
+    async function getRecomputeMessages(shopDomain: string): Promise<{ id: string; source: string; buyerAccountId: string; read_ct: number }[]> {
+      return sql<{ id: string; source: string; buyerAccountId: string; read_ct: number }[]>`
+        SELECT
+          message->>'buyerAccountId' AS "buyerAccountId",
+          message->>'source' AS source,
+          msg_id::text AS id,
+          read_ct
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${shopDomain}
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      `;
+    }
+
+    it("create draft with buyer flags the account with source 'draft_change'", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/423-create-${TEST_423_SUFFIX}`,
+        name: "#423-CREATE",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      const result = await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_CREATE",
+        draftOrder,
+        `wh-423-create-${TEST_423_SUFFIX}`
+      );
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(TEST_ACCOUNT_A);
+      expect(messages[0].source).toBe("draft_change");
+    });
+
+    it("update with real change (total changed) flags the account", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-update-${TEST_423_SUFFIX}`;
+
+      // Create initial draft
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-UPDATE', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-UPDATE",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "2000.00", currencyCode: "INR" } }, // Changed from 1000 to 2000
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      const result = await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder,
+        `wh-423-update-${TEST_423_SUFFIX}`
+      );
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("updated");
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(TEST_ACCOUNT_A);
+    });
+
+    it("update with no relevant change doesn't flag", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-noop-${TEST_423_SUFFIX}`;
+
+      // Create initial draft
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-NOOP', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Same data, only name changed (irrelevant)
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-NOOP-RENAMED",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder,
+        `wh-423-noop-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(0);
+    });
+
+    it("move A->B flags both accounts", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-move-${TEST_423_SUFFIX}`;
+
+      // Create initial draft with buyer A
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-MOVE', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Update to buyer B
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-MOVE",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_B_ID },
+          location: { id: TEST_LOCATION_B_ID },
+        },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder,
+        `wh-423-move-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(2);
+      const accountIds = messages.map((m) => m.buyerAccountId).sort();
+      expect(accountIds).toEqual([TEST_ACCOUNT_A, TEST_ACCOUNT_B].sort());
+    });
+
+    it("delete flags the previous buyer", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-delete-${TEST_423_SUFFIX}`;
+
+      // Create initial draft with buyer A
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-DELETE', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-DELETE",
+        createdAt: "2026-10-25T10:00:00Z",
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_DELETE",
+        draftOrder,
+        `wh-423-delete-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(TEST_ACCOUNT_A);
+    });
+
+    it("completed status flags the buyer", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-completed-${TEST_423_SUFFIX}`;
+
+      // Create initial draft with buyer A
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-COMPLETED', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-COMPLETED",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "completed",
+        totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder,
+        `wh-423-completed-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(TEST_ACCOUNT_A);
+    });
+
+    it("null buyer create flags nothing", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/423-nullbuyer-${TEST_423_SUFFIX}`,
+        name: "#423-NULLBUYER",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        // No purchasingEntity - no buyer
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_CREATE",
+        draftOrder,
+        `wh-423-nullbuyer-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(0);
+    });
+
+    it("non-INR shop flags nothing on delete (terminal topic)", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-usd-delete-${TEST_423_SUFFIX}`;
+
+      // Create a buyer account for the USD shop
+      const usdAccountId = `account-423-usd-${TEST_423_SUFFIX}`;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${usdAccountId}, ${TEST_USD_SHOP_ID}, 'COMPANY', ${TEST_COMPANY_A_ID}, ${TEST_LOCATION_A_ID}, 'Test USD Account',
+          NOW(), NOW()
+        )
+      `;
+
+      // Create draft for USD shop (would have been created before currency guard)
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_USD_SHOP_ID}, ${draftOrderId}, ${usdAccountId}, '#423-USD-DELETE', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      try {
+        const draftOrder: ShopifyDraftOrder = {
+          id: draftOrderId,
+          name: "#423-USD-DELETE",
+          createdAt: "2026-10-25T10:00:00Z",
+        };
+
+        await processDraftOrderWebhook(
+          sql,
+          TEST_USD_SHOP_DOMAIN,
+          "DRAFT_ORDERS_DELETE",
+          draftOrder,
+          `wh-423-usd-delete-${TEST_423_SUFFIX}`
+        );
+
+        // Should not flag any accounts for non-INR shop
+        const messages = await getRecomputeMessages(TEST_USD_SHOP_DOMAIN);
+        expect(messages).toHaveLength(0);
+      } finally {
+        await sql`DELETE FROM "BuyerAccount" WHERE id = ${usdAccountId}`;
+      }
+    });
+
+    it("burst of webhooks for one account gives one unread message (debounce)", async () => {
+      // Create multiple drafts for account A in quick succession
+      for (let i = 1; i <= 5; i++) {
+        const draftOrder: ShopifyDraftOrder = {
+          id: `gid://shopify/DraftOrder/423-burst-${i}-${TEST_423_SUFFIX}`,
+          name: `#423-BURST-${i}`,
+          createdAt: "2026-10-25T10:00:00Z",
+          status: "open",
+          totalPriceSet: { shopMoney: { amount: `${i * 1000}.00`, currencyCode: "INR" } },
+          paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+          purchasingEntity: {
+            __typename: "PurchasingCompany",
+            company: { id: TEST_COMPANY_A_ID },
+            location: { id: TEST_LOCATION_A_ID },
+          },
+        };
+
+        await processDraftOrderWebhook(
+          sql,
+          TEST_INR_SHOP_DOMAIN,
+          "DRAFT_ORDERS_CREATE",
+          draftOrder,
+          `wh-423-burst-${i}-${TEST_423_SUFFIX}`
+        );
+      }
+
+      // Should have exactly one unread message for account A
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      const accountAMessages = messages.filter((m) => m.buyerAccountId === TEST_ACCOUNT_A);
+      expect(accountAMessages).toHaveLength(1);
+      expect(accountAMessages[0].read_ct).toBe(0);
+    });
+
+    it("double processing gives the same end state (idempotent)", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-double-${TEST_423_SUFFIX}`;
+
+      // First process: create
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-DOUBLE",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_CREATE",
+        draftOrder,
+        `wh-423-double-1-${TEST_423_SUFFIX}`
+      );
+
+      // Simulate processing the message (set read_ct > 0)
+      await sql`
+        UPDATE pgmq.q_s6_sync
+        SET read_ct = read_ct + 1
+        WHERE message->>'shop' = ${TEST_INR_SHOP_DOMAIN}
+          AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND message->>'buyerAccountId' = ${TEST_ACCOUNT_A}
+      `;
+
+      // Second process: update with change
+      const draftOrder2: ShopifyDraftOrder = {
+        ...draftOrder,
+        totalPriceSet: { shopMoney: { amount: "6000.00", currencyCode: "INR" } },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder2,
+        `wh-423-double-2-${TEST_423_SUFFIX}`
+      );
+
+      // Should have exactly 2 messages (one read, one unread)
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(2);
+      expect(messages.filter((m) => m.read_ct === 0)).toHaveLength(1);
+      expect(messages.filter((m) => m.read_ct > 0)).toHaveLength(1);
+    });
+  });
 });
