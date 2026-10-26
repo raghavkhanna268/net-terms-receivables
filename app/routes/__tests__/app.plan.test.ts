@@ -126,10 +126,7 @@ describe("Plan Page Loader", () => {
     });
 
     expect(result.plan).toBeNull();
-    expect(result.usage).toEqual({
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
-    });
+    expect(result.usage).toBeNull();
     expect(result.gatedCount).toBe(0);
     expect(result.error).toBeNull();
   });
@@ -218,16 +215,16 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-      plan: { key: "none", limits: { companies: 0, importsPerMonth: -1 } },
-      subscriptionId: null,
-      subscriptionName: null,
+      plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
+      subscriptionId: "sub-123",
+      subscriptionName: "Starter",
       isTest: false,
       fromCache: false,
     });
 
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
-      companies: { current: 0, limit: 0 },
-      importsThisMonth: { current: 0, limit: -1 },
+      companies: { current: 15, limit: 25 },
+      importsThisMonth: { current: 3, limit: -1 },
     });
 
     (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(2);
@@ -243,7 +240,56 @@ describe("Plan Page Loader", () => {
     });
 
     expect(result.gatingEnforced).toBe(false);
-    expect(result.gatedCount).toBe(2);
+    // getUsageStats is always called - usage is shown regardless of flag
+    expect(getUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toEqual({
+      companies: { current: 15, limit: 25 },
+      importsThisMonth: { current: 3, limit: -1 },
+    });
+    // When flag is off, gatedCount is 0 (no query made)
+    expect(result.gatedCount).toBe(0);
+    // getGatedAccountCount should not be called when flag is off
+    expect(getGatedAccountCount).not.toHaveBeenCalled();
+  });
+
+  it("returns null usage and no banner when getUsageStats fails", async () => {
+    const { resolvePlan } = await import("~/services/plan.server");
+    const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
+      "~/services/gating.server"
+    );
+    const { getRequestSql } = await import("~/lib/request-context.server");
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
+      subscriptionId: "sub-123",
+      subscriptionName: "Starter",
+      isTest: false,
+      fromCache: false,
+    });
+
+    (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Database connection failed")
+    );
+
+    (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    const { loader } = await import("../app.plan");
+    const result = await loader({
+      request: mockRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    expect(getUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toBeNull();
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(result.newAccountsPausedBanner.heading).toBe("");
   });
 
   it("does not include subscriptionId or fromCache in returned plan", async () => {
@@ -732,5 +778,107 @@ describe("UsageDisplay render tests (T1)", () => {
 
     expect(html).not.toContain("At Limit");
     expect(html).not.toContain("Near Limit");
+  });
+});
+
+/**
+ * T4 Render Tests: PlanPage wiring with null usage.
+ * Verifies Usage section is absent when usage is null.
+ *
+ * Tests the conditional rendering pattern by inspecting the component source
+ * for the {usage && ...} guard around the Usage section.
+ */
+describe("T4 PlanPage component wiring with usage null", () => {
+  it("PlanPage source: Usage section guarded by {usage && ...} conditional", async () => {
+    const { readFileSync } = await import("fs");
+    const planSource = readFileSync("app/routes/app.plan.tsx", "utf-8");
+
+    expect(planSource).toContain("{usage && (");
+    expect(planSource).toContain("<s-section heading=\"Usage\">");
+    
+    const usageGuardMatch = planSource.match(/\{usage\s*&&\s*\(\s*<s-section\s+heading="Usage">/);
+    expect(usageGuardMatch).not.toBeNull();
+  });
+
+  it("UsageDisplay renders Buyer Accounts label (proving Usage section content)", async () => {
+    const { UsageDisplay } = await import("../app.plan");
+
+    const html = renderToString(
+      createElement(UsageDisplay, {
+        current: 10,
+        limit: 25,
+        label: "Buyer Accounts",
+        gatingEnforced: true,
+      })
+    );
+
+    expect(html).toContain("Buyer Accounts");
+    expect(html).toContain("10 / 25");
+  });
+});
+
+/**
+ * T4 Render Tests: Over-limit banner shows even when usage is null.
+ * This verifies the banner was moved outside the {usage && ...} block.
+ */
+describe("T4 Over-limit banner renders when usage is null", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("renders over-limit banner when usage is null but gatedCount > 0", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: null,
+          gatedCount: 3,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    // Over-limit banner should show even when usage is null
+    expect(html).toContain("3 accounts over your plan limit");
+    expect(html).toContain("s-banner");
+  });
+
+  it("does not render over-limit banner when gatedCount is 0 and usage is null", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: null,
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    // No over-limit banner when gatedCount is 0
+    expect(html).not.toContain("accounts over your plan limit");
   });
 });
