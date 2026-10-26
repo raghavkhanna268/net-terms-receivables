@@ -10,10 +10,15 @@
  * 6. Rows with failure_count >= 5 are excluded
  * 7. Uninstalled shops are excluded from global recovery
  * 8. Recovery is idempotent (two calls queue exactly one message)
+ *
+ * ONE CLOCK = THE DB CLOCK. Tests read NOW() from Postgres, then sync the JS
+ * clock to it with vi.setSystemTime(). All date values are derived from that
+ * same DB instant to avoid JS/DB clock disagreement.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { syncClockToDb } from "../../../../tests/helpers/db-clock";
 import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 vi.mock("../admin-client.server", () => ({
@@ -24,9 +29,19 @@ vi.mock("../admin-client.server", () => ({
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+/**
+ * Generate a letters-only random string (a-z) to avoid /\d{5,}/ assertion conflicts.
+ */
+function lettersOnlyId(len: number): string {
+  return Array.from({ length: len }, () =>
+    String.fromCharCode(97 + Math.floor(Math.random() * 26))
+  ).join("");
+}
+
 describeWithDb("bulk-op-recovery (DB-backed)", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-recovery";
+  let dbNow: Date;
+  const TEST_SUFFIX = lettersOnlyId(8) + "-recovery";
   const TEST_SHOP_ID = `shop-recovery-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-recovery-${TEST_SUFFIX}.myshopify.com`;
 
@@ -52,14 +67,31 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    dbNow = await syncClockToDb(sql);
     await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_bulk_operations WHERE shop = ${TEST_SHOP_DOMAIN}`;
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Helper to compute dates relative to the DB instant.
+   */
+  function hoursAgo(n: number): Date {
+    return new Date(dbNow.getTime() - n * 60 * 60 * 1000);
+  }
+
+  function minutesAgo(n: number): Date {
+    return new Date(dbNow.getTime() - n * 60 * 1000);
+  }
+
   describe("findStaleBulkOperations", () => {
     it("finds old open rows (started > threshold ago)", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/stale-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at)
@@ -76,7 +108,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
     it("ignores fresh open rows (started < threshold ago)", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/fresh-${TEST_SUFFIX}`;
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      const tenMinutesAgo = minutesAgo(10);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at)
@@ -92,8 +124,8 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
     it("ignores completed operations", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/completed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
+      const oneHourAgo = hoursAgo(1);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at)
@@ -109,7 +141,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
     it("ignores rows with failure_count >= 5", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/already-failed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
@@ -127,8 +159,8 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const uninstalledShopId = `shop-uninstalled-${TEST_SUFFIX}`;
       const uninstalledShopDomain = `test-uninstalled-${TEST_SUFFIX}.myshopify.com`;
       const bulkOpId = `gid://shopify/BulkOperation/uninstalled-shop-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
+      const oneHourAgo = hoursAgo(1);
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
@@ -153,7 +185,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
     it("ignores closed rows (reinstall_reset) while finding unclosed siblings", async () => {
       const closedOpId = `gid://shopify/BulkOperation/closed-${TEST_SUFFIX}`;
       const unclosedOpId = `gid://shopify/BulkOperation/unclosed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, closed_at, closed_reason)
@@ -179,7 +211,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
   describe("markBulkOperationFailed", () => {
     it("sets failure_count to 5 for open operation", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/mark-failed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count)
@@ -199,8 +231,8 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
     it("returns false for already-completed operation", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/mark-completed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
+      const oneHourAgo = hoursAgo(1);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at, failure_count)
@@ -220,7 +252,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
     it("returns false for closed operation (reinstall_reset)", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/mark-closed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count, closed_at, closed_reason)
@@ -244,7 +276,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/recover-completed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -280,7 +312,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/recover-failed-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -310,7 +342,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/fresh-running-${TEST_SUFFIX}`;
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      const tenMinutesAgo = minutesAgo(10);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -339,7 +371,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/stale-running-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -371,7 +403,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/already-failed-shop-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -401,7 +433,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/idempotent-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -443,7 +475,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
       const bulkOpId = `gid://shopify/BulkOperation/shop-specific-${TEST_SUFFIX}`;
       const otherBulkOpId = `gid://shopify/BulkOperation/other-shop-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
       const otherShopDomain = `test-other-${TEST_SUFFIX}.myshopify.com`;
       const otherShopId = `shop-other-${TEST_SUFFIX}`;
 
@@ -490,9 +522,9 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const bulkOpId1 = `gid://shopify/BulkOperation/limit-test-1-${TEST_SUFFIX}`;
       const bulkOpId2 = `gid://shopify/BulkOperation/limit-test-2-${TEST_SUFFIX}`;
       const bulkOpId3 = `gid://shopify/BulkOperation/limit-test-3-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
-      const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
+      const threeHoursAgo = hoursAgo(3);
+      const fourHoursAgo = hoursAgo(4);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -522,8 +554,8 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/dedupe-webhook-${TEST_SUFFIX}`;
-      const webhookStyleId = `shopify-webhook-${Date.now()}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const webhookStyleId = `shopify-webhook-${dbNow.getTime()}`;
+      const twoHoursAgo = hoursAgo(2);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -542,7 +574,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
         webhookId: webhookStyleId,
         bulkOperationId: bulkOpId,
         bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       })})`;
 
       const { recoverStaleBulkOperationsForShop } = await import("../bulk-op-recovery.server");
@@ -564,7 +596,7 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/topic-test-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
@@ -593,8 +625,8 @@ describeWithDb("bulk-op-recovery (DB-backed)", () => {
 
       const closedOpId = `gid://shopify/BulkOperation/closed-shop-${TEST_SUFFIX}`;
       const unclosedOpId = `gid://shopify/BulkOperation/unclosed-shop-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const closedAt = new Date(Date.now() - 1 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
+      const closedAt = hoursAgo(1);
 
       vi.mocked(adminGraphQL).mockResolvedValue({
         success: true,
