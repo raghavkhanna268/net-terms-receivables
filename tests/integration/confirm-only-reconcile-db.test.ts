@@ -1275,8 +1275,8 @@ describeWithDb("Confirm-only bank reconcile flow: DB integration", () => {
           amountPaise: 500000,
           rail: "NEFT",
           utr: makeValidNeftUtr(`${runId}61`),
-          payerName: "Test Unmatch Co",
-          narration: `NEFT CR-TEST UNMATCH CO-#1001`,
+          payerName: "Test Reject Co",
+          narration: `NEFT CR-TEST REJECT CO-#1001`,
         },
       ];
 
