@@ -17,8 +17,8 @@ Track B2B net-terms invoices, manage credit limits and holds, match Indian bank 
 
 ## App Details
 
-<!-- 488 characters -->
-Net Terms Receivables helps Indian wholesale merchants track outstanding invoices, enforce credit limits, and reconcile bank payments — without spreadsheets. Sync buyer accounts from Shopify B2B Companies or tagged Customers. Track open invoices by aging bucket. Set credit limits and manual holds per buyer. Block checkout or hide payment methods for held accounts. Import Indian bank statements and confirm matches to mark orders paid. Send payment reminders before and after due dates.
+<!-- 497 characters -->
+Built for Indian merchants. Requires INR as the store currency. Track outstanding invoices, enforce credit limits, and reconcile bank payments — without spreadsheets. Sync buyer accounts from Shopify B2B Companies or tagged Customers. Track open invoices by aging bucket. Set credit limits and manual holds per buyer. Block checkout or hide payment methods for held accounts. Import Indian bank statements and confirm matches to mark orders paid. Send payment reminders before and after due dates.
 
 **This app does not lend money, provide financing, or purchase/factor receivables.** It helps merchants track payment terms they extend themselves (App Store requirement 1.1.16).
 
@@ -40,14 +40,47 @@ Net Terms Receivables helps Indian wholesale merchants track outstanding invoice
 
 ## Pricing Details
 
-**[OWNER]** Pricing not finalized. Create plans in Partner Dashboard before submission.
+| Plan | Monthly | Annual | Buyer Accounts | Support |
+|------|---------|--------|----------------|---------|
+| Starter | $9/month | $90/year | Up to 25 | Standard |
+| Growth | $19/month | $190/year | Up to 100 | Standard |
+| Unlimited | $29/month | $290/year | Unlimited | Priority |
 
-Spec: Define pricing tiers in the Partner Dashboard "Pricing" section. Use Shopify App Pricing (recommended) or Billing API. Include free trial if applicable.
+- **30-day free trial** on all plans
+- **Annual billing** at 10× monthly (2 months free)
+- **Every feature included** on every plan
+- **No free plan**
+- **Development and partner stores:** free
+
+Spec: Configure these plans in the Partner Dashboard "Pricing" section using Shopify App Pricing (recommended) or Billing API.
 Ref: https://shopify.dev/docs/apps/launch/billing
+
+### DRAFT: Top features (per plan, for the Partner Dashboard plan descriptions; final copy owned by Wholesale Terms Builder)
+
+**Starter (up to 25 buyer accounts)**
+- Up to 25 buyer accounts · All features included
+
+**Growth (up to 100 buyer accounts)**
+- Up to 100 buyer accounts · All features included
+
+**Unlimited**
+- Unlimited buyer accounts · Priority support · All features included
+
+**All plans include:**
+- Sync buyer accounts from B2B Companies or tagged Customers
+- Track invoices with aging buckets (current through 90+ days)
+- Set credit limits and manual holds per buyer
+- Block checkout when accounts are on hold or over limit
+- Hide payment methods for held accounts at checkout
+- Import HDFC, ICICI, SBI, Axis bank statements (browser-side)
+- Match payments to invoices; confirm to mark orders paid
+- Send payment reminders before and after due dates
 
 ---
 
 ## App Icon
+
+**Icon:** `listing/icon.png` *(draft, pending Raghav's approval)*
 
 **[OWNER]** Upload a 1200×1200 px square JPEG or PNG.
 
@@ -185,6 +218,7 @@ The app accesses **Level 1 + Name + Email** protected customer fields.
 - **Shopify Plan:** Basic, Grow, Advanced, or Shopify Plus
 - **B2B (optional):** B2B features require B2B on the store (not available on Starter or Retail plans)
 - **Region:** Optimized for Indian merchants (bank statement formats for HDFC, ICICI, SBI, Axis; INR currency; IST timezone)
+- **Currency:** Requires INR as the store currency (v1)
 
 ---
 

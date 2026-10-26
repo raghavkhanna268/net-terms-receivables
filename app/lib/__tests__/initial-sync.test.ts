@@ -19,6 +19,20 @@ const mockSql = Object.assign(vi.fn(), {
   json: vi.fn((obj) => JSON.stringify(obj)),
 });
 
+// #292: Helper to wrap mockImplementation with default currency check for INR shops
+function wrapWithCurrencyCheck(
+  handler: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>
+) {
+  return (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const query = strings.join("?");
+    // Handle currency query from enqueueInitialSync
+    if (query.includes("currency") && query.includes("Shop") && query.includes("SELECT")) {
+      return Promise.resolve([{ currency: "INR" }]);
+    }
+    return handler(strings, ...values);
+  };
+}
+
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
 }));
@@ -354,7 +368,7 @@ describe("initial-sync.server", () => {
 
     it("companies in_progress + OLD failed orders = in_progress (not failed), retry blocked", async () => {
       const companiesStarted = new Date("2026-10-24T10:00:00Z");
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("s6_bulk_operations") && query.includes("companies")) {
           return Promise.resolve([
@@ -377,7 +391,7 @@ describe("initial-sync.server", () => {
           return Promise.resolve([]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { getInitialSyncState, enqueueInitialSync } = await import("../initial-sync.server");
       const state = await getInitialSyncState(mockSql as unknown as Sql, "test.myshopify.com");
@@ -468,7 +482,7 @@ describe("initial-sync.server", () => {
   describe("enqueueInitialSync", () => {
     it("returns in_progress when latest run is still running", async () => {
       const companiesStarted = new Date("2026-10-24T10:00:00Z");
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
@@ -491,7 +505,7 @@ describe("initial-sync.server", () => {
           return Promise.resolve([{ count: "0" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { enqueueInitialSync } = await import("../initial-sync.server");
       const result = await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
@@ -501,13 +515,13 @@ describe("initial-sync.server", () => {
     });
 
     it("returns already_queued when manual message already in queue", async () => {
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([{ msg_id: "123" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { enqueueInitialSync } = await import("../initial-sync.server");
       const result = await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
@@ -521,7 +535,7 @@ describe("initial-sync.server", () => {
       let sentMessage: ReconcileMessage | null = null;
       const companiesStarted = new Date("2026-10-24T10:00:00Z");
 
-      mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
@@ -552,7 +566,7 @@ describe("initial-sync.server", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { enqueueInitialSync } = await import("../initial-sync.server");
       const result = await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
@@ -566,7 +580,7 @@ describe("initial-sync.server", () => {
     it("enqueues with manual webhookId format", async () => {
       let sentMessage: ReconcileMessage | null = null;
 
-      mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
@@ -582,7 +596,7 @@ describe("initial-sync.server", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { enqueueInitialSync } = await import("../initial-sync.server");
       await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
@@ -594,7 +608,7 @@ describe("initial-sync.server", () => {
     it("logs use shopHash, no domain or webhookId", async () => {
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
@@ -606,7 +620,7 @@ describe("initial-sync.server", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { enqueueInitialSync } = await import("../initial-sync.server");
       await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
@@ -647,7 +661,7 @@ describe("initial-sync.server", () => {
     it("matches ReconcileMessage shape from reconcile.server.ts", async () => {
       let sentMessage: unknown = null;
 
-      mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
         if (query.includes("pgmq.q_s6_sync") && query.includes("manual")) {
           return Promise.resolve([]);
@@ -663,7 +677,7 @@ describe("initial-sync.server", () => {
           return Promise.resolve([{ send: "1" }]);
         }
         return Promise.resolve([]);
-      });
+      }));
 
       const { enqueueInitialSync } = await import("../initial-sync.server");
       await enqueueInitialSync(mockSql as unknown as Sql, "test.myshopify.com");
@@ -801,6 +815,94 @@ describe("initial-sync.server", () => {
 
       const { getInitialSyncState } = await import("../initial-sync.server");
       const result = await getInitialSyncState(mockSql as unknown as Sql, "test-s8-queuedcust.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
+    });
+  });
+
+  describe("getInitialSyncStateWithRecovery", () => {
+    it("returns state without triggering recovery when status is not in_progress", async () => {
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-not-started.myshopify.com");
+
+      expect(result.status).toBe("not_started");
+    });
+
+    it("returns state without triggering recovery when operation is fresh", async () => {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/fresh-recovery",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: tenMinutesAgo,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-fresh.myshopify.com");
+
+      expect(result.status).toBe("in_progress");
+    });
+
+    it("continues to return state even if recovery throws an error", async () => {
+      vi.doMock("~/services/drain/bulk-op-recovery.server", () => ({
+        recoverStaleBulkOperationsForShop: vi.fn().mockRejectedValue(new Error("Recovery failed")),
+        STALE_THRESHOLD_MINUTES: 60,
+      }));
+
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("");
+        if (query.includes("s6_bulk_operations") && query.includes("companies")) {
+          return Promise.resolve([
+            {
+              bulk_operation_id: "gid://shopify/BulkOperation/stale-recovery-error",
+              reconcile_stage: "companies",
+              completed_at: null,
+              failure_count: 0,
+              started_at: twoHoursAgo,
+            },
+          ]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("customers")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("orders")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { getInitialSyncStateWithRecovery } = await import("../initial-sync.server");
+      const result = await getInitialSyncStateWithRecovery(mockSql as unknown as Sql, "test-recovery-error.myshopify.com");
 
       expect(result.status).toBe("in_progress");
     });

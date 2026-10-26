@@ -94,8 +94,8 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
       VALUES 
-        (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'gated-buyer@test.com', 'Gated Buyer', NOW()),
-        (${TEST_SHOP_ID}, ${TEST_NONGATED_CUSTOMER_ID}, 'nongated-buyer@test.com', 'Non-Gated Buyer', NOW())
+        (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'gated-buyer@test-example.com', 'Gated Buyer', NOW()),
+        (${TEST_SHOP_ID}, ${TEST_NONGATED_CUSTOMER_ID}, 'nongated-buyer@test-example.com', 'Non-Gated Buyer', NOW())
       ON CONFLICT (shop_id, customer_id) DO NOTHING
     `;
 
@@ -208,7 +208,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   });
 
   describe("2. sendPaymentReminder - real DB with gating", () => {
-    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+    const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-buyer@test-example.com,nongated-buyer@test-example.com" };
 
     it("skips gated account with gating ON - NO ReminderLog, NO cap consumed", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
@@ -444,71 +444,35 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
     });
   });
 
-  describe("4. Bulk import - checkImportLimit with real DB", () => {
-    it("blocks import when at limit with gating ON (free plan)", async () => {
+  describe("4. Bank imports - unlimited on all plans (T5)", () => {
+    it("getUsageStats returns unlimited importsThisMonth with gating ON", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "1");
 
-      // Create one import this month (free plan limit is 1)
-      const importId = `import-limit-test-${TEST_SUFFIX}`;
+      // Create several imports this month
       await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', 10, NOW())
+        INSERT INTO "BankImport" ("shopId", bank, "fileName", "rowCount", "createdAt")
+        VALUES 
+          (${TEST_SHOP_ID}, 'hdfc', 'import1.xlsx', 10, NOW()),
+          (${TEST_SHOP_ID}, 'hdfc', 'import2.xlsx', 10, NOW()),
+          (${TEST_SHOP_ID}, 'hdfc', 'import3.xlsx', 10, NOW())
       `;
 
-      const { checkImportLimit } = await import("../gating.server");
-      const result = await checkImportLimit(sql, TEST_SHOP_ID);
+      const { getUsageStats } = await import("../gating.server");
+      const stats = await getUsageStats(sql, TEST_SHOP_ID);
 
-      expect(result.allowed).toBe(false);
-      expect(result.currentUsage).toBe(1);
-      expect(result.limit).toBe(1);
-      expect(result.reason).toContain("Import limit reached");
+      // importsThisMonth should always be unlimited
+      expect(stats.importsThisMonth.limit).toBe(-1);
+      expect(stats.importsThisMonth.current).toBe(0);
     });
 
-    it("allows import when under limit with gating ON (free plan)", async () => {
-      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
-
-      // No imports this month
-      const { checkImportLimit } = await import("../gating.server");
-      const result = await checkImportLimit(sql, TEST_SHOP_ID);
-
-      expect(result.allowed).toBe(true);
-      expect(result.currentUsage).toBe(0);
-      expect(result.limit).toBe(1);
-    });
-
-    it("allows import when gating OFF regardless of limit", async () => {
+    it("getUsageStats returns unlimited importsThisMonth with gating OFF", async () => {
       vi.stubEnv("PLAN_GATING_ENFORCED", "0");
 
-      // Create one import this month
-      const importId = `import-limit-off-${TEST_SUFFIX}`;
-      await sql`
-        INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
-        VALUES (${importId}, ${TEST_SHOP_ID}, 'hdfc', 'test.xlsx', 10, NOW())
-      `;
+      const { getUsageStats } = await import("../gating.server");
+      const stats = await getUsageStats(sql, TEST_SHOP_ID);
 
-      const { checkImportLimit } = await import("../gating.server");
-      const result = await checkImportLimit(sql, TEST_SHOP_ID);
-
-      expect(result.allowed).toBe(true);
-      expect(result.reason).toContain("Gating not enforced");
-    });
-
-    it("allows unlimited imports for starter+ plans with gating ON", async () => {
-      vi.stubEnv("PLAN_GATING_ENFORCED", "1");
-
-      // Upgrade shop to starter
-      await sql`UPDATE "Shop" SET plan_key = 'starter' WHERE id = ${TEST_SHOP_ID}`;
-
-      try {
-        const { checkImportLimit } = await import("../gating.server");
-        const result = await checkImportLimit(sql, TEST_SHOP_ID);
-
-        expect(result.allowed).toBe(true);
-        expect(result.limit).toBe(-1); // Unlimited
-      } finally {
-        // Restore to free plan
-        await sql`UPDATE "Shop" SET plan_key = 'free' WHERE id = ${TEST_SHOP_ID}`;
-      }
+      // importsThisMonth should always be unlimited
+      expect(stats.importsThisMonth.limit).toBe(-1);
     });
   });
 

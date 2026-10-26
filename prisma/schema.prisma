@@ -294,6 +294,15 @@ model BuyerAccount {
   /// S18: Source of the opt-out: 'merchant' (toggle) or 'link' (unsubscribe).
   /// NULL when reminderOptOutAt is NULL. Both must be set together.
   reminderOptOutSource   ReminderOptOutSource?
+  /// B2B main contact email for payment reminders. NULL for TAGGED_CUSTOMER kind.
+  /// Requires CUSTOMER_PII_FIELDS=1 and write_companies + write_customers scopes.
+  mainContactEmail       String?
+  /// B2B main contact display name for payment reminders. NULL for TAGGED_CUSTOMER kind.
+  /// Requires CUSTOMER_PII_FIELDS=1 and write_companies + write_customers scopes.
+  mainContactName        String?
+  /// B2B main contact's Shopify Customer GID. Used by customers/redact to match and null the PII.
+  /// NULL for TAGGED_CUSTOMER kind.
+  mainContactCustomerId  String?
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -677,6 +686,10 @@ model S6BulkOperation {
   reconcileStage  String?   @map("reconcile_stage")
   failureCount    Int       @default(0) @map("failure_count")
   chunkSize       Int       @default(524288) @map("chunk_size")
+  /// When the operation was closed. NULL means open.
+  closedAt        DateTime? @map("closed_at") @db.Timestamptz(6)
+  /// Why the operation was closed. Currently only 'reinstall_reset'.
+  closedReason    String?   @map("closed_reason")
 
   @@map("s6_bulk_operations")
 }

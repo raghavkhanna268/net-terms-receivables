@@ -24,14 +24,15 @@
 | Offline tokens | `Session.accessToken` (`:123`), `Session.refreshToken` (`:132`) | Until session deletion | Part of Session table; deleted with sessions | `prisma/schema.prisma:116-140` |
 | BuyerAccount.name | `BuyerAccount.name` | Until customers/redact (anonymized to "Redacted Customer") or shop/redact (CASCADE) | `redactCustomer()` at `compliance.server.ts:405-413` | `prisma/schema.prisma` |
 | Tagged customer PII | `s8_tagged_customers.email`, `s8_tagged_customers.display_name` | Until customers/redact or shop/redact; minimised on tag removal only if no open invoices | `minimiseCustomerPiiIfInactive()` at `compliance.server.ts:971-995`, called from `customer.server.ts:388` | See Notes |
-| AuditEvent | `AuditEvent` | Until shop/redact (CASCADE) | No separate retention purge — not implemented | `prisma/schema.prisma` |
+| AuditEvent (access.* events) | `AuditEvent` | 365 days | pg_cron job `audit_purge_access_events_365d` at 03:30 UTC daily; deletes rows where `type LIKE 'access.%' AND at < NOW() - INTERVAL '365 days'`; also deleted on shop/redact via CASCADE | `prisma/migrations/20261115000000_access_event_purge/migration.sql` |
+| AuditEvent (financial events) | `AuditEvent` | Until shop/redact (CASCADE) | Financial events (match.*, invoice.*, account.*) are not purged by schedule; deleted only by shop/redact FK cascade (`compliance.server.ts:230`, `prisma/migrations/20261022000001_s5_data_model/migration.sql:284`) | `prisma/schema.prisma` |
 | Backstop processed orders | `backstop_processed_orders` | 30 days | pg_cron job `backstop-purge-30d` at 03:00 UTC daily | `prisma/migrations/20261028000000_s13_backstop_table/migration.sql:61-65` |
 | Customer PII fallback counts | `s10b_customer_pii_fallback` | 90 days | pg_cron job `s10b_purge_old_pii_fallback` at 04:15 UTC daily; also deleted on shop/redact (`compliance.server.ts:156`) | `prisma/migrations/20261027000000_s10b_customer_pii_fallback/migration.sql:47-51` |
 | Order outstanding missing counts | `order_outstanding_missing` | 90 days | pg_cron job `purge_old_order_outstanding_missing` at 04:30 UTC daily; also deleted on shop/redact (`compliance.server.ts:150`) | `prisma/migrations/20261026010000_order_outstanding_missing/migration.sql:50-54` |
 | Bulk operations tracking | `s6_bulk_operations` | Until shop/redact | Deleted by `deleteShop()` at `compliance.server.ts:144` | No time-based purge |
-| Database backups | Supabase-managed (Free plan) | No automatic backups on Supabase Free. **PLANNED:** nightly encrypted (`age`) `pg_dump` to Cloudflare R2. | Not app-controlled | [Supabase Backups docs](https://supabase.com/docs/guides/platform/backups) |
-| Sentry error events | Sentry cloud | Integration present, not enabled (no DSN configured). When enabled: 30 days (Developer), 90 days (Team/Business/Enterprise). | Sentry data retention settings | [Sentry Data Retention docs](https://docs.sentry.io/security-legal-pii/security/data-retention-periods/) |
-| Worker logs | Cloudflare | [Raghav to confirm plan] — 3 days (Workers Free) / 7 days (Workers Paid) | Cloudflare Workers Logpush or dashboard | [Cloudflare Workers Logs](https://developers.cloudflare.com/workers/observability/logs/) |
+| Database backups | Supabase-managed | Provider-controlled. Supabase automatic daily backups only on Pro (7 days), Team (14 days), Enterprise (up to 30 days); no automatic backups on the Free plan (Supabase advises Free projects to export with `pg_dump`). PITR add-on: 7/14/28 days. [Raghav to confirm plan and any manual dump schedule] | Not app-controlled | [Supabase Backups docs](https://supabase.com/docs/guides/platform/backups) |
+| Sentry error events | Sentry cloud | [Raghav to confirm plan] — Errors: 30 days (Developer), 90 days (Team/Business/Enterprise) | Sentry data retention settings | [Sentry Data Retention docs](https://docs.sentry.io/security-legal-pii/security/data-retention-periods/) |
+| Worker logs | Cloudflare | **Proposed, pending owner review:** Workers Logs retained by Cloudflare for 3 days on the Workers Free plan (7 days on Paid); plan: [Unverified — Raghav to confirm]. Logpush not used (Paid-only). `wrangler.jsonc` has `observability.enabled: true`; sampling 100%, invocation logs on, traces off, no tail consumers. Logs carry only counts/ids/enums/booleans/timestamps/error codes per the `safeLog()` allowlist. | Cloudflare Workers dashboard or `wrangler tail` | [Cloudflare Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) |
 
 ---
 
@@ -53,6 +54,7 @@
 | `s18_enqueue_reminders_hourly` | `15 * * * *` (hourly at :15) | Enqueue payment reminder messages | `20261030000000_s18_payment_reminders/migration.sql:231-235` |
 | `s18_global_sends_cleanup` | `0 5 * * *` (daily 05:00 UTC) | Delete global send counts older than 35 days | `20261030000000_s18_payment_reminders/migration.sql:240-244` |
 | `s22_purge_unmatched_narration` | `0 4 * * *` (daily 04:00 UTC) | Purge narration on unmatched payments older than 180 days | `20261101000000_s22_followups/migration.sql:69-73` |
+| `audit_purge_access_events_365d` | `30 3 * * *` (daily 03:30 UTC) | Delete access.* AuditEvent rows older than 365 days | `20261115000000_access_event_purge/migration.sql` |
 
 **Workers Cron Trigger (not pg_cron):** `*/5 * * * *` (every 5 minutes) — fallback drain keep-alive (`wrangler.jsonc:12`)
 
@@ -66,7 +68,7 @@
 
 3. **pgmq queue tables:** Shop-scoped messages deleted by `deleteShop()` from `pgmq.q_s6_sync`, `pgmq.q_s6_bulk`, `pgmq.a_s6_sync`, `pgmq.a_s6_bulk` (lines 174-188 in `compliance.server.ts`).
 
-4. **AuditEvent:** Deleted via CASCADE on `shop/redact`. No separate retention purge — not implemented.
+4. **AuditEvent:** Access events (`access.*` types) are purged after 365 days by the daily pg_cron job `audit_purge_access_events_365d` (03:30 UTC). Financial events (`match.*`, `invoice.*`, `account.*`) are not purged by schedule and are deleted only by the shop/redact FK cascade (`compliance.server.ts:230`, `prisma/migrations/20261022000001_s5_data_model/migration.sql:284`). See `prisma/migrations/20261115000000_access_event_purge/migration.sql`.
 
 5. **S8 tagged customer PII minimisation:** `minimiseCustomerPiiIfInactive()` (`compliance.server.ts:971-995`) runs only at tag removal (`customer.server.ts:388`) and requires `email IS NOT NULL`. If open invoices exist at tag removal, PII is not nulled later — no sweep job exists. `minimiseInactiveCustomerPii()` (`:938-960`) is defined but never called — not implemented.
 
@@ -78,5 +80,4 @@
 
 - **Time-based PII-minimisation sweep:** `minimiseInactiveCustomerPii()` is never called; PII minimisation only happens at tag removal
 - **Time-based Session expiry purge:** Expired sessions are not automatically purged
-- **AuditEvent retention purge:** No scheduled cleanup
 - **Invoice legal-hold / 7-year tax retention:** Only a code comment; not enforced
