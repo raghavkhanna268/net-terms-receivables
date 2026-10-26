@@ -313,7 +313,7 @@ describe("prod-readonly-query.yml closed_window_hours clamp", () => {
     if (value !== undefined) env.CLOSED_WINDOW_HOURS = value;
     try {
       const out = execFileSync("bash", ["-c", `set -euo pipefail\n${block}\necho "$CWH"`], {
-        env,
+        env: env as unknown as NodeJS.ProcessEnv,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
