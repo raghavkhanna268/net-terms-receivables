@@ -30,6 +30,7 @@ import { sqlOptions } from "../../app/lib/db-light.server.js";
 import { parseBankStatement } from "../../app/lib/banks/index.js";
 import { runMatcher } from "../../app/services/matcher.server.js";
 import { CONFIDENCE_THRESHOLD } from "../../app/lib/matching/score.js";
+import { normalizeNarrationForLookup } from "../../app/lib/matching/normalize.js";
 import { REVIEWER_DEMO_AMOUNTS, REVIEWER_DEMO_BUYER } from "../fixtures/reviewer-demo";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -324,12 +325,17 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
    */
   describe("with confirmed alias seeded", () => {
     const aliasId = `alias-reviewer-demo-${Date.now()}`;
+    // Payer text extracted from fixture's narration by the parser
+    const FIXTURE_PAYER_TEXT = "TEST BUYER CO";
+    // Compute the alias value the same way confirmMatch does
+    const aliasKey = normalizeNarrationForLookup(FIXTURE_PAYER_TEXT);
 
     beforeEach(async () => {
-      // Seed a confirmed alias for the buyer
+      // Seed a confirmed alias for the buyer using the normalized value
+      // that confirmMatch would actually store
       await sql`
         INSERT INTO "PayerAlias" (id, "buyerAccountId", "payerKey", "createdAt")
-        VALUES (${aliasId}, ${testBuyerId}, 'test buyer co', NOW())
+        VALUES (${aliasId}, ${testBuyerId}, ${aliasKey}, NOW())
         ON CONFLICT DO NOTHING
       `;
     });

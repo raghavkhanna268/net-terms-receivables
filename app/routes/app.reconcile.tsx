@@ -1195,7 +1195,13 @@ export default function ReconcilePage() {
             <s-text type="strong">Partial/overpayment:</s-text> +10 points
           </s-list-item>
           <s-list-item>
-            <s-text type="strong">Payer name:</s-text> +10 points
+            <s-text type="strong">Confirmed alias:</s-text> +30 points
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Payer name:</s-text> +8 points
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Email match:</s-text> +6 points
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
