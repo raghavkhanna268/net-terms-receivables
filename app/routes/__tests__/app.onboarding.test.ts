@@ -2551,3 +2551,549 @@ describe("T4: newAccountsPausedBanner", () => {
     expect(html).not.toContain("Upgrade your plan");
   });
 });
+
+describe("Sequential DB: Initial Sync currency UI", () => {
+  const TEST_SHOP = "test-initialsync-currency.myshopify.com";
+  const TEST_SHOP_ID = "shop-initialsync-currency";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  describe("(a) USD shop with no ops: currencySupported=false, note shown, no button, no polling", () => {
+    it("loader returns currencySupported=false for USD shop", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "USD" }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "USD",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "USD" }) },
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.currencySupported).toBe(false);
+      expect(result.initialSyncState?.status).toBe("not_started");
+    });
+
+    it("renders non-INR note and no button when currencySupported=false (fails on revert)", async () => {
+      vi.doMock("react-router", async () => {
+        const actual = await vi.importActual<typeof import("react-router")>("react-router");
+        return {
+          ...actual,
+          useLoaderData: () => ({
+            error: null,
+            state: {
+              steps: [],
+              isComplete: false,
+              completedCount: 0,
+              totalCount: 5,
+              dismissedAt: null,
+            },
+            registrationStatus: null,
+            initialSyncState: { status: "not_started" },
+            newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+            currencySupported: false,
+            currencyFlipBlocked: false,
+          }),
+          useActionData: () => null,
+          useNavigation: () => ({ state: "idle", formData: null }),
+          useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+          Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+            createElement("form", props, children),
+        };
+      });
+
+      vi.resetModules();
+      const { default: OnboardingPage } = await import("../app.onboarding");
+
+      const html = renderToString(createElement(OnboardingPage));
+
+      expect(html).toContain("Initial sync is available once the store currency is INR.");
+      expect(html).not.toContain('>Start sync<');
+      expect(html).not.toContain('>Starting...<');
+      expect(html).not.toContain('value="start_sync"');
+    });
+  });
+
+  describe("(b) INR-to-USD flip: USD shop with open companies op shows no In progress, no button, no polling", () => {
+    it("loader returns currencySupported=false for USD shop even with open companies op", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "USD" }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("reconcile_stage = 'companies'")) {
+          return Promise.resolve([{
+            bulk_operation_id: "gid://shopify/BulkOperation/open-companies",
+            reconcile_stage: "companies",
+            completed_at: null,
+            failure_count: 0,
+            started_at: new Date(),
+          }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "USD",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "USD" }) },
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.currencySupported).toBe(false);
+      expect(result.initialSyncState?.status).toBe("in_progress");
+    });
+
+    it("renders non-INR note instead of In progress badge when currencySupported=false with open op (fails on revert)", async () => {
+      vi.doMock("react-router", async () => {
+        const actual = await vi.importActual<typeof import("react-router")>("react-router");
+        return {
+          ...actual,
+          useLoaderData: () => ({
+            error: null,
+            state: {
+              steps: [],
+              isComplete: false,
+              completedCount: 0,
+              totalCount: 5,
+              dismissedAt: null,
+            },
+            registrationStatus: null,
+            initialSyncState: { status: "in_progress" },
+            newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+            currencySupported: false,
+            currencyFlipBlocked: false,
+          }),
+          useActionData: () => null,
+          useNavigation: () => ({ state: "idle", formData: null }),
+          useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+          Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+            createElement("form", props, children),
+        };
+      });
+
+      vi.resetModules();
+      const { default: OnboardingPage } = await import("../app.onboarding");
+
+      const html = renderToString(createElement(OnboardingPage));
+
+      expect(html).toContain("Initial sync is available once the store currency is INR.");
+      expect(html).not.toContain("In progress");
+      expect(html).not.toContain('>Start sync<');
+      expect(html).not.toContain('>Retry<');
+      expect(html).not.toContain('value="start_sync"');
+    });
+  });
+
+  describe("(c) INR shop with open op shows In progress plus polling unchanged", () => {
+    it("loader returns currencySupported=true for INR shop with open op", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+        }
+        if (query.includes("SELECT currency") && query.includes("Shop")) {
+          return Promise.resolve([{ currency: "INR" }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("reconcile_stage = 'companies'")) {
+          return Promise.resolve([{
+            bulk_operation_id: "gid://shopify/BulkOperation/open-companies",
+            reconcile_stage: "companies",
+            completed_at: null,
+            failure_count: 0,
+            started_at: new Date(),
+          }]);
+        }
+        if (query.includes("s6_bulk_operations")) {
+          return Promise.resolve([]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+        if (query.includes("ShopCurrencyAndId")) {
+          return {
+            json: async () => ({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  currencyCode: "INR",
+                  metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                },
+              },
+            }),
+          };
+        }
+        return { json: async () => ({ data: {} }) };
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result.currencySupported).toBe(true);
+      expect(result.initialSyncState?.status).toBe("in_progress");
+    });
+
+    it("renders In progress badge for INR shop with open op (fails on revert)", async () => {
+      vi.doMock("react-router", async () => {
+        const actual = await vi.importActual<typeof import("react-router")>("react-router");
+        return {
+          ...actual,
+          useLoaderData: () => ({
+            error: null,
+            state: {
+              steps: [],
+              isComplete: false,
+              completedCount: 0,
+              totalCount: 5,
+              dismissedAt: null,
+            },
+            registrationStatus: null,
+            initialSyncState: { status: "in_progress" },
+            newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+            currencySupported: true,
+            currencyFlipBlocked: false,
+          }),
+          useActionData: () => null,
+          useNavigation: () => ({ state: "idle", formData: null }),
+          useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+          Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+            createElement("form", props, children),
+        };
+      });
+
+      vi.resetModules();
+      const { default: OnboardingPage } = await import("../app.onboarding");
+
+      const html = renderToString(createElement(OnboardingPage));
+
+      expect(html).toContain("In progress");
+      expect(html).toContain("Syncing B2B companies");
+      expect(html).not.toContain("Initial sync is available once the store currency is INR.");
+    });
+
+  });
+});
+
+describe("shouldPollInitialSync helper", () => {
+  it("returns true when status is in_progress and currency is supported", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("in_progress", true)).toBe(true);
+  });
+
+  it("returns false when status is in_progress but currency is not supported", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("in_progress", false)).toBe(false);
+  });
+
+  it("returns false when status is not_started even with supported currency", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("not_started", true)).toBe(false);
+  });
+
+  it("returns false when status is done even with supported currency", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("done", true)).toBe(false);
+  });
+
+  it("returns false when status is failed even with supported currency", async () => {
+    const { shouldPollInitialSync } = await import("../app.onboarding");
+    expect(shouldPollInitialSync("failed", true)).toBe(false);
+  });
+});
+
+describe("Button loading state isolation", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("Retry submit does not put Dismiss into loading state (fails on revert)", async () => {
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "retry_registration");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Validation Function", status: "missing" },
+            paymentCustomization: { name: "Payment Customization", status: "ok" },
+            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Retrying...");
+    expect(html).toContain("Dismiss for now");
+    expect(html).not.toContain("Dismissing...");
+  });
+
+  it("Dismiss submit does not put Retry into loading state (fails on revert)", async () => {
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "dismiss");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Validation Function", status: "missing" },
+            paymentCustomization: { name: "Payment Customization", status: "ok" },
+            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Dismissing...");
+    expect(html).toContain("Retry");
+    expect(html).not.toContain("Retrying...");
+  });
+});
+
+describe("Merchant-facing copy", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("uses merchant-friendly language instead of developer-speak for step descriptions (fails on revert)", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Each step reflects your store");
+    expect(html).toContain("actual settings");
+    expect(html).not.toContain("nothing is hardcoded");
+  });
+
+  it("Need help section points to support instead of repository documentation (fails on revert)", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Contact support");
+    expect(html).toContain("setup assistance and troubleshooting");
+    expect(html).not.toContain("documentation in this repository");
+  });
+});
