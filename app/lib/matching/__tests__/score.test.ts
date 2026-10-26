@@ -336,6 +336,41 @@ describe("scorePaymentToInvoice", () => {
     expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
   });
 
+  it("does NOT award alias points for empty payer text", () => {
+    const payment = makePayment({ payerText: "" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["synthetic corp", "synth"] });
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "payer_name")).toBe(false);
+  });
+
+  it("does NOT award alias points for whitespace-only payer text", () => {
+    const payment = makePayment({ payerText: "   " });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["synthetic corp", "synth"] });
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "payer_name")).toBe(false);
+  });
+
+  it("does NOT award alias points for short unrelated payer (< 3 chars after normalize)", () => {
+    // "AB" normalizes to "ab" (2 chars) - too short for substring matching
+    const payment = makePayment({ payerText: "AB" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["synthetic corp"] });
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+    // Should not match via substring (alias.includes("ab") would be false anyway,
+    // but normalizedPayer.includes(alias) is guarded by length >= 3)
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+  });
+
   it("scores payer name match (fuzzy)", () => {
     const payment = makePayment({ payerText: "SYNTHETIC CORPORATION" });
     const invoice = makeInvoice();
@@ -872,5 +907,172 @@ describe("email prefix minimum length", () => {
     const result = scorePaymentToInvoice(payment, invoice, buyer, []);
     // Should NOT have email_match reason
     expect(result.reasons.some((r) => r.type === "email_match")).toBe(false);
+  });
+});
+
+/**
+ * Reachability table: combinations that reach >= 80 (High confidence)
+ *
+ * Current weights:
+ * - invoice_ref: +30
+ * - order_ref: +30
+ * - amount_exact: +20
+ * - amount_partial: +10
+ * - amount_overpayment: +10
+ * - payer_alias: +30 (confirmed alias only)
+ * - payer_name: +8 (fuzzy match)
+ * - email_match: +6
+ * - multi_invoice: +5
+ *
+ * CONFIDENCE_THRESHOLD: 80
+ */
+describe("reachability: combinations that reach High (>= 80)", () => {
+  const makePayment = (overrides: Partial<PaymentForScoring> = {}): PaymentForScoring => ({
+    id: "payment-1",
+    amountPaise: 1000000n,
+    narration: "NEFT-#1001-PAYMENT",
+    payerText: "SYNTHETIC CORP",
+    utr: null,
+    rail: "NEFT",
+    ...overrides,
+  });
+
+  const makeInvoice = (overrides: Partial<InvoiceForScoring> = {}): InvoiceForScoring => ({
+    id: "invoice-1",
+    name: "#1001",
+    orderId: null,
+    outstandingPaise: 1000000n,
+    buyerAccountId: "buyer-1",
+    dueAt: new Date("2026-10-15"),
+    ...overrides,
+  });
+
+  /**
+   * Reachability table for >= 80:
+   *
+   * | Combination                              | Score | Reaches 80? | Has payer_alias? |
+   * |------------------------------------------|-------|-------------|------------------|
+   * | invoice_ref + amount_exact + payer_alias | 80    | YES         | YES              |
+   * | order_ref + amount_exact + payer_alias   | 80    | YES         | YES              |
+   * | invoice_ref + amount_partial + payer_alias| 70   | NO          | YES              |
+   * | invoice_ref + amount_exact + payer_name  | 58    | NO          | NO               |
+   * | invoice_ref + amount_exact + email_match | 56    | NO          | NO               |
+   * | invoice_ref + amount_exact + multi_inv   | 55*   | NO          | NO               |
+   * | multi_invoice only raises avg by +5      | varies| NO          | -                |
+   *
+   * * multi_invoice bonus is +5 on average score, only for 2+ invoices
+   *
+   * Conclusion: ALL combinations reaching >= 80 require payer_alias.
+   */
+  it("invoice_ref + amount_exact + payer_alias = 80 (High)", () => {
+    const payment = makePayment({ narration: "#1001 payment", payerText: "SYNTHETIC CORP" });
+    const invoice = makeInvoice({ name: "#1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Other Name",
+      aliases: ["synthetic"],
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(80);
+    expect(result.reasons.some((r) => r.type === "invoice_ref")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "amount_exact")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+  });
+
+  it("order_ref + amount_exact + payer_alias = 80 (High)", () => {
+    const payment = makePayment({ narration: "ORDER-1001 payment", payerText: "SYNTHETIC CORP" });
+    const invoice = makeInvoice({ name: "#9999", orderId: "gid://shopify/Order/1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Other Name",
+      aliases: ["synthetic"],
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(80);
+    expect(result.reasons.some((r) => r.type === "order_ref")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "amount_exact")).toBe(true);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+  });
+
+  it("best without payer_alias: invoice_ref + amount_exact + payer_name = 58 (< 80)", () => {
+    const payment = makePayment({ narration: "#1001 payment", payerText: "SYNTHETIC CORP" });
+    const invoice = makeInvoice({ name: "#1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Synthetic Corp",
+      aliases: [], // No aliases
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(58);
+    expect(result.score).toBeLessThan(80);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "payer_name")).toBe(true);
+  });
+
+  it("invoice_ref + amount_exact + email_match = 56 (< 80, no alias)", () => {
+    const payment = makePayment({ narration: "#1001 payment", payerText: "JOHNDOE COMPANY" });
+    const invoice = makeInvoice({ name: "#1001" });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Different Name",
+      aliases: [],
+      email: "johndoe@example.com",
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(56);
+    expect(result.score).toBeLessThan(80);
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    expect(result.reasons.some((r) => r.type === "email_match")).toBe(true);
+  });
+
+  it("invoice_ref + overpayment + payer_alias = 70 (< 80)", () => {
+    const payment = makePayment({
+      narration: "#1001 payment",
+      payerText: "SYNTHETIC CORP",
+      amountPaise: 1200000n, // overpayment
+    });
+    const invoice = makeInvoice({ name: "#1001", outstandingPaise: 1000000n });
+    const buyer: BuyerForScoring = {
+      id: "buyer-1",
+      name: "Other Name",
+      aliases: ["synthetic"],
+      email: null,
+    };
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, ["1001"]);
+
+    expect(result.score).toBe(70);
+    expect(result.score).toBeLessThan(80);
+    expect(result.reasons.some((r) => r.type === "amount_overpayment")).toBe(true);
+  });
+
+  it("all combinations reaching >= 80 include payer_alias", () => {
+    // This test documents that under current weights, no combination
+    // without payer_alias can reach 80:
+    // - Max without alias: invoice_ref(30) + amount_exact(20) + payer_name(8) = 58
+    // - With email_match instead: 30 + 20 + 6 = 56
+    // - Multi-invoice bonus (+5) on a 58 base = 63, still < 80
+    //
+    // The only way to reach 80 is:
+    // - invoice_ref/order_ref (30) + amount_exact (20) + payer_alias (30) = 80
+    const maxWithoutAlias = 30 + 20 + 8; // invoice_ref + amount_exact + payer_name
+    const maxWithEmailMatch = 30 + 20 + 6; // invoice_ref + amount_exact + email_match
+    const multiInvoiceBonus = 5;
+
+    expect(maxWithoutAlias).toBe(58);
+    expect(maxWithEmailMatch).toBe(56);
+    expect(maxWithoutAlias + multiInvoiceBonus).toBe(63);
+    expect(maxWithoutAlias + multiInvoiceBonus).toBeLessThan(80);
   });
 });

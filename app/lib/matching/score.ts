@@ -331,9 +331,23 @@ function scorePayerNameMatch(
 ): PayerNameMatchResult {
   const normalizedPayer = normalizePayerName(payerText);
 
+  // Guard: empty/whitespace payer text gets no name-based points
+  if (normalizedPayer.length === 0) {
+    return {
+      matched: false,
+      type: "payer_name",
+      points: 0,
+      detail: "",
+    };
+  }
+
   // Check aliases first (highest confidence - confirmed aliases only)
+  // Require minimum 3 chars for substring matches to avoid false positives
   for (const alias of buyer.aliases) {
-    if (alias === normalizedPayer || normalizedPayer.includes(alias) || alias.includes(normalizedPayer)) {
+    const isExactMatch = alias === normalizedPayer;
+    const payerContainsAlias = normalizedPayer.length >= 3 && normalizedPayer.includes(alias);
+    const aliasContainsPayer = normalizedPayer.length >= 3 && alias.includes(normalizedPayer);
+    if (isExactMatch || payerContainsAlias || aliasContainsPayer) {
       return {
         matched: true,
         type: "payer_alias",
