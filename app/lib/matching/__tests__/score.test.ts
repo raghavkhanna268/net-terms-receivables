@@ -704,7 +704,7 @@ describe("reasonsContainNoPII", () => {
 
   it("returns true for approved detail patterns", () => {
     const reasons: MatchReason[] = [
-      { type: "payer_alias", points: 10, detail: "Alias matched" },
+      { type: "payer_alias", points: 30, detail: "Alias matched" },
       { type: "email_match", points: 6, detail: "Email prefix matched" },
       { type: "amount_overpayment", points: 10, detail: "Overpayment (excess flagged)" },
     ];

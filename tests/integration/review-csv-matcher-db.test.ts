@@ -22,7 +22,7 @@
  * All data is FICTIONAL - no real bank data.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import postgres from "postgres";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -299,12 +299,92 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
    * KEY FINDINGS:
    * - All rows now have "TEST BUYER CO" in the narration for buyer identification
    * - Rows 1 and 2 are MEDIUM (58), Row 3 is LOW (48) due to partial payment
-   * - High (80) requires a confirmed payer alias; without one the best is Medium (58)
+   * - High (80) requires a confirmed payer alias (+30); without one the best is Medium (58)
    */
   it("documents pinned results table", async () => {
     await seedPaymentsFromCsv();
     const result = await runMatcher(sql, testShopId);
     expect(result.paymentsProcessed).toBe(3);
     expect(result.highConfidenceMatches).toBe(0);
+  });
+
+  /**
+   * Test with confirmed payer alias seeded.
+   *
+   * When a PayerAlias is seeded for the buyer (simulating a previously confirmed match),
+   * the payer_alias signal provides +30 points instead of payer_name's +8 points.
+   *
+   * Score breakdown with alias:
+   * - invoice_ref: +30 (#1001 in narration matches invoice name)
+   * - amount_exact: +20 (payment ₹10,000 = invoice ₹10,000)
+   * - payer_alias: +30 (confirmed alias match)
+   * - Total: 80 points, HIGH band
+   *
+   * Unaliased rows remain unchanged (58/58/48).
+   */
+  describe("with confirmed alias seeded", () => {
+    const aliasId = `alias-reviewer-demo-${Date.now()}`;
+
+    beforeEach(async () => {
+      // Seed a confirmed alias for the buyer
+      await sql`
+        INSERT INTO "PayerAlias" (id, "buyerAccountId", "payerKey", "createdAt")
+        VALUES (${aliasId}, ${testBuyerId}, 'test buyer co', NOW())
+        ON CONFLICT DO NOTHING
+      `;
+    });
+
+    afterEach(async () => {
+      await sql`DELETE FROM "PayerAlias" WHERE id = ${aliasId}`;
+    });
+
+    it("Row 1 with alias: pins ₹10,000 payment → #1001, score 80, high", async () => {
+      await seedPaymentsFromCsv();
+      await runMatcher(sql, testShopId);
+
+      const matches = await getMatchesForPayment(paymentIds[0]);
+      expect(matches.length).toBeGreaterThan(0);
+
+      const topMatch = matches[0];
+      expect(topMatch.invoiceName).toBe("#1001");
+      expect(topMatch.score).toBe(80);
+      expect(getConfidenceBand(topMatch.score)).toBe("high");
+      expect(topMatch.amount).toBe(10000);
+    });
+
+    it("Row 2 with alias: pins ₹5,000 payment → #1002, score 80, high", async () => {
+      await seedPaymentsFromCsv();
+      await runMatcher(sql, testShopId);
+
+      const matches = await getMatchesForPayment(paymentIds[1]);
+      expect(matches.length).toBeGreaterThan(0);
+
+      const topMatch = matches[0];
+      expect(topMatch.invoiceName).toBe("#1002");
+      expect(topMatch.score).toBe(80);
+      expect(getConfidenceBand(topMatch.score)).toBe("high");
+      expect(topMatch.amount).toBe(5000);
+    });
+
+    it("Row 3 with alias: pins ₹2,500 payment → #1002, score 70, medium", async () => {
+      await seedPaymentsFromCsv();
+      await runMatcher(sql, testShopId);
+
+      const matches = await getMatchesForPayment(paymentIds[2]);
+      expect(matches.length).toBeGreaterThan(0);
+
+      const topMatch = matches[0];
+      expect(topMatch.invoiceName).toBe("#1002");
+      expect(topMatch.score).toBe(70);
+      expect(getConfidenceBand(topMatch.score)).toBe("medium");
+      expect(topMatch.amount).toBe(2500);
+    });
+
+    it("with alias: highConfidenceMatches = 2 (exact amounts only)", async () => {
+      await seedPaymentsFromCsv();
+      const result = await runMatcher(sql, testShopId);
+      expect(result.paymentsProcessed).toBe(3);
+      expect(result.highConfidenceMatches).toBe(2);
+    });
   });
 });

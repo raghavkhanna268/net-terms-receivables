@@ -48,6 +48,9 @@ const WEIGHT_AMOUNT_PARTIAL = 10;
 /** Score weight for payer name match */
 const WEIGHT_NAME_MATCH = 10;
 
+/** Score weight for confirmed payer alias match (higher than fuzzy name) */
+const WEIGHT_CONFIRMED_ALIAS = 30;
+
 /** Reason types for match explanation */
 export type MatchReasonType =
   | "invoice_ref"
@@ -328,13 +331,13 @@ function scorePayerNameMatch(
 ): PayerNameMatchResult {
   const normalizedPayer = normalizePayerName(payerText);
 
-  // Check aliases first (highest confidence for names)
+  // Check aliases first (highest confidence - confirmed aliases only)
   for (const alias of buyer.aliases) {
     if (alias === normalizedPayer || normalizedPayer.includes(alias) || alias.includes(normalizedPayer)) {
       return {
         matched: true,
         type: "payer_alias",
-        points: WEIGHT_NAME_MATCH,
+        points: WEIGHT_CONFIRMED_ALIAS,
         detail: `Alias matched`, // No PII - just indicate match type
       };
     }
