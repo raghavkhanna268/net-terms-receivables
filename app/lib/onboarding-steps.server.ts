@@ -79,6 +79,8 @@ export interface OnboardingStepInputs {
   validation: ValidationInfo | null;
   paymentCustomization: PaymentCustomizationInfo | null;
   resendApiKeyConfigured: boolean;
+  /** True when shop has enabled reminders via s18_shop_reminder_settings. */
+  remindersEnabled: boolean;
   dismissedAt: Date | null;
 }
 
@@ -240,9 +242,12 @@ export function computePaymentCustomizationStep(
 /**
  * Compute step 5: Reminder sender configured.
  * Shows as "coming soon" when RESEND_API_KEY is not configured.
+ * Shows as "pending" when sending is configured but reminders are disabled.
+ * Shows as "complete" only when BOTH sending is configured AND reminders are enabled.
  */
 export function computeReminderStep(
-  resendApiKeyConfigured: boolean
+  resendApiKeyConfigured: boolean,
+  remindersEnabled: boolean
 ): OnboardingStep {
   if (!resendApiKeyConfigured) {
     return {
@@ -251,6 +256,18 @@ export function computeReminderStep(
       description: "Send automated payment reminder emails to buyers",
       status: "coming_soon",
       helpText: "Email reminders will be available when email sending is configured",
+    };
+  }
+
+  if (!remindersEnabled) {
+    return {
+      id: "reminders",
+      title: "Configure payment reminders",
+      description: "Set up automated reminder emails for upcoming and overdue invoices",
+      status: "pending",
+      helpText: "Email sending is ready",
+      actionUrl: "/app/settings/reminders",
+      actionLabel: "Enable reminders",
     };
   }
 
@@ -276,7 +293,7 @@ export function computeOnboardingState(
     computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),
-    computeReminderStep(inputs.resendApiKeyConfigured),
+    computeReminderStep(inputs.resendApiKeyConfigured, inputs.remindersEnabled),
   ];
 
   const completedCount = steps.filter(

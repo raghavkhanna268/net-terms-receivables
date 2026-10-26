@@ -158,13 +158,27 @@ describe("onboarding-steps", () => {
 
   describe("computeReminderStep", () => {
     it("returns coming_soon when RESEND_API_KEY is not configured", () => {
-      const step = computeReminderStep(false);
+      const step = computeReminderStep(false, false);
       expect(step.status).toBe("coming_soon");
       expect(step.helpText).toContain("will be available");
     });
 
-    it("returns complete when RESEND_API_KEY is configured", () => {
-      const step = computeReminderStep(true);
+    it("returns coming_soon when sending not configured even if reminders enabled", () => {
+      const step = computeReminderStep(false, true);
+      expect(step.status).toBe("coming_soon");
+      expect(step.helpText).toContain("will be available");
+    });
+
+    it("returns pending when sending configured but reminders disabled", () => {
+      const step = computeReminderStep(true, false);
+      expect(step.status).toBe("pending");
+      expect(step.helpText).toContain("Email sending is ready");
+      expect(step.actionUrl).toBe("/app/settings/reminders");
+      expect(step.actionLabel).toBe("Enable reminders");
+    });
+
+    it("returns complete when both sending configured AND reminders enabled", () => {
+      const step = computeReminderStep(true, true);
       expect(step.status).toBe("complete");
       expect(step.helpText).toContain("configured and ready");
     });
@@ -179,6 +193,7 @@ describe("onboarding-steps", () => {
       validation: null,
       paymentCustomization: null,
       resendApiKeyConfigured: false,
+      remindersEnabled: false,
       dismissedAt: null,
     };
 
@@ -206,6 +221,7 @@ describe("onboarding-steps", () => {
           title: "Termwise Payment Hide",
         },
         resendApiKeyConfigured: false, // coming_soon doesn't block completion
+        remindersEnabled: false,
       };
 
       const state = computeOnboardingState(inputs);
@@ -245,6 +261,7 @@ describe("onboarding-steps", () => {
       validation: null,
       paymentCustomization: null,
       resendApiKeyConfigured: false,
+      remindersEnabled: false,
       dismissedAt: null,
     };
 
@@ -355,6 +372,7 @@ describe("onboarding-steps", () => {
           title: "Termwise Payment Hide",
         },
         resendApiKeyConfigured: true,
+        remindersEnabled: true,
         dismissedAt: null,
       };
 
@@ -376,6 +394,7 @@ describe("onboarding-steps", () => {
         validation: null,
         paymentCustomization: null,
         resendApiKeyConfigured: false,
+        remindersEnabled: false,
         dismissedAt: null,
       };
 

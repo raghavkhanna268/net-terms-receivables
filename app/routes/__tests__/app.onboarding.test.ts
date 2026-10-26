@@ -96,6 +96,12 @@ vi.mock("~/services/gating.server", () => ({
   isGatingEnforced: mockIsGatingEnforced,
 }));
 
+const mockGetShopReminderSettings = vi.fn().mockResolvedValue({ enabled: false });
+
+vi.mock("~/services/reminders.server", () => ({
+  getShopReminderSettings: mockGetShopReminderSettings,
+}));
+
 vi.mock("~/lib/plan-url", () => ({
   getAppHandle: vi.fn().mockReturnValue("net-terms-receivables"),
   buildPlanSelectionUrl: vi.fn().mockReturnValue("https://admin.shopify.com/plans"),
@@ -132,6 +138,7 @@ describe("app.onboarding", () => {
       companies: { current: 0, limit: 25 },
       importsThisMonth: { current: 0, limit: -1 },
     });
+    mockGetShopReminderSettings.mockResolvedValue({ enabled: false });
   });
 
   describe("action - dismiss", () => {
@@ -465,6 +472,102 @@ describe("app.onboarding", () => {
 
       expect(result.error).toBeNull();
       expect(result.state?.dismissedAt).toBe(dismissedDate.toISOString());
+    });
+
+    it("returns reminders step as pending when sending configured but reminders disabled", async () => {
+      process.env.RESEND_API_KEY = "test-key";
+      mockGetShopReminderSettings.mockResolvedValue({ enabled: false });
+
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ data: {} }),
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.error).toBeNull();
+      const reminderStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
+      expect(reminderStep?.status).toBe("pending");
+      expect(reminderStep?.helpText).toContain("Email sending is ready");
+
+      delete process.env.RESEND_API_KEY;
+    });
+
+    it("returns reminders step as complete when both sending configured AND reminders enabled", async () => {
+      process.env.RESEND_API_KEY = "test-key";
+      mockGetShopReminderSettings.mockResolvedValue({ enabled: true });
+
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+          return Promise.resolve([{
+            id: TEST_SHOP_ID,
+            defaultTermsDays: 30,
+            onboardingDismissedAt: null,
+          }]);
+        }
+        if (query.includes("COUNT(*)")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const mockGraphql = vi.fn().mockResolvedValue({
+        json: () => Promise.resolve({ data: {} }),
+      });
+
+      const { loader } = await import("../app.onboarding");
+
+      const result = await loader({
+        request: new Request("https://example.com/app/onboarding"),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                admin: { graphql: mockGraphql },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs);
+
+      expect(result.error).toBeNull();
+      const reminderStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
+      expect(reminderStep?.status).toBe("complete");
+      expect(reminderStep?.helpText).toContain("configured and ready");
+
+      delete process.env.RESEND_API_KEY;
     });
   });
 

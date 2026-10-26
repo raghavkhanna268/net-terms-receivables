@@ -47,6 +47,7 @@ import {
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
+import { getShopReminderSettings } from "~/services/reminders.server";
 
 /**
  * Client-side version of canStartSync to avoid importing server-only module in client code.
@@ -386,11 +387,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
   const currencySupported = isShopCurrencySupported(shopCurrency);
 
-  const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
+  const [validationResult, paymentCustomizationResult, metafieldStatus, syncState, reminderSettings] = await Promise.all([
     fetchValidationInfo(admin),
     fetchPaymentCustomizationInfo(admin),
     checkMetafieldDefinitionsStatus(admin),
     getInitialSyncStateWithRecovery(sql, shopDomain),
+    getShopReminderSettings(sql, dbData.shopId),
   ]);
 
   const validation = validationResult.info;
@@ -399,6 +401,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const paymentCustomizationError = paymentCustomizationResult.error;
 
   const resendApiKeyConfigured = Boolean(process.env.RESEND_API_KEY);
+  const remindersEnabled = reminderSettings?.enabled ?? false;
 
   const inputs: OnboardingStepInputs = {
     shopId: dbData.shopId,
@@ -408,6 +411,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     validation,
     paymentCustomization,
     resendApiKeyConfigured,
+    remindersEnabled,
     dismissedAt: dbData.dismissedAt,
   };
 
@@ -857,7 +861,14 @@ export default function OnboardingPage() {
       : registrationStatus;
 
   const loaderSyncStatus: InitialSyncStatus = initialSyncState?.status ?? "not_started";
-  const currentSyncState: InitialSyncState = { status: loaderSyncStatus };
+  // Show "in_progress" immediately after a successful start_sync action, even if
+  // the loader hasn't revalidated yet. The server-side fix in getInitialSyncState
+  // checks for queued messages, so revalidation should also return "in_progress".
+  const effectiveSyncStatus: InitialSyncStatus =
+    (actionData?.success && actionData.action === "start_sync")
+      ? "in_progress"
+      : loaderSyncStatus;
+  const currentSyncState: InitialSyncState = { status: effectiveSyncStatus };
 
   useEffect(() => {
     if (loaderSyncStatus === "in_progress") {
