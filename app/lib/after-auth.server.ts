@@ -20,6 +20,7 @@ import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "./shop-currency.server";
 import { refreshPlanCache } from "~/services/plan.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "./shop-currency-guard.server";
+import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -102,7 +103,7 @@ export async function runAfterAuth(
   try {
     sql = getRequestSql();
   } catch (error) {
-    safeLog("warn", "shop_config_write_failed", { err: toErrorCode(error) });
+    safeLog("warn", "clear_uninstalled_at_failed", { err: toErrorCode(error) });
   }
 
   if (sql) {
@@ -116,18 +117,23 @@ export async function runAfterAuth(
  * Clear uninstalledAt and run setup if the shop was reinstalled or not cached.
  *
  * On reinstall (wasReinstalled=true):
- * 1. Await critical registration in parallel (Setup Guide depends on these)
- * 2. Run non-critical work (plan refresh, syncShopInfo) in waitUntil
+ * 1. Await critical work in parallel (uninstalledAt clear + registration + plan refresh)
+ * 2. Run non-critical work (syncShopInfo) in waitUntil
  *
- * Critical path (awaited, parallel): metafield definitions, validation, payment customization
- * Background (waitUntil): plan refresh, syncShopInfo (timezone/currency/DB upsert)
+ * Critical path (awaited, parallel):
+ * - [metafield definitions → validation] chain (validation depends on definitions)
+ * - [payment customization] (independent)
+ * - [plan refresh with forceRefresh] (bypasses stale cache)
+ *
+ * Background (waitUntil): syncShopInfo (timezone/currency/DB upsert)
  *
  * This fixes two reinstall bugs:
  * - Plan cache showing old Starter plan after subscription was cancelled by uninstall
  * - Payment Customization showing "Missing" on first load due to racing setup
  *
- * Latency optimization: Critical calls run in parallel (~0.5-1.2s vs ~1.5-3s serial).
- * Order dependency: None among the three critical chains (all independent Shopify calls).
+ * Latency optimization: Critical calls run in parallel (~0.5-1.2s).
+ * The definitions→validation chain runs sequentially because validation's Function
+ * input query references the metafield definitions. Payment customization is independent.
  */
 async function clearAndMaybeSetup(
   sql: Sql,
@@ -140,9 +146,9 @@ async function clearAndMaybeSetup(
   if (reinstallResult.wasReinstalled) {
     setupCompletedShops.delete(shop);
 
-    await runCriticalRegistration(admin);
+    const criticalSuccess = await runCriticalRegistration(sql, shop, admin);
 
-    const backgroundPromise = runBackgroundSetup(sql, shop, admin, reinstallResult.shopId);
+    const backgroundPromise = runBackgroundSetup(shop, admin, criticalSuccess);
     waitUntil(backgroundPromise);
     return;
   }
@@ -153,71 +159,89 @@ async function clearAndMaybeSetup(
 /**
  * Run critical registration steps that the Setup Guide depends on (awaited on reinstall).
  *
- * Runs in parallel: metafield definitions, validation, payment customization.
- * These are independent Shopify Admin API calls with no ordering constraints.
+ * Runs two chains in parallel:
+ * 1. [definitions → validation] - validation depends on metafield definitions
+ * 2. [payment customization] - independent
+ * 3. [plan refresh] - force-bypasses cache to get fresh subscription status
  *
- * Critical path call count: 3-4 parallel calls (vs 8-9 serial before).
- * - Metafield definitions: 1 call (2 owner types parallelized internally)
- * - Validation: 1-2 calls (query + optional create/update)
- * - Payment customization: 1-2 calls (query + optional create/update)
+ * Returns true if ALL critical steps succeeded, false if any failed.
+ * A failed step leaves the shop retryable (not marked complete).
  */
-async function runCriticalRegistration(admin: AdminGraphqlClient): Promise<void> {
-  const errors: string[] = [];
+async function runCriticalRegistration(
+  sql: Sql,
+  shop: string,
+  admin: AdminGraphqlClient,
+): Promise<boolean> {
+  let hasError = false;
 
-  const [definitionsResult, validationResult, paymentResult] = await Promise.allSettled([
-    ensureMetafieldDefinitions(admin),
-    ensureValidation(admin),
-    ensurePaymentCustomization(admin),
+  // Chain 1: definitions → validation (validation depends on definitions)
+  const definitionsValidationChain = async (): Promise<void> => {
+    await ensureMetafieldDefinitions(admin);
+    const validationResult = await ensureValidation(admin);
+    if (validationResult.created) {
+      safeLog("info", "validation_created", { validationId: validationResult.id });
+    }
+  };
+
+  // Chain 2: payment customization (independent)
+  const paymentChain = async (): Promise<{ id: string; created: boolean }> => {
+    return await ensurePaymentCustomization(admin);
+  };
+
+  // Chain 3: plan refresh with force (bypasses stale cache)
+  const planChain = async (): Promise<void> => {
+    await refreshPlanCache(sql, shop);
+  };
+
+  const [defValResult, paymentResult, planResult] = await Promise.allSettled([
+    definitionsValidationChain(),
+    paymentChain(),
+    planChain(),
   ]);
 
-  if (definitionsResult.status === "rejected") {
-    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${toErrorCode(definitionsResult.reason)}`);
-    errors.push("metafield_definitions");
-  }
-
-  if (validationResult.status === "rejected") {
-    const errInfo = (validationResult.reason as { code?: string; name?: string })?.code ?? (validationResult.reason as Error)?.name ?? "unknown";
-    console.error(`[afterAuth] validation_registration_failed reason=exception err=${errInfo}`);
-    errors.push("validation");
-  } else if (validationResult.value.created) {
-    console.log(`[afterAuth] validation_created id=${validationResult.value.id}`);
+  if (defValResult.status === "rejected") {
+    safeLog("error", "validation_registration_failed", { err: toErrorCode(defValResult.reason) });
+    hasError = true;
   }
 
   if (paymentResult.status === "rejected") {
-    const errInfo = (paymentResult.reason as { code?: string; name?: string })?.code ?? (paymentResult.reason as Error)?.name ?? "unknown";
-    console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
-    errors.push("payment_customization");
+    safeLog("error", "payment_customization_failed", { err: toErrorCode(paymentResult.reason) });
+    hasError = true;
   } else if (paymentResult.value.created) {
-    console.log(`[afterAuth] payment_customization_created id=${paymentResult.value.id}`);
+    safeLog("info", "payment_customization_created", { paymentCustomizationId: paymentResult.value.id });
   }
+
+  if (planResult.status === "rejected") {
+    safeLog("warn", "plan_background_refresh_failed", { err: toErrorCode(planResult.reason) });
+    hasError = true;
+  }
+
+  return !hasError;
 }
 
 /**
  * Run non-critical setup in the background (via waitUntil).
  *
- * Includes: plan refresh, syncShopInfo (timezone/currency/DB upsert).
- * These don't block the Setup Guide's first render.
+ * Includes: syncShopInfo (timezone/currency/DB upsert).
+ * Plan refresh is now in the critical path, not here.
+ *
+ * Only marks shop complete if critical registration succeeded.
  */
 async function runBackgroundSetup(
-  sql: Sql,
   shop: string,
   admin: AdminGraphqlClient,
-  shopId?: string,
+  criticalSuccess: boolean,
 ): Promise<void> {
-  try {
-    await refreshPlanCache(sql, shop);
-  } catch (error) {
-    safeLog("warn", "plan_background_refresh_failed", { shopId, err: toErrorCode(error) });
-  }
-
   try {
     await syncShopInfo(shop, admin);
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] sync_shop_info_failed reason=exception err=${errInfo}`);
+    safeLog("warn", "sync_shop_info_failed", { err: toErrorCode(error) });
   }
 
-  setupCompletedShops.add(shop);
+  // Only mark complete if all critical steps succeeded
+  if (criticalSuccess) {
+    setupCompletedShops.add(shop);
+  }
 }
 
 /**
@@ -330,7 +354,7 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
     }
     return { wasReinstalled: false };
   } catch (error) {
-    safeLog("error", "shop_config_write_failed", { shopHash: await shopHash(shop), err: toErrorCode(error) });
+    safeLog("error", "clear_uninstalled_at_failed", { shopHash: await shopHash(shop), err: toErrorCode(error) });
     return { wasReinstalled: false };
   }
 }
@@ -442,6 +466,7 @@ async function syncShopInfo(
 
   // #292 Currency Flip Safety: Check if currency flip should be blocked
   let effectiveCurrency = authInfo.currencyCode;
+  let flipBlocked = false;
 
   if (authInfo.currencyCode === SUPPORTED_SHOP_CURRENCY) {
     const [shopRow] = await sql<{ id: string; currency: string | null }[]>`
@@ -458,6 +483,7 @@ async function syncShopInfo(
 
       if (decision.blocked) {
         effectiveCurrency = decision.effectiveCurrency;
+        flipBlocked = true;
         safeLog("info", "currency_flip_blocked_on_auth", {
           shopHash: await shopHash(shop),
         });
@@ -465,11 +491,23 @@ async function syncShopInfo(
     }
   }
 
+  // #292: Write shop_config metafield with currency (unless flip was blocked)
+  // On first install, there's no Shop row yet, so checkAndRecoverCurrency never runs.
+  // This ensures the shop_config metafield is written on first install.
+  if (!flipBlocked && authInfo.shopId) {
+    const writeResult = await writeShopConfigMetafield(admin, authInfo.shopId, effectiveCurrency);
+    if (!writeResult.success) {
+      safeLog("warn", "shop_config_write_failed", {
+        shopHash: await shopHash(shop),
+        err: writeResult.error || "unknown",
+      });
+    }
+  }
+
   try {
     await upsertShopOnAuth(sql, shop, authInfo.timezone, effectiveCurrency);
   } catch (error) {
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
+    safeLog("error", "upsert_shop_failed", { shopHash: await shopHash(shop), err: toErrorCode(error) });
     throw error;
   }
 }
@@ -485,15 +523,17 @@ async function runSetup(
     await ensureMetafieldDefinitions(admin);
   } catch (error) {
     hasError = true;
-    console.error(`[afterAuth] metafield_definitions_failed reason=exception err=${toErrorCode(error)}`);
+    safeLog("error", "metafield_definitions_failed", { err: toErrorCode(error) });
   }
   
   try {
-    await ensureValidation(admin);
+    const validationResult = await ensureValidation(admin);
+    if (validationResult.created) {
+      safeLog("info", "validation_created", { validationId: validationResult.id });
+    }
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] validation_registration_failed reason=exception err=${errInfo}`);
+    safeLog("error", "validation_registration_failed", { err: toErrorCode(error) });
   }
   
   // S13: Payment customization for hiding net-terms payment methods.
@@ -501,12 +541,11 @@ async function runSetup(
   try {
     const result = await ensurePaymentCustomization(admin);
     if (result.created) {
-      console.log(`[afterAuth] payment_customization_created id=${result.id}`);
+      safeLog("info", "payment_customization_created", { paymentCustomizationId: result.id });
     }
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] payment_customization_failed reason=exception err=${errInfo}`);
+    safeLog("error", "payment_customization_failed", { err: toErrorCode(error) });
   }
   
   // Shop info sync runs even if earlier steps fail - it's independent.
@@ -515,8 +554,7 @@ async function runSetup(
     await syncShopInfo(shop, admin);
   } catch (error) {
     hasError = true;
-    const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
-    console.error(`[afterAuth] sync_shop_info_failed reason=exception err=${errInfo}`);
+    safeLog("warn", "sync_shop_info_failed", { err: toErrorCode(error) });
   }
   
   // Only mark complete if all steps succeeded.
@@ -639,7 +677,7 @@ export async function upsertShopOnAuth(
   const shopId = result[0]?.id ?? 'unknown';
   const closedCount = result[0]?.closed_count ?? 0;
   const deletedClaimsCount = result[0]?.deleted_claims_count ?? 0;
-  console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
+  safeLog("info", "shop_upserted", { shopId });
   if (closedCount > 0 || deletedClaimsCount > 0) {
     safeLog("info", "reinstall_initial_sync_reset", {
       shopHash: await shopHash(shopDomain),

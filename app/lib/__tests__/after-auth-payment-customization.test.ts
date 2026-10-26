@@ -98,10 +98,10 @@ describe("after-auth with payment customization (S13)", () => {
     }
 
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[afterAuth] payment_customization_created id=")
+      expect.stringContaining('"event":"payment_customization_created"')
     );
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("gid://shopify/PaymentCustomization/pc-456")
+      expect.stringContaining('"paymentCustomizationId":"gid://shopify/PaymentCustomization/pc-456"')
     );
 
     consoleSpy.mockRestore();
@@ -126,7 +126,7 @@ describe("after-auth with payment customization (S13)", () => {
     }
 
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[afterAuth] payment_customization_failed reason=exception err=")
+      expect.stringContaining('"event":"payment_customization_failed"')
     );
 
     expect(_isShopSetupComplete("s13-test-failing-shop.myshopify.com")).toBe(false);
@@ -154,11 +154,11 @@ describe("after-auth with payment customization (S13)", () => {
     }
 
     const pcFailedCall = consoleSpy.mock.calls.find(
-      (call) => call[0]?.includes?.("[afterAuth] payment_customization_failed")
+      (call) => call[0]?.includes?.('"event":"payment_customization_failed"')
     );
     expect(pcFailedCall).toBeDefined();
     expect(pcFailedCall).toHaveLength(1);
-    expect(pcFailedCall![0]).toContain("err=TestError");
+    expect(pcFailedCall![0]).toContain('"err":"TestError"');
     expect(pcFailedCall![0]).not.toContain("[object");
 
     consoleSpy.mockRestore();
