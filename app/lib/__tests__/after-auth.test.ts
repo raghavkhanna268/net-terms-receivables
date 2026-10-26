@@ -1166,16 +1166,17 @@ describe("after-auth", () => {
 
       await Promise.allSettled(waitUntilPromises);
 
-      // EXACTLY ONE call should have gotten the RETURNING row (SQL atomicity)
+      // With per-isolate deduplication set BEFORE the DB call, only ONE call
+      // actually runs - the other awaits the first's promise. So:
+      // - Exactly ONE clear query is made
+      // - Exactly ONE call gets the RETURNING row
+      expect(clearCallCount).toBe(1);
       expect(reinstallWinners).toHaveLength(1);
       
-      // Both calls should have attempted the clear query
-      expect(clearCallCount).toBe(2);
-      
-      // Registration should have been called at least once by the winner
-      expect(mockEnsureMetafieldDefinitions).toHaveBeenCalled();
-      expect(mockEnsureValidation).toHaveBeenCalled();
-      expect(mockEnsurePaymentCustomization).toHaveBeenCalled();
+      // Registration should have been called exactly once by the winner
+      expect(mockEnsureMetafieldDefinitions).toHaveBeenCalledTimes(1);
+      expect(mockEnsureValidation).toHaveBeenCalledTimes(1);
+      expect(mockEnsurePaymentCustomization).toHaveBeenCalledTimes(1);
     });
 
     it("latency: parallel chains - payment starts while definitions still running (deterministic)", async () => {

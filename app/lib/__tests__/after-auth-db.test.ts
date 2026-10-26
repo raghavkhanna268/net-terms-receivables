@@ -386,9 +386,10 @@ describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = vi.fn((p: Promise<unknown>) => waitUntilPromises.push(p));
 
-      // Run two concurrent runAfterAuth calls - both will race on clearUninstalledAtAndMetafieldErrors
-      // One wins the SQL RETURNING row (wasReinstalled=true), the other loses (wasReinstalled=false)
-      // With the inFlightSetups deduplication fix, the loser should wait on the winner's promise
+      // Run two concurrent runAfterAuth calls.
+      // With the per-isolate deduplication set BEFORE any DB call:
+      // - First call sets inFlightReinstallHandlers synchronously and does all the work
+      // - Second call finds the existing handler and awaits it (never makes a DB query)
       await Promise.all([
         runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
         runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil),
@@ -396,10 +397,7 @@ describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB
 
       await Promise.allSettled(waitUntilPromises);
 
-      // With the deduplication fix in clearAndMaybeSetup:
-      // - First call (RETURNING winner) creates setup promise, adds to inFlightSetups, runs registration
-      // - Second call (RETURNING loser) finds in-flight promise, waits on it instead of starting own setup
-      // Result: registration runs exactly ONCE
+      // Result: registration runs exactly ONCE (the second call awaited the first)
       expect(registrationCallCount).toBe(1);
     });
 
@@ -465,10 +463,11 @@ describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB
       // Wait a tick for both calls to reach the registration wait point
       await new Promise(r => setTimeout(r, 50));
 
-      // Bug B fix assertion: NEITHER call should have resolved yet because
-      // the winner is blocked on registration, and the loser AWAITS the winner's
-      // critical promise (not just waitUntil). Without the fix, the loser would
-      // return immediately, allowing the Setup Guide to render stale state.
+      // Bug B fix assertion: NEITHER call should have resolved yet because:
+      // - The first call is blocked on registration
+      // - The second call found inFlightReinstallHandlers and AWAITS it
+      // Without the dedupe-before-await fix, the second call could return early,
+      // allowing the Setup Guide to render stale state.
       expect(call1Resolved).toBe(false);
       expect(call2Resolved).toBe(false);
 

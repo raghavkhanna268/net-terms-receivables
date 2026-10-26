@@ -52,20 +52,26 @@ const setupCompletedShops = new Set<string>();
 const inFlightSetups = new Map<string, Promise<void>>();
 
 /**
- * In-flight CRITICAL registration promises by shop.
+ * In-flight reinstall handler promises by shop.
  * 
- * This is separate from inFlightSetups because:
- * - inFlightSetups tracks the FULL setup (critical + background sync)
- * - This map tracks only the CRITICAL registration that the Setup Guide depends on
+ * This is the PRIMARY deduplication mechanism for concurrent reinstall loads.
+ * Set SYNCHRONOUSLY before any DB call, so all concurrent callers await the
+ * same promise. Deleted in finally after the handler completes.
  * 
- * Bug B fix: When two concurrent reinstall loads race:
- * - Winner (gets RETURNING row): adds critical promise here, awaits it
- * - Loser (gets empty): finds critical promise here, AWAITS it before returning
+ * Why this exists (race condition fix):
+ * Without this, two concurrent calls race on clearUninstalledAtAndMetafieldErrors.
+ * The loser's 0-row result can return BEFORE the winner sets up its in-flight maps,
+ * causing the loser to fall through to runSetupIfNeeded and render stale state.
  * 
- * This ensures BOTH calls' runAfterAuth resolves only after critical registration
- * is complete, so neither renders the Setup Guide with stale "Missing" state.
+ * With this map set synchronously BEFORE the first await, every concurrent caller
+ * waits on the same promise. The first caller does the work; others await it.
+ * 
+ * This deduplication is per-isolate. Across Workers isolates, a concurrent
+ * duplicate is still possible but harmless, because every registration function
+ * (ensureMetafieldDefinitions, ensureValidation, ensurePaymentCustomization)
+ * is idempotent (query then create/update).
  */
-const inFlightCriticalRegistrations = new Map<string, Promise<boolean>>();
+const inFlightReinstallHandlers = new Map<string, Promise<void>>();
 
 /**
  * Runs after-authentication hooks for a shop.
@@ -132,9 +138,19 @@ export async function runAfterAuth(
 /**
  * Clear uninstalledAt and run setup if the shop was reinstalled or not cached.
  *
+ * Deduplication (per-isolate):
+ * BEFORE any DB call, we check/set inFlightReinstallHandlers synchronously.
+ * All concurrent callers await the same promise, ensuring:
+ * - Registration runs exactly once per shop per isolate
+ * - All callers' runAfterAuth resolves only after critical registration completes
+ * - The Setup Guide never renders stale "Missing" state
+ *
+ * Across Workers isolates, a concurrent duplicate is still possible but harmless,
+ * because every registration function is idempotent (query then create/update).
+ *
  * On reinstall (wasReinstalled=true):
- * 1. Await critical work in parallel (uninstalledAt clear + registration + plan refresh)
- * 2. Run non-critical work (syncShopInfo) in waitUntil
+ * 1. Await critical work in parallel (registration + plan refresh)
+ * 2. Run non-critical work (syncShopInfo) via waitUntil
  *
  * Critical path (awaited, parallel):
  * - [metafield definitions → validation] chain (validation depends on definitions)
@@ -146,16 +162,6 @@ export async function runAfterAuth(
  * This fixes two reinstall bugs:
  * - Plan cache showing old Starter plan after subscription was cancelled by uninstall
  * - Payment Customization showing "Missing" on first load due to racing setup
- *
- * Latency optimization: Critical calls run in parallel (~0.5-1.2s).
- * The definitions→validation chain runs sequentially because validation's Function
- * input query references the metafield definitions. Payment customization is independent.
- *
- * Concurrent reinstall deduplication:
- * Two concurrent /app loads after a reinstall share ONE registration promise:
- * - First call (wins SQL RETURNING): creates setup promise, adds to inFlightSetups
- * - Second call (loses SQL race): finds in-flight promise, waits for it via waitUntil
- * This ensures registration runs exactly once even with concurrent loads.
  */
 async function clearAndMaybeSetup(
   sql: Sql,
@@ -163,80 +169,80 @@ async function clearAndMaybeSetup(
   admin: AdminGraphqlClient,
   waitUntil: WaitUntilFn,
 ): Promise<void> {
-  const reinstallResult = await clearUninstalledAtAndMetafieldErrors(sql, shop);
+  // Check for existing in-flight handler BEFORE any await.
+  // This prevents the race where the loser's SQL returns before the winner sets up dedupe.
+  const existingHandler = inFlightReinstallHandlers.get(shop);
+  if (existingHandler) {
+    // Another call is already handling this shop - await it and return.
+    // The existing handler will do the work; we just wait for it.
+    await existingHandler;
+    return;
+  }
 
-  if (reinstallResult.wasReinstalled) {
-    setupCompletedShops.delete(shop);
+  // We're the first caller - set up the handler promise synchronously.
+  // Create a deferred so we can resolve it from within the handler.
+  let resolveHandler!: () => void;
+  let rejectHandler!: (error: unknown) => void;
+  const handlerPromise = new Promise<void>((resolve, reject) => {
+    resolveHandler = resolve;
+    rejectHandler = reject;
+  });
 
-    // Check if there's already an in-flight CRITICAL registration for this shop.
-    // Another concurrent reinstall load may have already started registration.
-    const existingCriticalPromise = inFlightCriticalRegistrations.get(shop);
-    if (existingCriticalPromise) {
-      // Another call is handling this shop's critical registration - AWAIT it.
-      // Bug B fix: We MUST await (not just waitUntil) so runAfterAuth doesn't resolve
-      // until registration is complete. Otherwise the Setup Guide renders stale state.
-      const existingFullPromise = inFlightSetups.get(shop);
-      if (existingFullPromise) {
-        waitUntil(existingFullPromise);
-      }
-      await existingCriticalPromise;
-      return;
-    }
+  // Set the handler BEFORE any await so concurrent callers find it immediately.
+  inFlightReinstallHandlers.set(shop, handlerPromise);
 
-    // Create a deferred for the critical registration result
-    let resolveCritical!: (success: boolean) => void;
-    const criticalResultPromise = new Promise<boolean>((resolve) => {
-      resolveCritical = resolve;
-    });
+  try {
+    // Now do the actual work - concurrent callers will await handlerPromise above.
+    const reinstallResult = await clearUninstalledAtAndMetafieldErrors(sql, shop);
 
-    // Store critical promise IMMEDIATELY so concurrent calls find it
-    inFlightCriticalRegistrations.set(shop, criticalResultPromise);
+    if (reinstallResult.wasReinstalled) {
+      setupCompletedShops.delete(shop);
 
-    // Create the full setup promise (critical + background) for deduplication.
-    // Other concurrent calls will wait on this via inFlightSetups.
-    const fullSetupPromise = (async () => {
-      const criticalSuccess = await criticalResultPromise;
-      await runBackgroundSetup(shop, admin, criticalSuccess);
-    })();
-
-    inFlightSetups.set(shop, fullSetupPromise);
-
-    try {
-      // Run critical registration and signal completion
-      const criticalSuccess = await runCriticalRegistration(sql, shop, admin);
-      resolveCritical(criticalSuccess);
-
-      // Background setup runs via waitUntil (not blocking the response)
-      waitUntil(fullSetupPromise);
-    } catch (error) {
-      // On error, signal failure so waiting calls can proceed
-      resolveCritical(false);
-      throw error;
-    } finally {
-      // Clean up in-flight entries after full setup completes
-      fullSetupPromise.finally(() => {
-        inFlightSetups.delete(shop);
-        inFlightCriticalRegistrations.delete(shop);
+      // Use a deferred to pass critical result to the background promise.
+      // This ensures the closure gets the actual result, not a captured initial value.
+      let resolveCritical!: (success: boolean) => void;
+      const criticalResultPromise = new Promise<boolean>((resolve) => {
+        resolveCritical = resolve;
       });
-    }
-    return;
-  }
 
-  // Loser path: wasReinstalled=false because another concurrent call already cleared it.
-  // But we still need to await the winner's critical registration before returning.
-  const existingCriticalPromise = inFlightCriticalRegistrations.get(shop);
-  if (existingCriticalPromise) {
-    // Bug B fix: AWAIT the winner's critical registration so runAfterAuth doesn't
-    // resolve until registration is complete. The Setup Guide renders after this.
-    const existingFullPromise = inFlightSetups.get(shop);
-    if (existingFullPromise) {
-      waitUntil(existingFullPromise);
-    }
-    await existingCriticalPromise;
-    return;
-  }
+      // Create the full setup promise (critical + background) for waitUntil.
+      const fullSetupPromise = (async () => {
+        const criticalSuccess = await criticalResultPromise;
+        await runBackgroundSetup(shop, admin, criticalSuccess);
+      })();
 
-  runSetupIfNeeded(shop, admin, waitUntil);
+      inFlightSetups.set(shop, fullSetupPromise);
+
+      try {
+        // Run critical registration - this is what the Setup Guide depends on
+        const criticalSuccess = await runCriticalRegistration(sql, shop, admin);
+        resolveCritical(criticalSuccess);
+
+        // Background setup runs via waitUntil (not blocking the response)
+        waitUntil(fullSetupPromise);
+      } catch (error) {
+        // Signal failure so background can proceed
+        resolveCritical(false);
+        throw error;
+      } finally {
+        // Clean up inFlightSetups after full setup completes
+        fullSetupPromise.finally(() => {
+          inFlightSetups.delete(shop);
+        });
+      }
+    } else {
+      // Not a reinstall - run normal setup if needed
+      runSetupIfNeeded(shop, admin, waitUntil);
+    }
+
+    resolveHandler();
+  } catch (error) {
+    rejectHandler(error);
+    throw error;
+  } finally {
+    // Always clean up the handler map
+    inFlightReinstallHandlers.delete(shop);
+  }
 }
 
 /**
@@ -662,7 +668,7 @@ async function runSetup(
 export function _resetSetupCacheForTesting(): void {
   setupCompletedShops.clear();
   inFlightSetups.clear();
-  inFlightCriticalRegistrations.clear();
+  inFlightReinstallHandlers.clear();
 }
 
 /**
