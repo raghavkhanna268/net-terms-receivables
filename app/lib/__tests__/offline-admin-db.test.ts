@@ -27,18 +27,27 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 // Mock fetch for token refresh tests
 const originalFetch = global.fetch;
 
-// Mock shopify.server module
+// Mock shopify.server module with controllable unauthenticated.admin
 const mockAdmin = {
   graphql: vi.fn(),
 };
 
+// Hoist the mock function so it can be controlled per-test
+const mockUnauthenticatedAdmin = vi.hoisted(() => vi.fn());
+
 vi.mock("~/shopify.server", () => ({
   getShopifyApp: () => ({
     unauthenticated: {
-      admin: vi.fn().mockResolvedValue({ admin: mockAdmin }),
+      admin: mockUnauthenticatedAdmin,
     },
   }),
 }));
+
+// Reset mock to default success behavior
+function resetUnauthenticatedAdminMock() {
+  mockUnauthenticatedAdmin.mockReset();
+  mockUnauthenticatedAdmin.mockResolvedValue({ admin: mockAdmin });
+}
 
 // Track fetch calls for concurrency test
 let fetchCallCount = 0;
@@ -62,6 +71,7 @@ describeWithDb("getOfflineAdminContext (DB-backed)", () => {
     vi.clearAllMocks();
     fetchCallCount = 0;
     fetchCallTimestamps = [];
+    resetUnauthenticatedAdminMock();
 
     // Clean up test session
     await sql`DELETE FROM "Session" WHERE id = ${TEST_SESSION_ID}`;
@@ -365,6 +375,75 @@ describeWithDb("getOfflineAdminContext (DB-backed)", () => {
 
       // No fetch call should be made
       expect(fetchCallCount).toBe(0);
+    });
+  });
+
+  describe("Session error from unauthenticated.admin", () => {
+    it("returns admin_session_error when unauthenticated.admin throws with 'session' in message", async () => {
+      // Create session with fresh token so refresh succeeds
+      await createTestSession({
+        accessToken: "shpat_valid",
+        expiresInMs: 60 * 60 * 1000, // Valid for 1 hour
+      });
+
+      // Make unauthenticated.admin throw a session error
+      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("session expired"));
+
+      const { getOfflineAdminContext } = await import("../offline-admin.server");
+
+      const result = await getOfflineAdminContext(
+        sql,
+        TEST_SHOP,
+        TEST_CLIENT_ID,
+        TEST_CLIENT_SECRET
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("admin_session_error");
+      expect(result.error).toBe("Session error");
+      expect(result.retryable).toBe(true);
+      expect(result.needsReauth).toBe(false);
+    });
+
+    it("returns admin_session_error for various session error messages (case insensitive)", async () => {
+      // Create session with fresh token
+      await createTestSession({
+        accessToken: "shpat_valid",
+        expiresInMs: 60 * 60 * 1000,
+      });
+
+      // Test with different session error messages
+      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("Session has expired"));
+
+      const { getOfflineAdminContext } = await import("../offline-admin.server");
+
+      const result = await getOfflineAdminContext(
+        sql,
+        TEST_SHOP,
+        TEST_CLIENT_ID,
+        TEST_CLIENT_SECRET
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("admin_session_error");
+      expect(result.retryable).toBe(true);
+    });
+
+    it("re-throws non-session errors from unauthenticated.admin", async () => {
+      // Create session with fresh token
+      await createTestSession({
+        accessToken: "shpat_valid",
+        expiresInMs: 60 * 60 * 1000,
+      });
+
+      // Make unauthenticated.admin throw a non-session error
+      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("Network timeout"));
+
+      const { getOfflineAdminContext } = await import("../offline-admin.server");
+
+      await expect(
+        getOfflineAdminContext(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET)
+      ).rejects.toThrow("Network timeout");
     });
   });
 });

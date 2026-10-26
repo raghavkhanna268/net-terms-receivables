@@ -467,15 +467,15 @@ describe("shopify-client.server", () => {
     });
 
     /**
-     * Other session errors (message contains 'session' but not InvalidSession or 'No session found')
-     * map to errorCode 'session_error', retryable: true. This matches the original behavior.
+     * admin_session_error (from unauthenticated.admin throws with 'session' in message)
+     * maps to errorCode 'session_error', retryable: true. This matches the original behavior.
      */
-    it("maps errors with 'session' in message to session_error (retryable)", async () => {
+    it("maps admin_session_error to session_error (retryable)", async () => {
       mockGetOfflineAdminContext.mockResolvedValueOnce({
         success: false,
-        errorCode: "unknown",
-        error: "Session expired or invalid",
-        retryable: false,
+        errorCode: "admin_session_error",
+        error: "Session error",
+        retryable: true,
         needsReauth: false,
       });
 

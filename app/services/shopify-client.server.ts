@@ -275,13 +275,8 @@ export async function shopifyGraphQL<T = unknown>(
       errorCode = "invalid_session";
       error = "Invalid session";
       retryable = true;
-    } else if (
-      // Only apply session_error fallback for unknown error codes with 'session' in message
-      // Don't override specific codes like invalid_grant, no_refresh_token, network_error
-      errorCode === "unknown" &&
-      (error.includes("session") || error.includes("Session"))
-    ) {
-      // Other session errors - may be recoverable via session refresh
+    } else if (errorCode === "admin_session_error") {
+      // Other session errors from unauthenticated.admin - may be recoverable via session refresh
       errorCode = "session_error";
       error = "Session error";
       retryable = true;

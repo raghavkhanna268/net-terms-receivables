@@ -38,7 +38,8 @@ import { safeLog, shopHash } from "./log.server";
 export type OfflineAdminErrorCode =
   | RefreshErrorCode
   | "admin_invalid_session"
-  | "admin_no_session";
+  | "admin_no_session"
+  | "admin_session_error";
 
 /**
  * Result of getting an offline admin context.
@@ -161,6 +162,21 @@ export async function getOfflineAdminContext(
         error: "No session found",
         retryable: false,
         needsReauth: true,
+      };
+    }
+
+    if (message.toLowerCase().includes("session")) {
+      safeLog("error", "offline_admin_refresh_failed", {
+        shopHash: await shopHash(shop),
+        code: "admin_session_error",
+      });
+
+      return {
+        success: false,
+        errorCode: "admin_session_error",
+        error: "Session error",
+        retryable: true,
+        needsReauth: false,
       };
     }
 
