@@ -23,16 +23,17 @@ import { sqlOptions } from "~/lib/db-light.server";
 import { syncClockToDb } from "../../../tests/helpers/db-clock";
 
 /**
- * Compute a fixed-offset Etc/GMT±N timezone where the DB's current local hour is ~12.
- * Uses DB's NOW() as the single clock source so the timezone choice aligns with the
- * business-hour check in s18_enqueue_reminders() which also uses NOW().
+ * Compute a fixed-offset Etc/GMT±N timezone where the given UTC hour becomes ~12 local.
  * PostgreSQL uses POSIX convention where Etc/GMT+5 means UTC-5 (opposite of ISO).
+ *
+ * @param utcHour - UTC hour (0-23), either from DB NOW() or injected for testing
+ * @returns Etc/GMT timezone string that makes utcHour appear as local hour 12
+ *
+ * Valid range: Etc/GMT+12 (UTC-12) to Etc/GMT-14 (UTC+14). With utcHour 0-23:
+ * - Min offset: 0 - 12 = -12 → Etc/GMT-12 (valid)
+ * - Max offset: 23 - 12 = 11 → Etc/GMT+11 (valid)
  */
-async function getTestTimezone(sql: ReturnType<typeof postgres>): Promise<string> {
-  const [row] = await sql<{ utc_hour: number }[]>`
-    SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
-  `;
-  const utcHour = row.utc_hour;
+function computeTestTimezone(utcHour: number): string {
   const offsetToMakeNoon = utcHour - 12;
   if (offsetToMakeNoon === 0) {
     return "Etc/GMT";
@@ -43,8 +44,79 @@ async function getTestTimezone(sql: ReturnType<typeof postgres>): Promise<string
   }
 }
 
+/**
+ * Compute a fixed-offset Etc/GMT±N timezone where the DB's current local hour is ~12.
+ * Uses DB's NOW() as the single clock source so the timezone choice aligns with the
+ * business-hour check in s18_enqueue_reminders() which also uses NOW().
+ *
+ * @param sql - Postgres connection
+ * @param injectedUtcHour - Optional UTC hour override for testing (0-23)
+ */
+async function getTestTimezone(
+  sql: ReturnType<typeof postgres>,
+  injectedUtcHour?: number
+): Promise<string> {
+  if (injectedUtcHour !== undefined) {
+    return computeTestTimezone(injectedUtcHour);
+  }
+  const [row] = await sql<{ utc_hour: number }[]>`
+    SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
+  `;
+  return computeTestTimezone(row.utc_hour);
+}
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describe("computeTestTimezone (pure, no DB)", () => {
+  /**
+   * Verify that for any UTC hour, the computed Etc/GMT±N timezone makes the
+   * local hour fall inside the 09:00-18:00 business-hour window.
+   *
+   * IST (UTC+5:30) edge cases converted to UTC hours:
+   * - 00:40 IST = 19:10 UTC → UTC hour 19
+   * - 10:00 IST = 04:30 UTC → UTC hour 4
+   * - 18:30 IST = 13:00 UTC → UTC hour 13
+   * - 23:59 IST = 18:29 UTC → UTC hour 18
+   */
+  const IST_EDGE_CASES: Array<{ istTime: string; utcHour: number }> = [
+    { istTime: "00:40 IST", utcHour: 19 },
+    { istTime: "10:00 IST", utcHour: 4 },
+    { istTime: "18:30 IST", utcHour: 13 },
+    { istTime: "23:59 IST", utcHour: 18 },
+  ];
+
+  it.each(IST_EDGE_CASES)(
+    "at $istTime (UTC hour $utcHour), chosen timezone makes local hour 12 (within 09-18)",
+    ({ utcHour }) => {
+      const tz = computeTestTimezone(utcHour);
+
+      expect(tz).toMatch(/^Etc\/GMT([+-]\d+)?$/);
+
+      const offset = tz === "Etc/GMT" ? 0 : parseInt(tz.replace("Etc/GMT", ""), 10);
+      expect(offset).toBeGreaterThanOrEqual(-12);
+      expect(offset).toBeLessThanOrEqual(11);
+
+      const localHour = (utcHour - offset + 24) % 24;
+      expect(localHour).toBe(12);
+      expect(localHour).toBeGreaterThanOrEqual(9);
+      expect(localHour).toBeLessThanOrEqual(18);
+    }
+  );
+
+  it("covers full UTC hour range (0-23) with valid Etc/GMT zones", () => {
+    for (let utcHour = 0; utcHour < 24; utcHour++) {
+      const tz = computeTestTimezone(utcHour);
+      const offset = tz === "Etc/GMT" ? 0 : parseInt(tz.replace("Etc/GMT", ""), 10);
+
+      expect(offset).toBeGreaterThanOrEqual(-12);
+      expect(offset).toBeLessThanOrEqual(11);
+
+      const localHour = (utcHour - offset + 24) % 24;
+      expect(localHour).toBe(12);
+    }
+  });
+});
 
 describeWithDb("Sequential DB", () => {
   describe("ensureDefaultReminderRules duplicate-rule fix", () => {
