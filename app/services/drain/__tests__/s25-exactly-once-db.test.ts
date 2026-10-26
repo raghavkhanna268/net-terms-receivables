@@ -650,11 +650,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
   // ==========================================================================
   // C1: Concurrent processBulkOperation on ONE op (3 deliveries, non-empty JSONL)
+  // Uses production path: getBulkHandler("BULK_OPERATIONS_FINISH") which calls
+  // processBulkOperation AND enqueueReconcileStage when nextStage is set.
   // ==========================================================================
   describe("C1: concurrent processBulkOperation - exactly one completion and one next-stage enqueue", () => {
     it("three concurrent deliveries (webhook + recovery + redelivery) on non-empty JSONL path result in exactly one customers-stage enqueue", async () => {
-      const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
-      const { enqueueReconcileStage } = await import("../reconcile-handlers.server");
+      const { getBulkHandler } = await import("../processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/concurrent-c1-${TEST_SUFFIX}`;
@@ -705,6 +706,10 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       });
 
       try {
+        // Get the production handler (handleBulkOperationsFinish)
+        const handler = getBulkHandler("BULK_OPERATIONS_FINISH");
+        expect(handler).toBeDefined();
+
         const createMessage = (webhookId: string) => ({
           topic: "BULK_OPERATIONS_FINISH" as const,
           shop: TEST_SHOP_DOMAIN,
@@ -714,11 +719,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           enqueuedAt: new Date().toISOString(),
         });
 
-        // Run 3 concurrent deliveries: webhook, recovery, redelivery
+        // Run 3 concurrent deliveries through the PRODUCTION handler
+        // This tests that the handler correctly enqueues next stage only once
         const [result1, result2, result3] = await Promise.all([
-          processBulkOperation(sql, createMessage(webhookId1)),
-          processBulkOperation(sql, createMessage(webhookId2)),
-          processBulkOperation(sql, createMessage(webhookId3)),
+          handler!(sql, createMessage(webhookId1)),
+          handler!(sql, createMessage(webhookId2)),
+          handler!(sql, createMessage(webhookId3)),
         ]);
 
         const results = [result1, result2, result3];
@@ -739,10 +745,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         `;
         expect(row.completed_at).not.toBeNull();
 
-        // Enqueue next stage for the winner (this is what processor.server.ts does)
-        await enqueueReconcileStage(sql, TEST_SHOP_DOMAIN, "customers", undefined, bulkOpId);
-
         // Verify EXACTLY 1 RECONCILE_CUSTOMERS message in pgmq.q_s6_sync
+        // The production handler enqueues this automatically when nextStage is set
         const [queueCount] = await sql<{ count: string }[]>`
           SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
           WHERE message->>'topic' = 'RECONCILE_CUSTOMERS'
@@ -1690,7 +1694,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
     it("end-to-end: recoverStaleBulkOperations re-enqueues stranded op and it processes to completion", async () => {
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
-      const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const { getBulkHandler } = await import("../processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
       const E2E_SHOP_ID = `shop-e2e-c15-${TEST_SUFFIX}`;
@@ -1796,7 +1800,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         expect(strandedAttempt2!.status).toBe("skipped");
 
         // === EXTENDED: Now process the re-enqueued message to completion ===
+        // Use the PRODUCTION handler which calls processBulkOperation AND
+        // enqueueReconcileStage when nextStage is set
         
+        const handler = getBulkHandler("BULK_OPERATIONS_FINISH");
+        expect(handler).toBeDefined();
+
         // Create message from queue (simulating what processor would do)
         const message = {
           topic: "BULK_OPERATIONS_FINISH" as const,
@@ -1807,8 +1816,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           enqueuedAt: new Date().toISOString(),
         };
 
-        // Process the message - should complete the op
-        const processResult = await processBulkOperation(sql, message);
+        // Process through production handler - completes op and enqueues next stage
+        const processResult = await handler!(sql, message);
 
         // Verify processing succeeded and completed
         expect(processResult.success).toBe(true);
@@ -1821,11 +1830,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         `;
         expect(completedRow.completed_at).not.toBeNull();
 
-        // Verify next-stage (RECONCILE_CUSTOMERS) enqueued when processor handles nextStage
-        // Note: processBulkOperation returns nextStage; the processor calls enqueueReconcileStage
-        const { enqueueReconcileStage } = await import("../reconcile-handlers.server");
-        await enqueueReconcileStage(sql, E2E_SHOP_DOMAIN, "customers", undefined, strandedOpId);
-
+        // Verify next-stage (RECONCILE_CUSTOMERS) enqueued by production handler
         const [customersQueueCount] = await sql<{ count: string }[]>`
           SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
           WHERE message->>'topic' = 'RECONCILE_CUSTOMERS'
@@ -2162,6 +2167,185 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         SELECT byte_offset::text FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
       `;
       expect(row.byte_offset).toBe("1000");
+    });
+
+    it("X1: saveBulkOperationProgress with chunkSize and wrong token after real takeover updates 0 rows", async () => {
+      const { saveBulkOperationProgress, acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/x1-chunksize-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset, chunk_size, failure_count
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 0, 1000, 0
+        )
+      `;
+
+      // A acquires the lease through the real acquire function
+      const tokenA = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(tokenA).not.toBeNull();
+
+      // Snapshot the row before takeover
+      const [beforeTakeover] = await sql<{
+        byte_offset: string | null;
+        chunk_size: string | null;
+        processing_lease_token: string | null;
+        processing_lease_until: Date | null;
+        failure_count: number;
+        completed_at: Date | null;
+      }[]>`
+        SELECT 
+          byte_offset::text, 
+          chunk_size::text, 
+          processing_lease_token,
+          processing_lease_until,
+          failure_count,
+          completed_at
+        FROM s6_bulk_operations 
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(beforeTakeover.processing_lease_token).toBe(tokenA);
+
+      // B takes over via SQL: new token and future lease_until
+      const tokenB = crypto.randomUUID();
+      const futureLease = new Date(Date.now() + 60000);
+      await sql`
+        UPDATE s6_bulk_operations
+        SET processing_lease_token = ${tokenB},
+            processing_lease_until = ${futureLease}
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+
+      // Snapshot after takeover (B's state)
+      const [afterTakeover] = await sql<{
+        byte_offset: string | null;
+        chunk_size: string | null;
+        processing_lease_token: string | null;
+        processing_lease_until: Date | null;
+        failure_count: number;
+        completed_at: Date | null;
+      }[]>`
+        SELECT 
+          byte_offset::text, 
+          chunk_size::text, 
+          processing_lease_token,
+          processing_lease_until,
+          failure_count,
+          completed_at
+        FROM s6_bulk_operations 
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(afterTakeover.processing_lease_token).toBe(tokenB);
+
+      // A (with its old token) calls saveBulkOperationProgress WITH chunkSize
+      // This hits the production branch at ~:909
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 5000, tokenA!, 2000);
+
+      // Should update 0 rows (owner check at :909 fails)
+      expect(rowUpdated).toBe(false);
+
+      // Snapshot after A's failed write - row must be byte-identical to afterTakeover
+      const [afterFailedWrite] = await sql<{
+        byte_offset: string | null;
+        chunk_size: string | null;
+        processing_lease_token: string | null;
+        processing_lease_until: Date | null;
+        failure_count: number;
+        completed_at: Date | null;
+      }[]>`
+        SELECT 
+          byte_offset::text, 
+          chunk_size::text, 
+          processing_lease_token,
+          processing_lease_until,
+          failure_count,
+          completed_at
+        FROM s6_bulk_operations 
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+
+      // Full row must be unchanged
+      expect(afterFailedWrite).toEqual(afterTakeover);
+    });
+
+    it("X1: saveBulkOperationProgress with chunkSize after A's lease expired and B re-acquired updates 0 rows", async () => {
+      const { saveBulkOperationProgress, acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
+
+      const bulkOpId = `gid://shopify/BulkOperation/x1-expired-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset, chunk_size, failure_count
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', NOW(), 100, 1000, 1
+        )
+      `;
+
+      // A acquires the lease
+      const tokenA = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(tokenA).not.toBeNull();
+
+      // Expire A's lease
+      await sql`
+        UPDATE s6_bulk_operations
+        SET processing_lease_until = NOW() - interval '1 minute'
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+
+      // B acquires the lease (A's is expired)
+      const tokenB = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(tokenB).not.toBeNull();
+      expect(tokenB).not.toBe(tokenA);
+
+      // Snapshot B's state
+      const [bState] = await sql<{
+        byte_offset: string | null;
+        chunk_size: string | null;
+        processing_lease_token: string | null;
+        processing_lease_until: Date | null;
+        failure_count: number;
+        completed_at: Date | null;
+      }[]>`
+        SELECT 
+          byte_offset::text, 
+          chunk_size::text, 
+          processing_lease_token,
+          processing_lease_until,
+          failure_count,
+          completed_at
+        FROM s6_bulk_operations 
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(bState.processing_lease_token).toBe(tokenB);
+
+      // A (with its old expired token) tries to save progress WITH chunkSize
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 9999, tokenA!, 3000);
+
+      // Should update 0 rows
+      expect(rowUpdated).toBe(false);
+
+      // Row must be unchanged
+      const [afterFailedWrite] = await sql<{
+        byte_offset: string | null;
+        chunk_size: string | null;
+        processing_lease_token: string | null;
+        processing_lease_until: Date | null;
+        failure_count: number;
+        completed_at: Date | null;
+      }[]>`
+        SELECT 
+          byte_offset::text, 
+          chunk_size::text, 
+          processing_lease_token,
+          processing_lease_until,
+          failure_count,
+          completed_at
+        FROM s6_bulk_operations 
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+
+      expect(afterFailedWrite).toEqual(bState);
     });
   });
 
@@ -2879,6 +3063,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       // Clear any existing messages in the bulk queue
       await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' = ${bulkOpId}`;
+
+      // Purge s6_sync queue to prevent flaky deadLettered counts from leftover messages
+      // (runDrain drains both s6_sync and s6_bulk; stale CREDIT_STATUS_RECOMPUTE messages
+      // from prior Sequential-DB tests can get dead-lettered here)
+      await sql`DELETE FROM pgmq.q_s6_sync`;
+      await sql`DELETE FROM pgmq.a_s6_sync`;
 
       // Insert message directly into pgmq. pgmq.read() increments read_ct by 1,
       // so insert with maxRetries - 1 (4) to have read_ct = maxRetries (5) after read.
