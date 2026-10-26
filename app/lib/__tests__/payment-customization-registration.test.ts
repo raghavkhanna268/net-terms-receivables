@@ -152,7 +152,7 @@ describe("payment-customization-registration", () => {
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
-    it("returns failed with errCode when title update has userErrors", async () => {
+    it("returns failed with errCode when title update has userErrors with known code", async () => {
       mockGraphql.mockResolvedValueOnce({
         json: async () => ({
           data: {
@@ -190,17 +190,106 @@ describe("payment-customization-registration", () => {
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
-      expect(result.errCode).toBeDefined();
+      expect(result.errCode).toBe("INVALID");
       expect(safeLogSpy).toHaveBeenCalledTimes(1);
       expect(safeLogSpy).toHaveBeenCalledWith(
         "warn",
         "payment_customization.title_update_failed",
-        { err: result.errCode },
+        { err: "INVALID" },
       );
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
-    it("returns failed with errCode when title update has GraphQL errors", async () => {
+    it("returns failed with errCode 'unknown' when title update has userErrors without code", async () => {
+      mockGraphql.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            paymentCustomizations: {
+              edges: [
+                {
+                  node: {
+                    id: "gid://shopify/PaymentCustomization/123",
+                    shopifyFunction: { handle: "hide-terms-payment" },
+                    title: "Old Title",
+                    enabled: true,
+                  },
+                },
+              ],
+            },
+          },
+        }),
+      });
+
+      mockGraphql.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            paymentCustomizationUpdate: {
+              paymentCustomization: null,
+              userErrors: [
+                { field: ["title"], message: "Title is invalid" },
+              ],
+            },
+          },
+        }),
+      });
+
+      const result = await ensurePaymentCustomization(mockAdmin);
+
+      expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBe("unknown");
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "payment_customization.title_update_failed",
+        { err: "unknown" },
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode when title update has GraphQL errors with extensions.code", async () => {
+      mockGraphql.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            paymentCustomizations: {
+              edges: [
+                {
+                  node: {
+                    id: "gid://shopify/PaymentCustomization/123",
+                    shopifyFunction: { handle: "hide-terms-payment" },
+                    title: "Old Title",
+                    enabled: true,
+                  },
+                },
+              ],
+            },
+          },
+        }),
+      });
+
+      mockGraphql.mockResolvedValueOnce({
+        json: async () => ({
+          errors: [{ message: "Internal server error", extensions: { code: "INTERNAL_ERROR" } }],
+        }),
+      });
+
+      const result = await ensurePaymentCustomization(mockAdmin);
+
+      expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBe("INTERNAL_ERROR");
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "payment_customization.title_update_failed",
+        { err: "INTERNAL_ERROR" },
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode 'unknown' when title update has GraphQL errors without extensions.code", async () => {
       mockGraphql.mockResolvedValueOnce({
         json: async () => ({
           data: {
@@ -231,17 +320,17 @@ describe("payment-customization-registration", () => {
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
-      expect(result.errCode).toBeDefined();
+      expect(result.errCode).toBe("unknown");
       expect(safeLogSpy).toHaveBeenCalledTimes(1);
       expect(safeLogSpy).toHaveBeenCalledWith(
         "warn",
         "payment_customization.title_update_failed",
-        { err: result.errCode },
+        { err: "unknown" },
       );
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
-    it("returns failed with errCode when title update throws", async () => {
+    it("returns failed with errCode 'error' when title update throws", async () => {
       mockGraphql.mockResolvedValueOnce({
         json: async () => ({
           data: {
@@ -268,12 +357,12 @@ describe("payment-customization-registration", () => {
       expect(result.id).toBe("gid://shopify/PaymentCustomization/123");
       expect(result.created).toBe(false);
       expect(result.titleUpdate).toBe("failed");
-      expect(result.errCode).toBeDefined();
+      expect(result.errCode).toBe("error");
       expect(safeLogSpy).toHaveBeenCalledTimes(1);
       expect(safeLogSpy).toHaveBeenCalledWith(
         "warn",
         "payment_customization.title_update_failed",
-        { err: result.errCode },
+        { err: "error" },
       );
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
