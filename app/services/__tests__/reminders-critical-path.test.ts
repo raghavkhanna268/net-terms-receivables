@@ -288,6 +288,38 @@ describe("Critical Path: Reminder Sending Gates", () => {
       expect(result.action).toBe("disabled");
       expect(mockFetch).not.toHaveBeenCalled();
     });
+
+    it("sendCatchupReminder returns skipped when shop reminders disabled (sender configured)", async () => {
+      const { DateTime } = await import("luxon");
+      const mockNow = DateTime.fromISO("2026-10-24T12:00:00", { zone: "Asia/Kolkata" });
+      vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { sendCatchupReminder } = await import("../reminders.server");
+
+      mockSql.setMockResult("log_status", [{ status: "delayed" }]);
+      mockSql.setMockResult("invoice", [{
+        ...getMockInvoice(),
+        dueAt: new Date("2026-10-23T00:00:00+05:30"),
+      }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("settings", [{ enabled: false }]);
+
+      const result = await sendCatchupReminder(
+        mockSql,
+        "shop-crit-123",
+        "inv-crit-123",
+        "rule-crit-123",
+        "log-crit-123",
+        0,
+        "Asia/Kolkata",
+        validEnv
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("Shop reminders disabled");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
   });
 
   describe("Case 2: test-recipient allowlist gate", () => {
@@ -1153,8 +1185,22 @@ describeWithDb("Critical Path: DB-backed tests", () => {
   const TEST_RULE_ID = `rule-critdb-${TEST_SUFFIX}`;
   const TEST_EMAIL = "critdb-buyer@example.com";
 
+  let globalSendsSnapshot: { dailyCount: number; monthlyCount: number; sendDate: Date; sendMonth: string } | null = null;
+
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const [existingGlobal] = await sql<{ daily_count: number; monthly_count: number; send_date: Date; send_month: string }[]>`
+      SELECT daily_count, monthly_count, send_date, send_month FROM s18_global_sends WHERE send_key = 'global'
+    `;
+    if (existingGlobal) {
+      globalSendsSnapshot = {
+        dailyCount: existingGlobal.daily_count,
+        monthlyCount: existingGlobal.monthly_count,
+        sendDate: existingGlobal.send_date,
+        sendMonth: existingGlobal.send_month,
+      };
+    }
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -1200,8 +1246,20 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM s18_global_sends WHERE send_key = 'global'`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    if (globalSendsSnapshot) {
+      await sql`
+        UPDATE s18_global_sends
+        SET daily_count = ${globalSendsSnapshot.dailyCount},
+            monthly_count = ${globalSendsSnapshot.monthlyCount},
+            send_date = ${globalSendsSnapshot.sendDate},
+            send_month = ${globalSendsSnapshot.sendMonth}
+        WHERE send_key = 'global'
+      `;
+    } else {
+      await sql`DELETE FROM s18_global_sends WHERE send_key = 'global'`;
+    }
 
     await sql.end();
   });
@@ -1513,6 +1571,115 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     expect(logRow).not.toContain("@example.com");
     expect(logRow).not.toContain("Payment due");
 
+    vi.useRealTimers();
+  });
+
+  it("hasNewerStageDueToday returns false when shop reminders disabled", async () => {
+    const { hasNewerStageDueToday } = await import("../reminders.server");
+
+    const invoiceId = `inv-newstagegate-${TEST_SUFFIX}`;
+    const orderId = `ord-newstagegate-${TEST_SUFFIX}`;
+    const rule2Id = `rule2-critdb-${TEST_SUFFIX}`;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#NEWSTAGEGATE-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '5 days',
+        (NOW() AT TIME ZONE 'Asia/Kolkata')::DATE - 7,
+        NOW(), NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${rule2Id}, ${TEST_SHOP_ID}, 7, 'email'::"ReminderChannel", true, NOW(), NOW())
+    `;
+
+    const resultEnabled = await hasNewerStageDueToday(sql, TEST_SHOP_ID, invoiceId, 0, "Asia/Kolkata");
+    expect(resultEnabled).toBe(true);
+
+    await sql`ALTER TABLE s18_shop_reminder_settings DISABLE TRIGGER s18_shop_reminder_settings_updated_at`;
+    await sql`UPDATE s18_shop_reminder_settings SET enabled = false, updated_at = NOW() WHERE shop_id = ${TEST_SHOP_ID}`;
+    await sql`ALTER TABLE s18_shop_reminder_settings ENABLE TRIGGER s18_shop_reminder_settings_updated_at`;
+
+    const resultDisabled = await hasNewerStageDueToday(sql, TEST_SHOP_ID, invoiceId, 0, "Asia/Kolkata");
+    expect(resultDisabled).toBe(false);
+
+    await sql`ALTER TABLE s18_shop_reminder_settings DISABLE TRIGGER s18_shop_reminder_settings_updated_at`;
+    await sql`UPDATE s18_shop_reminder_settings SET enabled = true, updated_at = NOW() WHERE shop_id = ${TEST_SHOP_ID}`;
+    await sql`ALTER TABLE s18_shop_reminder_settings ENABLE TRIGGER s18_shop_reminder_settings_updated_at`;
+    await sql`DELETE FROM "ReminderRule" WHERE id = ${rule2Id}`;
+  });
+
+  it("handleReminderSend twice with same message: fetch once, one sent ReminderLog row", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+
+    const originalEnv = process.env;
+    (process.env as Record<string, string | undefined>).RESEND_API_KEY = FAKE_RESEND_KEY;
+    (process.env as Record<string, string | undefined>).RESEND_FROM = "reminders@example.com";
+    (process.env as Record<string, string | undefined>).REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
+    (process.env as Record<string, string | undefined>).SHOPIFY_APP_URL = "https://test-app.example.com";
+    (process.env as Record<string, string | undefined>).RESEND_TEST_RECIPIENTS = TEST_EMAIL;
+
+    const { handleReminderSend } = await import("~/jobs/reminders");
+
+    const invoiceId = `inv-handler-${TEST_SUFFIX}`;
+    const orderId = `ord-handler-${TEST_SUFFIX}`;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#HANDLER-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '5 days', ${new Date("2026-10-24T00:00:00+05:30")}, NOW(), NOW()
+      )
+    `;
+
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "resend-handler-123" }),
+    });
+
+    const message = {
+      topic: "REMINDER_SEND" as const,
+      shop: TEST_SHOP_DOMAIN,
+      shopId: TEST_SHOP_ID,
+      invoiceId,
+      ruleId: TEST_RULE_ID,
+      offsetDays: 0,
+      timezone: "Asia/Kolkata",
+      webhookId: `s18_${invoiceId}_${TEST_RULE_ID}_2026-10-24`,
+      enqueuedAt: "2026-10-24T06:30:00Z",
+    };
+
+    const result1 = await handleReminderSend(sql, message);
+    expect(result1.success).toBe(true);
+    expect(result1.action).toBe("created");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    const result2 = await handleReminderSend(sql, message);
+    expect(result2.success).toBe(true);
+    expect(result2.action).toBe("skipped");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    const logs = await sql<{ id: string; status: string }[]>`
+      SELECT id, status FROM "ReminderLog"
+      WHERE "shopId" = ${TEST_SHOP_ID} AND "ruleId" = ${TEST_RULE_ID} AND "invoiceId" = ${invoiceId}
+    `;
+    expect(logs.length).toBe(1);
+    expect(logs[0].status).toBe("sent");
+
+    process.env = originalEnv;
     vi.useRealTimers();
   });
 });
