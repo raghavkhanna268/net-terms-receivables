@@ -639,10 +639,54 @@ describe("Bulk JSONL Processor", () => {
 
       expect(result.success).toBe(true);
       expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
       const bytes = result.bytes;
       expect(bytes).toBeDefined();
       expect(bytes).not.toBeNull();
       expect((bytes as Uint8Array).length).toBe(0);
+    });
+
+    it("8. numeric-total boundary: rangeEnd === totalSize - 2, not EOF", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const line1 = '{"id":"1"}\n';
+      const line2 = '{"id":"2"}\n';
+      const line3 = '{"id":"3"}\n';
+      const line4 = '{"id":"4"}\n';
+      const line5 = '{"id":"5"}\n';
+      const line6 = '{"id":"6"}\n';
+      const line7 = '{"id":"7"}\n';
+      const line8 = '{"id":"8"}\n';
+      const line9 = '{"id":"9x"}';
+      const bodyLines = line1 + line2 + line3 + line4 + line5 + line6 + line7 + line8 + line9;
+      expect(bodyLines.length).toBe(99);
+
+      const mockResponse = new Response(bodyLines, {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-98/100" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(false);
+      expect(result.totalSize).toBe(100);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      expect((bytes as Uint8Array).length).toBe(99);
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(8);
+      expect(lines[0]).toBe('{"id":"1"}');
+      expect(lines[7]).toBe('{"id":"8"}');
     });
   });
 
