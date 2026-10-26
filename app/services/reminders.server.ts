@@ -49,6 +49,7 @@ import {
   isAllowlistEnforced,
 } from "./recipient-allowlist.server";
 import { sendViaResend } from "./resend-client.server";
+import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 
 /**
  * Check if plan gating enforcement is enabled.
@@ -97,8 +98,6 @@ const GLOBAL_SEND_KEY = "global";
  */
 const SEND_WINDOW_START = 9;
 const SEND_WINDOW_END = 19;
-
-import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 
 /**
  * Check if reminder sending is enabled.

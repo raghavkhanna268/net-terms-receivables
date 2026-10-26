@@ -4,20 +4,12 @@
  * Verifies the shared email configuration check used by both
  * onboarding-steps.server.ts and reminders.server.ts.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { isEmailSendingConfigured } from "../email-sender-config.server";
 
 describe("isEmailSendingConfigured", () => {
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    delete process.env.RESEND_API_KEY;
-    delete process.env.RESEND_FROM;
-  });
-
   afterEach(() => {
-    process.env.RESEND_API_KEY = originalEnv.RESEND_API_KEY;
-    process.env.RESEND_FROM = originalEnv.RESEND_FROM;
+    vi.unstubAllEnvs();
   });
 
   describe("with env parameter override", () => {
@@ -96,27 +88,27 @@ describe("isEmailSendingConfigured", () => {
 
   describe("with process.env fallback", () => {
     it("returns true when both are set in process.env", () => {
-      process.env.RESEND_API_KEY = "re_fake_key_for_test_only_12345";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
+      vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
       expect(isEmailSendingConfigured()).toBe(true);
     });
 
     it("returns false when only API key is in process.env", () => {
-      process.env.RESEND_API_KEY = "re_fake_key_for_test_only_12345";
+      vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
 
       expect(isEmailSendingConfigured()).toBe(false);
     });
 
     it("returns false when only sender is in process.env", () => {
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
       expect(isEmailSendingConfigured()).toBe(false);
     });
 
     it("env parameter takes precedence over process.env when provided", () => {
-      process.env.RESEND_API_KEY = "re_fake_key_for_test_only_12345";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
+      vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
       expect(
         isEmailSendingConfigured({
@@ -127,8 +119,8 @@ describe("isEmailSendingConfigured", () => {
     });
 
     it("undefined in env parameter falls back to process.env (nullish coalescing)", () => {
-      process.env.RESEND_API_KEY = "re_fake_key_for_test_only_12345";
-      process.env.RESEND_FROM = "noreply@example.com";
+      vi.stubEnv("RESEND_API_KEY", "re_fake_key_for_test_only_12345");
+      vi.stubEnv("RESEND_FROM", "noreply@example.com");
 
       expect(
         isEmailSendingConfigured({
