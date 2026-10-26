@@ -66,7 +66,7 @@ function between(run: string, start: string, end: string): string {
 }
 function bash(script: string, env: Record<string, string>) {
   const r = spawnSync("bash", ["-c", script], {
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env },
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env } as unknown as NodeJS.ProcessEnv,
     encoding: "utf8",
   });
   // ::add-mask:: lines are consumed by the runner (masked), not printed.
