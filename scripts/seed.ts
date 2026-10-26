@@ -318,18 +318,17 @@ export const REVIEWER_DEMO_COMPANY_SEED = {
  * Enabled via --reviewer-demo flag or SEED_REVIEWER_DEMO=1 env var.
  *
  * These orders have specific amounts matching the synthetic reviewer CSV:
- * - First order: ₹10,000 - exact match for CSV row 1 (NEFT, ₹10,000)
- * - Second order: ₹5,000 - in 0.5x-2x range for CSV rows 2 and 3
+ * - Order #1001: ₹10,000 - exact match for CSV row 1 (NEFT, ₹10,000)
+ * - Order #1002: ₹5,000 - exact match for CSV row 2, partial for row 3
  *
- * NOTE: Order names (e.g., #1001) are assigned by Shopify sequentially at
- * creation time. We cannot guarantee specific order names. The seed logs
- * the actual assigned order names for verification. The CSV's #1001 reference
- * in the narration would only produce invoice_ref scoring if a seeded order
- * happens to get that name (depends on store's order count).
+ * Order names are set explicitly via OrderCreateOrderInput.name:
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
+ * "name: The name of the order. Can also be set by the API to be any string value."
  */
 export const REVIEWER_DEMO_ORDERS = [
   {
     orderKey: "reviewer-demo-1001",
+    orderName: "#1001",
     amountInr: 10000,
     productTitle: "Reviewer Demo Product A",
     daysAgo: 5,
@@ -337,6 +336,7 @@ export const REVIEWER_DEMO_ORDERS = [
   },
   {
     orderKey: "reviewer-demo-1002",
+    orderName: "#1002",
     amountInr: 5000,
     productTitle: "Reviewer Demo Product B",
     daysAgo: 5,
@@ -3369,6 +3369,7 @@ export function buildB2BOrderInput(
     processedAt: string;
     currencyCode: string;
     city?: string;
+    name?: string;
   }
 ): { order: Record<string, unknown>; options: Record<string, unknown> } {
   const city = options.city ?? DEFAULT_ORDER_CITY;
@@ -3377,6 +3378,7 @@ export function buildB2BOrderInput(
     order: {
       tags: [SEED_TAG, options.orderKey],
       companyLocationId: options.companyLocationId,
+      ...(options.name && { name: options.name }),
       customer: { toAssociate: { id: options.customerId } },
       currency: options.currencyCode,
       financialStatus: "PENDING",
@@ -3444,6 +3446,7 @@ export async function createOrder(
     amount: number;
     processedAt: string;
     expectedTermsDays: number;
+    name?: string;
   }
 ): Promise<{ id: string; name: string } | null> {
   const variables = buildB2BOrderInput({
@@ -3454,6 +3457,7 @@ export async function createOrder(
     amount: options.amount,
     processedAt: options.processedAt,
     currencyCode: state.currencyCode,
+    name: options.name,
   });
 
   // Retry loop with exponential backoff for throttle errors
@@ -3616,12 +3620,15 @@ async function seedReviewerDemoOrders(state: SeedState): Promise<void> {
   }
 
   for (const orderSpec of REVIEWER_DEMO_ORDERS) {
-    const orderTag = `${SEED_TAG}-${orderSpec.orderKey}`;
+    // Use SEED_PREFIX (like regular orders) so findOrderByTag matches correctly
+    // buildB2BOrderInput creates tags: [SEED_TAG, orderKey], so the full key
+    // must be passed for the lookup to find the second tag element
+    const orderKey = `${SEED_PREFIX}${orderSpec.orderKey}`;
     
-    // Check if order already exists
-    const existingOrder = await findOrderByTag(state, orderTag);
+    // Check if order already exists (idempotency)
+    const existingOrder = await findOrderByTag(state, orderKey);
     if (existingOrder) {
-      console.log(`  ✅ Order ${orderSpec.orderKey} already exists`);
+      console.log(`  ✅ Order ${orderSpec.orderKey} already exists (${existingOrder.name})`);
       state.unchangedCount.orders++;
       continue;
     }
@@ -3638,32 +3645,34 @@ async function seedReviewerDemoOrders(state: SeedState): Promise<void> {
 
     if (state.dryRun) {
       console.log(
-        `  [dry-run] Would create reviewer demo order ${orderSpec.orderKey}: ` +
+        `  [dry-run] Would create reviewer demo order ${orderSpec.orderName}: ` +
         formatCurrency(orderSpec.amountInr, state.currencyCode)
       );
       state.createdCount.orders++;
       continue;
     }
 
-    // Create the order
+    // Create the order with explicit name via OrderCreateOrderInput.name
     const order = await createOrder(state, {
-      orderKey: orderSpec.orderKey,
+      orderKey: orderKey,
       companyLocationId: locationId,
       customerId: companyData.contactCustomerId,
       productTitle: orderSpec.productTitle,
       amount: orderSpec.amountInr,
       processedAt: processedAt.toISOString(),
       expectedTermsDays: orderSpec.locationTermsDays,
+      name: orderSpec.orderName,
     });
 
     if (!order) {
       state.failedCount.orders++;
-      state.errors.push(`Failed to create reviewer demo order ${orderSpec.orderKey}`);
+      state.errors.push(`Failed to create reviewer demo order ${orderSpec.orderName}`);
       continue;
     }
 
+    // Log the assigned name (should match orderSpec.orderName if API accepted it)
     console.log(
-      `  ✅ Created reviewer demo order ${orderSpec.orderKey}: ` +
+      `  ✅ Created reviewer demo order: id=${order.id}, name=${order.name}, ` +
       formatCurrency(orderSpec.amountInr, state.currencyCode)
     );
     state.createdCount.orders++;
@@ -3886,6 +3895,20 @@ export function printDatabaseSeedSQL(state: SeedState): void {
 
 // -- Main --
 
+/**
+ * Check if the reviewer demo seed is enabled.
+ * Exported for testing. Used by parseArgs().
+ *
+ * @param argv - Command line arguments (e.g., process.argv.slice(2))
+ * @param env - Environment variables (e.g., process.env)
+ */
+export function isReviewerDemoEnabled(argv: string[], env: Record<string, string | undefined>): boolean {
+  if (argv.includes("--reviewer-demo")) return true;
+  if (env.SEED_REVIEWER_DEMO === "1") return true;
+  if (env.SEED_REVIEWER_DEMO === "0") return false;
+  return false;
+}
+
 function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean; reviewerDemo: boolean } {
   const args = process.argv.slice(2);
   return {
@@ -3893,7 +3916,7 @@ function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; re
     reset: args.includes("--reset"),
     resetApply: args.includes("--apply"),
     reportDuplicatesMode: args.includes("--report-duplicates"),
-    reviewerDemo: args.includes("--reviewer-demo") || process.env.SEED_REVIEWER_DEMO === "1",
+    reviewerDemo: isReviewerDemoEnabled(args, process.env),
   };
 }
 

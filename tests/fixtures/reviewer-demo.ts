@@ -3,21 +3,23 @@
  *
  * This module defines synthetic invoice/buyer data for testing the scorer
  * against the reviewer CSV (hdfc-review-synthetic.csv). These are HYPOTHETICAL
- * invoices used in unit tests - not the actual Shopify orders created by seed.ts.
+ * invoices used in unit tests - the actual Shopify orders are created by
+ * scripts/seed.ts with its own constants (gated behind --reviewer-demo flag).
  *
  * All data is FICTIONAL - no real company names, domains, or identifiers.
  * The buyer name "Test Buyer Co" matches the payer text in the review CSV.
  *
- * NOTE ON ORDER NAMES: The CSV narration contains "#1001", but Shopify assigns
- * order names sequentially. The seeded orders may not actually be #1001/#1002.
- * These fixtures use hypothetical order names for scoring unit tests only.
- * The DB integration test (review-csv-matcher-db.test.ts) pins real behavior.
+ * NOTE ON ORDER NAMES: The CSV narration contains "#1001" and "#1002", but
+ * Shopify assigns order names sequentially. The seeded orders may not actually
+ * be #1001/#1002. These fixtures use hypothetical order names for scoring unit
+ * tests only. The DB integration test (review-csv-matcher-db.test.ts) pins real
+ * behavior with whatever names the seeded invoices actually have.
  *
  * Amount window for candidate filtering in the app:
  * - MIN_FACTOR = 0.5x payment amount
  * - MAX_FACTOR = 2.0x payment amount
  *
- * CSV amounts: Row 1 = ₹10,000, Row 2 = ₹4,000, Row 3 = ₹2,500
+ * CSV amounts (v3): Row 1 = ₹10,000, Row 2 = ₹5,000, Row 3 = ₹2,500
  */
 
 import type { InvoiceForScoring, BuyerForScoring } from "~/lib/matching/score.js";
@@ -38,14 +40,15 @@ export const REVIEWER_DEMO_BUYER = {
  *
  * Amount selection rationale:
  * - ₹10,000: Exact match for CSV row 1
- * - ₹5,000: Falls in the 0.5x-2x window for rows 2 and 3
+ * - ₹5,000: Exact match for CSV row 2, partial match for row 3
  *
- * Row 2 (₹4,000): window = ₹2,000 - ₹8,000 → ₹5,000 is IN window
- * Row 3 (₹2,500): window = ₹1,250 - ₹5,000 → ₹5,000 is IN window (edge)
+ * Row 1 (₹10,000): Exact match to #1001 (₹10,000)
+ * Row 2 (₹5,000): Exact match to #1002 (₹5,000)
+ * Row 3 (₹2,500): Partial payment against #1002 (₹5,000)
  */
 export const REVIEWER_DEMO_AMOUNTS = {
   order1: 10000, // ₹10,000 - exact match for row 1
-  order2: 5000, // ₹5,000 - in window for rows 2/3
+  order2: 5000, // ₹5,000 - exact match for row 2, in window for row 3
 } as const;
 
 /**
@@ -61,7 +64,7 @@ export function buildReviewerDemoBuyer(withAliases = false): BuyerForScoring {
   return {
     id: REVIEWER_DEMO_BUYER.id,
     name: REVIEWER_DEMO_BUYER.name,
-    aliases: withAliases ? ["test buyer co", "test buyer"] : [],
+    aliases: withAliases ? ["test buyer co"] : [],
     email: REVIEWER_DEMO_BUYER.email,
   };
 }

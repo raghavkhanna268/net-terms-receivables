@@ -77,6 +77,7 @@ import {
   computeExitCode,
   REVIEWER_DEMO_COMPANY_SEED,
   REVIEWER_DEMO_ORDERS,
+  isReviewerDemoEnabled,
   type SeedState,
   type GraphQLResponse,
   type UserError,
@@ -495,53 +496,45 @@ describe("Reviewer demo seed flag gating", () => {
     expect(REVIEWER_DEMO_COMPANY_SEED.contact.email).toContain("@test-buyer.example");
   });
 
-  it("REVIEWER_DEMO_ORDERS has correct amounts", () => {
+  it("REVIEWER_DEMO_ORDERS has correct amounts and names", () => {
     expect(REVIEWER_DEMO_ORDERS).toHaveLength(2);
     expect(REVIEWER_DEMO_ORDERS[0].amountInr).toBe(10000);
+    expect(REVIEWER_DEMO_ORDERS[0].orderName).toBe("#1001");
     expect(REVIEWER_DEMO_ORDERS[1].amountInr).toBe(5000);
+    expect(REVIEWER_DEMO_ORDERS[1].orderName).toBe("#1002");
   });
 
-  it("seedReviewerDemoCompany is not called when reviewerDemo is false", async () => {
-    const state: SeedState = {
-      shop: "test.myshopify.com",
-      token: "test-token",
-      databaseUrl: null,
-      dryRun: true,
-      reset: false,
-      resetApply: false,
-      reportDuplicates: false,
-      reviewerDemo: false,
-      currencyCode: "INR",
-      companies: new Map(),
-      paymentTermsTemplates: [],
-      createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
-      unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
-      adoptedCount: { companies: 0 },
-      driftedCount: { companies: 0 },
-      skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
-      skippedReasons: [],
-      deletedCount: { companies: 0, orders: 0 },
-      failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0 },
-      ordersWithShopifyTerms: 0,
-      ordersWithoutShopifyTerms: 0,
-      overdueOrdersCount: 0,
-      taggedCustomerOrdersCount: 0,
-      errors: [],
-    };
+  describe("isReviewerDemoEnabled", () => {
+    it("returns false by default (no flag, no env)", () => {
+      expect(isReviewerDemoEnabled([], {})).toBe(false);
+    });
 
-    expect(state.reviewerDemo).toBe(false);
+    it("returns true with --reviewer-demo flag", () => {
+      expect(isReviewerDemoEnabled(["--reviewer-demo"], {})).toBe(true);
+    });
+
+    it("returns true with SEED_REVIEWER_DEMO=1 env", () => {
+      expect(isReviewerDemoEnabled([], { SEED_REVIEWER_DEMO: "1" })).toBe(true);
+    });
+
+    it("returns false with SEED_REVIEWER_DEMO=0 env", () => {
+      expect(isReviewerDemoEnabled([], { SEED_REVIEWER_DEMO: "0" })).toBe(false);
+    });
+
+    it("flag takes precedence over env=0", () => {
+      expect(isReviewerDemoEnabled(["--reviewer-demo"], { SEED_REVIEWER_DEMO: "0" })).toBe(true);
+    });
+
+    it("returns false for other env values", () => {
+      expect(isReviewerDemoEnabled([], { SEED_REVIEWER_DEMO: "true" })).toBe(false);
+      expect(isReviewerDemoEnabled([], { SEED_REVIEWER_DEMO: "yes" })).toBe(false);
+    });
   });
 
   it("seedReviewerDemoCompany is gated by state.reviewerDemo in main()", () => {
     const mainSource = readFileSync(resolve(__dirname, "../seed.ts"), "utf-8");
     expect(mainSource).toContain("if (state.reviewerDemo)");
     expect(mainSource).toContain("await seedReviewerDemoCompany(state);");
-  });
-
-  it("--reviewer-demo flag sets reviewerDemo true", () => {
-    const mainSource = readFileSync(resolve(__dirname, "../seed.ts"), "utf-8");
-    expect(mainSource).toContain('args.includes("--reviewer-demo")');
-    expect(mainSource).toContain('process.env.SEED_REVIEWER_DEMO === "1"');
   });
 });
 

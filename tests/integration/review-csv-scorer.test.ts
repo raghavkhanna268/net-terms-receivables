@@ -1,5 +1,5 @@
 /**
- * Unit test: Scorer behavior for reviewer synthetic HDFC CSV.
+ * Unit test: Scorer behavior for reviewer synthetic HDFC CSV (v3).
  *
  * This test exercises the SCORER (scoreMultiInvoiceMatch) against the reviewer
  * CSV, but with HYPOTHETICAL candidates. It does NOT exercise the full app path:
@@ -9,6 +9,10 @@
  *
  * For the REAL app path with proper candidate selection, see:
  * - tests/integration/review-csv-matcher-db.test.ts (DB-backed matcher test)
+ *
+ * CSV v3 changes:
+ * - Row 2: UPI-TEST BUYER CO-SYNT0002-#1002, ₹5,000.00 (was ₹4,000)
+ * - Row 3: IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT, ₹2,500.00
  *
  * Score breakdown components (from app/lib/matching/score.ts):
  * - invoice_ref: +30 (invoice number in narration, e.g., #1001)
@@ -58,7 +62,7 @@ function formatReasons(reasons: MatchReason[]): string {
   return reasons.map((r) => `${r.type}(+${r.points})`).join(", ");
 }
 
-describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => {
+describe("HDFC reviewer CSV v3: Scorer unit test (hypothetical candidates)", () => {
   let parseResult: ParseResult;
   let credits: NormalisedTxn[];
 
@@ -72,7 +76,7 @@ describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => 
     credits = parseResult.transactions.filter((t) => t.direction === "CR");
   });
 
-  describe("parser output for scoring", () => {
+  describe("parser output for scoring (CSV v3)", () => {
     it("extracts 3 credit rows", () => {
       expect(credits.length).toBe(3);
     });
@@ -81,18 +85,23 @@ describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => 
       const row1 = credits.find((c) => c.refNo === "SYNT0001");
       expect(row1).toBeDefined();
       expect(row1!.parsed.payerName).toBe("SYNT0001 TEST BUYER CO #1001");
+      expect(row1!.amountPaise).toBe(1000000); // ₹10,000
     });
 
-    it("Row 2: payerName is ref only (UPI parser behavior)", () => {
+    it("Row 2: payerName is company name from UPI parser (v3)", () => {
       const row2 = credits.find((c) => c.refNo === "SYNT0002");
       expect(row2).toBeDefined();
-      expect(row2!.parsed.payerName).toBe("SYNT0002");
+      // UPI parser extracts "TEST BUYER CO" from "UPI-TEST BUYER CO-SYNT0002-#1002"
+      expect(row2!.parsed.payerName).toBe("TEST BUYER CO");
+      expect(row2!.amountPaise).toBe(500000); // ₹5,000
     });
 
-    it("Row 3: payerName is unrelated trader name", () => {
+    it("Row 3: payerName is company name from IMPS parser (v3)", () => {
       const row3 = credits.find((c) => c.refNo === "SYNT0003");
       expect(row3).toBeDefined();
-      expect(row3!.parsed.payerName).toBe("UNRELATED TRADERS");
+      // IMPS parser extracts "TEST BUYER CO" from "IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT"
+      expect(row3!.parsed.payerName).toBe("TEST BUYER CO");
+      expect(row3!.amountPaise).toBe(250000); // ₹2,500
     });
   });
 
@@ -100,14 +109,11 @@ describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => 
     /**
      * Row 1: NEFT-SYNT0001-TEST BUYER CO-#1001, ₹10,000.00
      *
-     * When BOTH invoices are passed to the scorer:
+     * Score breakdown:
      * - invoice_ref: +30 (#1001 found in narration, matches invoice.name)
      * - amount_exact: +20 (payment 10,000 = invoice outstanding 10,000)
      * - payer_name: +8 (fuzzy match "TEST BUYER CO" in payerText to buyer.name)
-     * - Total: 58 points
-     *
-     * NOTE: This matches the real DB path since Row 1's amount window
-     * (₹5,000 - ₹20,000) includes both invoices.
+     * - Total: 58 points, MEDIUM band
      */
     it("Row 1: scorer finds #1001 with score 58", () => {
       const row1 = credits.find((c) => c.refNo === "SYNT0001")!;
@@ -147,19 +153,15 @@ describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => 
     });
 
     /**
-     * Row 2: UPI-SYNT0002-TEST BUYER CO-PART PAYMENT, ₹4,000.00
+     * Row 2: UPI-TEST BUYER CO-SYNT0002-#1002, ₹5,000.00 (CSV v3)
      *
-     * When BOTH invoices are passed to the scorer (DIFFERS FROM REAL PATH):
-     * - amount_partial: +10 (payment 4,000 < invoice outstanding 10,000)
-     * - Total: 10 points
-     * - Allocates to #1001 (₹10,000) because it's first in due-date order
-     *
-     * REAL APP PATH DIFFERENCE:
-     * - Amount window: ₹2,000 - ₹8,000
-     * - Only #1002 (₹5,000) is in window; #1001 (₹10,000) is OUTSIDE
-     * - Real path would allocate to #1002, not #1001
+     * Score breakdown:
+     * - invoice_ref: +30 (#1002 in narration matches invoice name)
+     * - amount_exact: +20 (payment ₹5,000 = invoice ₹5,000)
+     * - payer_name: +8 (fuzzy match "TEST BUYER CO" to buyer.name)
+     * - Total: 58 points, MEDIUM band
      */
-    it("Row 2: scorer allocates to #1001 (differs from real path)", () => {
+    it("Row 2: scorer finds #1002 with score 58 (v3)", () => {
       const row2 = credits.find((c) => c.refNo === "SYNT0002")!;
 
       const payment = {
@@ -172,45 +174,39 @@ describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => 
       };
 
       const extractedRefs = extractInvoiceRefs(row2.narration);
-      expect(extractedRefs.length).toBe(0);
+      expect(extractedRefs).toContain("1002");
 
       const result = scoreMultiInvoiceMatch(payment, invoices, buyer);
       expect(result).not.toBeNull();
 
       const allocation = result!.allocations[0];
+      expect(allocation.invoiceId).toBe("invoice-reviewer-demo-2");
 
       const score = allocation.score;
       const band = getConfidenceBand(score);
 
-      expect(score).toBe(10);
-      expect(band).toBe("low");
-
-      expect(allocation.invoiceId).toBe("invoice-reviewer-demo-1");
-      expect(allocation.allocatedPaise).toBe(400000n);
+      expect(score).toBe(58);
+      expect(band).toBe("medium");
 
       const reasonTypes = allocation.reasons.map((r) => r.type);
-      expect(reasonTypes).toContain("amount_partial");
-      expect(reasonTypes).not.toContain("payer_alias");
-      expect(reasonTypes).not.toContain("payer_name");
-      expect(reasonTypes).not.toContain("invoice_ref");
+      expect(reasonTypes).toContain("invoice_ref");
+      expect(reasonTypes).toContain("amount_exact");
+      expect(reasonTypes).toContain("payer_name");
 
       const breakdown = formatReasons(allocation.reasons);
-      expect(breakdown).toBe("amount_partial(+10)");
+      expect(breakdown).toBe("invoice_ref(+30), amount_exact(+20), payer_name(+8)");
     });
 
     /**
-     * Row 3: IMPS-SYNT0003-UNRELATED TRADERS, ₹2,500.00
+     * Row 3: IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT, ₹2,500.00 (CSV v3)
      *
-     * When BOTH invoices are passed (DIFFERS FROM REAL PATH):
-     * - amount_partial: +10
-     * - Allocates to #1001
-     *
-     * REAL APP PATH DIFFERENCE:
-     * - Amount window: ₹1,250 - ₹5,000
-     * - Only #1002 (₹5,000) is in window; #1001 (₹10,000) is OUTSIDE
-     * - Real path would allocate to #1002, not #1001
+     * Score breakdown:
+     * - invoice_ref: +30 (#1002 in narration matches invoice name)
+     * - amount_partial: +10 (payment ₹2,500 < invoice ₹5,000)
+     * - payer_name: +8 (fuzzy match "TEST BUYER CO" to buyer.name)
+     * - Total: 48 points, LOW band
      */
-    it("Row 3: scorer allocates to #1001 (differs from real path)", () => {
+    it("Row 3: scorer finds #1002 with score 48 (v3)", () => {
       const row3 = credits.find((c) => c.refNo === "SYNT0003")!;
 
       const payment = {
@@ -223,53 +219,43 @@ describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => 
       };
 
       const extractedRefs = extractInvoiceRefs(row3.narration);
-      expect(extractedRefs.length).toBe(0);
+      expect(extractedRefs).toContain("1002");
 
       const result = scoreMultiInvoiceMatch(payment, invoices, buyer);
       expect(result).not.toBeNull();
 
       const allocation = result!.allocations[0];
+      expect(allocation.invoiceId).toBe("invoice-reviewer-demo-2");
 
       const score = allocation.score;
       const band = getConfidenceBand(score);
 
-      expect(score).toBe(10);
+      expect(score).toBe(48);
       expect(band).toBe("low");
 
-      expect(allocation.invoiceId).toBe("invoice-reviewer-demo-1");
-      expect(allocation.allocatedPaise).toBe(250000n);
-
       const reasonTypes = allocation.reasons.map((r) => r.type);
+      expect(reasonTypes).toContain("invoice_ref");
       expect(reasonTypes).toContain("amount_partial");
+      expect(reasonTypes).toContain("payer_name");
 
       const breakdown = formatReasons(allocation.reasons);
-      expect(breakdown).toBe("amount_partial(+10)");
+      expect(breakdown).toBe("invoice_ref(+30), amount_partial(+10), payer_name(+8)");
     });
   });
 
-  describe("summary: scorer test vs real DB path", () => {
+  describe("summary: scorer test vs real DB path (CSV v3)", () => {
     /**
      * SCORER TEST RESULTS (all invoices passed directly):
      *
-     * | Row | Amount    | Top Candidate           | Score | Band   | Breakdown                                     |
-     * |-----|-----------|-------------------------|-------|--------|-----------------------------------------------|
-     * | 1   | ₹10,000   | invoice-reviewer-demo-1 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
-     * | 2   | ₹4,000    | invoice-reviewer-demo-1 | 10    | low    | amount_partial(+10)                           |
-     * | 3   | ₹2,500    | invoice-reviewer-demo-1 | 10    | low    | amount_partial(+10)                           |
+     * | Row | Amount   | PayerText        | Top Candidate           | Score | Band   | Breakdown                                     |
+     * |-----|----------|------------------|-------------------------|-------|--------|-----------------------------------------------|
+     * | 1   | ₹10,000  | SYNT0001 TEST... | invoice-reviewer-demo-1 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
+     * | 2   | ₹5,000   | TEST BUYER CO    | invoice-reviewer-demo-2 | 58    | medium | invoice_ref(+30), amount_exact(+20), payer_name(+8) |
+     * | 3   | ₹2,500   | SYNT0003 TEST... | invoice-reviewer-demo-2 | 48    | low    | invoice_ref(+30), amount_partial(+10), payer_name(+8) |
      *
-     * REAL DB PATH RESULTS (from review-csv-matcher-db.test.ts):
-     *
-     * | Row | Amount    | Top Candidate | Score | Band   | Why different?                                  |
-     * |-----|-----------|---------------|-------|--------|-------------------------------------------------|
-     * | 1   | ₹10,000   | #RD001        | 28    | low    | No invoice_ref (CSV #1001 ≠ DB #RD001)          |
-     * | 2   | ₹4,000    | #RD002        | 10    | low    | Amount window excludes ₹10,000 invoice          |
-     * | 3   | ₹2,500    | #RD002        | 10    | low    | Amount window excludes ₹10,000 invoice          |
-     *
-     * KEY DIFFERENCE: The real DB path uses 0.5x-2x amount window filtering.
-     * For rows 2 and 3, the ₹10,000 invoice is OUTSIDE the window, so only
-     * the ₹5,000 invoice is considered as a candidate.
+     * High (80) requires a confirmed payer alias; without one the best is Medium (58).
      */
-    it("validates all scores match pinned expectations", () => {
+    it("validates all scores match pinned expectations (v3)", () => {
       const row1 = credits.find((c) => c.refNo === "SYNT0001")!;
       const row2 = credits.find((c) => c.refNo === "SYNT0002")!;
       const row3 = credits.find((c) => c.refNo === "SYNT0003")!;
@@ -288,11 +274,11 @@ describe("HDFC reviewer CSV: Scorer unit test (hypothetical candidates)", () => 
       const r3 = scoreMultiInvoiceMatch(buildPayment(row3), invoices, buyer);
 
       expect(r1!.allocations[0].score).toBe(58);
-      expect(r2!.allocations[0].score).toBe(10);
-      expect(r3!.allocations[0].score).toBe(10);
+      expect(r2!.allocations[0].score).toBe(58);
+      expect(r3!.allocations[0].score).toBe(48);
 
       expect(getConfidenceBand(r1!.allocations[0].score)).toBe("medium");
-      expect(getConfidenceBand(r2!.allocations[0].score)).toBe("low");
+      expect(getConfidenceBand(r2!.allocations[0].score)).toBe("medium");
       expect(getConfidenceBand(r3!.allocations[0].score)).toBe("low");
     });
   });

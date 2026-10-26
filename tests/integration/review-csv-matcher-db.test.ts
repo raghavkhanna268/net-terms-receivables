@@ -1,26 +1,23 @@
 /**
- * DB integration test: Real matcher path for reviewer CSV.
+ * DB integration test: Real matcher path for reviewer CSV (v3).
  *
  * This test exercises the ACTUAL app path through matchSinglePayment:
  * 1. Buyer identification via findBestBuyerMatch
  * 2. Candidate filtering via 0.5x-2x amount window (when no buyer found)
  * 3. Scoring via scoreMultiInvoiceMatch
  *
- * Unlike the unit-level test (review-csv-app-path.test.ts), this test:
+ * Unlike the unit-level test (review-csv-scorer.test.ts), this test:
  * - Seeds real DB rows (Shop, BuyerAccount, Invoice, BankImport, Payment)
  * - Runs the actual runMatcher function
  * - Pins whatever the matcher produces (no tuning)
  *
  * The test uses the reviewer demo amounts from scripts/seed.ts:
- * - Invoice 1: ₹10,000 (exact match for CSV row 1)
- * - Invoice 2: ₹5,000 (in window for rows 2/3)
+ * - Invoice #1001: ₹10,000 (exact match for CSV row 1)
+ * - Invoice #1002: ₹5,000 (exact match for CSV row 2, partial for row 3)
  *
- * Amount windows for candidate filtering:
- * - Row 1 (₹10,000): 0.5x=₹5,000, 2x=₹20,000 → both invoices in window
- * - Row 2 (₹4,000): 0.5x=₹2,000, 2x=₹8,000 → only ₹5,000 invoice in window
- * - Row 3 (₹2,500): 0.5x=₹1,250, 2x=₹5,000 → only ₹5,000 invoice in window (edge)
- *
- * NOTE: ₹10,000 invoice is OUTSIDE the window for rows 2 and 3!
+ * CSV v3 changes:
+ * - Row 2: UPI-TEST BUYER CO-SYNT0002-#1002, ₹5,000.00 (was ₹4,000)
+ * - Row 3: IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT, ₹2,500.00
  *
  * All data is FICTIONAL - no real bank data.
  */
@@ -39,16 +36,21 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
 
-describeWithDb("Reviewer CSV: Real matcher DB path", () => {
+describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
   let sql: ReturnType<typeof postgres>;
   let testShopId: string;
   let testBuyerId: string;
-  let _invoice1Id: string;
-  let _invoice2Id: string;
   let testImportId: string;
   const paymentIds: string[] = [];
 
-  const TEST_SHOP_DOMAIN = `reviewer-matcher-${Date.now()}.myshopify.com`;
+  // Use test-* style domain with unique suffix to avoid collisions
+  const runId = Date.now();
+  const TEST_SHOP_DOMAIN = `test-reviewer-demo-${runId}.myshopify.com`;
+  
+  // Per-run unique IDs to avoid collisions from crashed runs
+  const buyerId = `buyer-reviewer-demo-${runId}`;
+  const invoice1Id = `invoice-reviewer-1-${runId}`;
+  const invoice2Id = `invoice-reviewer-2-${runId}`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -67,7 +69,7 @@ describeWithDb("Reviewer CSV: Real matcher DB path", () => {
         id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
       )
       VALUES (
-        ${REVIEWER_DEMO_BUYER.id}, ${testShopId}, 'COMPANY',
+        ${buyerId}, ${testShopId}, 'COMPANY',
         'gid://shopify/Company/reviewer-demo', 'gid://shopify/CompanyLocation/reviewer-demo',
         ${REVIEWER_DEMO_BUYER.name}, 100000, 'OK', NOW(), NOW()
       )
@@ -75,35 +77,31 @@ describeWithDb("Reviewer CSV: Real matcher DB path", () => {
     `;
     testBuyerId = buyer.id;
 
-    // Create Invoice 1: ₹10,000
-    const [inv1] = await sql<{ id: string }[]>`
+    // Create Invoice #1001: ₹10,000
+    await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
         "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
-        'invoice-reviewer-1', ${testShopId}, ${testBuyerId},
-        'gid://shopify/Order/reviewer-1', '#RD001', ${REVIEWER_DEMO_AMOUNTS.order1}.00, 'open', ${REVIEWER_DEMO_AMOUNTS.order1}.00,
+        ${invoice1Id}, ${testShopId}, ${testBuyerId},
+        'gid://shopify/Order/1001', '#1001', ${REVIEWER_DEMO_AMOUNTS.order1}, 'open', ${REVIEWER_DEMO_AMOUNTS.order1},
         NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
-      RETURNING id
     `;
-    _invoice1Id = inv1.id;
 
-    // Create Invoice 2: ₹5,000
-    const [inv2] = await sql<{ id: string }[]>`
+    // Create Invoice #1002: ₹5,000
+    await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
         "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES (
-        'invoice-reviewer-2', ${testShopId}, ${testBuyerId},
-        'gid://shopify/Order/reviewer-2', '#RD002', ${REVIEWER_DEMO_AMOUNTS.order2}.00, 'open', ${REVIEWER_DEMO_AMOUNTS.order2}.00,
+        ${invoice2Id}, ${testShopId}, ${testBuyerId},
+        'gid://shopify/Order/1002', '#1002', ${REVIEWER_DEMO_AMOUNTS.order2}, 'open', ${REVIEWER_DEMO_AMOUNTS.order2},
         NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
-      RETURNING id
     `;
-    _invoice2Id = inv2.id;
   });
 
   afterAll(async () => {
@@ -194,7 +192,7 @@ describeWithDb("Reviewer CSV: Real matcher DB path", () => {
     return matches;
   }
 
-  it("seeds 3 credit payments from CSV", async () => {
+  it("seeds 3 credit payments from CSV v3", async () => {
     await seedPaymentsFromCsv();
     expect(paymentIds.length).toBe(3);
   });
@@ -208,17 +206,14 @@ describeWithDb("Reviewer CSV: Real matcher DB path", () => {
   /**
    * Row 1: NEFT-SYNT0001-TEST BUYER CO-#1001, ₹10,000.00
    *
-   * Amount window: ₹5,000 - ₹20,000
-   * Both invoices are in window: #RD001 (₹10,000), #RD002 (₹5,000)
-   *
-   * Expected: Buyer is identified via findBestBuyerMatch (payerText contains
-   * "TEST BUYER CO" which fuzzy-matches the buyer name). Then scoring happens
-   * against all buyer's invoices.
-   *
-   * The matcher should find both invoices and score against them. The ₹10,000
-   * invoice should get a higher score due to exact amount match.
+   * Buyer identified via findBestBuyerMatch ("TEST BUYER CO" fuzzy matches buyer name).
+   * Scoring against buyer's invoices:
+   * - invoice_ref: +30 (#1001 in narration matches invoice name)
+   * - amount_exact: +20 (payment ₹10,000 = invoice ₹10,000)
+   * - payer_name: +8 (fuzzy match)
+   * - Total: 58 points, MEDIUM band
    */
-  it("Row 1: pins matcher result for ₹10,000 payment", async () => {
+  it("Row 1: pins ₹10,000 payment → #1001, score 58, medium", async () => {
     await seedPaymentsFromCsv();
     await runMatcher(sql, testShopId);
 
@@ -226,23 +221,22 @@ describeWithDb("Reviewer CSV: Real matcher DB path", () => {
     expect(matches.length).toBeGreaterThan(0);
 
     const topMatch = matches[0];
-    expect(topMatch.invoiceName).toBe("#RD001");
-    expect(topMatch.score).toBe(28);
+    expect(topMatch.invoiceName).toBe("#1001");
+    expect(topMatch.score).toBe(58);
     expect(topMatch.amount).toBe(10000);
   });
 
   /**
-   * Row 2: UPI-SYNT0002-TEST BUYER CO-PART PAYMENT, ₹4,000.00
+   * Row 2: UPI-TEST BUYER CO-SYNT0002-#1002, ₹5,000.00 (CSV v3)
    *
-   * Amount window: ₹2,000 - ₹8,000
-   * Only #RD002 (₹5,000) is in window. #RD001 (₹10,000) is OUTSIDE.
-   *
-   * PayerText from UPI parser: "SYNT0002" (not "TEST BUYER CO")
-   * No buyer identification, so matcher uses amount window filtering.
-   *
-   * Expected: Only ₹5,000 invoice is a candidate. Score = amount_partial(+10).
+   * Buyer identified via findBestBuyerMatch ("TEST BUYER CO" in narration).
+   * Scoring:
+   * - invoice_ref: +30 (#1002 in narration matches invoice name)
+   * - amount_exact: +20 (payment ₹5,000 = invoice ₹5,000)
+   * - payer_name: +8 (fuzzy match)
+   * - Total: 58 points, MEDIUM band
    */
-  it("Row 2: pins matcher result for ₹4,000 payment (amount window filtering)", async () => {
+  it("Row 2: pins ₹5,000 payment → #1002, score 58, medium", async () => {
     await seedPaymentsFromCsv();
     await runMatcher(sql, testShopId);
 
@@ -250,22 +244,22 @@ describeWithDb("Reviewer CSV: Real matcher DB path", () => {
     expect(matches.length).toBeGreaterThan(0);
 
     const topMatch = matches[0];
-    expect(topMatch.invoiceName).toBe("#RD002");
-    expect(topMatch.score).toBe(10);
-    expect(topMatch.amount).toBe(4000);
+    expect(topMatch.invoiceName).toBe("#1002");
+    expect(topMatch.score).toBe(58);
+    expect(topMatch.amount).toBe(5000);
   });
 
   /**
-   * Row 3: IMPS-SYNT0003-UNRELATED TRADERS, ₹2,500.00
+   * Row 3: IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT, ₹2,500.00 (CSV v3)
    *
-   * Amount window: ₹1,250 - ₹5,000
-   * Only #RD002 (₹5,000) is in window (edge case). #RD001 (₹10,000) is OUTSIDE.
-   *
-   * PayerText: "UNRELATED TRADERS" - no buyer match.
-   *
-   * Expected: Only ₹5,000 invoice is a candidate. Score = amount_partial(+10).
+   * Buyer identified via findBestBuyerMatch ("TEST BUYER CO" in narration).
+   * Scoring:
+   * - invoice_ref: +30 (#1002 in narration matches invoice name)
+   * - amount_partial: +10 (payment ₹2,500 < invoice ₹5,000)
+   * - payer_name: +8 (fuzzy match)
+   * - Total: 48 points, LOW band
    */
-  it("Row 3: pins matcher result for ₹2,500 payment (amount window filtering)", async () => {
+  it("Row 3: pins ₹2,500 payment → #1002, score 48, low", async () => {
     await seedPaymentsFromCsv();
     await runMatcher(sql, testShopId);
 
@@ -273,27 +267,24 @@ describeWithDb("Reviewer CSV: Real matcher DB path", () => {
     expect(matches.length).toBeGreaterThan(0);
 
     const topMatch = matches[0];
-    expect(topMatch.invoiceName).toBe("#RD002");
-    expect(topMatch.score).toBe(10);
+    expect(topMatch.invoiceName).toBe("#1002");
+    expect(topMatch.score).toBe(48);
     expect(topMatch.amount).toBe(2500);
   });
 
   /**
-   * Summary of pinned real matcher results:
+   * Summary of pinned real matcher results (CSV v3):
    *
-   * | Row | Amount  | PayerText             | Top Candidate | Score | Band   | Allocation |
-   * |-----|---------|----------------------|---------------|-------|--------|------------|
-   * | 1   | ₹10,000 | SYNT0001 TEST BUYER..| #RD001        | 28    | low    | ₹10,000    |
-   * | 2   | ₹4,000  | SYNT0002             | #RD002        | 10    | low    | ₹4,000     |
-   * | 3   | ₹2,500  | UNRELATED TRADERS    | #RD002        | 10    | low    | ₹2,500     |
+   * | Row | Amount  | PayerText          | Top Candidate | Score | Band   | Allocation |
+   * |-----|---------|-------------------|---------------|-------|--------|------------|
+   * | 1   | ₹10,000 | TEST BUYER CO...  | #1001         | 58    | medium | ₹10,000    |
+   * | 2   | ₹5,000  | TEST BUYER CO...  | #1002         | 58    | medium | ₹5,000     |
+   * | 3   | ₹2,500  | TEST BUYER CO...  | #1002         | 48    | low    | ₹2,500     |
    *
    * KEY FINDINGS:
-   * - Row 1: Score is 28 (amount_exact +20, payer_name +8), NOT 58. No invoice_ref
-   *   because the CSV's "#1001" doesn't match our test invoices "#RD001".
-   * - Rows 2/3: The ₹10,000 invoice is OUTSIDE the amount window, so only
-   *   the ₹5,000 invoice is a candidate. This is different from the unit test
-   *   which passed both invoices directly to the scorer.
-   * - All rows are LOW confidence (score < 50).
+   * - All rows now have "TEST BUYER CO" in the narration for buyer identification
+   * - Rows 1 and 2 are MEDIUM (58), Row 3 is LOW (48) due to partial payment
+   * - High (80) requires a confirmed payer alias; without one the best is Medium (58)
    */
   it("documents pinned results table", async () => {
     await seedPaymentsFromCsv();
