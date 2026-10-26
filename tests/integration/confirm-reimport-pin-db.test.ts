@@ -13,6 +13,10 @@
  * - High band (≥80) still only suggests, never auto-confirms
  * - Scores and bands are pinned exactly as main produces them today
  *
+ * NOTE: Row 2 is confirmed (not row 1) because row 2's payerText ("TEST BUYER CO")
+ * produces an alias that helps both row 1 and row 3. Row 1's payerText is different
+ * ("SYNT0001 TEST BUYER CO #1001") due to NEFT parsing extracting different segments.
+ *
  * This test uses the "Sequential DB" project via the *-db.test.ts naming pattern.
  * All data is FICTIONAL - no real bank data. Uses test- domains for isolation.
  */
@@ -305,15 +309,22 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
     });
   });
 
-  describe("Step 2: Confirm match (stores alias)", () => {
+  describe("Step 2: Confirm row 2 match (stores alias)", () => {
+    /**
+     * Confirm row 2 (not row 1) because:
+     * - Row 2 payerText: "TEST BUYER CO" → alias "test buyer"
+     * - Row 1 payerText: "SYNT0001 TEST BUYER CO #1001" → different alias
+     *
+     * Confirming row 2 creates alias "test buyer" which helps both row 1 and row 3.
+     */
     it("confirm creates payer alias from payment's payerText", async () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      expect(m1.length).toBeGreaterThan(0);
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      expect(m2.length).toBeGreaterThan(0);
 
-      const result = await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const result = await confirmMatch(sql, testShopId, m2[0].id, "test-user");
       expect(result.success).toBe(true);
 
       const aliases = await getPayerAliases();
@@ -327,11 +338,11 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
       const [confirmedMatch] = await sql<{ state: string }[]>`
-        SELECT state FROM "Match" WHERE id = ${m1[0].id}
+        SELECT state FROM "Match" WHERE id = ${m2[0].id}
       `;
       expect(confirmedMatch.state).toBe("confirmed");
     });
@@ -340,10 +351,10 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
-      const status = await getPaymentStatus(paymentIds[0]);
+      const status = await getPaymentStatus(paymentIds[1]);
       expect(status).toBe("matched");
     });
   });
@@ -351,29 +362,29 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
   describe("Step 3: Re-import same statement after confirm", () => {
     /**
      * CRITICAL ASSERTIONS for re-import:
-     * 1. Confirmed payment is deduplicated (no new payment created)
-     * 2. New payments for the other rows get alias-boosted scores
+     * 1. Confirmed payment (row 2) is deduplicated (no new payment created)
+     * 2. Unconfirmed payments (rows 1 and 3) get alias-boosted scores
      * 3. High band (80) still only suggests, never auto-confirms
      *
-     * PINNED SCORES - With alias after confirm:
+     * PINNED SCORES - With alias after confirm row 2:
      *
      * | Row | UTR      | Amount  | Top Candidate | Score | Band   |
      * |-----|----------|---------|---------------|-------|--------|
-     * | 1   | SYNT0001 | ₹10,000 | (already confirmed, deduplicated) |
-     * | 2   | SYNT0002 | ₹5,000  | #1002         | 80    | high   |
+     * | 1   | SYNT0001 | ₹10,000 | #1001         | 80    | high   |
+     * | 2   | SYNT0002 | ₹5,000  | (already confirmed, deduplicated) |
      * | 3   | SYNT0003 | ₹2,500  | #1002         | 70    | medium |
      *
      * Score breakdown (with alias):
-     * - invoice_ref: +30 (#1002 in narration)
-     * - amount_exact: +20 (row 2) / amount_partial: +10 (row 3)
+     * - invoice_ref: +30 (#1001/#1002 in narration)
+     * - amount_exact: +20 (row 1) / amount_partial: +10 (row 3)
      * - payer_alias: +30 (confirmed alias match)
      */
     it("re-import does not create duplicate payment for confirmed row", async () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
       const [preReimportCount] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "Payment" WHERE "shopId" = ${testShopId}
@@ -395,26 +406,26 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       expect(newCredits.length).toBe(0);
     });
 
-    it("re-matching unconfirmed payments with alias gives High (80) score", async () => {
+    it("re-matching unconfirmed payments with alias gives High (80) score for row 1", async () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
       await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId} AND state = 'suggested'`;
 
       await runMatcher(sql, testShopId);
 
-      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
       const m3 = await getMatchesForPayment(paymentIds[2], "suggested");
 
-      expect(m2.length).toBeGreaterThan(0);
+      expect(m1.length).toBeGreaterThan(0);
       expect(m3.length).toBeGreaterThan(0);
 
-      expect(m2[0].invoiceName).toBe("#1002");
-      expect(m2[0].score).toBe(80);
-      expect(getConfidenceBand(m2[0].score)).toBe("high");
+      expect(m1[0].invoiceName).toBe("#1001");
+      expect(m1[0].score).toBe(80);
+      expect(getConfidenceBand(m1[0].score)).toBe("high");
 
       expect(m3[0].invoiceName).toBe("#1002");
       expect(m3[0].score).toBe(70);
@@ -425,18 +436,18 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
       await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId} AND state = 'suggested'`;
 
       const matcherResult = await runMatcher(sql, testShopId);
       expect(matcherResult.highConfidenceMatches).toBe(1);
 
-      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
-      expect(m2.length).toBeGreaterThan(0);
-      expect(m2[0].score).toBe(80);
-      expect(m2[0].state).toBe("suggested");
+      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
+      expect(m1.length).toBeGreaterThan(0);
+      expect(m1[0].score).toBe(80);
+      expect(m1[0].state).toBe("suggested");
 
       const confirmedMatches = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "Match"
@@ -449,15 +460,15 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
       await runMatcher(sql, testShopId);
       await runMatcher(sql, testShopId);
 
-      const payment1Matches = await getMatchesForPayment(paymentIds[0]);
-      const confirmedCount = payment1Matches.filter((m) => m.state === "confirmed").length;
-      const suggestedCount = payment1Matches.filter((m) => m.state === "suggested").length;
+      const payment2Matches = await getMatchesForPayment(paymentIds[1]);
+      const confirmedCount = payment2Matches.filter((m) => m.state === "confirmed").length;
+      const suggestedCount = payment2Matches.filter((m) => m.state === "suggested").length;
 
       expect(confirmedCount).toBe(1);
       expect(suggestedCount).toBe(0);
@@ -475,11 +486,11 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
      * | SYNT0002 | 58    | medium | suggested |
      * | SYNT0003 | 48    | low    | suggested |
      *
-     * AFTER CONFIRM ROW 1 + RE-MATCH:
+     * AFTER CONFIRM ROW 2 + RE-MATCH:
      * | UTR      | Score | Band   | State     |
      * |----------|-------|--------|-----------|
-     * | SYNT0001 | 58    | medium | confirmed | (no change)
-     * | SYNT0002 | 80    | high   | suggested | (alias boost)
+     * | SYNT0001 | 80    | high   | suggested | (alias boost)
+     * | SYNT0002 | 58    | medium | confirmed | (no change)
      * | SYNT0003 | 70    | medium | suggested | (alias boost)
      */
     it("E2E: pins scores and bands through confirm-then-re-import", async () => {
@@ -497,21 +508,21 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       expect(getConfidenceBand(before2[0].score)).toBe("medium");
       expect(getConfidenceBand(before3[0].score)).toBe("low");
 
-      await confirmMatch(sql, testShopId, before1[0].id, "test-user");
+      await confirmMatch(sql, testShopId, before2[0].id, "test-user");
 
       await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId} AND state = 'suggested'`;
       await runMatcher(sql, testShopId);
 
-      const after1 = await getMatchesForPayment(paymentIds[0]);
-      const after2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      const after1 = await getMatchesForPayment(paymentIds[0], "suggested");
+      const after2 = await getMatchesForPayment(paymentIds[1]);
       const after3 = await getMatchesForPayment(paymentIds[2], "suggested");
 
-      expect(after1.filter((m) => m.state === "confirmed").length).toBe(1);
-      expect(after1.filter((m) => m.state === "confirmed")[0].score).toBe(58);
+      expect(after1[0].score).toBe(80);
+      expect(getConfidenceBand(after1[0].score)).toBe("high");
+      expect(after1[0].state).toBe("suggested");
 
-      expect(after2[0].score).toBe(80);
-      expect(getConfidenceBand(after2[0].score)).toBe("high");
-      expect(after2[0].state).toBe("suggested");
+      expect(after2.filter((m) => m.state === "confirmed").length).toBe(1);
+      expect(after2.filter((m) => m.state === "confirmed")[0].score).toBe(58);
 
       expect(after3[0].score).toBe(70);
       expect(getConfidenceBand(after3[0].score)).toBe("medium");
@@ -522,8 +533,8 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
       const [auditCount] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "AuditEvent"
@@ -536,8 +547,8 @@ describeWithDb("Confirm-then-re-import flow: SYNT00999888777 fixture", () => {
       await seedPaymentsFromCsv();
       await runMatcher(sql, testShopId);
 
-      const m1 = await getMatchesForPayment(paymentIds[0], "suggested");
-      await confirmMatch(sql, testShopId, m1[0].id, "test-user");
+      const m2 = await getMatchesForPayment(paymentIds[1], "suggested");
+      await confirmMatch(sql, testShopId, m2[0].id, "test-user");
 
       const [countBefore] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM "Match" WHERE "shopId" = ${testShopId}
