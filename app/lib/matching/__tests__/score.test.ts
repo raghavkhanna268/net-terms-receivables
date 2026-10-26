@@ -395,16 +395,97 @@ describe("scorePaymentToInvoice", () => {
     expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
   });
 
-  it("DOES award alias points for 3+ char alias matching by substring", () => {
-    // 3+ char alias "fab" appears inside "FABRICA CORP" - should match
+  it("does NOT award alias points for 3-char alias inside payer (not whole-word)", () => {
+    // "fab" appears inside "fabrica" but is not a whole word - should NOT match
     const payment = makePayment({ payerText: "FABRICA CORP" });
     const invoice = makeInvoice();
-    const buyer = makeBuyer({ aliases: ["fab"] }); // 3-char alias
+    const buyer = makeBuyer({ aliases: ["fab"] });
 
     const result = scorePaymentToInvoice(payment, invoice, buyer, []);
 
-    // 3+ char alias should match via payer.includes(alias)
+    // With whole-word matching, "fab" is NOT a token boundary in "fabrica"
+    expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+  });
+
+  it("DOES award alias points for whole-word alias match", () => {
+    // "synthetic" is a whole word in "synthetic traders" - should match
+    const payment = makePayment({ payerText: "SYNTHETIC TRADERS PVT" });
+    const invoice = makeInvoice();
+    const buyer = makeBuyer({ aliases: ["synthetic"] });
+
+    const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
     expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+  });
+
+  // Payer-side boundary tests for whole-word matching
+  describe("whole-word alias matching", () => {
+    it("'SY' and 'SYN' vs alias 'synthetic': no alias points (not whole words)", () => {
+      const invoice = makeInvoice();
+      const buyer = makeBuyer({ aliases: ["synthetic"] });
+
+      // "SY" is too short (< 3 chars) - no match
+      const syPayment = makePayment({ payerText: "SY" });
+      const syResult = scorePaymentToInvoice(syPayment, invoice, buyer, []);
+      expect(syResult.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+
+      // "SYN" is 3 chars but not a whole word in "synthetic" - no match
+      const synPayment = makePayment({ payerText: "SYN" });
+      const synResult = scorePaymentToInvoice(synPayment, invoice, buyer, []);
+      expect(synResult.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    });
+
+    it("'SYNTHETIC' and 'SYNTHETIC TRADERS PVT' vs alias 'synthetic': matches", () => {
+      const invoice = makeInvoice();
+      const buyer = makeBuyer({ aliases: ["synthetic"] });
+
+      // Exact match after normalization
+      const exactPayment = makePayment({ payerText: "SYNTHETIC" });
+      const exactResult = scorePaymentToInvoice(exactPayment, invoice, buyer, []);
+      expect(exactResult.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+
+      // Whole-word match
+      const compoundPayment = makePayment({ payerText: "SYNTHETIC TRADERS PVT" });
+      const compoundResult = scorePaymentToInvoice(compoundPayment, invoice, buyer, []);
+      expect(compoundResult.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+    });
+
+    it("punctuation-only payer ('...', '--') gets no alias points", () => {
+      const invoice = makeInvoice();
+      const buyer = makeBuyer({ aliases: ["synthetic"] });
+
+      // Punctuation-only normalizes to empty string
+      const dotsPayment = makePayment({ payerText: "..." });
+      const dotsResult = scorePaymentToInvoice(dotsPayment, invoice, buyer, []);
+      expect(dotsResult.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+
+      const dashPayment = makePayment({ payerText: "--" });
+      const dashResult = scorePaymentToInvoice(dashPayment, invoice, buyer, []);
+      expect(dashResult.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    });
+
+    it("'OTHER TRADERS' vs alias 'traders': matches (whole-word in payer)", () => {
+      // This is intentional: "traders" IS a complete token in "other traders"
+      // High still needs an exact amount plus an invoice ref, and High is a label only
+      const payment = makePayment({ payerText: "OTHER TRADERS" });
+      const invoice = makeInvoice();
+      const buyer = makeBuyer({ aliases: ["traders"] });
+
+      const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+      expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+    });
+
+    it("alias 'test buyer' vs payer 'testbuyers ltd': no match (partial-word overlap)", () => {
+      // "test buyer" is NOT a whole word in "testbuyers" (no space between tokens)
+      const payment = makePayment({ payerText: "TESTBUYERS LTD" });
+      const invoice = makeInvoice();
+      const buyer = makeBuyer({ aliases: ["test buyer"] });
+
+      const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+      expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    });
   });
 
   it("scores payer name match (fuzzy)", () => {
