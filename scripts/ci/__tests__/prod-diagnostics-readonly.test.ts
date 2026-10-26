@@ -1416,6 +1416,168 @@ describe("prod-diagnostics second-shop sync failure detail", () => {
         expect(r.stdout).not.toMatch(/gid:\/\//);
       });
     });
+
+    it("rejects bare numeric ids, digit runs inside codes and money-like values", () => {
+      const rows = [
+        // (a) 13-digit value -> invalid; 12 digits is the cap.
+        "e2e_bulk_op_1_type|7654321098765",
+        "e2e_bulk_op_1_age_min|999999999999",
+        // (b) ids riding inside a code or enum.
+        "e2e_dlq_row_1_error_code|graphql_error:7654321098",
+        "e2e_dlq_row_2_error_code|graphql_error:THROTTLED,7654321098",
+        "e2e_dlq_row_3_error_code|graphql_error:A7654321098",
+        "e2e_dlq_row_4_error_code|shop_7654321098",
+        "e2e_dlq_row_5_topic|ORDER_7654321098765",
+        "e2e_dlq_row_6_error_code|graphql_error:throttled",
+        // (c) decimals / money-like.
+        "e2e_bulk_op_1_age_min|12.50",
+        "e2e_bulk_op_2_failure_count|1250.00",
+        "e2e_bulk_op_3_failure_count|-5",
+        "e2e_bulk_op_4_failure_count|1e9",
+        "e2e_bulk_op_5_failure_count|5000,00",
+        // Legit shapes keep validating.
+        "e2e_dlq_row_7_queue|s6_bulk",
+        "e2e_dlq_row_7_error_code|graphql_error:MAX_COST_EXCEEDED,THROTTLED",
+        "e2e_bulk_op_6_age_min|0",
+        "e2e_bulk_op_6_closed_at|2026-10-26T01:02:03Z",
+        "e2e_bulk_grp_orders_fc5_closed|3",
+      ].join("\n");
+      withFile(rows + "\n", (f) => {
+        const r = runE2eSnippet(dbStep.run ?? "", START, END, { env: { DETAIL_OUT: f } });
+        expect(r.stderr).toBe("");
+        expect(r.status).toBe(0);
+        expect(r.stdout.trim().split("\n")).toEqual([
+          "e2e_bulk_op_1_type=invalid",
+          "e2e_bulk_op_1_age_min=999999999999",
+          "e2e_dlq_row_1_error_code=invalid",
+          "e2e_dlq_row_2_error_code=invalid",
+          "e2e_dlq_row_3_error_code=invalid",
+          "e2e_dlq_row_4_error_code=invalid",
+          "e2e_dlq_row_5_topic=invalid",
+          "e2e_dlq_row_6_error_code=invalid",
+          "e2e_bulk_op_1_age_min=invalid",
+          "e2e_bulk_op_2_failure_count=invalid",
+          "e2e_bulk_op_3_failure_count=invalid",
+          "e2e_bulk_op_4_failure_count=invalid",
+          "e2e_bulk_op_5_failure_count=invalid",
+          "e2e_dlq_row_7_queue=s6_bulk",
+          "e2e_dlq_row_7_error_code=graphql_error:MAX_COST_EXCEEDED,THROTTLED",
+          "e2e_bulk_op_6_age_min=0",
+          "e2e_bulk_op_6_closed_at=2026-10-26T01:02:03Z",
+          "e2e_bulk_grp_orders_fc5_closed=3",
+        ]);
+        expect(r.stdout).not.toContain("7654321098");
+        expect(r.stdout).not.toMatch(/[0-9]\.[0-9]/);
+      });
+    });
+
+    describe("SQL shape: no printed value selects an id, *_id or amount column", () => {
+      const FORBIDDEN_COL = /^(?:[a-z_][a-z0-9_]*\.)?(?:"?id"?|[a-z0-9_]*_id|[a-z0-9_]*amount[a-z0-9_]*)$/i;
+      const COMPARISON_AFTER = /^\s*(?:IN\b|NOT\s+IN\b|=|<>|!=|<|>|IS\b|LIKE\b|~)/i;
+      const COMPARISON_BEFORE = /(?:\bIN|=|<>|!=|<|>|\bIS|\bLIKE|~)\s*$/i;
+
+      /** Text between a `(` at `open` and its matching `)`. */
+      function balanced(s: string, open: number): string {
+        let depth = 0;
+        for (let i = open; i < s.length; i++) {
+          if (s[i] === "(") depth++;
+          else if (s[i] === ")" && --depth === 0) return s.slice(open + 1, i);
+        }
+        throw new Error("unbalanced SQL");
+      }
+
+      /** Every `(o, 'key', <expr>)` tuple in the printed VALUES lists. */
+      function valueTuples(sql: string): Array<{ key: string; expr: string }> {
+        const out: Array<{ key: string; expr: string }> = [];
+        const re = /\((\d+),\s*'([a-z0-9_]+)',\s*/g;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(sql)) !== null) {
+          const body = balanced(sql, m.index);
+          out.push({ key: m[2], expr: body.slice(body.indexOf(m[2]) + m[2].length + 2).trim() });
+        }
+        return out;
+      }
+
+      /**
+       * Column references an expression can emit as a value: a forbidden column is
+       * fine only as an operand of a comparison/membership test (boolean result) or
+       * inside an aggregate like count(id). Subquery WHERE clauses are predicates.
+       */
+      function emittedForbidden(expr: string): string[] {
+        let e = expr.replace(/'(?:[^']|'')*'/g, "''");
+        // Aggregates collapse to a number.
+        e = e.replace(/\b(count|sum|min|max|avg)\s*\([^()]*\)/gi, "0");
+        // Drop WHERE/ORDER BY/GROUP BY clauses inside subqueries (predicates, not values).
+        e = e.replace(/\b(WHERE|ORDER\s+BY|GROUP\s+BY)\b[^()]*(?:\([^()]*\)[^()]*)*/gi, " ");
+        const hits: string[] = [];
+        const ref = /(?:[a-z_][a-z0-9_]*\.)?"?[a-z_][a-z0-9_]*"?/gi;
+        let m: RegExpExecArray | null;
+        while ((m = ref.exec(e)) !== null) {
+          const tok = m[0];
+          if (!FORBIDDEN_COL.test(tok)) continue;
+          if (/\(\s*$/.test(e.slice(0, m.index)) && /^\s*\(/.test(e.slice(m.index + tok.length))) continue;
+          const before = e.slice(0, m.index);
+          const after = e.slice(m.index + tok.length);
+          if (COMPARISON_AFTER.test(after) || COMPARISON_BEFORE.test(before)) continue;
+          // `x IN (SELECT id FROM ...)`: the subquery list feeds a membership test.
+          if (/\bIN\s*\(\s*SELECT\s+(?:DISTINCT\s+)?$/i.test(before)) continue;
+          // FROM/JOIN table names and aliases are not values.
+          if (/\b(FROM|JOIN|AS)\s+$/i.test(before)) continue;
+          hits.push(tok);
+        }
+        return hits;
+      }
+
+      function detailSql(): string {
+        const run = dbStep.run ?? "";
+        const start = run.indexOf("# E2E sync detail (allow-listed shapes only)");
+        const end = run.indexOf("# E2E sync detail summary");
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(end).toBeGreaterThan(start);
+        const block = run.slice(start, end);
+        const sql = block.slice(block.indexOf("<<'EOSQL'") + 9, block.lastIndexOf("EOSQL"));
+        expect(sql).toContain("SELECT k, v FROM (");
+        return sql;
+      }
+
+      it("the checker flags planted id/amount selects and allows counts and comparisons", () => {
+        expect(emittedForbidden("b.bulk_operation_id")).toEqual(["b.bulk_operation_id"]);
+        expect(emittedForbidden("d.id::text")).toEqual(["d.id"]);
+        expect(emittedForbidden("COALESCE(i.order_id, 'null')")).toEqual(["i.order_id"]);
+        expect(emittedForbidden("(SELECT amount_paise FROM t LIMIT 1)::text")).toEqual(["amount_paise"]);
+        expect(emittedForbidden("(SELECT b.id::text FROM bulk b WHERE b.n = 1)")).toEqual(["b.id"]);
+        expect(emittedForbidden("(SELECT COUNT(id) FROM t)::text")).toEqual([]);
+        expect(emittedForbidden("(b.bulk_operation_id IN (SELECT bulk_operation_id FROM ids))::text")).toEqual([]);
+        expect(emittedForbidden("(d.id IN (SELECT id FROM linked))::text")).toEqual([]);
+        expect(emittedForbidden(
+          "COALESCE((SELECT b.n::text FROM bulk b WHERE b.bulk_operation_id = d.message->>'bulkOperationId'), 'none')",
+        )).toEqual([]);
+      });
+
+      it("detail SQL: every printed value is free of id/*_id/amount columns", () => {
+        const sql = detailSql();
+        const tuples = valueTuples(sql);
+        // scalars + bulk_rows + dlq_rows.
+        expect(tuples.length).toBeGreaterThanOrEqual(19 + 13 + 11);
+        const offenders = tuples
+          .map((t) => ({ key: t.key, hits: emittedForbidden(t.expr) }))
+          .filter((t) => t.hits.length > 0);
+        expect(offenders).toEqual([]);
+        // Group rows print COUNT(*) only; the final select prints k, v only.
+        expect(sql).toContain("COUNT(*)::text AS v");
+        expect(sql).toMatch(/SELECT k, v FROM \(\s*SELECT 1 AS g, 0 AS n, o, k, v FROM scalars/);
+        expect(sql).not.toMatch(/\bamount\b/i);
+      });
+
+      it("bulk op ids query feeds only the request body file, never stdout", () => {
+        const run = adminStep.run ?? "";
+        expect(run).toContain('"$DATABASE_URL" > "$BULK_IDS_FILE" <<\'EOSQL\'');
+        expect(run).not.toMatch(/(cat|echo|printf)[^\n]*\$BULK_IDS_FILE/);
+        expect(run).not.toMatch(/(cat|echo|printf)[^\n]*\$BULK_QUERY_FILE/);
+        // Printed per-row values are enums/counts/booleans keyed by row index.
+        expect(run).not.toMatch(/e2e_bulk_op_\\\(\$ns\[\$i\]\)_[a-z_]*=\\\(\$op\.id/);
+      });
+    });
   });
 
   describe("Admin bulk op status", () => {

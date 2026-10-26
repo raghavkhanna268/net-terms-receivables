@@ -2183,14 +2183,25 @@ jobs:
             : > "$DETAIL_OUT"
           fi
           # E2E sync detail summary
-          # Keys are e2e_<fixed name> with a row index; values are ints, booleans,
-          # lowercase codes, UPPER_CASE Shopify enums or UTC
-          # second timestamps. Anything else -> invalid.
+          # Keys are e2e_<fixed name> with a row index; values are ints (max 12
+          # digits, no decimals), booleans, lowercase codes, UPPER_CASE Shopify
+          # enums or UTC second timestamps. Codes/enums may carry at most 2
+          # consecutive digits (s6_bulk), so ids can't ride inside a code.
+          # Anything else -> invalid.
           DETAIL_KEY_RE='^e2e_(sync|bulk|dlq)_[a-z0-9_]{1,56}$'
-          DETAIL_VALUE_RE='^([0-9]{1,12}|true|false|null|unknown|none|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|[a-z][a-z0-9_]{0,47}|[A-Z][A-Z0-9_]{0,47}|graphql_error:[A-Z0-9_,]{1,80})$'
+          DETAIL_INT_RE='^[0-9]{1,12}$'
+          DETAIL_TS_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+          DETAIL_CODE_RE='^(true|false|null|unknown|none|[a-z][a-z0-9_]{0,47}|[A-Z][A-Z0-9_]{0,47}|graphql_error:[A-Z][A-Z0-9_]{0,39}(,[A-Z][A-Z0-9_]{0,39}){0,7})$'
+          DETAIL_DIGIT_RUN_RE='[0-9]{3,}'
           while IFS='|' read -r k v; do
             [[ "$k" =~ $DETAIL_KEY_RE ]] || continue
-            [[ "$v" =~ $DETAIL_VALUE_RE ]] || v=invalid
+            if [[ "$v" =~ $DETAIL_INT_RE || "$v" =~ $DETAIL_TS_RE ]]; then
+              :
+            elif [[ "$v" =~ $DETAIL_CODE_RE && ! "$v" =~ $DETAIL_DIGIT_RUN_RE ]]; then
+              :
+            else
+              v=invalid
+            fi
             echo "$k=$v"
           done < "$DETAIL_OUT"
           # End E2E sync detail
