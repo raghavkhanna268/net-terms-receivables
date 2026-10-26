@@ -3003,6 +3003,308 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         await sql`DELETE FROM "Shop" WHERE id = ${DONE_SHOP_ID}`;
       }
     });
+
+    it("C15e: uninstalled shop op is NOT returned by findStrandedBulkOperations", async () => {
+      // Mutation test: removing the uninstalledAt IS NULL filter would cause this to fail
+      const { findStrandedBulkOperations } = await import("../bulk-op-recovery.server");
+
+      const UNINSTALLED_SHOP_ID = `shop-uninstalled-${TEST_SUFFIX}`;
+      const UNINSTALLED_SHOP_DOMAIN = `uninstalled-${TEST_SUFFIX}.myshopify.com`;
+      const INSTALLED_SHOP_ID = `shop-installed-${TEST_SUFFIX}`;
+      const INSTALLED_SHOP_DOMAIN = `installed-${TEST_SUFFIX}.myshopify.com`;
+      const uninstalledOpId = `gid://shopify/BulkOperation/uninstalled-filter-${TEST_SUFFIX}`;
+      const installedOpId = `gid://shopify/BulkOperation/installed-filter-${TEST_SUFFIX}`;
+
+      try {
+        // Uninstalled shop
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+          VALUES (${UNINSTALLED_SHOP_ID}, ${UNINSTALLED_SHOP_DOMAIN}, 'INR', NOW(), NOW(), NOW())
+        `;
+
+        // Installed shop (uninstalledAt is NULL)
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${INSTALLED_SHOP_ID}, ${INSTALLED_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Stranded op on uninstalled shop - should NOT be found
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${uninstalledOpId}, ${UNINSTALLED_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL
+          )
+        `;
+
+        // Stranded op on installed shop - SHOULD be found
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at
+          )
+          VALUES (
+            ${installedOpId}, ${INSTALLED_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL
+          )
+        `;
+
+        const stranded = await findStrandedBulkOperations(sql, 10);
+
+        // Uninstalled shop's op should NOT be found
+        const foundUninstalled = stranded.find((op) => op.bulk_operation_id === uninstalledOpId);
+        expect(foundUninstalled).toBeUndefined();
+
+        // Installed shop's op SHOULD be found
+        const foundInstalled = stranded.find((op) => op.bulk_operation_id === installedOpId);
+        expect(foundInstalled).toBeDefined();
+      } finally {
+        await sql`DELETE FROM s6_bulk_operations WHERE shop IN (${UNINSTALLED_SHOP_DOMAIN}, ${INSTALLED_SHOP_DOMAIN})`;
+        await sql`DELETE FROM "Shop" WHERE id IN (${UNINSTALLED_SHOP_ID}, ${INSTALLED_SHOP_ID})`;
+      }
+    });
+
+    it("C15f: op at failure_count >= MAX is NOT returned by findStrandedBulkOperations", async () => {
+      // Mutation test: removing the failure_count < MAX filter would cause this to fail
+      const { findStrandedBulkOperations } = await import("../bulk-op-recovery.server");
+      const { MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
+
+      const MAX_SHOP_ID = `shop-maxfail-${TEST_SUFFIX}`;
+      const MAX_SHOP_DOMAIN = `maxfail-${TEST_SUFFIX}.myshopify.com`;
+      const maxFailOpId = `gid://shopify/BulkOperation/maxfail-filter-${TEST_SUFFIX}`;
+      const normalOpId = `gid://shopify/BulkOperation/normalfail-filter-${TEST_SUFFIX}`;
+
+      try {
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${MAX_SHOP_ID}, ${MAX_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Op at MAX_FAILURE_COUNT - should NOT be found
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at, failure_count
+          )
+          VALUES (
+            ${maxFailOpId}, ${MAX_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL,
+            ${MAX_FAILURE_COUNT}
+          )
+        `;
+
+        // Op at failure_count=0 - SHOULD be found
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at, failure_count
+          )
+          VALUES (
+            ${normalOpId}, ${MAX_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL,
+            0
+          )
+        `;
+
+        const stranded = await findStrandedBulkOperations(sql, 10);
+
+        // Op at MAX should NOT be found
+        const foundMax = stranded.find((op) => op.bulk_operation_id === maxFailOpId);
+        expect(foundMax).toBeUndefined();
+
+        // Op at 0 SHOULD be found
+        const foundNormal = stranded.find((op) => op.bulk_operation_id === normalOpId);
+        expect(foundNormal).toBeDefined();
+      } finally {
+        await sql`DELETE FROM s6_bulk_operations WHERE shop = ${MAX_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${MAX_SHOP_ID}`;
+      }
+    });
+  });
+
+  // ==========================================================================
+  // QA2: Nightly DLQ loop fix - permanent failures mark op terminal
+  // ==========================================================================
+  describe("QA2: permanent failures mark op terminal (no nightly DLQ loop)", () => {
+    it.each([
+      { name: "NO_RESULT_URL", errorCode: "bulk_no_result_url", setupMock: "no_result_url" },
+      { name: "CHUNK_HTTP_4XX", errorCode: "bulk_chunk_http_4xx", setupMock: "chunk_4xx" },
+    ])("$name: drive permanent failure, run 3 recovery cycles, exactly 1 DLQ row", async ({ errorCode, setupMock }) => {
+      const { runDrain, DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
+      const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
+      const { adminGraphQL } = await import("../admin-client.server");
+      const { MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
+
+      const DLQ_SHOP_ID = `shop-dlq-loop-${errorCode}-${TEST_SUFFIX}`;
+      const DLQ_SHOP_DOMAIN = `dlq-loop-${errorCode}-${TEST_SUFFIX}.myshopify.com`;
+      const bulkOpId = `gid://shopify/BulkOperation/dlq-loop-${errorCode}-${TEST_SUFFIX}`;
+      const webhookId = `finish:dlq-loop:${bulkOpId}`;
+
+      try {
+        // Create shop
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${DLQ_SHOP_ID}, ${DLQ_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Create bulk operation (finish_received_at is old enough for recovery)
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at, failure_count
+          )
+          VALUES (
+            ${bulkOpId}, ${DLQ_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL,
+            0
+          )
+        `;
+
+        // Setup mock based on the error type
+        if (setupMock === "no_result_url") {
+          // Mock adminGraphQL to return COMPLETED with partialDataUrl but no url
+          vi.mocked(adminGraphQL).mockResolvedValue({
+            success: true,
+            data: {
+              node: {
+                id: bulkOpId,
+                status: "COMPLETED",
+                url: null,
+                objectCount: "10",
+                partialDataUrl: "https://partial.example.com/data.jsonl",
+                errorCode: null,
+              },
+            },
+            retryable: false,
+          });
+        } else if (setupMock === "chunk_4xx") {
+          // Mock adminGraphQL to return COMPLETED with url, then fetch will fail
+          vi.mocked(adminGraphQL).mockResolvedValue({
+            success: true,
+            data: {
+              node: {
+                id: bulkOpId,
+                status: "COMPLETED",
+                url: "https://example.com/result.jsonl",
+                objectCount: "10",
+                partialDataUrl: null,
+                errorCode: null,
+              },
+            },
+            retryable: false,
+          });
+          // Mock global fetch to return 404 (permanent HTTP error)
+          // Must include arrayBuffer() method for fetchJsonlChunk to work
+          vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+            ok: false,
+            status: 404,
+            statusText: "Not Found",
+            arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+            headers: new Headers(),
+          }));
+        }
+
+        // Clear any existing messages and DLQ rows
+        await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${DLQ_SHOP_DOMAIN}`;
+        await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${DLQ_SHOP_DOMAIN}`;
+
+        // Insert message directly into pgmq with high read_ct to go straight to DLQ
+        const message = {
+          topic: "BULK_OPERATIONS_FINISH",
+          shop: DLQ_SHOP_DOMAIN,
+          webhookId,
+          bulkOperationId: bulkOpId,
+          bulkType: "companies",
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        await sql`
+          INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
+          VALUES (NOW(), ${DEFAULT_DRAIN_CONFIG.maxRetries - 1}, NOW(), ${sql.json(message)})
+        `;
+
+        // Run drain - should dead-letter the message
+        const drainResult = await runDrain(sql, {
+          ...DEFAULT_DRAIN_CONFIG,
+          batchSize: 1,
+          timeBudgetMs: 5000,
+        });
+        expect(drainResult.deadLettered).toBe(1);
+
+        // Verify DLQ row exists after first drain
+        const [dlqAfterDrain] = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
+          WHERE original_queue = 's6_bulk' AND message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(dlqAfterDrain.count, 10)).toBe(1);
+
+        // Verify op is now terminal (failure_count = MAX)
+        const [opAfterDrain] = await sql<{ failure_count: number }[]>`
+          SELECT failure_count FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+        `;
+        expect(opAfterDrain.failure_count).toBe(MAX_FAILURE_COUNT);
+
+        // Now run 3 recovery cycles - should NOT re-enqueue the terminal op
+        for (let cycle = 0; cycle < 3; cycle++) {
+          // Recovery should NOT find this op (failure_count >= MAX)
+          const recoveryResult = await recoverStaleBulkOperations(sql, 60, 10);
+          const foundOp = recoveryResult.attempts.find((a) => a.bulkOperationId === bulkOpId);
+          expect(foundOp).toBeUndefined();
+
+          // Run drain again - should process nothing new
+          await runDrain(sql, {
+            ...DEFAULT_DRAIN_CONFIG,
+            batchSize: 1,
+            timeBudgetMs: 5000,
+          });
+        }
+
+        // After 3 cycles: still exactly 1 DLQ row
+        const [dlqFinal] = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
+          WHERE original_queue = 's6_bulk' AND message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(dlqFinal.count, 10)).toBe(1);
+
+        // No messages in queue for this op
+        const [queueFinal] = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(queueFinal.count, 10)).toBe(0);
+
+        // Op is still terminal
+        const [opFinal] = await sql<{ failure_count: number; completed_at: Date | null }[]>`
+          SELECT failure_count, completed_at FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+        `;
+        expect(opFinal.failure_count).toBe(MAX_FAILURE_COUNT);
+      } finally {
+        vi.mocked(adminGraphQL).mockReset();
+        vi.unstubAllGlobals();
+        await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${DLQ_SHOP_DOMAIN}`;
+        await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${DLQ_SHOP_DOMAIN}`;
+        await sql`DELETE FROM s6_bulk_operations WHERE shop = ${DLQ_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${DLQ_SHOP_ID}`;
+      }
+    });
   });
 
   // ==========================================================================
