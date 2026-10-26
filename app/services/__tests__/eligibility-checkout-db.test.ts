@@ -36,9 +36,18 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
 
 import { recomputeCreditStatus } from "../credit-status-recompute.server";
 import { hasOverdueInvoices } from "../overdue.server";
+import type { CreditStatus } from "~/lib/metafields-contract";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+function getLastMetafieldJson(): CreditStatus | null {
+  const lastCall = mockShopifyGraphQLRequest.mock.calls.at(-1);
+  if (!lastCall) return null;
+  const variables = lastCall[1] as { metafields?: Array<{ value: string }> } | undefined;
+  if (!variables?.metafields?.[0]?.value) return null;
+  return JSON.parse(variables.metafields[0].value) as CreditStatus;
+}
 
 function lettersOnlyId(len: number): string {
   return Array.from({ length: len }, () =>
@@ -148,11 +157,15 @@ describeWithDb("eligibility-checkout: overdue invoice hold lifecycle", () => {
     expect(result.success).toBe(true);
     expect(result.newHold).toBe(true);
 
-    const [account] = await sql<{ holdState: string; holdReasonCode: string | null }[]>`
-      SELECT "holdState", "holdReasonCode" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
+    const [account] = await sql<{ holdState: string }[]>`
+      SELECT "holdState" FROM "BuyerAccount" WHERE id = ${TEST_ACCOUNT_ID}
     `;
     expect(account.holdState).toBe("HELD");
-    expect(account.holdReasonCode).toBe("PAYMENT_OVERDUE");
+
+    const metafieldJson = getLastMetafieldJson();
+    expect(metafieldJson).not.toBeNull();
+    expect(metafieldJson!.hold).toBe(true);
+    expect(metafieldJson!.holdReasonCode).toBe("PAYMENT_OVERDUE");
   });
 
   it("paying overdue invoice releases hold", async () => {
