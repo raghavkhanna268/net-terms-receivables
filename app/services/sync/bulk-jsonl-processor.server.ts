@@ -888,56 +888,37 @@ export async function loadBulkOperationProgress(
  *
  * R1: Owner-checked with processing_lease_token to prevent stale processor A
  * from overwriting progress after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  */
 export async function saveBulkOperationProgress(
   sql: Sql,
   bulkOperationId: string,
   byteOffset: number,
-  _completedAt: Date | null = null,
-  chunkSize?: number,
-  leaseToken?: string
+  leaseToken: string,
+  chunkSize?: number
 ): Promise<{ rowUpdated: boolean }> {
   let result;
   if (chunkSize !== undefined) {
-    result = leaseToken
-      ? await sql`
-          UPDATE s6_bulk_operations
-          SET byte_offset = ${byteOffset},
-              chunk_size = ${chunkSize}
-          WHERE bulk_operation_id = ${bulkOperationId}
-            AND closed_at IS NULL
-            AND completed_at IS NULL
-            AND processing_lease_token = ${leaseToken}
-            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
-        `
-      : await sql`
-          UPDATE s6_bulk_operations
-          SET byte_offset = ${byteOffset},
-              chunk_size = ${chunkSize}
-          WHERE bulk_operation_id = ${bulkOperationId}
-            AND closed_at IS NULL
-            AND completed_at IS NULL
-            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
-        `;
+    result = await sql`
+      UPDATE s6_bulk_operations
+      SET byte_offset = ${byteOffset},
+          chunk_size = ${chunkSize}
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
+        AND completed_at IS NULL
+        AND processing_lease_token = ${leaseToken}
+        AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
+    `;
   } else {
-    result = leaseToken
-      ? await sql`
-          UPDATE s6_bulk_operations
-          SET byte_offset = ${byteOffset}
-          WHERE bulk_operation_id = ${bulkOperationId}
-            AND closed_at IS NULL
-            AND completed_at IS NULL
-            AND processing_lease_token = ${leaseToken}
-            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
-        `
-      : await sql`
-          UPDATE s6_bulk_operations
-          SET byte_offset = ${byteOffset}
-          WHERE bulk_operation_id = ${bulkOperationId}
-            AND closed_at IS NULL
-            AND completed_at IS NULL
-            AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
-        `;
+    result = await sql`
+      UPDATE s6_bulk_operations
+      SET byte_offset = ${byteOffset}
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
+        AND completed_at IS NULL
+        AND processing_lease_token = ${leaseToken}
+        AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
+    `;
   }
   return { rowUpdated: result.count > 0 };
 }
@@ -950,37 +931,26 @@ export async function saveBulkOperationProgress(
  *
  * R1: Owner-checked with processing_lease_token to prevent stale processor A
  * from claiming completion after processor B has taken over the lease.
+ * leaseToken is REQUIRED - all processor writes must be owner-checked.
  *
- * @param leaseToken - Optional lease token for owner check. If provided, only
- *                     claims if the token matches (prevents stale processor writes).
  * @returns true if this caller won the claim, false otherwise
  */
 export async function claimBulkCompletion(
   sql: Sql,
   bulkOperationId: string,
   shop: string,
-  leaseToken?: string
+  leaseToken: string
 ): Promise<boolean> {
-  const result = leaseToken
-    ? await sql`
-        UPDATE s6_bulk_operations
-        SET completed_at = now()
-        WHERE bulk_operation_id = ${bulkOperationId}
-          AND shop = ${shop}
-          AND completed_at IS NULL
-          AND closed_at IS NULL
-          AND processing_lease_token = ${leaseToken}
-        RETURNING bulk_operation_id
-      `
-    : await sql`
-        UPDATE s6_bulk_operations
-        SET completed_at = now()
-        WHERE bulk_operation_id = ${bulkOperationId}
-          AND shop = ${shop}
-          AND completed_at IS NULL
-          AND closed_at IS NULL
-        RETURNING bulk_operation_id
-      `;
+  const result = await sql`
+    UPDATE s6_bulk_operations
+    SET completed_at = now()
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND shop = ${shop}
+      AND completed_at IS NULL
+      AND closed_at IS NULL
+      AND processing_lease_token = ${leaseToken}
+    RETURNING bulk_operation_id
+  `;
   return result.count > 0;
 }
 
@@ -1356,10 +1326,11 @@ export async function processBulkOperation(
       };
     }
 
-    // Retryable failure: increment failure count
+    // Retryable failure: increment failure count (owner-checked)
     const newFailureCount = await incrementBulkOperationFailureCount(
       sql,
-      bulkOperationId
+      bulkOperationId,
+      leaseToken
     );
     const exhaustedRetries = newFailureCount >= MAX_FAILURE_COUNT;
     const errorCode = exhaustedRetries ? BULK_ERROR_CODES.MAX_FAILURES : BULK_ERROR_CODES.NO_RESULT_URL;
@@ -1400,10 +1371,11 @@ export async function processBulkOperation(
       };
     }
 
-    // Retryable error - increment failure count
+    // Retryable error - increment failure count (owner-checked)
     const newFailureCount = await incrementBulkOperationFailureCount(
       sql,
-      bulkOperationId
+      bulkOperationId,
+      leaseToken
     );
     const exhaustedRetries = newFailureCount >= MAX_FAILURE_COUNT;
     const errorCode = exhaustedRetries ? BULK_ERROR_CODES.MAX_FAILURES : BULK_ERROR_CODES.PROCESSING_ERROR;
@@ -1491,11 +1463,10 @@ export async function processBulkOperation(
       };
     }
 
-    // Save increased chunk size and retry
-    await updateBulkOperationChunkSize(sql, bulkOperationId, newChunkSize);
+    // Save increased chunk size and retry (owner-checked)
+    await updateBulkOperationChunkSize(sql, bulkOperationId, newChunkSize, leaseToken);
 
-    // Reset failure count on successful progress
-    // R1: Pass leaseToken for owner-checked reset
+    // Reset failure count on successful progress (owner-checked)
     await resetBulkOperationFailureCount(sql, bulkOperationId, leaseToken);
 
     console.log(
@@ -1560,8 +1531,8 @@ export async function processBulkOperation(
         linesToProcess
       );
     } catch {
-      // Increment failure count on processing error
-      await incrementBulkOperationFailureCount(sql, bulkOperationId);
+      // Increment failure count on processing error (owner-checked)
+      await incrementBulkOperationFailureCount(sql, bulkOperationId, leaseToken);
       return {
         success: false,
         action: "skipped",
@@ -1646,10 +1617,9 @@ export async function processBulkOperation(
   }
 
   // Save progress for next iteration
-  // Reset chunk size to default if we found lines
-  // R1: Pass leaseToken for owner-checked write
+  // Reset chunk size to default if we found lines (owner-checked)
   const nextChunkSize = lines.length > 0 ? DEFAULT_CHUNK_SIZE : currentChunkSize;
-  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, null, nextChunkSize, leaseToken);
+  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, leaseToken, nextChunkSize);
 
   // Reset failure count on successful progress
   // R1: Pass leaseToken for owner-checked reset

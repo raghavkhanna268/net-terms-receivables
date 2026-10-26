@@ -97,8 +97,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   });
 
   describe("claimBulkCompletion - exactly-once completion", () => {
-    it("first caller wins completion claim, second caller loses", async () => {
-      const { claimBulkCompletion } = await import("~/services/sync/bulk-jsonl-processor.server");
+    it("first caller wins completion claim, second caller loses (with owner-checked tokens)", async () => {
+      const { claimBulkCompletion, acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/claim-race-${TEST_SUFFIX}`;
 
@@ -107,13 +107,20 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'webhook', NOW())
       `;
 
+      // First processor acquires lease
+      const leaseA = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseA).not.toBeNull();
+
+      // Racing claims - only A has the correct lease token, B has a wrong one
+      const wrongToken = "wrong-token-B";
       const [claim1, claim2] = await Promise.all([
-        claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN),
-        claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN),
+        claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseA!),
+        claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, wrongToken),
       ]);
 
-      const winCount = [claim1, claim2].filter(Boolean).length;
-      expect(winCount).toBe(1);
+      // Only the caller with the correct lease token wins
+      expect(claim1).toBe(true);
+      expect(claim2).toBe(false);
 
       const [row] = await sql<{ completed_at: Date | null }[]>`
         SELECT completed_at FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
@@ -126,12 +133,15 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       const bulkOpId = `gid://shopify/BulkOperation/claim-closed-${TEST_SUFFIX}`;
 
+      // Insert with a lease token so we can test with it
+      const testToken = "test-token-closed";
       await sql`
-        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, closed_at, closed_reason)
-        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'webhook', NOW(), NOW(), 'reinstall_reset')
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, closed_at, closed_reason, processing_lease_token)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'webhook', NOW(), NOW(), 'reinstall_reset', ${testToken})
       `;
 
-      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      // Even with correct token, cannot claim closed operation
+      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, testToken);
       expect(claimed).toBe(false);
 
       const [row] = await sql<{ completed_at: Date | null }[]>`
@@ -393,7 +403,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
   describe("saveBulkOperationProgress - byte offset monotonic advancement", () => {
     it("advances byte_offset only when new value is larger", async () => {
-      const { saveBulkOperationProgress } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const { saveBulkOperationProgress, acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/progress-monotonic-${TEST_SUFFIX}`;
 
@@ -402,10 +412,14 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'webhook', NOW(), 1000)
       `;
 
-      const { rowUpdated: updated1 } = await saveBulkOperationProgress(sql, bulkOpId, 2000);
+      // Acquire lease to get a valid token (required for owner-checked writes)
+      const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseToken).not.toBeNull();
+
+      const { rowUpdated: updated1 } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!);
       expect(updated1).toBe(true);
 
-      const { rowUpdated: updated2 } = await saveBulkOperationProgress(sql, bulkOpId, 1500);
+      const { rowUpdated: updated2 } = await saveBulkOperationProgress(sql, bulkOpId, 1500, leaseToken!);
       expect(updated2).toBe(false);
 
       const [row] = await sql<{ byte_offset: string }[]>`
@@ -419,12 +433,15 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       const bulkOpId = `gid://shopify/BulkOperation/progress-completed-${TEST_SUFFIX}`;
 
+      // Insert with a known lease token so we can test with it
+      const testToken = "test-token-completed";
       await sql`
-        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset, completed_at)
-        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'webhook', NOW(), 1000, NOW())
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, byte_offset, completed_at, processing_lease_token)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'webhook', NOW(), 1000, NOW(), ${testToken})
       `;
 
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000);
+      // Even with correct token, should not update completed operations
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, testToken);
       expect(rowUpdated).toBe(false);
     });
   });
@@ -1841,7 +1858,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(leaseA).not.toBeNull();
 
       // Manually complete the operation (simulating processor A finished)
-      await claimBulkCompletion(sql, bulkOpId2, TEST_SHOP_DOMAIN);
+      await claimBulkCompletion(sql, bulkOpId2, TEST_SHOP_DOMAIN, leaseA!);
 
       // Manually release A's lease (simulating A's finally block)
       await sql`
@@ -1992,7 +2009,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       // A (stale processor with wrong token) tries to save progress
       const staleTokenA = "stale-token-A";
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, null, undefined, staleTokenA);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, staleTokenA);
 
       // Should update 0 rows (owner check fails)
       expect(rowUpdated).toBe(false);
@@ -2073,7 +2090,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(tokenB).not.toBeNull();
 
       // With the CORRECT token, progress save should succeed
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, null, undefined, tokenB!);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, tokenB!);
       expect(rowUpdated).toBe(true);
 
       const [row] = await sql<{ byte_offset: string | null }[]>`
