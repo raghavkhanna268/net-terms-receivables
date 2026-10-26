@@ -147,7 +147,7 @@ Write scopes include read access to the same resource type. See [Access scopes](
 
 ## Error Monitoring
 
-- [x] **⚠️ Wire Sentry error monitoring** — Wired in code (`workers/app.ts`, `app/lib/sentry.ts`); Worker `SENTRY_DSN` set (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST); ingest smoke passed (#390); Worker-side capture pending
+- [ ] **⚠️ Wire Sentry error monitoring** — Why open: Worker-side capture pending
   - Package installed: `@sentry/cloudflare`
   - Wrapper implemented: `app/lib/sentry.ts`
   - [x] Create Sentry project (Raghav), DSN provided through a secure secret request (#390)
