@@ -225,9 +225,8 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     await archiveForeignQueueMessages();
 
     // #239: Create an uninstalled-but-present Shop row so the drain guard allows
-    // the message through to the handler. The handler returns shop_not_found
-    // which triggers the DLQ sanitization path. Without this, the guard would
-    // delete the message immediately (redacted shop behaviour).
+    // the message through to the handler (which returns shop_not_found for this
+    // domain). Without this, the guard would delete messages for missing shops.
     const shopId = `shop-sanitize-${testContext.suffix}`;
     const now = new Date();
     const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
@@ -725,13 +724,10 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
 
   it("already-sanitized message is skipped and archived, not re-processed", async () => {
     const webhookId = `wh-skip-${testContext.suffix}`;
-    // #239: Include the shop field so the drain guard allows it through to the
-    // sanitized-message skip logic. Without shop, the guard would try to delete it.
     const sanitizedMessage = {
       sanitized: true,
       reason: "shop_not_found",
       topic: "COMPANY_LOCATIONS_CREATE",
-      shop: testContext.missingShopDomain,
       originalMsgId: "old-msg-123",
       webhookId,
       resourceGid: `gid://shopify/CompanyLocation/skip-${testContext.suffix}`,

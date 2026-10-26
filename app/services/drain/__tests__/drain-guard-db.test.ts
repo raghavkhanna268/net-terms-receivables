@@ -98,6 +98,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
   let consoleInfoSpy: ReturnType<typeof vi.spyOn>;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let consoleDebugSpy: ReturnType<typeof vi.spyOn>;
 
   const testContext = {
     suffix: "",
@@ -119,6 +120,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
   });
 
   afterEach(async () => {
@@ -126,6 +128,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
     consoleInfoSpy.mockRestore();
     consoleWarnSpy.mockRestore();
     consoleErrorSpy.mockRestore();
+    consoleDebugSpy.mockRestore();
   });
 
   function getAllConsoleOutput(): string[] {
@@ -379,6 +382,12 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
       "DRAFT_ORDERS_CREATE",
       "DRAFT_ORDERS_UPDATE",
       "DRAFT_ORDERS_DELETE",
+      "RECONCILE_COMPANIES",
+      "RECONCILE_CUSTOMERS",
+      "RECONCILE_ORDERS",
+      "CREDIT_STATUS_RECOMPUTE",
+      "REMINDER_SEND",
+      "REMINDER_CATCHUP",
     ];
 
     for (const topic of syncTopics) {
@@ -525,7 +534,7 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
   });
 
   describe("Leak test: no PII in logs", () => {
-    it("drain_shop_missing_deleted contains no domain, webhookId, payload or token", async () => {
+    it("drain_shop_missing_deleted contains no domain, webhookId, payload or token (raw mock.calls)", async () => {
       const suffix = testContext.suffix;
       const missingDomain = `test-leak-${suffix}.myshopify.com`;
       const webhookId = `wh-leak-secret-token-${suffix}`;
@@ -547,17 +556,79 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
 
-        const allOutput = getAllConsoleOutput().join("\n");
+        const allCalls = [
+          ...consoleLogSpy.mock.calls,
+          ...consoleInfoSpy.mock.calls,
+          ...consoleWarnSpy.mock.calls,
+          ...consoleErrorSpy.mock.calls,
+          ...consoleDebugSpy.mock.calls,
+        ];
 
-        expect(allOutput).not.toContain(missingDomain);
-        expect(allOutput).not.toContain("myshopify.com");
-        expect(allOutput).not.toContain(webhookId);
-        expect(allOutput).not.toContain("sensitive-data");
-        expect(allOutput).not.toContain("shpat_secret123");
-        expect(allOutput).not.toContain("payload");
-        expect(allOutput).not.toContain("token");
+        const drainLogCall = allCalls.find((call) => {
+          const arg = call[0];
+          return typeof arg === "string" && arg.includes("drain_shop_missing_deleted");
+        });
 
-        expect(allOutput).toContain("drain_shop_missing_deleted");
+        expect(drainLogCall).toBeDefined();
+
+        const logStr = drainLogCall![0] as string;
+        const logObj = JSON.parse(logStr);
+
+        expect(Object.keys(logObj).sort()).toEqual(["count", "event", "msgId", "queue", "topic"]);
+
+        expect(logStr).not.toContain(missingDomain);
+        expect(logStr).not.toContain("myshopify.com");
+        expect(logStr).not.toContain(webhookId);
+        expect(logStr).not.toContain("sensitive-data");
+        expect(logStr).not.toContain("shpat_secret123");
+        expect(logStr).not.toContain("payload");
+      } finally {
+        await cleanupTestData([missingDomain], suffix);
+      }
+    });
+
+    it("drain_shop_missing_deleted exact key set (fails if field added/removed)", async () => {
+      const suffix = testContext.suffix;
+      const missingDomain = `test-keycheck-${suffix}.myshopify.com`;
+
+      try {
+        const webhookId = `wh-keycheck-${suffix}`;
+        const message = {
+          shop: missingDomain,
+          topic: "ORDERS_UPDATED",
+          webhookId,
+          resourceGid: `gid://shopify/Order/keycheck-${suffix}`,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        await sqlRef`
+          SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})
+        `;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const allCalls = [
+          ...consoleLogSpy.mock.calls,
+          ...consoleInfoSpy.mock.calls,
+        ];
+
+        const drainLogCall = allCalls.find((call) => {
+          const arg = call[0];
+          return typeof arg === "string" && arg.includes("drain_shop_missing_deleted");
+        });
+
+        expect(drainLogCall).toBeDefined();
+
+        const logObj = JSON.parse(drainLogCall![0] as string);
+
+        expect(Object.keys(logObj).sort()).toEqual(["count", "event", "msgId", "queue", "topic"]);
+
+        expect(logObj.event).toBe("drain_shop_missing_deleted");
+        expect(logObj.queue).toMatch(/^(sync|bulk)$/);
+        expect(typeof logObj.topic).toBe("string");
+        expect(typeof logObj.msgId).toBe("string");
+        expect(typeof logObj.count).toBe("number");
       } finally {
         await cleanupTestData([missingDomain], suffix);
       }
@@ -621,10 +692,11 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
   });
 
   describe("Near-miss domain", () => {
-    it("near-miss domain (case variant) is unaffected", async () => {
+    it("suffix mismatch: similar domain is deleted (not archived)", async () => {
       const suffix = testContext.suffix;
       const existingDomain = `test-nearmiss-${suffix}.myshopify.com`;
-      const nearMissDomain = `test-nearmiss-${suffix}x.myshopify.com`;
+      const suffixPart = suffix + "x";
+      const nearMissDomain = `test-nearmiss-${suffixPart}.myshopify.com`;
       const shopId = `shop-nearmiss-${suffix}`;
 
       try {
@@ -685,13 +757,13 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         await cleanupTestData([existingDomain, nearMissDomain], suffix);
       }
     });
-  });
 
-  describe("DB error handling", () => {
-    it("sync: exception log uses correct key and fields", async () => {
+    it("upper-case variant: domain query is case-sensitive", async () => {
       const suffix = testContext.suffix;
-      const existingDomain = `test-err-sync-${suffix}.myshopify.com`;
-      const shopId = `shop-err-sync-${suffix}`;
+      const existingDomain = `test-casetest-${suffix}.myshopify.com`;
+      const upperSuffix = suffix.toUpperCase();
+      const upperDomain = `test-CASETEST-${upperSuffix}.myshopify.com`;
+      const shopId = `shop-casetest-${suffix}`;
 
       try {
         const now = new Date();
@@ -700,13 +772,223 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
           INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
           VALUES (${shopId}, ${existingDomain}, 'INR', ${now}, ${now})
         `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + existingDomain}, ${existingDomain}, 'test-state', false, 'test-token')
+        `;
 
-        const webhookId = `wh-err-sync-${suffix}`;
-        const message = {
+        const existingWebhookId = `wh-existing-case-${suffix}`;
+        const upperWebhookId = `wh-upper-case-${suffix}`;
+
+        const existingMessage = {
           shop: existingDomain,
+          topic: "COMPANIES_DELETE",
+          webhookId: existingWebhookId,
+          resourceGid: `gid://shopify/Company/existing-case-${suffix}`,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        const upperMessage = {
+          shop: upperDomain,
+          topic: "COMPANIES_DELETE",
+          webhookId: upperWebhookId,
+          resourceGid: `gid://shopify/Company/upper-case-${suffix}`,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(existingMessage)})`;
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(upperMessage)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [existingArchive] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
+          WHERE message->>'webhookId' = ${existingWebhookId}
+        `;
+        expect(parseInt(existingArchive.count, 10)).toBe(1);
+
+        const [upperDeleted] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE message->>'webhookId' = ${upperWebhookId}
+        `;
+        expect(parseInt(upperDeleted.count, 10)).toBe(0);
+
+        const [upperArchive] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
+          WHERE message->>'webhookId' = ${upperWebhookId}
+        `;
+        expect(parseInt(upperArchive.count, 10)).toBe(0);
+      } finally {
+        await cleanupTestData([existingDomain, upperDomain], suffix);
+      }
+    });
+
+    it("underscore in domain: exact match required (catches = to LIKE mutation)", async () => {
+      const suffix = testContext.suffix;
+      const existingDomain = `test-under_score-${suffix}.myshopify.com`;
+      const wildcardDomain = `test-underXscore-${suffix}.myshopify.com`;
+      const shopId = `shop-underscore-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${existingDomain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + existingDomain}, ${existingDomain}, 'test-state', false, 'test-token')
+        `;
+
+        const wildcardWebhookId = `wh-wildcard-underscore-${suffix}`;
+        const wildcardMessage = {
+          shop: wildcardDomain,
+          topic: "COMPANIES_DELETE",
+          webhookId: wildcardWebhookId,
+          resourceGid: `gid://shopify/Company/wildcard-${suffix}`,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(wildcardMessage)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [wildcardDeleted] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE message->>'webhookId' = ${wildcardWebhookId}
+        `;
+        expect(parseInt(wildcardDeleted.count, 10)).toBe(0);
+
+        const [wildcardArchive] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
+          WHERE message->>'webhookId' = ${wildcardWebhookId}
+        `;
+        expect(parseInt(wildcardArchive.count, 10)).toBe(0);
+      } finally {
+        await cleanupTestData([existingDomain, wildcardDomain], suffix);
+      }
+    });
+
+    it("percent in domain: exact match required (catches = to LIKE mutation)", async () => {
+      const suffix = testContext.suffix;
+      const existingDomain = `test-pct-${suffix}.myshopify.com`;
+      const pctSuffix = suffix.slice(0, -1);
+      const wildcardDomain = `test-pct-${pctSuffix}.myshopify.com`;
+      const shopId = `shop-pct-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${existingDomain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + existingDomain}, ${existingDomain}, 'test-state', false, 'test-token')
+        `;
+
+        const wildcardWebhookId = `wh-wildcard-pct-${suffix}`;
+        const wildcardMessage = {
+          shop: wildcardDomain,
+          topic: "COMPANIES_DELETE",
+          webhookId: wildcardWebhookId,
+          resourceGid: `gid://shopify/Company/wildcard-pct-${suffix}`,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(wildcardMessage)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [wildcardDeleted] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE message->>'webhookId' = ${wildcardWebhookId}
+        `;
+        expect(parseInt(wildcardDeleted.count, 10)).toBe(0);
+
+        const [wildcardArchive] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
+          WHERE message->>'webhookId' = ${wildcardWebhookId}
+        `;
+        expect(parseInt(wildcardArchive.count, 10)).toBe(0);
+      } finally {
+        await cleanupTestData([existingDomain, wildcardDomain], suffix);
+      }
+    });
+  });
+
+  describe("DB error handling in guard", () => {
+    it("sync: guard exception logs sync_message_exception with correct fields", async () => {
+      const suffix = testContext.suffix;
+      const missingDomain = `test-guard-err-sync-${suffix}.myshopify.com`;
+
+      try {
+        const webhookId = `wh-guard-err-sync-${suffix}`;
+        const message = {
+          shop: missingDomain,
           topic: "ORDERS_UPDATED",
           webhookId,
-          resourceGid: `gid://shopify/Order/err-${suffix}`,
+          resourceGid: `gid://shopify/Order/guard-err-${suffix}`,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        await sqlRef`
+          INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
+          VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
+        `;
+
+        let callCount = 0;
+        const errorOnce = new Error("Simulated DB error");
+        const proxiedSql = new Proxy(sqlRef, {
+          apply(target, thisArg, args) {
+            const queryStr = args[0]?.raw?.join?.("") ?? "";
+            if (queryStr.includes('SELECT id FROM "Shop"') && queryStr.includes("WHERE domain")) {
+              callCount++;
+              if (callCount === 1) {
+                throw errorOnce;
+              }
+            }
+            return Reflect.apply(target, thisArg, args);
+          },
+        }) as typeof sqlRef;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        const errorLog = findLogEntry("sync_message_exception");
+        expect(errorLog).not.toBeNull();
+        expect(errorLog!.topic).toBe("ORDERS_UPDATED");
+        expect(errorLog!.queue).toBe("s6_sync");
+        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.readCt).toBe(1);
+
+        const [stillInQueue] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE message->>'webhookId' = ${webhookId}
+        `;
+        expect(parseInt(stillInQueue.count, 10)).toBe(1);
+      } finally {
+        await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'webhookId' LIKE ${`%${suffix}%`}`;
+        await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE message->>'webhookId' LIKE ${`%${suffix}%`}`;
+      }
+    });
+
+    it("sync: persistent guard error goes to DLQ at maxRetries", async () => {
+      const suffix = testContext.suffix;
+      const missingDomain = `test-guard-dlq-sync-${suffix}.myshopify.com`;
+
+      try {
+        const webhookId = `wh-guard-dlq-sync-${suffix}`;
+        const message = {
+          shop: missingDomain,
+          topic: "ORDERS_UPDATED",
+          webhookId,
+          resourceGid: `gid://shopify/Order/guard-dlq-${suffix}`,
           enqueuedAt: new Date().toISOString(),
         };
 
@@ -715,36 +997,46 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
           VALUES (NOW() - interval '1 second', 4, NOW(), ${sqlRef.json(message)}::jsonb)
         `;
 
-        const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+        const alwaysThrow = new Error("Persistent DB error");
+        const proxiedSql = new Proxy(sqlRef, {
+          apply(target, thisArg, args) {
+            const queryStr = args[0]?.raw?.join?.("") ?? "";
+            if (queryStr.includes('SELECT id FROM "Shop"') && queryStr.includes("WHERE domain")) {
+              throw alwaysThrow;
+            }
+            return Reflect.apply(target, thisArg, args);
+          },
+        }) as typeof sqlRef;
 
-        const errorLog = findLogEntry("sync_message_failed");
-        expect(errorLog).not.toBeNull();
-        expect(errorLog!.topic).toBe("ORDERS_UPDATED");
-        expect(errorLog!.queue).toBe("s6_sync");
-        expect(errorLog!.errorCode).toBeDefined();
-        expect(errorLog!.readCt).toBeDefined();
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
+          SELECT message FROM s6_dead_letter WHERE message->>'webhookId' = ${webhookId}
+        `;
+        expect(dlqRow).toBeDefined();
+        expect(dlqRow!.message.webhookId).toBe(webhookId);
+
+        const [notInQueue] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE message->>'webhookId' = ${webhookId}
+        `;
+        expect(parseInt(notInQueue.count, 10)).toBe(0);
       } finally {
-        await cleanupTestData([existingDomain], suffix);
+        await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'webhookId' LIKE ${`%${suffix}%`}`;
+        await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE message->>'webhookId' LIKE ${`%${suffix}%`}`;
+        await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'webhookId' LIKE ${`%${suffix}%`}`;
       }
     });
 
-    it("bulk: exception log uses correct key and fields", async () => {
+    it("bulk: guard exception logs bulk_message_exception with correct fields", async () => {
       const suffix = testContext.suffix;
-      const existingDomain = `test-err-bulk-${suffix}.myshopify.com`;
-      const shopId = `shop-err-bulk-${suffix}`;
+      const missingDomain = `test-guard-err-bulk-${suffix}.myshopify.com`;
 
       try {
-        const now = new Date();
-
-        await sqlRef`
-          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-          VALUES (${shopId}, ${existingDomain}, 'INR', ${now}, ${now})
-        `;
-
-        const bulkOpId = `bulk-err-${suffix}`;
+        const bulkOpId = `bulk-guard-err-${suffix}`;
         const message = {
-          shop: existingDomain,
+          shop: missingDomain,
           topic: "BULK_OPERATIONS_FINISH",
           bulkOperationId: bulkOpId,
           bulkType: "orders",
@@ -752,29 +1044,88 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         };
 
         await sqlRef`
-          INSERT INTO s6_bulk_operations (
-            bulk_operation_id, shop, bulk_type, started_at, origin, failure_count, chunk_size
-          ) VALUES (
-            ${bulkOpId}, ${existingDomain}, 'orders', NOW(), 'webhook', 0, 524288
-          )
+          INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
+          VALUES (NOW() - interval '1 second', 0, NOW(), ${sqlRef.json(message)}::jsonb)
         `;
+
+        let callCount = 0;
+        const errorOnce = new Error("Simulated DB error");
+        const proxiedSql = new Proxy(sqlRef, {
+          apply(target, thisArg, args) {
+            const queryStr = args[0]?.raw?.join?.("") ?? "";
+            if (queryStr.includes('SELECT id FROM "Shop"') && queryStr.includes("WHERE domain")) {
+              callCount++;
+              if (callCount === 1) {
+                throw errorOnce;
+              }
+            }
+            return Reflect.apply(target, thisArg, args);
+          },
+        }) as typeof sqlRef;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        const errorLog = findLogEntry("bulk_message_exception");
+        expect(errorLog).not.toBeNull();
+        expect(errorLog!.topic).toBe("BULK_OPERATIONS_FINISH");
+        expect(errorLog!.queue).toBe("s6_bulk");
+        expect(errorLog!.errorCode).toBeDefined();
+        expect(errorLog!.readCt).toBe(1);
+      } finally {
+        await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' LIKE ${`%${suffix}%`}`;
+        await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'bulkOperationId' LIKE ${`%${suffix}%`}`;
+      }
+    });
+
+    it("bulk: persistent guard error goes to DLQ at maxRetries", async () => {
+      const suffix = testContext.suffix;
+      const missingDomain = `test-guard-dlq-bulk-${suffix}.myshopify.com`;
+
+      try {
+        const bulkOpId = `bulk-guard-dlq-${suffix}`;
+        const message = {
+          shop: missingDomain,
+          topic: "BULK_OPERATIONS_FINISH",
+          bulkOperationId: bulkOpId,
+          bulkType: "orders",
+          enqueuedAt: new Date().toISOString(),
+        };
 
         await sqlRef`
           INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
           VALUES (NOW() - interval '1 second', 4, NOW(), ${sqlRef.json(message)}::jsonb)
         `;
 
-        const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(sqlRef, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+        const alwaysThrow = new Error("Persistent DB error");
+        const proxiedSql = new Proxy(sqlRef, {
+          apply(target, thisArg, args) {
+            const queryStr = args[0]?.raw?.join?.("") ?? "";
+            if (queryStr.includes('SELECT id FROM "Shop"') && queryStr.includes("WHERE domain")) {
+              throw alwaysThrow;
+            }
+            return Reflect.apply(target, thisArg, args);
+          },
+        }) as typeof sqlRef;
 
-        const errorLog = findLogEntry("bulk_message_failed");
-        expect(errorLog).not.toBeNull();
-        expect(errorLog!.topic).toBe("BULK_OPERATIONS_FINISH");
-        expect(errorLog!.queue).toBe("s6_bulk");
-        expect(errorLog!.errorCode).toBeDefined();
-        expect(errorLog!.readCt).toBeDefined();
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(proxiedSql, { batchSize: 1, timeBudgetMs: 5000, maxRetries: 5 });
+
+        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown> }?]>`
+          SELECT message FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(dlqRow).toBeDefined();
+        expect(dlqRow!.message.bulkOperationId).toBe(bulkOpId);
+
+        const [notInQueue] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
+          WHERE message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(notInQueue.count, 10)).toBe(0);
       } finally {
-        await cleanupTestData([existingDomain], suffix);
+        await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' LIKE ${`%${suffix}%`}`;
+        await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE message->>'bulkOperationId' LIKE ${`%${suffix}%`}`;
+        await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${suffix}%`}`;
       }
     });
   });

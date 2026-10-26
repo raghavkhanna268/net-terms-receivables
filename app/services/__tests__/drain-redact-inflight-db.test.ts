@@ -323,6 +323,25 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
     `;
   });
 
+  beforeEach(async () => {
+    // Archive foreign bulk messages to prevent cross-test pollution when tests run shuffled
+    const allDomains = [NO_SHOP_DOMAIN, LIVE_SHOP_DOMAIN, UNINSTALLED_SHOP_DOMAIN];
+    await sql`
+      WITH visible AS (
+        SELECT msg_id FROM pgmq.q_s6_bulk
+        WHERE message->>'shop' NOT IN ${sql(allDomains)}
+      )
+      SELECT pgmq.archive('s6_bulk', msg_id) FROM visible
+    `;
+    await sql`
+      WITH visible AS (
+        SELECT msg_id FROM pgmq.q_s6_sync
+        WHERE message->>'shop' NOT IN ${sql(allDomains)}
+      )
+      SELECT pgmq.archive('s6_sync', msg_id) FROM visible
+    `;
+  });
+
   afterAll(async () => {
     const allDomains = [NO_SHOP_DOMAIN, LIVE_SHOP_DOMAIN, UNINSTALLED_SHOP_DOMAIN];
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN ${sql(allDomains)}`;
@@ -424,8 +443,11 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
       `;
       expect(parseInt(archiveCount.count, 10)).toBe(0);
 
-      // Handler was never called
-      expect(mockedProcessBulkOperation).not.toHaveBeenCalled();
+      // Handler was never called for our specific domain
+      const callsForOurDomain = mockedProcessBulkOperation.mock.calls.filter(
+        (call) => call[1]?.shop === NO_SHOP_DOMAIN
+      );
+      expect(callsForOurDomain).toHaveLength(0);
 
       mockedProcessBulkOperation.mockRestore();
     });
