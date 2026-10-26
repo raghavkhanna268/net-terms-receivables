@@ -33,6 +33,54 @@ function extractLoaderData<T>(result: unknown): T {
   return result as T;
 }
 
+/**
+ * Step type for loader result (minimal interface for test assertions).
+ */
+interface LoaderStep {
+  id: string;
+  status: string;
+  helpText?: string;
+}
+
+/**
+ * Loader result type for type-safe extraction.
+ */
+interface LoaderResult {
+  error: string | null;
+  state: {
+    steps: LoaderStep[];
+    isComplete: boolean;
+    completedCount: number;
+    totalCount: number;
+    dismissedAt: string | null;
+  } | null;
+  shopId?: string;
+  registrationStatus: {
+    validation: { status: string; errorCode?: string };
+    paymentCustomization: { status: string; errorCode?: string };
+    metafieldDefinitions: { status: string; errorCode?: string };
+  } | null;
+  initialSyncState: { status: string } | null;
+  newAccountsPausedBanner: {
+    show: boolean;
+    heading: string;
+    bodyText: string;
+    upgradeUrl: string | null;
+  };
+  currencySupported: boolean;
+  currencyFlipBlocked: boolean;
+}
+
+/**
+ * Helper to call loader and extract data in one step.
+ * Uses 'any' for flexible typing in tests.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function callLoader(loader: (args: any) => Promise<any>, args: any): Promise<LoaderResult> {
+  const result = await loader(args);
+  return extractLoaderData<LoaderResult>(result);
+}
+
 const mockSql = Object.assign(vi.fn(), {
   unsafe: vi.fn((s) => s),
   json: vi.fn((obj) => JSON.stringify(obj)),
@@ -286,7 +334,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -401,7 +449,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -448,7 +496,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -572,7 +620,7 @@ describe("app.onboarding", () => {
 
         const { loader } = await import("../app.onboarding");
 
-        const result = await loader({
+        const rawResult = await loader({
           request: new Request("https://example.com/app/onboarding"),
           context: {
             shopify: {
@@ -586,8 +634,9 @@ describe("app.onboarding", () => {
           },
           params: {},
         } as unknown as LoaderFunctionArgs);
+        const result = extractLoaderData<LoaderResult>(rawResult);
 
-        const remindersStep = result.state?.steps.find((s) => s.id === "reminders");
+        const remindersStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
         expect(remindersStep?.status).toBe("pending");
         expect(remindersStep?.helpText).toContain("Email sending is ready");
       });
@@ -687,7 +736,7 @@ describe("app.onboarding", () => {
 
         const { loader } = await import("../app.onboarding");
 
-        const result = await loader({
+        const rawResult = await loader({
           request: new Request("https://example.com/app/onboarding"),
           context: {
             shopify: {
@@ -701,8 +750,9 @@ describe("app.onboarding", () => {
           },
           params: {},
         } as unknown as LoaderFunctionArgs);
+        const result = extractLoaderData<LoaderResult>(rawResult);
 
-        const remindersStep = result.state?.steps.find((s) => s.id === "reminders");
+        const remindersStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
         expect(remindersStep?.status).toBe("complete");
       });
 
@@ -801,7 +851,7 @@ describe("app.onboarding", () => {
 
         const { loader } = await import("../app.onboarding");
 
-        const result = await loader({
+        const rawResult = await loader({
           request: new Request("https://example.com/app/onboarding"),
           context: {
             shopify: {
@@ -815,8 +865,9 @@ describe("app.onboarding", () => {
           },
           params: {},
         } as unknown as LoaderFunctionArgs);
+        const result = extractLoaderData<LoaderResult>(rawResult);
 
-        const remindersStep = result.state?.steps.find((s) => s.id === "reminders");
+        const remindersStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
         expect(remindersStep?.status).toBe("pending");
         expect(remindersStep?.helpText).toContain("Email sending is ready");
       });
@@ -916,7 +967,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -999,7 +1050,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1039,7 +1090,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1107,7 +1158,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1172,7 +1223,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1212,7 +1263,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1531,7 +1582,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1575,7 +1626,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1619,7 +1670,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1662,7 +1713,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1711,7 +1762,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -2510,13 +2561,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
@@ -2553,14 +2601,8 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
-        return Promise.resolve([{ count: "0" }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
       return Promise.resolve([]);
     });
@@ -2599,13 +2641,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: false }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
@@ -2970,7 +3009,7 @@ describe("T4: newAccountsPausedBanner", () => {
 
     const { loader } = await import("../app.onboarding");
 
-    const result = await loader({
+    const result = await callLoader(loader, {
       request: new Request("https://example.com/app/onboarding"),
       context: {
         shopify: {
@@ -3014,7 +3053,7 @@ describe("T4: newAccountsPausedBanner", () => {
 
     const { loader } = await import("../app.onboarding");
 
-    const result = await loader({
+    const result = await callLoader(loader, {
       request: new Request("https://example.com/app/onboarding"),
       context: {
         shopify: {
@@ -3060,7 +3099,7 @@ describe("T4: newAccountsPausedBanner", () => {
 
     const { loader } = await import("../app.onboarding");
 
-    const result = await loader({
+    const result = await callLoader(loader, {
       request: new Request("https://example.com/app/onboarding"),
       context: {
         shopify: {
@@ -3215,7 +3254,7 @@ describe("Sequential DB: Initial Sync currency UI", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -3324,7 +3363,7 @@ describe("Sequential DB: Initial Sync currency UI", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -3434,7 +3473,7 @@ describe("Sequential DB: Initial Sync currency UI", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {

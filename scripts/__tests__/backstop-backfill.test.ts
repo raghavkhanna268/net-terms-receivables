@@ -330,10 +330,11 @@ describeWithDb("scripts/backstop-backfill", () => {
 
   describe("hasOfflineSession", () => {
     const SESSION_ID = `offline_${TEST_SHOP_DOMAIN}`;
+    let dbNow: Date;
 
     beforeEach(async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
-      await syncClockToDb(sql);
+      dbNow = await syncClockToDb(sql);
       await sql`DELETE FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}`;
     });
 
@@ -364,7 +365,7 @@ describeWithDb("scripts/backstop-backfill", () => {
       // Use synced JS clock - expires is 1 hour in the future
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
-        VALUES (${SESSION_ID}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', ${new Date(Date.now() + 3600000).toISOString()})
+        VALUES (${SESSION_ID}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', ${new Date(dbNow.getTime() + 3600000).toISOString()})
       `;
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
@@ -385,7 +386,7 @@ describeWithDb("scripts/backstop-backfill", () => {
       // Use synced JS clock - expires is 1 hour in the past
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
-        VALUES (${SESSION_ID + "-expired"}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_expired_token', ${new Date(Date.now() - 3600000).toISOString()})
+        VALUES (${SESSION_ID + "-expired"}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_expired_token', ${new Date(dbNow.getTime() - 3600000).toISOString()})
       `;
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
