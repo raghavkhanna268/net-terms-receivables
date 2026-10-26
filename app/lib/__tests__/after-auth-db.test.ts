@@ -287,6 +287,14 @@ describeWithDb("clearUninstalledAtAndMetafieldErrors cross-isolate reinstall (DB
   });
 
   describe("concurrent reinstall atomicity", () => {
+    afterEach(() => {
+      vi.doUnmock("../validation-registration.server");
+      vi.doUnmock("../metafield-definitions.server");
+      vi.doUnmock("../payment-customization-registration.server");
+      vi.doUnmock("../request-context.server");
+      vi.resetModules();
+    });
+
     it("two concurrent clearUninstalledAtAndMetafieldErrors: exactly one gets RETURNING row", async () => {
       const TEST_SHOP = `concurrent-atomicity-${TEST_SUFFIX}.myshopify.com`;
       
@@ -2148,6 +2156,11 @@ describeWithDb("markShopUninstalled plan cache invalidation (DB)", () => {
     await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
   });
 
+  afterEach(() => {
+    vi.doUnmock("~/services/drain/admin-client.server");
+    vi.resetModules();
+  });
+
   it("markShopUninstalled sets plan_cached_at to NULL", async () => {
     // Create shop with plan_cached_at set
     await sql`
@@ -2204,7 +2217,6 @@ describeWithDb("markShopUninstalled plan cache invalidation (DB)", () => {
     `;
 
     // Mock adminGraphQL to track if Shopify was called
-    const { adminGraphQL: realAdminGraphQL } = await import("~/services/drain/admin-client.server");
     let shopifyQueryCalled = false;
     const mockAdminGraphQL = vi.fn().mockImplementation(async (shop: string, query: string) => {
       if (query.includes("currentAppInstallation")) {

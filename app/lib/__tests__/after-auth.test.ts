@@ -19,6 +19,7 @@ vi.mock("../payment-customization-registration.server", () => ({
   ensurePaymentCustomization: vi.fn(),
 }));
 
+
 const mockSqlQuery = Object.assign(
   vi.fn().mockResolvedValue([]),
   { json: (v: unknown) => JSON.stringify(v) }
