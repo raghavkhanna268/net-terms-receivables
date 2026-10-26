@@ -269,7 +269,7 @@ export async function enqueueCreditStatusRecompute(
   sql: Sql,
   shopDomain: string,
   buyerAccountId: string,
-  source: "invoice_change" | "daily_sweep" | "manual",
+  source: "invoice_change" | "daily_sweep" | "manual" | "sync",
 ): Promise<void> {
   // Deterministic dedupe key: account ID + date (for daily sweep deduplication)
   // For event-driven, use a unique key per event
