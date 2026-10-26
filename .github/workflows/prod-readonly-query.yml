@@ -30,6 +30,7 @@ on:
           - redriven-webhook-receipts
           - s12-hold-coverage
           - s22-retention-purge-preview
+          - s8-draft-status-case
       msg_ids:
         description: "Comma-separated pgmq msg_ids (e.g. 162,163); used by canary-orders-backstop and redriven-webhook-receipts"
         required: false
