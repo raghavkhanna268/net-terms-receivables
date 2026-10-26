@@ -30,7 +30,7 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { getPlanByShopId, getPlanWithConfirmedStatus } from "./plan.server";
+import { getPlanByShopId, getPlanWithConfirmedStatus, isPlanConfirmed } from "./plan.server";
 import {
   planLimit,
   isLimitExceeded,
@@ -174,6 +174,10 @@ export interface GateDecision {
  * taken when PLAN_GATING_ENFORCED is on AND limit != -1, so there's no cost
  * while the flag is false or for unlimited plans.
  *
+ * Ruling (b): Unconfirmed shops (no plan_cached_at) are NOT gated.
+ * Uses isPlanConfirmed() - the same shared helper as checkCompanyLimit - so
+ * the two functions cannot drift apart on the "confirmed" definition.
+ *
  * IMPORTANT: The limit must be looked up OUTSIDE the transaction using the
  * outer SQL client (not tx) to avoid triggering background cache refresh
  * on a closed transaction. Callers must call getPlanByShopId(sql, shopId)
@@ -198,6 +202,13 @@ export async function decideNewAccountGate(
   }
 
   await takeBaLimitLock(tx, shopId);
+
+  // Ruling (b): Unconfirmed shops are not gated
+  // Uses isPlanConfirmed() - shared with checkCompanyLimit
+  const confirmed = await isPlanConfirmed(tx, shopId);
+  if (!confirmed) {
+    return { gate: false, used: 0, limit: -1 };
+  }
 
   const used = await countActiveAccounts(tx, shopId);
 
