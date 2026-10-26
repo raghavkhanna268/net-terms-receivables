@@ -138,6 +138,13 @@ When `PLAN_GATING_ENFORCED` is ON and a new BuyerAccount would exceed the limit:
    - Up to the new limit
    - Oldest accounts first (by `createdAt`)
 
+6. **Tag reactivation edge case**: When a removed tag is re-added to a customer,
+   the existing TAGGED_CUSTOMER account is reactivated (tag_active=true). This does
+   NOT change `gated_at` - the account remains ungated if it was ungated when
+   the tag was removed. This can push the active count over the limit because
+   reactivation doesn't re-check the limit. This is by design: tag operations
+   are controlled by the merchant's Shopify admin, not our app.
+
 ### Bank Statement Imports
 
 Bank statement imports are **unlimited on all plans**. There is no import limit enforcement.
@@ -159,18 +166,40 @@ matching which still works for gated accounts.
 Enforced when creating new BuyerAccounts (only when `PLAN_GATING_ENFORCED=true`):
 
 ```typescript
-// If over limit, account is created with gated_at set
-const shouldGate = isGatingEnforced() && !limitCheck.allowed;
+// Caller looks up limit BEFORE sql.begin() to avoid stale cache refresh inside tx
+const plan = await getPlanByShopId(sql, shopId);
+const limit = planLimit(plan, "companies");
+
+// decideNewAccountGate() inside sql.begin() takes the lock and decides gating
+const decision = await decideNewAccountGate(tx, shopId, limit);
+const shouldGate = decision.gate;
 ```
 
-**Concurrent webhook note**: The count-then-insert pattern in `checkCompanyLimit` can
-slightly overshoot the limit under concurrent webhooks. This is acceptable because:
-1. Gated accounts don't consume functional capacity
-2. The slight overage will be gated by subsequent calls
-3. Proper locking would add latency to every webhook
+**T4 Concurrency**: All account creation paths use `pg_advisory_xact_lock` inside
+transactions to prevent concurrent creates from overshooting the plan limit:
 
-If exact enforcement is needed in the future, use `SELECT ... FOR UPDATE` on the
-Shop row, but this is unlikely to be necessary for the current use case.
+- Lock key: `hashtextextended('ba_limit:' || shopId, 0)`
+- Lock is taken ONLY when `PLAN_GATING_ENFORCED=true` AND limit != -1
+- `decideNewAccountGate(tx, shopId, limit)` - called inside `sql.begin()` for single creates
+  (caller resolves limit before the transaction to avoid cache refresh on `tx`)
+- `reactivateGatedAccounts(sql, shopId)` - uses the same lock for reactivation
+
+Paths using this pattern:
+- B2B webhook (`processCompanyLocationWebhook`)
+- Bulk company reconcile (`bulkUpsertBuyerAccounts` - one tx per ≤25-row batch)
+- Tagged-customer webhook (`syncTaggedCustomerBuyerAccount`)
+- Bulk customer sync goes through `processBulkCustomer` → `syncTaggedCustomerBuyerAccount`
+
+**Flag-off behavior**: When `PLAN_GATING_ENFORCED` is turned off:
+- `decideNewAccountGate` returns `gate: false` (no new gating)
+- `reactivateGatedAccounts` **still runs** and clears `gated_at` on upgrade
+- All accounts are treated as active for enforcement purposes
+
+Turning the flag back on re-enables gating: accounts that still have `gated_at` set
+(e.g., accounts gated before an upgrade that hasn't been processed) remain gated until
+reactivated on upgrade.
+
+This ensures at most the plan's limit of accounts stay ungated under any concurrency scenario.
 
 ## Credit Holds
 
@@ -209,16 +238,16 @@ The `app_handle` comes from `APP_HANDLE` env var.
 
 ## Status of #57 Items (Pre-Enable Checklist)
 
-Items 1-5 from issue #57 are done on main; item 6 is deferred (acceptable). Status summary:
+Items 1-6 from issue #57 are complete. Status summary:
 
 | Item | Description | Status | Evidence |
 |------|-------------|--------|----------|
 | 1 | Background plan refresh wiring | Done on main | `workers/app.ts:44` passes `waitUntil` via ALS `requestContext.run()`; `plan.server.ts:319` uses `getRequestWaitUntil()`. PRs #67, #149. Tests: `plan.test.ts`, `als-request-isolation.test.ts`. |
 | 2 | Gated accounts exclusion from queries | Revised on main | Product decision (#127): gated accounts stay VISIBLE in ledger/UI, holds, aging. Only gated ACTIONS blocked. Tests: `gated-account-db.test.ts`, `plan-gating-actions-db.test.ts`. |
-| 3 | S10b bulk/reconcile gating | Done on main | `bulk-jsonl-processor.server.ts:420` calls `bulkUpsertBuyerAccounts()`; that function at `company-location.server.ts:229` calls `checkCompanyLimit()` per-batch. PR #67. Tests: `company-location.test.ts`. |
+| 3 | S10b bulk/reconcile gating | Done on main | `bulk-jsonl-processor.server.ts:420` calls `bulkUpsertBuyerAccounts()`; uses locked tx pattern with `pg_advisory_xact_lock`. PR #67. Tests: `company-location.test.ts`, `t4-account-gating-db.test.ts`. |
 | 4 | Import limit wiring | Removed (T5) | Import limits removed; imports unlimited on all plans. |
 | 5 | Migration hygiene (index drift) | Done on main | Migration `20261025000001_s21_fix_gated_at_index` creates regular index; `schema.prisma:286` uses `@@index([gatedAt], map: "BuyerAccount_gated_at_idx")`. No drift (`prisma migrate diff` shows "No difference detected"). PR #67. |
-| 6 | Count-then-insert concurrency | Deferred (acceptable) | See "Concurrent webhook note" in Company Limit section above. Reason: Slight overshoot is acceptable; gated accounts don't consume functional capacity; proper locking would add latency to every webhook. |
+| 6 | Count-then-insert concurrency | Done (T4) | All account creation paths use `pg_advisory_xact_lock(hashtextextended('ba_limit:' || shopId, 0))` inside transactions. See "T4 Concurrency" in Company Limit section. Tests: `t4-account-gating-db.test.ts` section (d). |
 
 **Scheduled reminders path**: The `s18_enqueue_reminders()` PL/pgSQL function does NOT
 filter gated accounts. SQL enqueues all open due invoices regardless of `ba.gated_at`.

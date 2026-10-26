@@ -16,7 +16,7 @@ Each potential match is scored 0-100 based on these factors:
 | Exact amount match | +20 | Payment amount equals outstanding |
 | Partial amount | +10 | Payment < outstanding (partial payment) |
 | Overpayment | +10 | Payment > outstanding (reduced, flags excess) |
-| Payer alias match | +10 | Normalized payer matches stored alias |
+| Payer alias match | +30 | Normalized payer matches confirmed alias |
 | Payer name match | +8 | Fuzzy match on buyer company name |
 | Email match | +6 | Email prefix found in payer text |
 

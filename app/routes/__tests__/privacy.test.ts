@@ -53,7 +53,7 @@ describe("/privacy route", () => {
     expect(response.status).toBe(200);
   });
 
-  it("contains all four TBD placeholders in output", async () => {
+  it("contains privacy contact email, owner info, no placeholder email, no phone or address", async () => {
     const { loader } = await import("../privacy");
 
     const request = new Request("https://example.com/privacy");
@@ -68,10 +68,18 @@ describe("/privacy route", () => {
 
     const html = await response.text();
 
-    expect(html).toContain("[TBD: legal entity]");
-    expect(html).toContain("[TBD: contact email]");
-    expect(html).toContain("[TBD: effective date]");
-    expect(html).toContain("[TBD: DPA]");
+    expect(html).toContain("raghavkhanna468@gmail.com");
+    expect(html).toContain("Raghav Khanna");
+    expect(html).toContain("individual developer, India");
+
+    expect(html).not.toContain("[privacy contact email]");
+    expect(html).not.toContain("[TBD: legal entity]");
+    expect(html).not.toContain("[TBD: contact email]");
+    expect(html).not.toContain("[TBD: effective date]");
+
+    expect(html).not.toMatch(/phone|telephone|mobile/i);
+    expect(html).not.toContain("postal address");
+    expect(html).not.toContain("mailing address");
   });
 
   it("renders HTML with proper structure", async () => {
