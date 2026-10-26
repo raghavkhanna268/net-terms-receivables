@@ -1537,6 +1537,330 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     });
   });
 
+  describe("amount tiebreak ordering (#230)", () => {
+    it("enqueues catch-up messages by oldest-first then larger-amount, NULL outstanding last", async () => {
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      // 3 invoices with same reminder date but different outstanding amounts
+      const invoiceIdSmall = `inv-amount-small-${TEST_SUFFIX}`;
+      const invoiceIdLarge = `inv-amount-large-${TEST_SUFFIX}`;
+      const invoiceIdNull = `inv-amount-null-${TEST_SUFFIX}`;
+      const orderIdSmall = `gid://shopify/Order/amount-small-${TEST_SUFFIX}`;
+      const orderIdLarge = `gid://shopify/Order/amount-large-${TEST_SUFFIX}`;
+      const orderIdNull = `gid://shopify/Order/amount-null-${TEST_SUFFIX}`;
+
+      // All invoices due 2 days ago (so reminder date = dueAt + 0 = 2 days ago, within D+1..D+3)
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES 
+          (${invoiceIdSmall}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdSmall},
+           '#AMOUNT-SMALL', 10000.00, 1000.00, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
+          (${invoiceIdLarge}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdLarge},
+           '#AMOUNT-LARGE', 10000.00, 9000.00, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
+          (${invoiceIdNull}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdNull},
+           '#AMOUNT-NULL', 10000.00, NULL, 'open',
+           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow})
+      `;
+
+      // Create delayed logs for each (all same reminder date = 2 days ago)
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES 
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdSmall}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdLarge}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceIdNull}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+      `;
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      const messages = await sql<{ invoiceId: string; outstanding: string | null }[]>`
+        SELECT message->>'invoiceId' AS "invoiceId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'topic' = 'REMINDER_CATCHUP'
+        ORDER BY msg_id ASC
+      `;
+
+      expect(messages.length).toBe(3);
+      // Order: largest outstanding first, then smaller, then NULL last
+      expect(messages[0].invoiceId).toBe(invoiceIdLarge);  // 9000
+      expect(messages[1].invoiceId).toBe(invoiceIdSmall);  // 1000
+      expect(messages[2].invoiceId).toBe(invoiceIdNull);   // NULL
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    });
+  });
+
+  describe("never-twice across runs (#230)", () => {
+    it("second enqueue run does not re-enqueue already-sent reminder", async () => {
+      const { sendCatchupReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
+
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      const invoiceId = `inv-never-twice-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/never-twice-${TEST_SUFFIX}`;
+      const logId = `log-never-twice-${TEST_SUFFIX}`;
+
+      // Invoice due 2 days ago
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#NEVER-TWICE', 10000.00, 10000.00, 'open',
+          ${dates.daysAgo(7)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}
+        )
+      `;
+
+      // Create delayed log
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+      `;
+
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-never-twice" }) });
+
+      // First drain: catch-up sends successfully
+      const result1 = await sendCatchupReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        logId,
+        0,
+        testTimezone,
+        validEnv
+      );
+      expect(result1.action).toBe("sent");
+
+      // Verify log is now 'sent'
+      const [logAfterSend] = await sql<{ status: string }[]>`
+        SELECT status FROM "ReminderLog" WHERE id = ${logId}
+      `;
+      expect(logAfterSend.status).toBe("sent");
+
+      // Clear queue and run second enqueue
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      // Should NOT enqueue again because ReminderLog already exists
+      const messagesAfterSecondEnqueue = await sql<{ invoiceId: string }[]>`
+        SELECT message->>'invoiceId' AS "invoiceId"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+          AND message->>'invoiceId' = ${invoiceId}
+      `;
+
+      expect(messagesAfterSecondEnqueue.length).toBe(0);
+
+      // Verify only one send happened
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    });
+  });
+
+  describe("re-check skips for carried-over reminders (#230)", () => {
+    it("skips and deletes delayed row when invoice status is cancelled", async () => {
+      const { sendCatchupReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
+
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      const invoiceId = `inv-cancelled-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/cancelled-${TEST_SUFFIX}`;
+      const logId = `log-cancelled-${TEST_SUFFIX}`;
+
+      // Invoice was cancelled after being delayed
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#CANCELLED', 10000.00, 10000.00, 'cancelled',
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.dbNow}, ${dates.dbNow}
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
+      `;
+
+      const result = await sendCatchupReminder(
+        sql,
+        TEST_SHOP_ID,
+        invoiceId,
+        TEST_RULE_ID_1,
+        logId,
+        0,
+        testTimezone,
+        validEnv
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toContain("cancelled");
+
+      // Verify delayed row was deleted
+      const [log] = await sql<{ id: string }[]>`
+        SELECT id FROM "ReminderLog"
+        WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+      `;
+      expect(log).toBeUndefined();
+
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("skips and deletes delayed row when buyer opted out", async () => {
+      const { sendCatchupReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
+
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      const invoiceId = `inv-opted-out-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/opted-out-${TEST_SUFFIX}`;
+      const logId = `log-opted-out-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#OPTED-OUT', 10000.00, 10000.00, 'open',
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.dbNow}, ${dates.dbNow}
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
+      `;
+
+      // Mark buyer as opted out
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "reminderOptOutAt" = NOW(), "reminderOptOutSource" = 'link'::"ReminderOptOutSource"
+        WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          testTimezone,
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("opted out");
+
+        // Verify delayed row was transitioned to skipped_opted_out
+        const [log] = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog"
+          WHERE "invoiceId" = ${invoiceId} AND "ruleId" = ${TEST_RULE_ID_1}
+        `;
+        expect(log.status).toBe("skipped_opted_out");
+
+        expect(mockFetch).not.toHaveBeenCalled();
+      } finally {
+        // Reset opt-out status
+        await sql`
+          UPDATE "BuyerAccount"
+          SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = NULL
+          WHERE id = ${TEST_ACCOUNT_ID}
+        `;
+      }
+    });
+  });
+
+  describe("HELD buyer still receives reminders (#230)", () => {
+    it("catch-up sends for buyer with holdState=HELD - status becomes sent", async () => {
+      const { sendCatchupReminder } = await import("../reminders.server");
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
+
+      const dates = computeDatesFromDbNow(dbNow, testTimezone);
+      const invoiceId = `inv-held-buyer-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/held-buyer-${TEST_SUFFIX}`;
+      const logId = `log-held-buyer-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#HELD-BUYER', 10000.00, 10000.00, 'open',
+          ${dates.daysAgo(5)}, ${dates.daysAgo(1)}, ${dates.dbNow}, ${dates.dbNow}
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(1)})
+      `;
+
+      // Set buyer account to HELD state
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "holdState" = 'HELD'::"HoldState", "manualHold" = true
+        WHERE id = ${TEST_ACCOUNT_ID}
+      `;
+
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-held-buyer" }) });
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          testTimezone,
+          validEnv
+        );
+
+        // HELD buyers still receive reminders
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        // Verify log is now 'sent'
+        const [log] = await sql<{ status: string; sentAt: Date | null }[]>`
+          SELECT status, "sentAt" FROM "ReminderLog" WHERE id = ${logId}
+        `;
+        expect(log.status).toBe("sent");
+        expect(log.sentAt).not.toBeNull();
+
+        // Verify exactly one send happened
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      } finally {
+        // Reset hold state
+        await sql`
+          UPDATE "BuyerAccount"
+          SET "holdState" = 'OK'::"HoldState", "manualHold" = false
+          WHERE id = ${TEST_ACCOUNT_ID}
+        `;
+      }
+    });
+  });
+
 });
 
 /**
