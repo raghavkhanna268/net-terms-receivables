@@ -327,18 +327,15 @@ interface PayerNameMatchResult {
  * Check if `needle` appears as a whole word (at token boundaries) within `haystack`.
  * Both strings should be normalized (lowercase, single-space-separated, no punctuation).
  * Returns true if needle equals haystack or if needle appears surrounded by spaces or at string edges.
+ * Checks ALL occurrences of needle, not just the first.
  */
 function containsWholeWord(haystack: string, needle: string): boolean {
   if (needle.length === 0 || haystack.length === 0) return false;
   if (haystack === needle) return true;
 
-  const index = haystack.indexOf(needle);
-  if (index === -1) return false;
-
-  const beforeOk = index === 0 || haystack[index - 1] === " ";
-  const afterOk = index + needle.length === haystack.length || haystack[index + needle.length] === " ";
-
-  return beforeOk && afterOk;
+  // Pad with spaces to simplify boundary checks at start/end
+  // For normalized single-space strings, this correctly detects whole-word matches
+  return (" " + haystack + " ").includes(" " + needle + " ");
 }
 
 /**

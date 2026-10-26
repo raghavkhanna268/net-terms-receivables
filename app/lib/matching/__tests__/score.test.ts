@@ -486,6 +486,28 @@ describe("scorePaymentToInvoice", () => {
 
       expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
     });
+
+    it("payer 'SYNTHETICS SYNTHETIC' vs alias 'synthetic': matches (later occurrence is whole word)", () => {
+      // First occurrence "synthetics" fails boundary check, but second "synthetic" is a whole word
+      const payment = makePayment({ payerText: "SYNTHETICS SYNTHETIC" });
+      const invoice = makeInvoice();
+      const buyer = makeBuyer({ aliases: ["synthetic"] });
+
+      const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+      expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(true);
+    });
+
+    it("payer 'SYNTHETICS' vs alias 'synthetic': no match (not a whole word)", () => {
+      // "synthetic" appears inside "synthetics" but is not at word boundaries
+      const payment = makePayment({ payerText: "SYNTHETICS" });
+      const invoice = makeInvoice();
+      const buyer = makeBuyer({ aliases: ["synthetic"] });
+
+      const result = scorePaymentToInvoice(payment, invoice, buyer, []);
+
+      expect(result.reasons.some((r) => r.type === "payer_alias")).toBe(false);
+    });
   });
 
   it("scores payer name match (fuzzy)", () => {
