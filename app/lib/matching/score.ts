@@ -28,6 +28,7 @@
  */
 
 import type { PaymentRail } from "~/lib/banks/types";
+import { normalizeName } from "./normalize";
 
 /** Maximum invoices to consider for subset-sum (multi-invoice) matching */
 export const MAX_INVOICES_FOR_SUBSET_SUM = 15;
@@ -339,6 +340,60 @@ function containsWholeWord(haystack: string, needle: string): boolean {
 }
 
 /**
+ * Generic business words that do NOT establish payer identity.
+ * A payer-alias match requires at least one NON-GENERIC token to earn the bonus.
+ * This prevents false positives from common corporate suffixes/descriptors.
+ *
+ * List intentionally kept short and stable:
+ * - TRADERS, ENTERPRISES, AGENCIES: Common business type descriptors
+ * - CORPORATION, CO: Corporate structure indicators
+ * - PVT, LTD: Private/Limited (common in Indian company names)
+ */
+const GENERIC_ALIAS_WORDS = new Set([
+  "traders",
+  "enterprises",
+  "agencies",
+  "corporation",
+  "co",
+  "pvt",
+  "ltd",
+]);
+
+/**
+ * Check if the alias match includes at least one non-generic token.
+ * Returns true if the match should earn the alias bonus.
+ *
+ * Rules:
+ * - If the alias is all-generic (e.g., "traders"), no bonus (need substantive identity)
+ * - If the payer matches only generic tokens from a multi-token alias, no bonus
+ * - If at least one non-generic alias token is matched whole-word in the payer, bonus OK
+ */
+function hasNonGenericAliasMatch(
+  normalizedPayer: string,
+  alias: string
+): boolean {
+  const aliasTokens = alias.split(/\s+/).filter((t) => t.length > 0);
+  if (aliasTokens.length === 0) return false;
+
+  // If the alias is entirely generic tokens, no bonus regardless of match quality
+  if (aliasTokens.every((token) => GENERIC_ALIAS_WORDS.has(token))) {
+    return false;
+  }
+
+  // Check if at least one non-generic alias token appears as whole word in payer
+  const payerTokens = new Set(
+    normalizedPayer.split(/\s+/).filter((t) => t.length > 0)
+  );
+  for (const aliasToken of aliasTokens) {
+    if (!GENERIC_ALIAS_WORDS.has(aliasToken) && payerTokens.has(aliasToken)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Score payer name match against buyer data.
  * IMPORTANT: Detail fields must NOT contain PII (no email, phone, address).
  */
@@ -361,11 +416,16 @@ function scorePayerNameMatch(
   // Check aliases first (highest confidence - confirmed aliases only)
   // Use whole-word (token-boundary) matching to avoid false positives from partial substrings
   // Require minimum 3 chars for BOTH sides to avoid false positives
+  // Generic-word guard: alias bonus requires at least one non-generic token match
   for (const alias of buyer.aliases) {
     const isExactMatch = alias === normalizedPayer;
     const payerContainsAlias = normalizedPayer.length >= 3 && alias.length >= 3 && containsWholeWord(normalizedPayer, alias);
     const aliasContainsPayer = normalizedPayer.length >= 3 && alias.length >= 3 && containsWholeWord(alias, normalizedPayer);
     if (isExactMatch || payerContainsAlias || aliasContainsPayer) {
+      // Generic-word guard: require at least one non-generic token match for alias bonus
+      if (!hasNonGenericAliasMatch(normalizedPayer, alias)) {
+        continue; // Skip this alias, try others or fall through to payer_name
+      }
       return {
         matched: true,
         type: "payer_alias",
@@ -417,20 +477,14 @@ function scorePayerNameMatch(
 /**
  * Normalize payer name for matching.
  * Removes common suffixes, punctuation, and normalizes to lowercase.
+ *
+ * IMPORTANT: This function delegates to normalizeName() from normalize.ts to ensure
+ * the SAME normalization is used for both alias storage (confirmMatch) and matching
+ * (scorePayerNameMatch). This unification prevents mismatches where an alias stored
+ * as "test buyer" wouldn't match a payer normalized differently.
  */
 export function normalizePayerName(name: string): string {
-  return name
-    .toUpperCase()
-    // Remove M/S prefix
-    .replace(/^M\/S\.?\s*/i, "")
-    // Remove common suffixes
-    .replace(/\b(PVT|PRIVATE|LTD|LIMITED|LLC|INC|INCORPORATED|CORP|CORPORATION)\b\.?/gi, "")
-    // Remove punctuation
-    .replace(/[.,\-_()]/g, " ")
-    // Normalize whitespace
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+  return normalizeName(name);
 }
 
 /**

@@ -360,3 +360,93 @@ describe("ICICI-style narration parsing", () => {
     expect(normalized).toContain("vendor");
   });
 });
+
+/**
+ * Normalizer unification tests.
+ *
+ * These tests verify that the alias normalization used for STORING aliases
+ * (via normalizeNarrationForLookup in confirmMatch) produces identical output
+ * to the normalization used for MATCHING (via normalizeName in scorePayerNameMatch).
+ *
+ * Both paths must normalize to the same string for aliases to be found.
+ */
+describe("normalizer unification: storage and matching paths produce identical output", () => {
+  // Test cases covering: case, punctuation, extra whitespace, M/S and Pvt Ltd style tokens, digits
+  const testCases = [
+    // Case normalization
+    { input: "SYNTHETIC CORP", expected: "synthetic" },
+    { input: "Synthetic Corp", expected: "synthetic" },
+    { input: "synthetic corp", expected: "synthetic" },
+
+    // Punctuation handling (apostrophe becomes space, & preserved)
+    // Note: suffixes are removed BEFORE punctuation, so _CORP doesn't match \bCORP\b
+    { input: "SYNTHETIC, CORP.", expected: "synthetic" },
+    { input: "SYNTHETIC - CORP", expected: "synthetic" },
+    { input: "SYNTHETIC (CORP)", expected: "synthetic" },
+    { input: "SYNTHETIC_CORP", expected: "synthetic corp" },
+    { input: "SYNTHETIC'S WHOLESALE", expected: "synthetic s wholesale" },
+
+    // Extra whitespace
+    { input: "  SYNTHETIC   WHOLESALE  ", expected: "synthetic wholesale" },
+    { input: "SYNTHETIC\t\nWHOLESALE", expected: "synthetic wholesale" },
+
+    // M/S prefix variations
+    { input: "M/S SYNTHETIC WHOLESALE", expected: "synthetic wholesale" },
+    { input: "M/S. SYNTHETIC WHOLESALE", expected: "synthetic wholesale" },
+    { input: "MS SYNTHETIC WHOLESALE", expected: "synthetic wholesale" },
+    { input: "MESSRS SYNTHETIC WHOLESALE", expected: "synthetic wholesale" },
+
+    // Pvt Ltd style tokens (Indian business suffixes)
+    { input: "SYNTHETIC PVT LTD", expected: "synthetic" },
+    { input: "SYNTHETIC PRIVATE LIMITED", expected: "synthetic" },
+    { input: "SYNTHETIC PVT. LTD.", expected: "synthetic" },
+    { input: "SYNTHETIC ENTERPRISES PVT LTD", expected: "synthetic" },
+
+    // Mixed corporate suffixes
+    { input: "SYNTHETIC CORP PVT LTD", expected: "synthetic" },
+    { input: "SYNTHETIC CORPORATION LTD", expected: "synthetic" },
+    { input: "SYNTHETIC CO PVT LTD", expected: "synthetic" },
+    { input: "SYNTHETIC LLC", expected: "synthetic" },
+    { input: "SYNTHETIC LLP", expected: "synthetic" },
+    { input: "SYNTHETIC INC", expected: "synthetic" },
+
+    // Digits in names (should be preserved)
+    { input: "SYNTHETIC 123 WHOLESALE", expected: "synthetic 123 wholesale" },
+    { input: "SYNTHETIC2000", expected: "synthetic2000" },
+    { input: "99 SYNTHETIC MART", expected: "99 synthetic mart" },
+
+    // Complex real-world-like patterns (& preserved, SOLUTIONS/TECHNOLOGIES are suffixes)
+    { input: "M/S. SYNTHETIC INDUSTRIES PVT. LTD.", expected: "synthetic" },
+    { input: "TEST BUYER CO", expected: "test buyer" },
+    { input: "ACME TRADERS PVT LTD", expected: "acme" },
+    { input: "SYNTHETIC SOLUTIONS & TECHNOLOGIES", expected: "synthetic &" },
+  ];
+
+  it.each(testCases)(
+    "normalizeName($input) === $expected",
+    ({ input, expected }) => {
+      const result = normalizeName(input);
+      expect(result).toBe(expected);
+    }
+  );
+
+  it("storage path (normalizeNarrationForLookup) and match path (normalizeName) produce identical output for payer text", () => {
+    // Payer text as it appears in bank statements (not full narration with UTRs etc.)
+    const payerTexts = [
+      "TEST BUYER CO",
+      "SYNTHETIC CORP PVT LTD",
+      "M/S ACME WHOLESALE",
+      "SYNTHETIC   INDUSTRIES",
+      "DELTA TRADERS",
+    ];
+
+    for (const payerText of payerTexts) {
+      // Storage path: confirmMatch calls normalizeNarrationForLookup on payer_text
+      const storedAlias = normalizeNarrationForLookup(payerText);
+      // Match path: scorePayerNameMatch calls normalizeName via normalizePayerName
+      const matchNormalized = normalizeName(payerText);
+
+      expect(storedAlias).toBe(matchNormalized);
+    }
+  });
+});
