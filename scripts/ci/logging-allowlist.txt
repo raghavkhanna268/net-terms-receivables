@@ -27,11 +27,6 @@ scripts/lib/refresh-offline-token.ts:domain-literal:1
 # - 2 ${grandTotal} interpolations (count but ends with 'total')
 scripts/credit-status-metafield-backfill.ts:shop-interpolation:2
 
-# prune-backups.ts:
-# - 2 result.total concatenations (aggregate backup counts, not shop data)
-# Output is intentionally counts-only for public logs (total, eligible, kept)
-scripts/ops/prune-backups.ts:concat-sensitive:2
-
 # seed.ts:
 # - ${shopDomain} placeholder, ${accountName}, code-controlled .name endings
 scripts/seed.ts:shop-interpolation:10

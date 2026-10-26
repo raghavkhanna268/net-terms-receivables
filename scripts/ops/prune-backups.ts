@@ -37,10 +37,10 @@ export interface S3Object {
 }
 
 export interface PruneResult {
-  total: number;
-  eligible: number;
-  kept: number;
-  deleted: number;
+  totalCount: number;
+  eligibleCount: number;
+  keptCount: number;
+  deletedCount: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -212,34 +212,34 @@ export async function main(): Promise<number> {
   const toDelete = selectForDeletion(objects, RETENTION_DAYS, KEEP_NEWEST, nowMs);
 
   const result: PruneResult = {
-    total: objects.length,
-    eligible: toDelete.length,
-    kept: objects.length - toDelete.length,
-    deleted: 0,
+    totalCount: objects.length,
+    eligibleCount: toDelete.length,
+    keptCount: objects.length - toDelete.length,
+    deletedCount: 0,
   };
 
   if (deleteMode) {
     // Delete eligible objects
     for (const key of toDelete) {
       if (deleteObject(bucket, key, endpoint)) {
-        result.deleted++;
+        result.deletedCount++;
       }
     }
     // Structured output: counts only (no keys, sizes, or shop data)
     console.log(
       "prune_mode=delete" +
-        " total=" + result.total +
-        " eligible=" + result.eligible +
-        " kept=" + result.kept +
-        " deleted=" + result.deleted
+        " total=" + result.totalCount +
+        " eligible=" + result.eligibleCount +
+        " kept=" + result.keptCount +
+        " deleted=" + result.deletedCount
     );
   } else {
     // Dry-run: print counts only
     console.log(
       "prune_mode=dry_run" +
-        " total=" + result.total +
-        " eligible=" + result.eligible +
-        " kept=" + result.kept
+        " total=" + result.totalCount +
+        " eligible=" + result.eligibleCount +
+        " kept=" + result.keptCount
     );
   }
 
