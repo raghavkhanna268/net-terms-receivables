@@ -1,14 +1,24 @@
 /**
- * Dead letter message sanitization for shop_not_found errors (#239).
+ * Dead letter message sanitization for shop_not_found and shop_gone scenarios (#239, #262).
  *
- * When a webhook fails with shop_not_found, the shop no longer exists in our
- * database, so the full message (containing shop domain, payload, etc.) becomes
- * orphaned PII. For topics that are re-fetched after reinstall (companies,
- * company locations, orders), we sanitize the DLQ row to an allowlisted object.
+ * Sanitization occurs when:
+ * - shop_not_found: The handler returned shop_not_found error (shop already gone)
+ * - shop_gone: The Shop row is missing or uninstalledAt is set (48h pre-redact window)
+ *
+ * For topics that are re-fetched after reinstall (companies, company locations, orders),
+ * we sanitize the DLQ row to an allowlisted object containing only:
+ * - topic, errorCode (from s6_dead_letter.error column), attemptCount, timestamps
+ * - shopId (internal UUID, never the domain) when available
+ * - resourceGid, webhookId, bulkOperationId, bulkType for debugging
+ *
+ * The shop domain (PII) is dropped. Payload is not stored.
  *
  * Topics WITHOUT reconcile coverage (customers, draft_orders) keep their full
  * message because nothing would re-fetch that data after reinstall. A follow-up
  * (S8 customers/draft-orders reconcile) will enable sanitization for those.
+ *
+ * Recovery path: After reinstall, the nightly reconcile (reconcile-handlers.server.ts:61)
+ * re-fetches all companies/orders via RECONCILE_COMPANIES and RECONCILE_ORDERS bulk ops.
  *
  * NO shopHash: The shopHash function (log.server.ts:426-432) uses unkeyed
  * SHA-256, not HMAC, so including it would allow rainbow-table reversal.
@@ -42,15 +52,32 @@ const COVERED_SYNC_TOPICS = new Set([
 const COVERED_BULK_TYPES = new Set(["companies", "orders"]);
 
 /**
+ * Reason for DLQ sanitization.
+ * - shop_not_found: Handler returned shop_not_found error (shop already gone)
+ * - shop_gone: Shop row is missing or uninstalledAt is set (48h pre-redact window)
+ */
+export type SanitizationReason = "shop_not_found" | "shop_gone";
+
+/**
  * Sanitized dead letter message structure.
  * Contains only allowlisted fields for audit/debugging without PII.
+ *
+ * Kept fields:
+ * - topic, reason, attemptCount, timestamps (enqueuedAt, failedAt)
+ * - shopId (internal UUID, never the domain) when available
+ * - webhookId, resourceGid, bulkOperationId, bulkType for debugging
+ *
+ * Dropped fields:
+ * - shop (domain - PII), payload, and any other message content
+ *
  * Index signature allows JSON serialization without type errors.
  */
 export interface SanitizedDeadLetterMessage {
   sanitized: true;
-  reason: "shop_not_found";
+  reason: SanitizationReason;
   topic: string;
   originalMsgId: string;
+  shopId?: string;
   webhookId?: string;
   resourceGid?: string;
   bulkOperationId?: string;
@@ -84,7 +111,7 @@ export function isShopNotFoundReason(reason: string): boolean {
 }
 
 /**
- * Sanitize a sync message for shop_not_found dead-lettering.
+ * Sanitize a sync message for dead-lettering.
  *
  * Returns a sanitized object with only allowlisted fields, or null if the
  * topic is not covered by reconcile (customers, draft_orders).
@@ -92,12 +119,16 @@ export function isShopNotFoundReason(reason: string): boolean {
  * @param message - Original sync message
  * @param msgId - Original message ID from the queue
  * @param readCt - Read count (attempt count)
+ * @param reason - Why the message was sanitized (shop_not_found or shop_gone)
+ * @param shopId - Internal Shop UUID (never the domain), if available
  * @returns Sanitized message or null if topic is not covered
  */
 export function sanitizeSyncMessage(
   message: SyncMessage,
   msgId: string,
-  readCt: number
+  readCt: number,
+  reason: SanitizationReason = "shop_not_found",
+  shopId?: string
 ): SanitizedDeadLetterMessage | null {
   if (!isCoveredSyncTopic(message.topic)) {
     return null;
@@ -105,9 +136,10 @@ export function sanitizeSyncMessage(
 
   return {
     sanitized: true,
-    reason: "shop_not_found",
+    reason,
     topic: message.topic,
     originalMsgId: msgId,
+    ...(shopId !== undefined && { shopId }),
     webhookId: message.webhookId,
     resourceGid: message.resourceGid,
     attemptCount: readCt,
@@ -117,7 +149,7 @@ export function sanitizeSyncMessage(
 }
 
 /**
- * Sanitize a bulk message for shop_not_found dead-lettering.
+ * Sanitize a bulk message for dead-lettering.
  *
  * Returns a sanitized object with only allowlisted fields, or null if the
  * bulk type is not covered by reconcile (customers).
@@ -125,12 +157,16 @@ export function sanitizeSyncMessage(
  * @param message - Original bulk message
  * @param msgId - Original message ID from the queue
  * @param readCt - Read count (attempt count)
+ * @param reason - Why the message was sanitized (shop_not_found or shop_gone)
+ * @param shopId - Internal Shop UUID (never the domain), if available
  * @returns Sanitized message or null if bulk type is not covered
  */
 export function sanitizeBulkMessage(
   message: BulkMessage,
   msgId: string,
-  readCt: number
+  readCt: number,
+  reason: SanitizationReason = "shop_not_found",
+  shopId?: string
 ): SanitizedDeadLetterMessage | null {
   if (!isCoveredBulkType(message.bulkType)) {
     return null;
@@ -138,9 +174,10 @@ export function sanitizeBulkMessage(
 
   return {
     sanitized: true,
-    reason: "shop_not_found",
+    reason,
     topic: message.topic,
     originalMsgId: msgId,
+    ...(shopId !== undefined && { shopId }),
     webhookId: message.webhookId,
     bulkOperationId: message.bulkOperationId,
     bulkType: message.bulkType,

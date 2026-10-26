@@ -1213,10 +1213,11 @@ export async function moveToDeadLetter(
     `;
 
     const shopGone = !shopRow || shopRow.uninstalledAt !== null;
+    const shopId = shopRow?.id;
 
     if (shopGone && !preSanitized) {
       if (queue === S6_QUEUES.SYNC) {
-        const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt);
+        const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt, "shop_gone", shopId);
         if (sanitized) {
           messageToStore = sanitized;
           safeLog("info", "dlq_sanitized_shop_gone", {
@@ -1225,7 +1226,7 @@ export async function moveToDeadLetter(
           });
         }
       } else if (queue === S6_QUEUES.BULK) {
-        const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt);
+        const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt, "shop_gone", shopId);
         if (sanitized) {
           messageToStore = sanitized;
           safeLog("info", "dlq_sanitized_shop_gone", {
