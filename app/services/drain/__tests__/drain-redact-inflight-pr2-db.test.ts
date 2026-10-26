@@ -500,18 +500,18 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
     await cleanupTestData(testContext.suffix);
   }, 10000);
 
-  it("(d-conn) pgmq.send uses tx client: rollback undoes message (proves atomicity)", async () => {
+  it("(d-conn) rollback undoes pgmq.send when using tx (proves atomicity)", async () => {
     const SHOP_A_ID = `shop-pr2-a-${testContext.suffix}`;
     const SHOP_A_DOMAIN = `test-redact-pr2-a-${testContext.suffix}.myshopify.com`;
-    const buyerAccountId = `buyer-conn-${testContext.suffix}`;
+    const buyerAccountId = `buyer-conn-rollback-${testContext.suffix}`;
 
     await sql1`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
       VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW())
     `;
 
-    let messageVisibleAfterSendBeforeCommit = false;
     let rolledBack = false;
+    let messageVisibleAfterSend = false;
 
     try {
       await sql1.begin(async (tx) => {
@@ -537,7 +537,7 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
             AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
             AND message->>'buyerAccountId' = ${buyerAccountId}
         `;
-        messageVisibleAfterSendBeforeCommit = parseInt(outsideCount.count, 10) > 0;
+        messageVisibleAfterSend = parseInt(outsideCount.count, 10) > 0;
 
         throw new Error("intentional_rollback_for_test");
       });
@@ -550,7 +550,7 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
     }
 
     expect(rolledBack).toBe(true);
-    expect(messageVisibleAfterSendBeforeCommit).toBe(false);
+    expect(messageVisibleAfterSend).toBe(false);
 
     const [afterRollback] = await sql1<[{ count: string }]>`
       SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
@@ -562,6 +562,76 @@ describeWithDb("PR2: credit recompute race with deleteShop (#239)", () => {
 
     await cleanupTestData(testContext.suffix);
   }, 10000);
+
+  it("(d-conn-mutation) enqueueCreditStatusRecompute message not visible while waiting for FOR SHARE", async () => {
+    const SHOP_A_ID = `shop-pr2-a-${testContext.suffix}`;
+    const SHOP_A_DOMAIN = `test-redact-pr2-a-${testContext.suffix}.myshopify.com`;
+    const buyerAccountId = `buyer-mutation-${testContext.suffix}`;
+
+    await sql1`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES (${SHOP_A_ID}, ${SHOP_A_DOMAIN}, 'INR', NOW(), NOW())
+    `;
+
+    let forUpdateAcquired = false;
+    let enqueueStarted = false;
+    let messageVisibleDuringBlock = false;
+    let checksDone = 0;
+
+    const { enqueueCreditStatusRecompute } = await import("~/services/credit-status-recompute.server");
+
+    const blockerPromise = sql1.begin(async (tx) => {
+      await tx`SELECT id FROM "Shop" WHERE domain = ${SHOP_A_DOMAIN} FOR UPDATE`;
+      forUpdateAcquired = true;
+
+      while (!enqueueStarted && checksDone < 50) {
+        await new Promise((r) => setTimeout(r, 20));
+        checksDone++;
+      }
+
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 30));
+        const [visibleCount] = await sql2<[{ count: string }]>`
+          SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
+          WHERE message->>'shop' = ${SHOP_A_DOMAIN}
+            AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+            AND message->>'buyerAccountId' = ${buyerAccountId}
+        `;
+        if (parseInt(visibleCount.count, 10) > 0) {
+          messageVisibleDuringBlock = true;
+          break;
+        }
+      }
+    });
+
+    while (!forUpdateAcquired) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    enqueueStarted = true;
+    const enqueuePromise = enqueueCreditStatusRecompute(
+      sql2,
+      SHOP_A_DOMAIN,
+      buyerAccountId,
+      "manual"
+    );
+
+    await blockerPromise;
+    const result = await enqueuePromise;
+
+    expect(result).toBe(true);
+    expect(messageVisibleDuringBlock).toBe(false);
+
+    const [afterComplete] = await sql1<[{ count: string }]>`
+      SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${SHOP_A_DOMAIN}
+        AND message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+        AND message->>'buyerAccountId' = ${buyerAccountId}
+    `;
+    expect(parseInt(afterComplete.count, 10)).toBe(1);
+
+    await cleanupTestData(testContext.suffix);
+  }, 15000);
 
   it("(d-conn-real) enqueueCreditStatusRecompute sends atomically with shop check", async () => {
     const SHOP_A_ID = `shop-pr2-a-${testContext.suffix}`;
