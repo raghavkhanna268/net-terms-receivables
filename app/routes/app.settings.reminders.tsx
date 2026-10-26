@@ -81,7 +81,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
-  // Ensure default rules exist (idempotent, only seeds when shop has no rules)
+  // Ensure settings row exists; seeds default rules only when shop has no
+  // settings row, no ReminderLog history, AND no existing ReminderRule rows.
   await ensureDefaultReminderRules(sql, shop.id);
 
   const [settings, rules, logs, statusCounts, delayedReminders, shopSentToday] = await Promise.all([

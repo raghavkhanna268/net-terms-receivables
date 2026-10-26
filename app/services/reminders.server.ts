@@ -1867,6 +1867,7 @@ export const DEFAULT_RULE_OFFSETS = [-3, 0, 7] as const;
  * Skips seeding entirely if:
  * - Shop already has a settings row (not first visit)
  * - Shop has any ReminderLog history (has used reminders before)
+ * - Shop already has ReminderRule rows (e.g., from migration seed)
  *
  * Concurrency-safe: Uses pg_advisory_xact_lock plus INSERT ... ON CONFLICT
  * to prevent duplicate inserts from concurrent requests.
@@ -1910,8 +1911,17 @@ export async function ensureDefaultReminderRules(
       RETURNING shop_id
     `;
 
-    // Only seed rules if we just created the settings row for the first time
+    // If settings row already existed, skip seeding entirely
     if (inserted.length === 0) {
+      return { seeded: false, count: 0 };
+    }
+
+    // Check for existing ReminderRule rows (e.g., from migration seed).
+    // If rules already exist, keep them and skip re-seeding to prevent duplicates.
+    const [rulesCheck] = await tx<{ hasRules: boolean }[]>`
+      SELECT EXISTS(SELECT 1 FROM "ReminderRule" WHERE "shopId" = ${shopId}) AS "hasRules"
+    `;
+    if (rulesCheck?.hasRules) {
       return { seeded: false, count: 0 };
     }
 
