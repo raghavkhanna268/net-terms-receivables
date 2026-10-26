@@ -29,6 +29,9 @@ RESEND_TEST_RECIPIENTS=ops@test-example.com
 # keeps the guard ENFORCED (fail closed).
 # IMPORTANT: Flipping this to "false" in production is a launch step requiring
 # the owner's sign-off. Do not disable without explicit approval.
+# NOTE: There is no diagnostics output for this flag (Actions cannot read Worker
+# secret values). Verification at the launch flip is a live send to a non-allowlisted
+# test inbox, performed by DevOps after setting the flag, only with owner approval.
 # RESEND_RECIPIENT_ALLOWLIST_ENFORCED=false
 
 # Database connection for local development
