@@ -394,7 +394,7 @@ describeWithDb("Ingestion Paths Integration", () => {
       expect(invoice.status).toBe("open");
     });
 
-    it("cancel sets status to cancelled but leaves outstanding unchanged", async () => {
+    it("cancel sets status to cancelled and sets outstanding to 0.00", async () => {
       const orderId = orderGid(`cancel-status-${TEST_SUFFIX}`);
       const webhookId = `wh-ing-cancel-status-${TEST_SUFFIX}`;
 
@@ -420,7 +420,7 @@ describeWithDb("Ingestion Paths Integration", () => {
 
       const [invoice] = await sql`SELECT outstanding::text, status FROM "Invoice" WHERE "orderId" = ${orderId}`;
       expect(invoice.status).toBe("cancelled");
-      expect(invoice.outstanding).toBe("88888.88");
+      expect(invoice.outstanding).toBe("0.00");
     });
 
     it("cancelled invoice excluded from buyer outstanding totals via getBuyerLedger", async () => {

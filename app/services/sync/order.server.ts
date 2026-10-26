@@ -563,6 +563,8 @@ async function upsertInvoice(
 
 /**
  * Cancel an invoice when order is cancelled.
+ * Only transitions open invoices; paid/cancelled rows are untouched.
+ * Sets outstanding to 0.00 to match the cancel mapping and markInvoicePaid.
  */
 async function cancelInvoice(
   sql: Sql,
@@ -572,8 +574,8 @@ async function cancelInvoice(
 ): Promise<SyncResult> {
   const [result] = await sql<{ id: string }[]>`
     UPDATE "Invoice"
-    SET status = 'cancelled', "updatedAt" = NOW()
-    WHERE "shopId" = ${shopId} AND "orderId" = ${orderId}
+    SET status = 'cancelled', outstanding = '0.00', "updatedAt" = NOW()
+    WHERE "shopId" = ${shopId} AND "orderId" = ${orderId} AND status = 'open'
     RETURNING id
   `;
 
