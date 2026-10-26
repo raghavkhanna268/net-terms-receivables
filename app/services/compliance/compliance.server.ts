@@ -368,6 +368,7 @@ export async function redactCustomer(
   payerAliasesDeleted: number;
   buyerAccountAnonymized: boolean;
   paymentsRedacted: number;
+  b2bMainContactsRedacted: number;
 }> {
   // Wrap all operations in a single transaction for atomicity.
   // If any statement fails, the entire operation rolls back, so Shopify's
@@ -377,6 +378,19 @@ export async function redactCustomer(
     const taggedResult = await tx`
       DELETE FROM s8_tagged_customers
       WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
+    `;
+
+    // Null B2B main contact fields where mainContactCustomerId matches
+    // This handles company locations whose main contact is being redacted
+    const b2bMainContactResult = await tx`
+      UPDATE "BuyerAccount"
+      SET 
+        "mainContactEmail" = NULL,
+        "mainContactName" = NULL,
+        "mainContactCustomerId" = NULL,
+        "updatedAt" = NOW()
+      WHERE "shopId" = ${shopId}
+        AND "mainContactCustomerId" = ${customerGid}
     `;
 
     // Delete draft orders linked to customer's buyer account
@@ -467,6 +481,7 @@ export async function redactCustomer(
       payerAliasesDeleted,
       buyerAccountAnonymized,
       paymentsRedacted,
+      b2bMainContactsRedacted: b2bMainContactResult.count,
     };
   });
 }
@@ -511,6 +526,18 @@ interface CustomerDataExport {
       defaultTermsDays: number | null;
       holdState: string;
     } | null;
+    /**
+     * B2B buyer accounts where this customer is the main contact.
+     * Includes contact fields (email, name, customer ID) for this customer only.
+     */
+    b2bMainContactAccounts: Array<{
+      id: string;
+      name: string;
+      kind: string;
+      mainContactEmail: string | null;
+      mainContactName: string | null;
+      mainContactCustomerId: string;
+    }>;
     invoices: Array<{
       id: string;
       name: string;
@@ -590,6 +617,26 @@ export async function generateCustomerDataExport(
       "holdState"::text as "holdState"
     FROM "BuyerAccount"
     WHERE "shopId" = ${shopId} AND "customerId" = ${customerGid}
+  `;
+
+  // Fetch B2B buyer accounts where this customer is the main contact
+  // This includes COMPANY accounts where mainContactCustomerId matches
+  const b2bMainContactAccounts = await sql<{
+    id: string;
+    name: string;
+    kind: string;
+    mainContactEmail: string | null;
+    mainContactName: string | null;
+    mainContactCustomerId: string;
+  }[]>`
+    SELECT 
+      id, name, kind::text,
+      "mainContactEmail",
+      "mainContactName",
+      "mainContactCustomerId"
+    FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId}
+      AND "mainContactCustomerId" = ${customerGid}
   `;
 
   // No LIMIT - data request should be complete
@@ -672,6 +719,14 @@ export async function generateCustomerDataExport(
             holdState: buyerAccount.holdState,
           }
         : null,
+      b2bMainContactAccounts: b2bMainContactAccounts.map((a) => ({
+        id: a.id,
+        name: a.name,
+        kind: a.kind,
+        mainContactEmail: a.mainContactEmail,
+        mainContactName: a.mainContactName,
+        mainContactCustomerId: a.mainContactCustomerId,
+      })),
       invoices: invoices.map((i) => ({
         id: i.id,
         name: i.name,

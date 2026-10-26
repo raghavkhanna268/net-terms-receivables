@@ -18,7 +18,7 @@
  */
 
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
-import { getCustomerByNodeQuery } from "~/services/sync/customer-fields.server";
+import { getCustomerByNodeQuery, shouldIncludePiiFields, type PiiEnv } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 
 export const API_VERSION = "2026-10";
@@ -83,13 +83,67 @@ export const COMPANY_QUERY = `
 `;
 
 /**
- * Fetch a CompanyLocation by GID.
- * Fetches id, name, company, billingAddress.companyName (name fallback), payment terms.
- * No PII fields.
+ * Build a CompanyLocation query dynamically based on PII flag.
  *
+ * DPDP data minimization:
+ * - When CUSTOMER_PII_FIELDS=1: requests mainContact.customer { id email displayName }
+ * - When flag is off: requests mainContact.customer { id } only
+ *
+ * The B2B recipient is the COMPANY's main contact (not on CompanyLocation directly).
  * Note: CompanyAddress.company was renamed to companyName in 2026-10.
+ *
+ * @param env - Environment for PII flag check (required, no default)
+ * @returns GraphQL query string
  */
-export const COMPANY_LOCATION_QUERY = `
+export function getCompanyLocationQuery(env: PiiEnv): string {
+  const piiEnabled = shouldIncludePiiFields(env);
+  const customerFields = piiEnabled ? "id\n              email\n              displayName" : "id";
+  
+  return `
+  query CompanyLocationById($id: ID!) {
+    node(id: $id) {
+      ... on CompanyLocation {
+        id
+        name
+        company {
+          id
+          mainContact {
+            customer {
+              ${customerFields}
+            }
+          }
+        }
+        billingAddress {
+          companyName
+        }
+        buyerExperienceConfiguration {
+          paymentTermsTemplate {
+            id
+            name
+            dueInDays
+            paymentTermsType
+          }
+        }
+      }
+    }
+  }
+`;
+}
+
+/**
+ * Build a CompanyLocation query WITHOUT mainContact fields.
+ *
+ * Used as a fallback when ACCESS_DENIED is returned on mainContact.
+ * This query fetches only the base location data (id, name, company.id,
+ * billingAddress, paymentTermsTemplate) and completely omits mainContact.
+ *
+ * When this fallback is used, the caller should preserve existing stored
+ * contact fields (contactKnown=false behavior) rather than NULLing them.
+ *
+ * @returns GraphQL query string without mainContact
+ */
+export function getCompanyLocationQueryWithoutContact(): string {
+  return `
   query CompanyLocationById($id: ID!) {
     node(id: $id) {
       ... on CompanyLocation {
@@ -113,6 +167,7 @@ export const COMPANY_LOCATION_QUERY = `
     }
   }
 `;
+}
 
 /**
  * Fetch bulk operation status and result URL.
