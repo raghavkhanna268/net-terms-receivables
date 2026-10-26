@@ -17,7 +17,8 @@ describe("narration-parser", () => {
         expect(result.upiId).toBe("fakevendor@synthetic");
         expect(result.utr).toBe("987654321098");
         expect(result.payerName).toBeDefined();
-        expect(result.payerBank).toBe("SYNTHETIC");
+        // IFSC takes precedence over VPA handle for payer bank
+        expect(result.payerBank).toBe("SYNT0000001");
       });
 
       it("extracts UPI - ICICI format", () => {
@@ -222,6 +223,113 @@ describe("narration-parser", () => {
         expect(result.rail).toBe("OTHER");
       });
     });
+
+    describe("CMS (Cash Management Service) transactions", () => {
+      it("detects CMS rail from narration starting with CMS/", () => {
+        const result = parseNarration("CMS/ SYNT123 45/SYNT TEST TRADERS");
+        expect(result.rail).toBe("CMS");
+      });
+
+      it("detects CMS rail from narration starting with CMS space", () => {
+        const result = parseNarration("CMS REF00001/SYNT DEMO CORP");
+        expect(result.rail).toBe("CMS");
+      });
+
+      it("does NOT extract ref as UTR from CMS narration (CMS refs are not UTRs)", () => {
+        const result = parseNarration("CMS/ SYNT123 45/SYNT TEST TRADERS");
+        expect(result.rail).toBe("CMS");
+        // CMS refs are internal refs, NOT UTRs - utr should be undefined
+        expect(result.utr).toBeUndefined();
+      });
+
+      it("extracts payer name from CMS narration", () => {
+        const result = parseNarration("CMS/ SYNT123 45/SYNT TEST TRADERS");
+        expect(result.rail).toBe("CMS");
+        expect(result.payerName).toBe("SYNT TEST TRADERS");
+      });
+
+      it("handles CMS with only ref segment (no UTR, but may extract name)", () => {
+        const result = parseNarration("CMS/ REF00001");
+        expect(result.rail).toBe("CMS");
+        // CMS refs are NOT UTRs
+        expect(result.utr).toBeUndefined();
+      });
+
+      it("handles CMS corporate collection format", () => {
+        const result = parseNarration("CMS/ SYNTCORP 99/SYNT WHOLESALE PVT LTD");
+        expect(result.rail).toBe("CMS");
+        // CMS refs are NOT UTRs
+        expect(result.utr).toBeUndefined();
+        expect(result.payerName).toBe("SYNT WHOLESALE");
+      });
+    });
+
+    describe("UPI with special VPA formats", () => {
+      it("extracts UPI ID without @ symbol (ICICI format)", () => {
+        const result = parseNarration(
+          "UPI/600000000001/synttest.1234/SYNT VENDOR/SYNT BANK/600000000002/SYNT000001",
+          "ICICI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synttest.1234");
+      });
+
+      it("does NOT extract code-shaped ref as UPI ID (ICICI format)", () => {
+        // Index 2 has "SYNT0000001234" which looks like a code (3-6 letters + digits)
+        const result = parseNarration(
+          "UPI/600000000001/SYNT0000001234/SYNT VENDOR/SYNT BANK",
+          "ICICI"
+        );
+        expect(result.rail).toBe("UPI");
+        // Should NOT be extracted as UPI ID since it matches ^[A-Z]{3,6}\d+$
+        expect(result.upiId).toBeUndefined();
+      });
+
+      it("extracts standard VPA in HDFC format", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-vendor9000@oksynt-SYNT0000001-600000000003-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("vendor9000@oksynt");
+      });
+
+      it("extracts hyphenated VPA in HDFC dash-format", () => {
+        const result = parseNarration(
+          "UPI-9000000000-1@oksynt-SYNT VENDOR-SBIN00TEST12-300000000101-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      it("extracts payer bank from IFSC segment (HDFC UPI)", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-vendor@oksynt-SYNT0000001-600000000004-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.payerBank).toBe("SYNT0000001");
+      });
+
+      it("extracts payer bank from VPA handle for ICICI UPI", () => {
+        const result = parseNarration(
+          "UPI/SYNT VENDOR/vendor@oksynt/Test Remark/SYNT BANK/600000000005/SYNT000002",
+          "ICICI"
+        );
+        expect(result.rail).toBe("UPI");
+        // VPA handle is extracted when no IFSC found
+        expect(result.payerBank).toBe("OKSYNT");
+      });
+
+      it("extracts payer bank from bank name when present (ICICI)", () => {
+        // ICICI format where the bank name is explicitly mentioned
+        const result = parseNarration(
+          "UPI/SYNT VENDOR/syntvendor/Test Remark/SYNT BANK/600000000005/SYNT000002",
+          "ICICI"
+        );
+        expect(result.rail).toBe("UPI");
+        // When VPA has no @ and bank name segment contains "BANK", use it
+        expect(result.payerBank).toBe("SYNT BANK");
+      });
+    });
   });
 
   describe("extractUtrForDedupe", () => {
@@ -264,6 +372,15 @@ describe("narration-parser", () => {
 
       it("returns refNo if it's 12 digits", () => {
         expect(extractUtrForDedupe("some narration", "UPI", "123456789012")).toBe("123456789012");
+      });
+
+      it("falls back to narration extraction for non-12-digit ref", () => {
+        // 16-digit ref doesn't match 12-digit pattern, so falls back to narration extraction
+        expect(extractUtrForDedupe("UPI/600000000001/vendor@synth", "UPI", "0000600000000001")).toBe("600000000001");
+      });
+
+      it("returns null when ref is all zeros and narration has no RRN", () => {
+        expect(extractUtrForDedupe("some narration without RRN", "UPI", "0000000000000000")).toBeNull();
       });
     });
 

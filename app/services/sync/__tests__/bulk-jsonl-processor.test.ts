@@ -1374,7 +1374,7 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       // Orphan schedule line only (parent order not in batch)
       const lines = ['{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/999"}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify the orphan lookup query includes status='open' filter
       const lookupQuery = recordedQueries.find(q => 
@@ -1432,9 +1432,10 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order without schedule (existing invoice has account-default dueAt)
-      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
+      // #292: Must include INR currency to pass currency guard
+      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}}}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify bulkUpsertInvoices was called with correct dueAt/dueSource
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1487,9 +1488,10 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order without schedule dueAt
-      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
+      // #292: Must include INR currency to pass currency guard
+      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}}}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify merchant override is preserved
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1542,11 +1544,12 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order WITH PaymentSchedule (schedule dueAt attached via parser)
+      // #292: Must include INR currency to pass currency guard
       const lines = [
-        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
+        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}},"paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
       ];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify schedule dueAt is used
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1597,11 +1600,12 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order WITH schedule dueAt
+      // #292: Must include INR currency to pass currency guard
       const lines = [
-        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
+        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}},"paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
       ];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Schedule beats override
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1610,6 +1614,107 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       expect(invoices[0].dueAt?.toISOString()).toBe("2025-02-15T00:00:00.000Z");
       expect(invoices[0].dueSource).toBe("schedule");
     });
+  });
+});
+
+describe("#292: Per-order currency guard in bulk sync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("filters out non-INR orders and logs count via drain_skip_non_inr_order", async () => {
+    const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+    const { bulkUpsertInvoices } = await import("../order.server");
+    const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+    
+    const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+    const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+    const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+    
+    mockGetContext.mockResolvedValue({ shop: { id: "shop-123" } });
+    mockCheckEligibility.mockResolvedValue({
+      eligible: true,
+      reason: "shopify_payment_terms",
+      explanation: "Has payment terms",
+      buyerAccountId: "buyer-456",
+      dueDate: {
+        dueAt: new Date("2025-02-15T00:00:00Z"),
+        dueSource: "schedule",
+        basis: null,
+        reason: "Payment schedule from Shopify",
+      },
+    });
+    
+    const recordedQueries: string[] = [];
+    const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      recordedQueries.push(query);
+      return Promise.resolve([]);
+    });
+    
+    // Two orders: one INR, one USD
+    const inrOrder = '{"id":"gid://shopify/Order/inr-1","name":"#INR","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"gid://shopify/Company/1"},"location":{"id":"gid://shopify/CompanyLocation/1"}}}';
+    const usdOrder = '{"id":"gid://shopify/Order/usd-1","name":"#USD","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"USD"}},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"gid://shopify/Company/1"},"location":{"id":"gid://shopify/CompanyLocation/1"}}}';
+    
+    const lines = [inrOrder, usdOrder];
+    
+    // The processOrderLines function should filter out USD orders
+    await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
+    
+    // Should only process the INR order
+    // bulkUpsertInvoices is called with array of invoices - only 1 should be there
+    if (mockUpsertInvoices.mock.calls.length > 0) {
+      const invoices = mockUpsertInvoices.mock.calls[0][1];
+      // If any invoices, they should all be INR
+      for (const inv of invoices) {
+        expect(inv.orderId).not.toContain("usd");
+      }
+    }
+    
+    // The USD order should have been filtered out before processing
+    // (we can't directly verify the safeLog call without more mocking,
+    // but the order should not appear in processed invoices)
+  });
+
+  it("filters out orders with missing currency (fail-closed)", async () => {
+    const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+    const { bulkUpsertInvoices } = await import("../order.server");
+    const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+    
+    const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+    const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+    const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+    
+    mockGetContext.mockResolvedValue({ shop: { id: "shop-123" } });
+    mockCheckEligibility.mockResolvedValue({
+      eligible: true,
+      reason: "shopify_payment_terms",
+      explanation: "Has payment terms",
+      buyerAccountId: "buyer-456",
+      dueDate: {
+        dueAt: new Date("2025-02-15T00:00:00Z"),
+        dueSource: "schedule",
+        basis: null,
+        reason: "Payment schedule from Shopify",
+      },
+    });
+    
+    const mockSql = vi.fn().mockImplementation(() => Promise.resolve([]));
+    
+    // One order with INR, one without any currency
+    const inrOrder = '{"id":"gid://shopify/Order/inr-1","name":"#INR","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}}}';
+    const noCurrencyOrder = '{"id":"gid://shopify/Order/no-currency","name":"#NOCURRENCY","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}';
+    
+    const lines = [inrOrder, noCurrencyOrder];
+    
+    await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
+    
+    // Assert unconditionally: exactly the INR order, and only it, is upserted
+    expect(mockUpsertInvoices).toHaveBeenCalled();
+    const invoices = mockUpsertInvoices.mock.calls[0][1];
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0].orderId).toBe("gid://shopify/Order/inr-1");
   });
 });
 

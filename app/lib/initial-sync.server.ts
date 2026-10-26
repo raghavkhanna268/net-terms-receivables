@@ -31,6 +31,7 @@ import type { Sql } from "./db-light.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
 import { S6_QUEUES } from "./pgmq.server";
 import type { ReconcileMessage } from "~/services/drain/reconcile.server";
+import { isShopCurrencySupported } from "./shop-currency.server";
 import {
   recoverStaleBulkOperationsForShop,
   STALE_THRESHOLD_MINUTES,
@@ -98,6 +99,7 @@ export async function getInitialSyncState(
     SELECT bulk_operation_id, reconcile_stage, completed_at, failure_count, started_at
     FROM s6_bulk_operations
     WHERE shop = ${shopDomain} AND origin = 'reconcile' AND reconcile_stage = 'companies'
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -113,6 +115,7 @@ export async function getInitialSyncState(
       AND origin = 'reconcile'
       AND reconcile_stage = 'customers'
       AND started_at >= ${companiesOp.started_at}
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -124,6 +127,7 @@ export async function getInitialSyncState(
       AND origin = 'reconcile'
       AND reconcile_stage = 'orders'
       AND started_at >= ${companiesOp.started_at}
+      AND closed_at IS NULL
     ORDER BY started_at DESC
     LIMIT 1
   `;
@@ -235,6 +239,14 @@ export async function enqueueInitialSync(
   sql: Sql,
   shopDomain: string
 ): Promise<{ enqueued: boolean; reason?: string }> {
+  // #292: Check shop currency before allowing sync
+  const [shopRow] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  if (!isShopCurrencySupported(shopRow?.currency)) {
+    return { enqueued: false, reason: "unsupported_currency" };
+  }
+
   if (await hasManualSyncQueued(sql, shopDomain)) {
     return { enqueued: false, reason: "already_queued" };
   }

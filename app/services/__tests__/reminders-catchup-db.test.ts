@@ -191,7 +191,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("cap boundary - delayed instead of deleted", () => {
     it("upserts as delayed when daily cap is reached", async () => {
       const { sendPaymentReminder, DAILY_SEND_CAP } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-cap-delayed-${TEST_SUFFIX}`;
@@ -292,7 +292,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("older delayed stage skipped when newer stage is already sent", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-sent-newer-${TEST_SUFFIX}`;
@@ -350,7 +350,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("payment mid-window - delayed row deleted silently", () => {
     it("deletes delayed row when invoice is paid before catch-up", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-paid-mid-${TEST_SUFFIX}`;
@@ -435,7 +435,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("at most one per invoice per day", () => {
     it("skips catch-up when invoice already has sent reminder today", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-one-per-day-${TEST_SUFFIX}`;
@@ -498,7 +498,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("REMINDER_SEND skips when another stage already sent today", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-concurrent-${TEST_SUFFIX}`;
@@ -553,7 +553,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("duplicate catch-up messages", () => {
     it("second catch-up message skips when first already sent", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-dup-catchup-${TEST_SUFFIX}`;
@@ -765,7 +765,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("partly paid invoice - sends with outstanding balance", () => {
     it("sends reminder for partly paid invoice (outstanding > 0)", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-partly-paid-${TEST_SUFFIX}`;
@@ -810,7 +810,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("skips invoice when outstanding is zero", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-zero-outstanding-${TEST_SUFFIX}`;
@@ -855,7 +855,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("delayed-to-sent transition preserves firstCappedAt", () => {
     it("markDelayedAsSent keeps firstCappedAt for 'sent late' tracking", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-sent-late-${TEST_SUFFIX}`;
@@ -913,7 +913,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("one reminder per invoice per day - newer stage wins", () => {
     it("stage 1 delayed becomes skipped when stage 2 is due today, only stage 2 sends", async () => {
       const { sendPaymentReminder, sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-newer-stage-${TEST_SUFFIX}`;
@@ -1117,7 +1117,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   describe("auth error logging", () => {
     it("logs reminders_catchup_auth_error on 401 response", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
 
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-auth-error-${TEST_SUFFIX}`;
@@ -1210,7 +1210,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("flag=false: catch-up sends to gated account", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "gated-catchup@test-reminders.example" };
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "false";
@@ -1261,7 +1261,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("flag=true: catch-up skips gated account", async () => {
       const { sendCatchupReminder } = await import("../reminders.server");
-      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" };
+      const validEnv = { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@test-reminders.example", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: "catchup-buyer@test-reminders.example" };
       const originalEnv = process.env.PLAN_GATING_ENFORCED;
 
       (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
@@ -1313,6 +1313,220 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         expect(log).toBeUndefined();
       } finally {
         (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
+      }
+    });
+  });
+
+  describe("recipient allowlist enforcement on catch-up", () => {
+    it("skips with success=true when recipient not in allowlist, keeps delayed row, no cap consumed", async () => {
+      const { sendCatchupReminder, getGlobalSendCounts } = await import("../reminders.server");
+      const envWithAllowlist = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@test-reminders.example",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "other-buyer@test-reminders.example",
+      };
+
+      const invoiceId = `inv-allowlist-skip-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/allowlist-skip-${TEST_SUFFIX}`;
+      const logId = `log-allowlist-skip-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#ALLOWLIST-SKIP', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      const countsBefore = await getGlobalSendCounts(sql);
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          testTimezone,
+          envWithAllowlist
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("allowlist");
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        const [log] = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog" WHERE id = ${logId}
+        `;
+        expect(log.status).toBe("delayed");
+
+        const countsAfter = await getGlobalSendCounts(sql);
+        expect(countsAfter.daily).toBe(countsBefore.daily);
+        expect(countsAfter.monthly).toBe(countsBefore.monthly);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("skips with success=true when allowlist is empty, keeps delayed row, no cap consumed", async () => {
+      const { sendCatchupReminder, getGlobalSendCounts } = await import("../reminders.server");
+      const envEmptyAllowlist = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@test-reminders.example",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "",
+      };
+
+      const invoiceId = `inv-empty-allowlist-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/empty-allowlist-${TEST_SUFFIX}`;
+      const logId = `log-empty-allowlist-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#EMPTY-ALLOWLIST', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      const countsBefore = await getGlobalSendCounts(sql);
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          testTimezone,
+          envEmptyAllowlist
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("allowlist");
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        const [log] = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog" WHERE id = ${logId}
+        `;
+        expect(log.status).toBe("delayed");
+
+        const countsAfter = await getGlobalSendCounts(sql);
+        expect(countsAfter.daily).toBe(countsBefore.daily);
+        expect(countsAfter.monthly).toBe(countsBefore.monthly);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("skips with success=true when allowlist env var is absent (undefined), keeps delayed row, no cap consumed", async () => {
+      // Make test hermetic: ensure process.env.RESEND_TEST_RECIPIENTS is unset
+      // so the ?? process.env fallback in sendCatchupReminder sees undefined
+      vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
+      const originalEnvValue = process.env.RESEND_TEST_RECIPIENTS;
+      delete process.env.RESEND_TEST_RECIPIENTS;
+
+      const { sendCatchupReminder, getGlobalSendCounts } = await import("../reminders.server");
+      const envUnsetAllowlist = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@test-reminders.example",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: undefined,
+      };
+
+      const invoiceId = `inv-unset-allowlist-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/unset-allowlist-${TEST_SUFFIX}`;
+      const logId = `log-unset-allowlist-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#UNSET-ALLOWLIST', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+
+      const countsBefore = await getGlobalSendCounts(sql);
+
+      try {
+        const result = await sendCatchupReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID_1,
+          logId,
+          0,
+          testTimezone,
+          envUnsetAllowlist
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("allowlist");
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        const [log] = await sql<{ status: string }[]>`
+          SELECT status FROM "ReminderLog" WHERE id = ${logId}
+        `;
+        expect(log.status).toBe("delayed");
+
+        const countsAfter = await getGlobalSendCounts(sql);
+        expect(countsAfter.daily).toBe(countsBefore.daily);
+        expect(countsAfter.monthly).toBe(countsBefore.monthly);
+      } finally {
+        luxonSpy.mockRestore();
+        // Restore process.env
+        if (originalEnvValue !== undefined) {
+          process.env.RESEND_TEST_RECIPIENTS = originalEnvValue;
+        }
+        vi.unstubAllEnvs();
       }
     });
   });

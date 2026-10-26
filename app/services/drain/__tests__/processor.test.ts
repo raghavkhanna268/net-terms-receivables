@@ -29,9 +29,10 @@ vi.mock("../admin-client.server", () => ({
     retryable: false,
   }),
   COMPANY_QUERY: "query CompanyById",
-  COMPANY_LOCATION_QUERY: "query CompanyLocationById",
   ORDER_QUERY: "query OrderById",
   getCustomerQueryForDrain: vi.fn().mockReturnValue("query CustomerById"),
+  getCompanyLocationQuery: vi.fn().mockReturnValue("query CompanyLocationById"),
+  getCompanyLocationQueryWithoutContact: vi.fn().mockReturnValue("query CompanyLocationById"),
   DRAFT_ORDER_QUERY: "query DraftOrderById",
   BULK_OPERATION_STATUS_QUERY: "query BulkOperationStatus",
 }));
@@ -92,7 +93,7 @@ vi.mock("../customer-fetch.server", async (importOriginal) => {
 
 vi.mock("~/services/sync/bulk-operations.server", () => ({
   registerBulkOperation: vi.fn().mockResolvedValue(undefined),
-  BULK_COMPANIES_QUERY: "mutation BulkCompaniesExport",
+  getBulkCompaniesQuery: vi.fn().mockReturnValue("mutation BulkCompaniesExport"),
   BULK_ORDERS_QUERY: "mutation BulkOrdersExport",
   parseBulkOperationResult: vi.fn().mockReturnValue({
     success: true,
@@ -823,11 +824,13 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     expect(result.status).toBe("complete");
     // Should chain because nextStage='customers', not because of webhookId
     // Fourth arg is manualKey (undefined for cron path since mock returns undefined)
+    // Fifth arg is prevBulkOperationId (#293)
     expect(mockEnqueueReconcileStage).toHaveBeenCalledWith(
       mockSql,
       "test.myshopify.com",
       "customers",
-      undefined
+      undefined,
+      "gid://shopify/BulkOperation/123"
     );
   });
 

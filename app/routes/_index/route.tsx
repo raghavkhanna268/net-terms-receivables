@@ -35,7 +35,7 @@ export default function App() {
         <h1 className={styles.heading}>Net Terms Receivables</h1>
         <p className={styles.text}>
           B2B wholesale net-terms management for Shopify. Track invoices, manage credit limits,
-          and match Indian bank payments (NEFT/RTGS/IMPS/UPI) to orders.
+          and match Indian bank payments (NEFT/RTGS/IMPS/UPI/CMS) to orders.
         </p>
         <p className={styles.text}>
           <strong>Install from the Shopify App Store</strong> to get started.
@@ -50,7 +50,7 @@ export default function App() {
             credit holds when limits are exceeded.
           </li>
           <li>
-            <strong>Payment Matching</strong>. Match Indian bank transfers (NEFT/RTGS/IMPS/UPI)
+            <strong>Payment Matching</strong>. Match Indian bank transfers (NEFT/RTGS/IMPS/UPI/CMS)
             back to orders automatically.
           </li>
         </ul>

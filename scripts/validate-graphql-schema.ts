@@ -1111,12 +1111,13 @@ function runSelfTests(schema: GraphQLSchema): boolean {
  * - Are generic wrapper functions where queries are passed in (validated elsewhere)
  */
 const ADMIN_GRAPHQL_CONST_ALLOWLIST = [
-  "after-auth.server.ts", // Uses SHOP_TIMEZONE_QUERY constant
+  "after-auth.server.ts", // Uses SHOP_AUTH_INFO_QUERY constant
   "metafield-definitions.server.ts", // Uses METAFIELD_DEFINITION_CREATE_MUTATION constant
   "validation-registration.server.ts", // Uses VALIDATIONS_QUERY, VALIDATION_CREATE_MUTATION constants
   "payment-customization-registration.server.ts", // Uses PAYMENT_CUSTOMIZATIONS_QUERY, PAYMENT_CUSTOMIZATION_CREATE_MUTATION constants
   "shopify-client.server.ts", // Generic wrapper that takes query as parameter
   "app.onboarding.tsx", // Uses METAFIELD_DEFINITIONS_QUERY constant (S23-02)
+  "shop-config.server.ts", // #292: Uses WRITE_SHOP_CONFIG_MUTATION constant for INR-only shop_config
 ];
 
 /**
@@ -1338,6 +1339,118 @@ async function validateDynamicQueryBuilders(schema: GraphQLSchema): Promise<{ re
       validatedCount++;
       console.log(`  ✓ getBulkCustomersQuery (special chars): validated`);
     }
+  }
+
+  // ===== getCompanyLocationQuery variants (B2B main contact queries) =====
+
+  // Import getCompanyLocationQuery from admin-client.server.ts
+  let getCompanyLocationQuery: (env: { CUSTOMER_PII_FIELDS?: string }) => string;
+  try {
+    const adminClientModule = await import("../app/services/drain/admin-client.server");
+    getCompanyLocationQuery = adminClientModule.getCompanyLocationQuery;
+  } catch {
+    console.error("❌ FATAL: Failed to import admin-client.server.ts");
+    process.exit(1);
+  }
+
+  // Variant: getCompanyLocationQuery without PII
+  const companyLocQueryNoPii = getCompanyLocationQuery(envNoPii);
+  const companyLocDocNoPii: GraphQLDocument = {
+    name: "getCompanyLocationQuery({})",
+    source: companyLocQueryNoPii,
+    filePath: path.join(__dirname, "../app/services/drain/admin-client.server.ts"),
+  };
+  const companyLocErrorsNoPii = validateDocument(schema, companyLocDocNoPii);
+  if (companyLocErrorsNoPii.length > 0) {
+    results.push({ document: companyLocDocNoPii, errors: companyLocErrorsNoPii });
+    console.log(`  ✗ getCompanyLocationQuery (no PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getCompanyLocationQuery (no PII): validated`);
+  }
+
+  // Variant: getCompanyLocationQuery with PII
+  const companyLocQueryWithPii = getCompanyLocationQuery(envWithPii);
+  const companyLocDocWithPii: GraphQLDocument = {
+    name: "getCompanyLocationQuery({CUSTOMER_PII_FIELDS:'1'})",
+    source: companyLocQueryWithPii,
+    filePath: path.join(__dirname, "../app/services/drain/admin-client.server.ts"),
+  };
+  const companyLocErrorsWithPii = validateDocument(schema, companyLocDocWithPii);
+  if (companyLocErrorsWithPii.length > 0) {
+    results.push({ document: companyLocDocWithPii, errors: companyLocErrorsWithPii });
+    console.log(`  ✗ getCompanyLocationQuery (with PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getCompanyLocationQuery (with PII): validated`);
+  }
+
+  // Variant: getCompanyLocationQueryWithoutContact (ACCESS_DENIED fallback)
+  let getCompanyLocationQueryWithoutContact: () => string;
+  try {
+    const adminClientModule2 = await import("../app/services/drain/admin-client.server");
+    getCompanyLocationQueryWithoutContact = adminClientModule2.getCompanyLocationQueryWithoutContact;
+  } catch {
+    console.error("❌ FATAL: Failed to import getCompanyLocationQueryWithoutContact");
+    process.exit(1);
+  }
+  const companyLocQueryNoContact = getCompanyLocationQueryWithoutContact();
+  const companyLocDocNoContact: GraphQLDocument = {
+    name: "getCompanyLocationQueryWithoutContact()",
+    source: companyLocQueryNoContact,
+    filePath: path.join(__dirname, "../app/services/drain/admin-client.server.ts"),
+  };
+  const companyLocErrorsNoContact = validateDocument(schema, companyLocDocNoContact);
+  if (companyLocErrorsNoContact.length > 0) {
+    results.push({ document: companyLocDocNoContact, errors: companyLocErrorsNoContact });
+    console.log(`  ✗ getCompanyLocationQueryWithoutContact(): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getCompanyLocationQueryWithoutContact(): validated`);
+  }
+
+  // ===== getBulkCompaniesQuery variants =====
+
+  // Import getBulkCompaniesQuery from bulk-operations.server.ts
+  let getBulkCompaniesQuery: (env: { CUSTOMER_PII_FIELDS?: string }) => string;
+  try {
+    const bulkOpsModule = await import("../app/services/sync/bulk-operations.server");
+    getBulkCompaniesQuery = bulkOpsModule.getBulkCompaniesQuery;
+  } catch {
+    console.error("❌ FATAL: Failed to import bulk-operations.server.ts");
+    process.exit(1);
+  }
+
+  // Variant: getBulkCompaniesQuery without PII
+  const bulkCompaniesQueryNoPii = getBulkCompaniesQuery(envNoPii);
+  const bulkCompaniesDocNoPii: GraphQLDocument = {
+    name: "getBulkCompaniesQuery({})",
+    source: bulkCompaniesQueryNoPii,
+    filePath: path.join(__dirname, "../app/services/sync/bulk-operations.server.ts"),
+  };
+  const bulkCompaniesErrorsNoPii = validateDocument(schema, bulkCompaniesDocNoPii);
+  if (bulkCompaniesErrorsNoPii.length > 0) {
+    results.push({ document: bulkCompaniesDocNoPii, errors: bulkCompaniesErrorsNoPii });
+    console.log(`  ✗ getBulkCompaniesQuery (no PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getBulkCompaniesQuery (no PII): validated`);
+  }
+
+  // Variant: getBulkCompaniesQuery with PII
+  const bulkCompaniesQueryWithPii = getBulkCompaniesQuery(envWithPii);
+  const bulkCompaniesDocWithPii: GraphQLDocument = {
+    name: "getBulkCompaniesQuery({CUSTOMER_PII_FIELDS:'1'})",
+    source: bulkCompaniesQueryWithPii,
+    filePath: path.join(__dirname, "../app/services/sync/bulk-operations.server.ts"),
+  };
+  const bulkCompaniesErrorsWithPii = validateDocument(schema, bulkCompaniesDocWithPii);
+  if (bulkCompaniesErrorsWithPii.length > 0) {
+    results.push({ document: bulkCompaniesDocWithPii, errors: bulkCompaniesErrorsWithPii });
+    console.log(`  ✗ getBulkCompaniesQuery (with PII): FAILED`);
+  } else {
+    validatedCount++;
+    console.log(`  ✓ getBulkCompaniesQuery (with PII): validated`);
   }
 
   // ===== getCustomerQuery variants =====
