@@ -51,6 +51,20 @@ export const STALE_THRESHOLD_MINUTES = 60;
 const MAX_FAILURE_COUNT = 5;
 
 /**
+ * Threshold in minutes for lease expiry recovery.
+ *
+ * When a processor dies after receiving the finish webhook but before completing,
+ * the operation has finish_received_at set but completed_at NULL, and the
+ * processing lease expires. The lease-contention DLQ path (bulk_lease_contention)
+ * means no further finish messages will be retried.
+ *
+ * This threshold determines how long after lease expiry we consider the processor
+ * dead. Must be >> PROCESSING_LEASE_SECONDS to avoid racing with slow processors.
+ * 5 minutes (300s) vs 60s lease gives a 5x buffer.
+ */
+export const LEASE_EXPIRY_THRESHOLD_MINUTES = 5;
+
+/**
  * Shopify bulk operation statuses (GraphQL enum).
  * @see https://shopify.dev/docs/api/admin-graphql/2026-10/enums/BulkOperationStatus
  */
@@ -133,6 +147,41 @@ export async function findStaleBulkOperations(
       AND bo.finish_received_at IS NULL
       AND (bo.processing_lease_until IS NULL OR bo.processing_lease_until < NOW())
       AND bo.started_at < NOW() - INTERVAL '1 minute' * ${thresholdMinutes}
+      AND s."uninstalledAt" IS NULL
+    ORDER BY bo.started_at ASC
+  `;
+  return rows;
+}
+
+/**
+ * Find bulk operations with expired processing leases that need re-enqueueing.
+ *
+ * S25: This handles the "stranded op" case where:
+ * - The finish webhook arrived (finish_received_at IS NOT NULL)
+ * - Processing started but the processor died (lease expired)
+ * - The finish message was DLQ'd as bulk_lease_contention
+ * - No further retries will occur, leaving the op stuck
+ *
+ * Recovery re-enqueues such ops so they can be processed again.
+ *
+ * @param sql - postgres.js SQL client
+ * @param thresholdMinutes - Minutes after lease expiry to consider dead
+ * @returns List of lease-expired operations
+ */
+export async function findLeaseExpiredBulkOperations(
+  sql: Sql,
+  thresholdMinutes: number = LEASE_EXPIRY_THRESHOLD_MINUTES
+): Promise<StaleBulkOperation[]> {
+  const rows = await sql<StaleBulkOperation[]>`
+    SELECT bo.bulk_operation_id, bo.shop, bo.bulk_type, bo.started_at
+    FROM s6_bulk_operations bo
+    INNER JOIN "Shop" s ON s.domain = bo.shop
+    WHERE bo.completed_at IS NULL
+      AND bo.closed_at IS NULL
+      AND bo.failure_count < ${MAX_FAILURE_COUNT}
+      AND bo.finish_received_at IS NOT NULL
+      AND bo.processing_lease_until IS NOT NULL
+      AND bo.processing_lease_until < NOW() - make_interval(mins => ${thresholdMinutes})
       AND s."uninstalledAt" IS NULL
     ORDER BY bo.started_at ASC
   `;
@@ -240,7 +289,7 @@ export async function markBulkOperationFailed(
     safeLog("warn", "bulk_op_recovery_marked_failed", {
       shopHash: hash,
       bulkType: bulkType ?? "unknown",
-      opStatus: shopifyStatus ?? "unknown",
+      status: shopifyStatus ?? "unknown",
     });
   }
 
@@ -381,25 +430,35 @@ async function recoverSingleOperation(
  * Recover stale bulk operations.
  *
  * This is the main entry point for the recovery mechanism. It:
- * 1. Finds all stale operations (open > STALE_THRESHOLD_MINUTES)
- * 2. Queries Shopify for each operation's status
- * 3. Takes appropriate action based on status
+ * 1. Finds all stale operations (open > STALE_THRESHOLD_MINUTES, no finish webhook)
+ * 2. Finds lease-expired operations (finish arrived, processor died)
+ * 3. Queries Shopify for each operation's status
+ * 4. Takes appropriate action based on status
  *
  * Safe to call repeatedly; idempotent via conditional updates and
  * existing webhook deduplication.
  *
  * @param sql - postgres.js SQL client
- * @param thresholdMinutes - Optional override for threshold (for testing)
+ * @param thresholdMinutes - Optional override for stale threshold (for testing)
+ * @param leaseExpiryThresholdMinutes - Optional override for lease expiry threshold
  * @returns Recovery statistics
  */
 export async function recoverStaleBulkOperations(
   sql: Sql,
-  thresholdMinutes: number = STALE_THRESHOLD_MINUTES
+  thresholdMinutes: number = STALE_THRESHOLD_MINUTES,
+  leaseExpiryThresholdMinutes: number = LEASE_EXPIRY_THRESHOLD_MINUTES
 ): Promise<RecoveryResult> {
   const staleOps = await findStaleBulkOperations(sql, thresholdMinutes);
+  const leaseExpiredOps = await findLeaseExpiredBulkOperations(sql, leaseExpiryThresholdMinutes);
+
+  const seenIds = new Set(staleOps.map((op) => op.bulk_operation_id));
+  const allOps = [
+    ...staleOps,
+    ...leaseExpiredOps.filter((op) => !seenIds.has(op.bulk_operation_id)),
+  ];
 
   const result: RecoveryResult = {
-    foundCount: staleOps.length,
+    foundCount: allOps.length,
     enqueuedCount: 0,
     markedFailedCount: 0,
     skippedCount: 0,
@@ -407,11 +466,11 @@ export async function recoverStaleBulkOperations(
     attempts: [],
   };
 
-  if (staleOps.length === 0) {
+  if (allOps.length === 0) {
     return result;
   }
 
-  for (const op of staleOps) {
+  for (const op of allOps) {
     const attemptResult = await recoverSingleOperation(sql, op);
     result.attempts.push(attemptResult);
 

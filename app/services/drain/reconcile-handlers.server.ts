@@ -122,7 +122,7 @@ export async function claimReconcileStage(
     WHERE chain_key = ${chainKey}
       AND stage = ${stage}
       AND bulk_operation_id IS NULL
-      AND claimed_at < now() - interval '${sql.unsafe(String(CLAIM_RECLAIM_MINUTES))} minutes'
+      AND claimed_at < now() - make_interval(mins => ${CLAIM_RECLAIM_MINUTES})
     RETURNING chain_key
   `;
   
@@ -137,7 +137,25 @@ export async function claimReconcileStage(
   `;
   
   if (existingClaim?.bulk_operation_id) {
-    return "already_running";
+    // S25: Verify the op row actually exists. If claim has op id but no row exists
+    // (due to partial failure before atomic fix), treat as re-claimable by clearing
+    // the broken claim and returning retry_pending.
+    const [opExists] = await sql<{ bulk_operation_id: string }[]>`
+      SELECT bulk_operation_id FROM s6_bulk_operations
+      WHERE bulk_operation_id = ${existingClaim.bulk_operation_id}
+    `;
+    
+    if (opExists) {
+      return "already_running";
+    }
+    
+    // Op row doesn't exist - clear the orphan claim so it can be re-claimed
+    await sql`
+      UPDATE s6_reconcile_stage_claims
+      SET bulk_operation_id = NULL, claimed_at = now() - make_interval(mins => ${CLAIM_RECLAIM_MINUTES + 1})
+      WHERE chain_key = ${chainKey} AND stage = ${stage}
+    `;
+    return "retry_pending";
   }
   
   // Claim exists with NULL bulk_operation_id but is younger than threshold - retry later
@@ -400,20 +418,26 @@ export async function startReconcileBulkOperation(
 
     bulkOperationId = parsed.bulkOperationId;
 
-    // S25: Record bulk_operation_id on the claim after successful mutation
-    if (chainKey) {
-      await recordClaimBulkOperationId(sql, chainKey, kind, shop, bulkOperationId);
-    }
+    // S25: Record bulk_operation_id on the claim AND register the op atomically.
+    // If either fails, both are rolled back. This prevents the case where:
+    // - recordClaimBulkOperationId succeeds
+    // - registerBulkOperation fails
+    // - retry returns "already_running" (claim has op id)
+    // - but no s6_bulk_operations row exists, causing bulk_finish_unknown_op
+    await sql.begin(async (tx) => {
+      if (chainKey) {
+        await recordClaimBulkOperationId(tx, chainKey, kind, shop, bulkOperationId!);
+      }
+      await registerBulkOperation(
+        tx,
+        bulkOperationId!,
+        shop,
+        kind,
+        "reconcile",
+        kind
+      );
+    });
     mutationSucceeded = true;
-
-    await registerBulkOperation(
-      sql,
-      bulkOperationId,
-      shop,
-      kind,
-      "reconcile",
-      kind
-    );
 
     await markWebhookProcessed(
       sql,

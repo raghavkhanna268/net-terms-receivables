@@ -43,9 +43,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const status = String(typedPayload.status ?? "").toUpperCase();
 
   if (!bulkOperationId) {
-    console.warn(
-      "[webhooks.bulk_operations.finish] Missing admin_graphql_api_id"
-    );
+    const hash = await shopHash(shop);
+    safeLog("warn", "bulk_finish_missing_id", {
+      shopHash: hash,
+    });
     return new Response(null, { status: 200 });
   }
 
@@ -80,10 +81,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     }
 
     // S25: Mark that the finish webhook was received
+    // Shop filter ensures cross-shop mismatches are rejected
     await tx`
       UPDATE s6_bulk_operations
       SET finish_received_at = NOW()
       WHERE bulk_operation_id = ${bulkOperationId}
+        AND shop = ${shop}
     `;
 
     await sendBulkMessage(tx, {
@@ -99,13 +102,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   });
 
   if (result.duplicate) {
-    console.log("[webhooks.bulk_operations.finish] Duplicate, skipping");
+    const hash = await shopHash(shop);
+    safeLog("info", "bulk_finish_duplicate", {
+      shopHash: hash,
+    });
     return new Response(null, { status: 200 });
   }
 
-  console.log(
-    `[webhooks.bulk_operations.finish] Enqueued ${bulkType} bulk operation: ${bulkOperationId}`
-  );
+  const hash = await shopHash(shop);
+  safeLog("info", "bulk_finish_enqueued", {
+    shopHash: hash,
+    bulkType,
+  });
 
   return new Response(null, { status: 200 });
 };

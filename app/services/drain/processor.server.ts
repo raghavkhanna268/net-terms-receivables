@@ -1284,8 +1284,7 @@ async function processSyncQueue(
           queue: S6_QUEUES.SYNC,
           errorCode,
           shopHash: hash,
-          readCount: msg.read_ct,
-          willDlq: shouldDlq,
+          readCt: msg.read_ct,
         });
 
         if (shouldDlq) {
@@ -1349,8 +1348,7 @@ async function processSyncQueue(
         queue: S6_QUEUES.SYNC,
         errorCode,
         shopHash: hash,
-        readCount: msg.read_ct,
-        willDlq: msg.read_ct >= config.maxRetries,
+        readCt: msg.read_ct,
       });
 
       if (msg.read_ct >= config.maxRetries) {
@@ -1607,8 +1605,7 @@ async function processBulkQueue(
         queue: S6_QUEUES.BULK,
         errorCode,
         shopHash: hash,
-        readCount: msg.read_ct,
-        willDlq: msg.read_ct >= config.maxRetries,
+        readCt: msg.read_ct,
       });
 
       if (msg.read_ct >= config.maxRetries) {

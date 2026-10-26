@@ -919,7 +919,7 @@ export async function acquireProcessingLease(
 ): Promise<boolean> {
   const result = await sql`
     UPDATE s6_bulk_operations
-    SET processing_lease_until = now() + interval '${sql.unsafe(String(PROCESSING_LEASE_SECONDS))} seconds'
+    SET processing_lease_until = now() + make_interval(secs => ${PROCESSING_LEASE_SECONDS})
     WHERE bulk_operation_id = ${bulkOperationId}
       AND closed_at IS NULL
       AND (processing_lease_until IS NULL OR processing_lease_until < now())
@@ -1080,8 +1080,44 @@ export async function processBulkOperation(
 
   // S25: Use try/finally to ensure lease is ALWAYS released on any exit path
   try {
+  // S25: Re-load progress AFTER acquiring the lease to get the latest state.
+  // A concurrent processor could have modified progress between our initial check
+  // and lease acquisition. Re-verify completed_at, closed_at, and failure_count.
+  const freshProgress = await loadBulkOperationProgress(sql, bulkOperationId);
+  if (!freshProgress) {
+    return {
+      success: false,
+      action: "skipped",
+      error: `Bulk operation disappeared: ${bulkOperationId}`,
+      status: "error",
+      errorType: "permanent",
+    };
+  }
+
+  if (freshProgress.completedAt || freshProgress.closedAt) {
+    await markWebhookProcessed(
+      sql,
+      webhookId,
+      "BULK_OPERATIONS_FINISH",
+      bulkOperationId
+    );
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: freshProgress.closedAt
+        ? "Bulk operation closed (reinstall reset)"
+        : "Bulk operation already completed",
+      status: "complete",
+    };
+  }
+
+  // Use fresh progress for the rest of the function
+  const currentByteOffset = freshProgress.byteOffset;
+  const currentChunkSize = freshProgress.chunkSize;
+  const currentFailureCount = freshProgress.failureCount;
+
   // Check failure count - if already at max, this goes to DLQ
-  if (progress.failureCount >= MAX_FAILURE_COUNT) {
+  if (currentFailureCount >= MAX_FAILURE_COUNT) {
     return {
       success: false,
       action: "skipped",
@@ -1097,7 +1133,10 @@ export async function processBulkOperation(
 
   // S25: Handle empty results (COMPLETED with url null and objectCount 0)
   // Per Shopify docs: COMPLETED with url=null and objectCount=0 is a valid empty result
+  // @see https://shopify.dev/docs/apps/build/apis/graphql-admin/bulk-operations/queries
+  // "If the query produced no results, then the `url` field will return `null`."
   // Note: objectCount is UnsignedInt64 serialized as STRING in Shopify's JSON response
+  // @see https://shopify.dev/docs/api/admin-graphql/latest/scalars/unsignedint64
   if (statusResult.success && statusResult.data) {
     const { status, url, objectCount, partialDataUrl } = statusResult.data;
     const parsedObjectCount = objectCount != null ? Number(objectCount) : null;
@@ -1171,8 +1210,8 @@ export async function processBulkOperation(
   }
 
   const resultUrl = statusResult.data.url;
-  const startByteOffset = progress.byteOffset;
-  const currentChunkSize = progress.chunkSize;
+  // S25: Use fresh progress values loaded after lease acquired
+  const startByteOffset = currentByteOffset;
 
   // Fetch chunk starting from saved offset
   const chunkResult = await fetchJsonlChunk(
