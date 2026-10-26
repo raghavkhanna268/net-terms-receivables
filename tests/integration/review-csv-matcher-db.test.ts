@@ -29,12 +29,21 @@ import { join } from "path";
 import { sqlOptions } from "../../app/lib/db-light.server.js";
 import { parseBankStatement } from "../../app/lib/banks/index.js";
 import { runMatcher } from "../../app/services/matcher.server.js";
+import { CONFIDENCE_THRESHOLD } from "../../app/lib/matching/score.js";
 import { REVIEWER_DEMO_AMOUNTS, REVIEWER_DEMO_BUYER } from "../fixtures/reviewer-demo";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
+
+type ConfidenceBand = "high" | "medium" | "low";
+
+function getConfidenceBand(score: number): ConfidenceBand {
+  if (score >= CONFIDENCE_THRESHOLD) return "high";
+  if (score >= 50) return "medium";
+  return "low";
+}
 
 describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
   let sql: ReturnType<typeof postgres>;
@@ -176,7 +185,7 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
       invoiceId: string;
       invoiceName: string;
       score: number;
-      amount: number;
+      amount: string;
     }>>`
       SELECT 
         m."invoiceId" AS "invoiceId",
@@ -189,7 +198,10 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
         AND m.state = 'suggested'
       ORDER BY m.score DESC
     `;
-    return matches;
+    return matches.map((m) => ({
+      ...m,
+      amount: parseFloat(m.amount),
+    }));
   }
 
   it("seeds 3 credit payments from CSV v3", async () => {
@@ -223,6 +235,7 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
     const topMatch = matches[0];
     expect(topMatch.invoiceName).toBe("#1001");
     expect(topMatch.score).toBe(58);
+    expect(getConfidenceBand(topMatch.score)).toBe("medium");
     expect(topMatch.amount).toBe(10000);
   });
 
@@ -246,6 +259,7 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
     const topMatch = matches[0];
     expect(topMatch.invoiceName).toBe("#1002");
     expect(topMatch.score).toBe(58);
+    expect(getConfidenceBand(topMatch.score)).toBe("medium");
     expect(topMatch.amount).toBe(5000);
   });
 
@@ -269,6 +283,7 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
     const topMatch = matches[0];
     expect(topMatch.invoiceName).toBe("#1002");
     expect(topMatch.score).toBe(48);
+    expect(getConfidenceBand(topMatch.score)).toBe("low");
     expect(topMatch.amount).toBe(2500);
   });
 
