@@ -12,7 +12,11 @@
 
 | Person | Access Level | Notes |
 |--------|--------------|-------|
-| Raghav (Owner) | Full access to Supabase, Cloudflare, Sentry, Resend | [Raghav to confirm] |
+| Raghav (Owner) | Full access to Supabase, Cloudflare, GitHub, Shopify Partners | Proposed, pending owner review. Sentry and Resend not yet enabled. |
+
+**Proposed, pending owner review:** Admin access to each service is limited to the owner.
+- **Supabase:** [Unverified — Raghav to confirm]
+- **Shopify Partners:** [Unverified — Raghav to confirm]
 
 ### 1.2 Automated Access
 
@@ -21,8 +25,22 @@
 | Cloudflare Workers | Hyperdrive binding | Database read/write via connection string | Runtime DB access; pooled connections |
 | GitHub Actions CI | `DATABASE_URL_MIGRATIONS`, `DATABASE_URL_SESSION` | Prisma migrations; prod-diagnostics; prod-readonly-query; prod-backfill-dry-run; prod-credit-status-backfill-dry-run; sync-vault-secrets; seed-dev-store | CI tests use ephemeral local Postgres; listed workflows connect to production |
 | Shopify App | Offline access tokens | Per-shop scoped | Stored in `Session` table |
-| Resend | API key | Email sending | `RESEND_API_KEY` env var |
-| Sentry | DSN | Error reporting | `SENTRY_DSN` env var |
+| Resend | API key | Email sending | Not yet enabled (`RESEND_API_KEY` not set) |
+| Sentry | DSN | Error reporting | Not enabled (no `SENTRY_DSN`) |
+
+**Proposed, pending owner review:** AI automation bots operate via scoped API tokens in their own environments:
+- Cloudflare API token (Worker deployment)
+- GitHub fine-grained token (repository access)
+- Shopify Partner API token (Partner API access)
+- Shopify app automation token (app release)
+- Supabase access (database operations)
+
+**GitHub Actions Secrets (by name):**
+`AGE_RECIPIENT`, `ALLOWED_DEV_STORE`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `DATABASE_URL_MIGRATIONS`, `DATABASE_URL_SESSION`, `E2E_SHOP`, `JOBS_DRAIN_SECRET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SHOPIFY_PARTNER_API_TOKEN`.
+
+**Environment `shopify-release`:** `SHOPIFY_APP_AUTOMATION_TOKEN` (requires reviewer `raghavkhanna268`, main branch only).
+
+**Worker Secrets:** `JOBS_DRAIN_SECRET`, `REMINDER_UNSUBSCRIBE_SECRET`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`.
 
 ---
 
@@ -30,14 +48,7 @@
 
 ### 2.1 Two-Factor Authentication (2FA)
 
-| Service | 2FA Status | Notes |
-|---------|------------|-------|
-| GitHub | [Raghav to confirm] | Repository and Actions |
-| Shopify Partners | [Raghav to confirm] | App management |
-| Cloudflare | [Raghav to confirm] | Workers, Hyperdrive |
-| Supabase | [Raghav to confirm] | Database access |
-| Sentry | [Raghav to confirm] | Error monitoring |
-| Resend | [Raghav to confirm] | Email delivery |
+**Proposed, pending owner review:** 2FA status per account is not published in this public repository; it is tracked privately by the owner.
 
 ---
 
@@ -67,7 +78,7 @@ scopes = "read_draft_orders,read_payment_terms,write_companies,write_customers,w
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
-**Protected Customer Data:** `write_customers` (implies `read_customers`) requires Shopify PCD Level 1 approval plus Name and Email fields.
+**Protected Customer Data:** `write_customers` (implies `read_customers`) requires Shopify PCD approval, Level 2 (protected customer fields: Name, Email only).
 
 ---
 
@@ -154,7 +165,7 @@ Tests that mock `safeLog`, `toErrorCode`, or `shopHash` must be explicitly allow
 
 **Environment variable:** `CUSTOMER_PII_FIELDS`
 
-**Enabled in production** (`wrangler.jsonc:42`, PCD Level 1 + Name + Email per the comment at line 39).
+**Enabled in production** (`wrangler.jsonc:42`, PCD Level 2 (protected customer fields: Name, Email only) per the comment at line 39).
 
 When enabled (`"1"`), the app fetches and stores buyer email and display name in `s8_tagged_customers.email` and `s8_tagged_customers.display_name`.
 
@@ -178,7 +189,7 @@ When enabled (`"1"`), the app fetches and stores buyer email and display name in
 
 ### 5.3 Token Handling
 
-- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns; any at-rest encryption is provider-managed by Supabase at the storage layer [Raghav to confirm], not by the app. App-level encryption: not implemented (tracked in issue #266).
+- `Session.accessToken` (`prisma/schema.prisma:123`) and `Session.refreshToken` (`:132`) are stored as plain-text columns and are not encrypted by the app (app-level encryption: not implemented, tracked in issue #266). Supabase encrypts data at rest with AES-256 (provider-managed, per [Supabase security](https://supabase.com/security)).
 - Refresh token rotation handled by `app/lib/offline-token.server.ts`
 - Invalid tokens trigger `needsReauth` flag (`prisma/schema.prisma:136`) requiring merchant re-authentication
 

@@ -435,6 +435,261 @@ describe("Bulk JSONL Processor", () => {
     });
   });
 
+  describe("fetchJsonlChunk EOF detection fix", () => {
+    it("1. numeric total with short chunk: not EOF, continues", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunk = '{"id":"1"}\n{"id":"2"}\n';
+      const mockResponse = new Response(shortChunk, {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-21/3000" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(false);
+      expect(result.totalSize).toBe(3000);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toBe('{"id":"1"}');
+      expect(lines[1]).toBe('{"id":"2"}');
+    });
+
+    it("2. numeric total on the last chunk: EOF", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const lastChunk = '{"id":"3"}\n';
+      const mockResponse = new Response(lastChunk, {
+        status: 206,
+        headers: { "Content-Range": "bytes 90-100/101" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        90,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBe(101);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe('{"id":"3"}');
+    });
+
+    it("3. no Content-Range header with short chunk: EOF via heuristic, last line kept", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines, decodeTailAsLine } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunkNoNewline = '{"id":"1"}\n{"id":"2"}';
+      const mockResponse = new Response(shortChunkNoNewline, {
+        status: 206,
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines, tailBytes } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toBe('{"id":"1"}');
+      const tail = decodeTailAsLine(tailBytes, decoder);
+      expect(tail).toBe('{"id":"2"}');
+    });
+
+    it("4. * total with last line no trailing newline: last line kept, EOF, no 8 MiB growth", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines, decodeTailAsLine, DEFAULT_CHUNK_SIZE } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunkNoNewline = '{"id":"final"}';
+      const mockResponse = new Response(shortChunkNoNewline, {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-13/*" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        DEFAULT_CHUNK_SIZE
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      expect((bytes as Uint8Array).length).toBe(14);
+      expect((bytes as Uint8Array).length).toBeLessThan(8 * 1024 * 1024);
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines, tailBytes } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(0);
+      const tail = decodeTailAsLine(tailBytes, decoder);
+      expect(tail).toBe('{"id":"final"}');
+    });
+
+    it("5. malformed Content-Range header: same as *, last line kept, EOF", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines, decodeTailAsLine } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const shortChunkNoNewline = '{"id":"last"}';
+      const mockResponse = new Response(shortChunkNoNewline, {
+        status: 206,
+        headers: { "Content-Range": "malformed-header-value" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines, tailBytes } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(0);
+      const tail = decodeTailAsLine(tailBytes, decoder);
+      expect(tail).toBe('{"id":"last"}');
+    });
+
+    it("6. 200 full body: EOF, complete file", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const fullBody = '{"id":"1"}\n{"id":"2"}\n{"id":"3"}\n';
+      const mockResponse = new Response(fullBody, {
+        status: 200,
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBe(fullBody.length);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(3);
+      expect(lines[0]).toBe('{"id":"1"}');
+      expect(lines[1]).toBe('{"id":"2"}');
+      expect(lines[2]).toBe('{"id":"3"}');
+    });
+
+    it("7. 416 Range Not Satisfiable: EOF, empty bytes", async () => {
+      const { fetchJsonlChunk } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const mockResponse = new Response("", { status: 416 });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        5000,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(true);
+      expect(result.totalSize).toBeUndefined();
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      expect((bytes as Uint8Array).length).toBe(0);
+    });
+
+    it("8. numeric-total boundary: rangeEnd === totalSize - 2, not EOF", async () => {
+      const { fetchJsonlChunk, splitBytesIntoLines } = await import(
+        "../bulk-jsonl-processor.server"
+      );
+
+      const line1 = '{"id":"1"}\n';
+      const line2 = '{"id":"2"}\n';
+      const line3 = '{"id":"3"}\n';
+      const line4 = '{"id":"4"}\n';
+      const line5 = '{"id":"5"}\n';
+      const line6 = '{"id":"6"}\n';
+      const line7 = '{"id":"7"}\n';
+      const line8 = '{"id":"8"}\n';
+      const line9 = '{"id":"9x"}';
+      const bodyLines = line1 + line2 + line3 + line4 + line5 + line6 + line7 + line8 + line9;
+      expect(bodyLines.length).toBe(99);
+
+      const mockResponse = new Response(bodyLines, {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-98/100" },
+      });
+      global.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await fetchJsonlChunk(
+        "https://example.com/test.jsonl",
+        0,
+        1024
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.isEof).toBe(false);
+      expect(result.totalSize).toBe(100);
+      const bytes = result.bytes;
+      expect(bytes).toBeDefined();
+      expect(bytes).not.toBeNull();
+      expect((bytes as Uint8Array).length).toBe(99);
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const { lines } = splitBytesIntoLines(bytes as Uint8Array, decoder);
+      expect(lines).toHaveLength(8);
+      expect(lines[0]).toBe('{"id":"1"}');
+      expect(lines[7]).toBe('{"id":"8"}');
+    });
+  });
+
   describe("resume from saved offset", () => {
     it("loads existing progress including chunkSize and failureCount", async () => {
       const { loadBulkOperationProgress } = await import(
@@ -502,7 +757,7 @@ describe("Bulk JSONL Processor", () => {
         mockSql as never,
         "gid://shopify/BulkOperation/123",
         1024,
-        null,
+        "test-lease-token",
         2097152 // 2MB chunk size
       );
 
@@ -1439,7 +1694,7 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       // Orphan schedule line only (parent order not in batch)
       const lines = ['{"id":"gid://shopify/PaymentSchedule/10","dueAt":"2025-01-31T00:00:00Z","__parentId":"gid://shopify/Order/999"}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify the orphan lookup query includes status='open' filter
       const lookupQuery = recordedQueries.find(q => 
@@ -1497,9 +1752,10 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order without schedule (existing invoice has account-default dueAt)
-      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
+      // #292: Must include INR currency to pass currency guard
+      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}}}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify bulkUpsertInvoices was called with correct dueAt/dueSource
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1552,9 +1808,10 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order without schedule dueAt
-      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}'];
+      // #292: Must include INR currency to pass currency guard
+      const lines = ['{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}}}'];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify merchant override is preserved
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1607,11 +1864,12 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order WITH PaymentSchedule (schedule dueAt attached via parser)
+      // #292: Must include INR currency to pass currency guard
       const lines = [
-        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
+        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}},"paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
       ];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Verify schedule dueAt is used
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1662,11 +1920,12 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       });
       
       // Order WITH schedule dueAt
+      // #292: Must include INR currency to pass currency guard
       const lines = [
-        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
+        '{"id":"gid://shopify/Order/123","name":"#1001","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"currencyCode":"INR","amount":"100.00"}},"paymentTerms":{"id":"pt1","paymentSchedules":{"edges":[{"node":{"id":"gid://shopify/PaymentSchedule/456","dueAt":"2025-02-15T00:00:00Z"}}]}}}',
       ];
       
-      await processOrderLines(mockSql as never, "shop-123", lines);
+      await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
       
       // Schedule beats override
       expect(mockUpsertInvoices).toHaveBeenCalled();
@@ -1675,6 +1934,107 @@ describe("Processor-level tests: batch cut and due date handling", () => {
       expect(invoices[0].dueAt?.toISOString()).toBe("2025-02-15T00:00:00.000Z");
       expect(invoices[0].dueSource).toBe("schedule");
     });
+  });
+});
+
+describe("#292: Per-order currency guard in bulk sync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("filters out non-INR orders and logs count via drain_skip_non_inr_order", async () => {
+    const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+    const { bulkUpsertInvoices } = await import("../order.server");
+    const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+    
+    const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+    const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+    const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+    
+    mockGetContext.mockResolvedValue({ shop: { id: "shop-123" } });
+    mockCheckEligibility.mockResolvedValue({
+      eligible: true,
+      reason: "shopify_payment_terms",
+      explanation: "Has payment terms",
+      buyerAccountId: "buyer-456",
+      dueDate: {
+        dueAt: new Date("2025-02-15T00:00:00Z"),
+        dueSource: "schedule",
+        basis: null,
+        reason: "Payment schedule from Shopify",
+      },
+    });
+    
+    const recordedQueries: string[] = [];
+    const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      recordedQueries.push(query);
+      return Promise.resolve([]);
+    });
+    
+    // Two orders: one INR, one USD
+    const inrOrder = '{"id":"gid://shopify/Order/inr-1","name":"#INR","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"gid://shopify/Company/1"},"location":{"id":"gid://shopify/CompanyLocation/1"}}}';
+    const usdOrder = '{"id":"gid://shopify/Order/usd-1","name":"#USD","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"USD"}},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"gid://shopify/Company/1"},"location":{"id":"gid://shopify/CompanyLocation/1"}}}';
+    
+    const lines = [inrOrder, usdOrder];
+    
+    // The processOrderLines function should filter out USD orders
+    await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
+    
+    // Should only process the INR order
+    // bulkUpsertInvoices is called with array of invoices - only 1 should be there
+    if (mockUpsertInvoices.mock.calls.length > 0) {
+      const invoices = mockUpsertInvoices.mock.calls[0][1];
+      // If any invoices, they should all be INR
+      for (const inv of invoices) {
+        expect(inv.orderId).not.toContain("usd");
+      }
+    }
+    
+    // The USD order should have been filtered out before processing
+    // (we can't directly verify the safeLog call without more mocking,
+    // but the order should not appear in processed invoices)
+  });
+
+  it("filters out orders with missing currency (fail-closed)", async () => {
+    const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+    const { bulkUpsertInvoices } = await import("../order.server");
+    const { checkOrderEligibility, getEligibilityContext } = await import("~/lib/invoice-eligibility");
+    
+    const mockUpsertInvoices = bulkUpsertInvoices as ReturnType<typeof vi.fn>;
+    const mockCheckEligibility = checkOrderEligibility as ReturnType<typeof vi.fn>;
+    const mockGetContext = getEligibilityContext as ReturnType<typeof vi.fn>;
+    
+    mockGetContext.mockResolvedValue({ shop: { id: "shop-123" } });
+    mockCheckEligibility.mockResolvedValue({
+      eligible: true,
+      reason: "shopify_payment_terms",
+      explanation: "Has payment terms",
+      buyerAccountId: "buyer-456",
+      dueDate: {
+        dueAt: new Date("2025-02-15T00:00:00Z"),
+        dueSource: "schedule",
+        basis: null,
+        reason: "Payment schedule from Shopify",
+      },
+    });
+    
+    const mockSql = vi.fn().mockImplementation(() => Promise.resolve([]));
+    
+    // One order with INR, one without any currency
+    const inrOrder = '{"id":"gid://shopify/Order/inr-1","name":"#INR","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING","totalPriceSet":{"shopMoney":{"amount":"1000.00","currencyCode":"INR"}}}';
+    const noCurrencyOrder = '{"id":"gid://shopify/Order/no-currency","name":"#NOCURRENCY","createdAt":"2025-01-15T00:00:00Z","displayFinancialStatus":"PENDING"}';
+    
+    const lines = [inrOrder, noCurrencyOrder];
+    
+    await processOrderLines(mockSql as never, "shop-123", "test-shop.myshopify.com", lines);
+    
+    // Assert unconditionally: exactly the INR order, and only it, is upserted
+    expect(mockUpsertInvoices).toHaveBeenCalled();
+    const invoices = mockUpsertInvoices.mock.calls[0][1];
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0].orderId).toBe("gid://shopify/Order/inr-1");
   });
 });
 

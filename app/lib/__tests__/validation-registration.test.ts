@@ -1,9 +1,29 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ensureValidation } from "../validation-registration.server";
+import * as logServer from "../log.server";
 
 describe("validation-registration", () => {
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let safeLogSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    safeLogSpy = vi.spyOn(logServer, "safeLog");
+  });
+
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+    safeLogSpy.mockRestore();
+  });
+
   describe("ensureValidation", () => {
-    it("returns existing validation when already registered", async () => {
+    it("returns existing validation when already registered with matching title", async () => {
       const mockAdmin = {
         graphql: vi.fn().mockResolvedValue({
           json: () =>
@@ -17,7 +37,7 @@ describe("validation-registration", () => {
                         shopifyFunction: {
                           handle: "credit-check-validation",
                         },
-                        title: "Net Terms Credit Check",
+                        title: "Termwise Credit Check",
                         enabled: true,
                       },
                     },
@@ -34,7 +54,373 @@ describe("validation-registration", () => {
 
       expect(result.id).toBe("gid://shopify/Validation/123");
       expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("skipped");
+      expect(result.errCode).toBeUndefined();
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).not.toHaveBeenCalled();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("updates title when existing validation has old title", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/Validation/123",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validationUpdate: {
+                    validation: {
+                      id: "gid://shopify/Validation/123",
+                      title: "Termwise Credit Check",
+                    },
+                    userErrors: [],
+                  },
+                },
+              }),
+          }),
+      };
+
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(result.id).toBe("gid://shopify/Validation/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("updated");
+      expect(result.errCode).toBeUndefined();
+      expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
+
+      const updateCall = mockAdmin.graphql.mock.calls[1];
+      expect(updateCall[0]).toContain("validationUpdate");
+      expect(updateCall[1]).toEqual({
+        variables: {
+          id: "gid://shopify/Validation/123",
+          title: "Termwise Credit Check",
+        },
+      });
+      expect(safeLogSpy).not.toHaveBeenCalled();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("skips update when title already matches (0 update calls)", async () => {
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValueOnce({
+          json: () =>
+            Promise.resolve({
+              data: {
+                validations: {
+                  edges: [
+                    {
+                      node: {
+                        id: "gid://shopify/Validation/123",
+                        shopifyFunction: {
+                          handle: "credit-check-validation",
+                        },
+                        title: "Termwise Credit Check",
+                        enabled: true,
+                      },
+                    },
+                  ],
+                },
+              },
+            }),
+        }),
+      };
+
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(result.id).toBe("gid://shopify/Validation/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("skipped");
+      expect(mockAdmin.graphql).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).not.toHaveBeenCalled();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode when title update has userErrors with known code", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/Validation/123",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validationUpdate: {
+                    validation: null,
+                    userErrors: [
+                      { field: ["title"], message: "Title is invalid", code: "INVALID" },
+                    ],
+                  },
+                },
+              }),
+          }),
+      };
+
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(result.id).toBe("gid://shopify/Validation/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBe("INVALID");
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: "INVALID" },
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode 'unknown' when title update has userErrors without code", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/Validation/123",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validationUpdate: {
+                    validation: null,
+                    userErrors: [
+                      { field: ["title"], message: "Title is invalid" },
+                    ],
+                  },
+                },
+              }),
+          }),
+      };
+
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(result.id).toBe("gid://shopify/Validation/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBe("unknown");
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: "unknown" },
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode when title update has GraphQL errors with extensions.code", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/Validation/123",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                errors: [{ message: "Internal server error", extensions: { code: "INTERNAL_ERROR" } }],
+              }),
+          }),
+      };
+
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(result.id).toBe("gid://shopify/Validation/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBe("INTERNAL_ERROR");
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: "INTERNAL_ERROR" },
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode 'unknown' when title update has GraphQL errors without extensions.code", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/Validation/123",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                errors: [{ message: "Internal server error" }],
+              }),
+          }),
+      };
+
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(result.id).toBe("gid://shopify/Validation/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBe("unknown");
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: "unknown" },
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns failed with errCode 'error' when title update throws", async () => {
+      const mockAdmin = {
+        graphql: vi
+          .fn()
+          .mockResolvedValueOnce({
+            json: () =>
+              Promise.resolve({
+                data: {
+                  validations: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/Validation/123",
+                          shopifyFunction: {
+                            handle: "credit-check-validation",
+                          },
+                          title: "Old Title",
+                          enabled: true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              }),
+          })
+          .mockRejectedValueOnce(new Error("Network error")),
+      };
+
+      const result = await ensureValidation(
+        mockAdmin as Parameters<typeof ensureValidation>[0],
+      );
+
+      expect(result.id).toBe("gid://shopify/Validation/123");
+      expect(result.created).toBe(false);
+      expect(result.titleUpdate).toBe("failed");
+      expect(result.errCode).toBe("error");
+      expect(safeLogSpy).toHaveBeenCalledTimes(1);
+      expect(safeLogSpy).toHaveBeenCalledWith(
+        "warn",
+        "validation.title_update_failed",
+        { err: "error" },
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
     it("creates validation when not found", async () => {
@@ -61,7 +447,7 @@ describe("validation-registration", () => {
                       shopifyFunction: {
                         handle: "credit-check-validation",
                       },
-                      title: "Net Terms Credit Check",
+                      title: "Termwise Credit Check",
                       enabled: true,
                     },
                     userErrors: [],
@@ -77,15 +463,19 @@ describe("validation-registration", () => {
 
       expect(result.id).toBe("gid://shopify/Validation/456");
       expect(result.created).toBe(true);
+      expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
 
       const createCall = mockAdmin.graphql.mock.calls[1];
       expect(createCall[1]).toEqual({
         variables: {
           functionHandle: "credit-check-validation",
-          title: "Net Terms Credit Check",
+          title: "Termwise Credit Check",
         },
       });
+      expect(safeLogSpy).not.toHaveBeenCalled();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
     it("throws on query error", async () => {
@@ -202,7 +592,7 @@ describe("validation-registration", () => {
                       shopifyFunction: {
                         handle: "credit-check-validation",
                       },
-                      title: "Net Terms Credit Check",
+                      title: "Termwise Credit Check",
                       enabled: true,
                     },
                     userErrors: [],
@@ -218,7 +608,11 @@ describe("validation-registration", () => {
 
       expect(result.id).toBe("gid://shopify/Validation/456");
       expect(result.created).toBe(true);
+      expect(result.titleUpdate).toBe("skipped");
       expect(mockAdmin.graphql).toHaveBeenCalledTimes(2);
+      expect(safeLogSpy).not.toHaveBeenCalled();
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });
 });

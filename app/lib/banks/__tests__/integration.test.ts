@@ -815,3 +815,101 @@ describe("transaction validation", () => {
     }
   });
 });
+
+describe("HDFC parser dedupe-key stability", () => {
+  it("preserves raw refNo with leading zeros and produces stable dedupe keys", async () => {
+    // Synthetic HDFC CSV with zero-padded UPI ref and cheque ref
+    const csv = `HDFC BANK
+Account No: XXXXXX1234
+Statement Period: 01/02/2020 to 29/02/2020
+
+Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance
+03/02/20,UPI-SYNTHETIC VENDOR-vendor@synth-SYNT0001234-600000000001-UPI,0000600000000001,03/02/20,,50000.00,150000.00
+04/02/20,CHQ DEP-SYNTHETIC RETAILER-000654,000654,04/02/20,,75000.00,225000.00
+`;
+    const file = new File([csv], "hdfc-stability-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions.length).toBe(2);
+
+    // UPI transaction with zero-padded ref
+    const upiTxn = result.transactions.find((t) => t.parsed.rail === "UPI");
+    expect(upiTxn).toBeDefined();
+    expect(upiTxn!.refNo).toBe("0000600000000001");
+    expect(upiTxn!.parsed.utr).toBe("600000000001");
+    expect(upiTxn!.dedupeKey).toBe("utr:UPI:CR:600000000001");
+
+    // Cheque transaction with leading-zero ref
+    const chqTxn = result.transactions.find((t) => t.parsed.rail === "CHEQUE");
+    expect(chqTxn).toBeDefined();
+    expect(chqTxn!.refNo).toBe("000654");
+    expect(chqTxn!.dedupeKey.startsWith("sha256:")).toBe(true);
+    // Hardcoded hash computed from main's code
+    expect(chqTxn!.dedupeKey).toBe(
+      "sha256:33dd758200fdf7d8a542ac6d7fe7ec85b11156a485457b0b214be5bedc541fd6"
+    );
+  });
+});
+
+describe("ICICI parser real-layout handling", () => {
+  it("parses Value-Date-first header, wrapped narration, Legends footer, and CMS credit", async () => {
+    // Synthetic ICICI CSV matching real .xls layout:
+    // - Blank col A (spacer)
+    // - Value Date column (not Transaction Date)
+    // - Wrapped narration continuation row
+    // - Legends footer block (regression test for footer detection)
+    // - CMS credit with stable dedupe key
+    const csv = `,S No.,Value Date,Transaction Date,Cheque Number,Transaction Remarks,Withdrawal Amount(INR),Deposit Amount(INR),Balance(INR),
+,1,03/02/2020,03/02/2020,,UPI/SYNT VENDOR/syntvendor@oksynt/Payment for invoice,0.00,50000.00,150000.00,
+,2,04/02/2020,04/02/2020,,UPI/SYNT WHOLESALER/syntwholesaler/Order payment/SYNT BANK/600000000002/SYNT000001 with additional,0.00,25000.00,175000.00,
+,,,,,remarks text that wraps to next row,,,,
+,3,05/02/2020,05/02/2020,,CMS/ SYNT00123456/SYNT CORPORATE COLLECTIONS PVT LTD,0.00,100000.00,275000.00,
+,4,06/02/2020,06/02/2020,,UPI/SYNT STORE/syntstore.payments@oksynt/Purchase/SYNT CO-OP BANK/600000000003/SYNT000002,10000.00,0.00,265000.00,
+,Legends,,,,,,,
+,1. SYNT - Synthetic test legend entry,,,,,,,
+,2. TEST - Another synthetic legend,,,,,,,
+`;
+    const file = new File([csv], "icici-real-layout-test.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("ICICI");
+    // Should have 4 transactions (Legends rows should be detected as footer)
+    expect(result.transactions.length).toBe(4);
+
+    // First UPI credit
+    const upiTxn1 = result.transactions.find((t) => t.narration.includes("SYNT VENDOR"));
+    expect(upiTxn1).toBeDefined();
+    expect(upiTxn1!.parsed.rail).toBe("UPI");
+    expect(upiTxn1!.parsed.upiId).toBe("syntvendor@oksynt");
+
+    // Wrapped narration should be joined
+    const wrappedTxn = result.transactions.find((t) => t.narration.includes("SYNT WHOLESALER"));
+    expect(wrappedTxn).toBeDefined();
+    expect(wrappedTxn!.narration).toContain("remarks text that wraps to next row");
+    expect(wrappedTxn!.parsed.utr).toBe("600000000002");
+
+    // CMS credit
+    const cmsTxn = result.transactions.find((t) => t.parsed.rail === "CMS");
+    expect(cmsTxn).toBeDefined();
+    expect(cmsTxn!.narration).toContain("SYNT CORPORATE COLLECTIONS");
+    // CMS has no UTR, uses sha256 dedupe key
+    expect(cmsTxn!.dedupeKey.startsWith("sha256:")).toBe(true);
+    // Pinned sha256 key for CMS transaction
+    expect(cmsTxn!.dedupeKey).toBe(
+      "sha256:63e01aad390bd12b03727274f7865584f4d303888b0fadd3382ca883f81a549b"
+    );
+
+    // Legends footer should NOT appear in any transaction's narration
+    for (const txn of result.transactions) {
+      expect(txn.narration).not.toContain("Legends");
+      expect(txn.narration).not.toContain("Synthetic test legend");
+    }
+
+    // Debit transaction
+    const debitTxn = result.transactions.find((t) => t.direction === "DR");
+    expect(debitTxn).toBeDefined();
+    expect(debitTxn!.parsed.rail).toBe("UPI");
+    expect(debitTxn!.amountPaise).toBe(1000000); // 10000.00 INR
+  });
+});

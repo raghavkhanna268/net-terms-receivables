@@ -47,6 +47,15 @@
       "exposurePaise": "0",
       "updatedAt": "2026-10-23T00:00:00Z"
     },
+    "wrongSchemaVersionNotHeld": {
+      "schemaVersion": 999,
+      "currencyCode": "INR",
+      "hold": false,
+      "holdReasonCode": null,
+      "limitPaise": "10000000",
+      "exposurePaise": "0",
+      "updatedAt": "2026-10-23T00:00:00Z"
+    },
     "missingFields": {
       "schemaVersion": 1,
       "currencyCode": "INR"

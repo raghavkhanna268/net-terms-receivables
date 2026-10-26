@@ -2,6 +2,7 @@
 """Self-test for shopify_release_guards.py (no network, no secrets). Exits non-zero on failure."""
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,11 +57,43 @@ def edit(path, old, new):
     open(path, "w").write(s.replace(old, new, 1))
 
 
+def inject_toml_scope(path, scope):
+    """Insert scope at the front of the scopes value in shopify.app.toml (order-agnostic)."""
+    text = open(path).read()
+    m = re.search(r'(scopes\s*=\s*")([^"]*)', text)
+    assert m, "scopes line not found in toml"
+    existing = m.group(2)
+    new_scopes = scope + "," + existing if existing else scope
+    open(path, "w").write(text[:m.start(2)] + new_scopes + text[m.end(2):])
+
+
+def inject_wrangler_scope(path, scope):
+    """Insert scope at the front of the SCOPES value in wrangler.jsonc (order-agnostic)."""
+    text = open(path).read()
+    m = re.search(r'("SCOPES"\s*:\s*")([^"]*)', text)
+    assert m, "SCOPES line not found in wrangler"
+    existing = m.group(2)
+    new_scopes = scope + "," + existing if existing else scope
+    open(path, "w").write(text[:m.start(2)] + new_scopes + text[m.end(2):])
+
+
+def remove_wrangler_scope(path, scope):
+    """Remove a specific scope from the SCOPES value in wrangler.jsonc (order-agnostic)."""
+    text = open(path).read()
+    m = re.search(r'("SCOPES"\s*:\s*")([^"]*)', text)
+    assert m, "SCOPES line not found in wrangler"
+    scopes = [s.strip() for s in m.group(2).split(",") if s.strip()]
+    assert scope in scopes, f"scope {scope} not found in wrangler SCOPES"
+    scopes.remove(scope)
+    new_scopes = ",".join(scopes)
+    open(path, "w").write(text[:m.start(2)] + new_scopes + text[m.end(2):])
+
+
 # 3. Extra scope in toml fails.
-if scratch(lambda d: edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_products,read_draft_orders,')) == 0:
+if scratch(lambda d: inject_toml_scope(os.path.join(d, "shopify.app.toml"), "read_products")) == 0:
     fails.append("extra toml scope not failed")
 # 4. Wrangler mismatch fails.
-if scratch(lambda d: edit(os.path.join(d, "wrangler.jsonc"), ',write_validations"', '"')) == 0:
+if scratch(lambda d: remove_wrangler_scope(os.path.join(d, "wrangler.jsonc"), "write_validations")) == 0:
     fails.append("wrangler mismatch not failed")
 # 5. Other config file fails.
 if scratch(lambda d: open(os.path.join(d, "shopify.app.prod.toml"), "w").write("client_id = \"x\"\n")) == 0:
@@ -99,11 +132,11 @@ if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release
 if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9.4"', '"@shopify/cli": "^4.9.4"')) == 0:
     fails.append("unpinned CLI devDependency not failed")
 
-# 13. S24: Adding read_locations (a 9th scope outside the approved 8) fails.
+# 13. S24: Adding read_locations (a 10th scope outside the approved 9) fails.
 def add_read_locations(d):
     """Add read_locations to both files sequentially."""
-    edit(os.path.join(d, "shopify.app.toml"), 'scopes = "read_draft_orders,', 'scopes = "read_locations,read_draft_orders,')
-    edit(os.path.join(d, "wrangler.jsonc"), '"SCOPES": "read_draft_orders,', '"SCOPES": "read_locations,read_draft_orders,')
+    inject_toml_scope(os.path.join(d, "shopify.app.toml"), "read_locations")
+    inject_wrangler_scope(os.path.join(d, "wrangler.jsonc"), "read_locations")
 
 # Capture output to verify read_locations is named
 import io

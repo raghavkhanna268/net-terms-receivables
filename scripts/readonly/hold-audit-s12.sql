@@ -1,17 +1,17 @@
 -- hold-audit-s12.sql (READ-ONLY)
 -- Developer's S12 hold questions (Q1-Q6). SELECT only, inside a READ ONLY transaction.
--- Prints only ids, enums, booleans, timestamps and counts. Never selects
--- name, holdNote, emails, domains, money amounts, payloads or free-text JSON fields.
+-- Prints only enums, booleans, timestamps and counts. Never selects
+-- name, holdNote, emails, domains, money amounts, payloads, free-text JSON fields,
+-- or individual buyer/invoice/company IDs (QA 2 audit: aggregates only).
 -- Note: AuditEvent's timestamp column is "at" (no createdAt).
--- Var: since (ISO-8601 UTC, e.g. 2026-10-24T09:30:00Z)
+-- Vars:
+--   since (ISO-8601 UTC, e.g. 2026-10-24T09:30:00Z)
+-- Q4's location set is derived inside the SQL from COMPANY_LOCATIONS_DELETE webhooks.
 -- Output column kinds for passthrough columns (scripts/ci/check-readonly-columns.ts,
 -- see scripts/readonly/README.md). Derived counts/booleans/CASE enums need no entry.
--- @col holdState, type, status, proname: enum
+-- @col holdState, type, proname: enum
 -- @col manualHold, bypass, syncPending: boolean
--- @col syncVersion: count
 -- @col gated_at_pos: id
--- company_location_id is the numeric tail of the CompanyLocation gid (replace() strips the prefix).
--- @col company_location_id: id
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 
@@ -42,54 +42,93 @@ FROM "AuditEvent"
 WHERE at > (:'since')::timestamptz
 GROUP BY 1 ORDER BY 1;
 
-\echo '== Q3 hold released/cleared audit events since :since (id/enum JSON fields only)'
+\echo '== Q3 hold released/cleared audit events since :since (aggregated by type and reason)'
+-- QA 2 audit: individual event/buyer/invoice IDs removed; aggregated by type and reason.
 WITH ev AS (
-  SELECT e.id AS audit_event_id, e.type, e.at, e.actor,
-         e.data->>'buyerAccountId' AS buyer_account_id,
+  SELECT e.type,
+         CASE WHEN e.actor IN ('system','webhook') THEN e.actor ELSE '<user>' END AS actor_kind,
          COALESCE(e.data->>'reasonCode', e.data->>'holdReasonCode', e.data->>'reason_code') AS reason_code_unchecked,
-         e.data->>'source' AS source_unchecked
+         e.data->>'source' AS source_unchecked,
+         e.data->>'buyerAccountId' AS buyer_account_id
   FROM "AuditEvent" e
   WHERE e.at > (:'since')::timestamptz
     AND e.type ILIKE '%hold%'
     AND (e.type ILIKE '%releas%' OR e.type ILIKE '%clear%' OR e.type ILIKE '%lift%' OR e.type ILIKE '%remov%')
 )
-SELECT ev.audit_event_id, ev.type, ev.at,
-       CASE WHEN ev.actor IN ('system','webhook') THEN ev.actor ELSE '<user>' END AS actor_kind,
-       ev.buyer_account_id,
+SELECT ev.type, ev.actor_kind,
        CASE WHEN ev.reason_code_unchecked ~ '^[A-Za-z0-9_:-]{1,40}$' THEN ev.reason_code_unchecked END AS reason_code,
        CASE WHEN ev.source_unchecked ~ '^[A-Za-z0-9_:-]{1,40}$' THEN ev.source_unchecked END AS source,
-       i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0, (i."dueAt" IS NULL) AS due_at_is_null,
-       -- Invoice has no paidAt column; status='paid' + updatedAt is the closest signal
-       CASE WHEN i.status = 'paid' THEN i."updatedAt" END AS paid_status_updated_at
+       COUNT(*) AS event_count,
+       COUNT(DISTINCT ev.buyer_account_id) AS distinct_accounts,
+       COUNT(DISTINCT i.id) AS distinct_invoices,
+       COUNT(*) FILTER (WHERE i.outstanding > 0) AS outstanding_gt_0_count,
+       COUNT(*) FILTER (WHERE i."dueAt" IS NULL) AS due_at_is_null_count,
+       COUNT(*) FILTER (WHERE i.status = 'paid') AS paid_count
 FROM ev
 LEFT JOIN "Invoice" i ON i."buyerAccountId" = ev.buyer_account_id
-ORDER BY ev.at, ev.audit_event_id, i.id
-LIMIT 500;
+GROUP BY 1, 2, 3, 4
+ORDER BY 1, 2, 3, 4;
 
-\echo '== Q3b non-seed accounts updated since :since (state now + invoices); hold transitions are not audited in app code'
-SELECT ba.id AS buyer_account_id, ba."holdState", ba."manualHold", ba.bypass,
+\echo '== Q3b non-seed accounts updated since :since (aggregated by holdState); hold transitions are not audited in app code'
+-- QA 2 audit: individual buyer_account_id and invoice_id removed; aggregated by holdState.
+SELECT ba."holdState", ba."manualHold", ba.bypass,
        CASE WHEN ba."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN ba."holdReasonCode" END AS hold_reason_code,
-       ba."syncPending", ba."syncVersion", ba."updatedAt",
-       i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0, (i."dueAt" IS NULL) AS due_at_is_null,
-       i."dueAt", CASE WHEN i.status = 'paid' THEN i."updatedAt" END AS paid_status_updated_at
+       ba."syncPending",
+       COUNT(DISTINCT ba.id) AS account_count,
+       COUNT(DISTINCT i.id) AS invoice_count,
+       COUNT(*) FILTER (WHERE i.outstanding > 0) AS outstanding_gt_0_count,
+       COUNT(*) FILTER (WHERE i."dueAt" IS NULL) AS due_at_is_null_count,
+       COUNT(*) FILTER (WHERE i.status = 'paid') AS paid_count
 FROM "BuyerAccount" ba
 LEFT JOIN "Invoice" i ON i."buyerAccountId" = ba.id
 WHERE ba."updatedAt" > (:'since')::timestamptz
-ORDER BY ba."updatedAt", ba.id, i.id
-LIMIT 500;
+GROUP BY 1, 2, 3, 4, 5
+ORDER BY 1, 2, 3, 4, 5;
 
-\echo '== Q4 CompanyLocations 24539398309 / 24544084133: account + open invoices outstanding > 0'
-SELECT replace(ba."companyLocationId", 'gid://shopify/CompanyLocation/', '') AS company_location_id,
-       ba.id AS buyer_account_id, ba."holdState", ba."manualHold", ba.bypass,
-       ba."syncPending", ba."syncVersion", (ba.gated_at IS NOT NULL) AS gated,
-       i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0, i."dueAt",
-       NOW() - i."dueAt" AS past_due_by,
-       (i."dueAt" < NOW() - INTERVAL '1 day') AS more_than_1_day_past_due
-FROM "BuyerAccount" ba
+\echo '== Q4 Deleted CompanyLocations (from COMPANY_LOCATIONS_DELETE webhooks): aggregated account + invoice state'
+-- QA 2 audit: Location set derived inside SQL from COMPANY_LOCATIONS_DELETE webhook records.
+-- No psql variables or workflow dispatch inputs needed.
+-- Output is aggregated by holdState; no individual IDs are printed.
+WITH deleted_locations AS (
+  SELECT DISTINCT
+    CASE
+      WHEN w.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN w.resource_gid
+      ELSE 'gid://shopify/CompanyLocation/' || w.resource_gid
+    END AS company_location_gid
+  FROM s6_processed_webhooks w
+  WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
+  UNION
+  -- webhook_receipts has no resource column (PK shop, webhook_id; see
+  -- prisma/migrations/20261025010000_s20_webhook_receipts). The resource gid travels in the
+  -- s6_sync message (SyncMessage.resourceGid, app/lib/pgmq.server.ts), so join the edge
+  -- receipt to its message on (shop, webhookId), as redriven-webhook-receipts.sql does.
+  SELECT DISTINCT
+    CASE
+      WHEN m.message->>'resourceGid' LIKE 'gid://shopify/CompanyLocation/%' THEN m.message->>'resourceGid'
+      ELSE 'gid://shopify/CompanyLocation/' || (m.message->>'resourceGid')
+    END AS company_location_gid
+  FROM webhook_receipts wr
+  JOIN (
+    SELECT message FROM pgmq.a_s6_sync
+    UNION ALL
+    SELECT message FROM pgmq.q_s6_sync
+    UNION ALL
+    SELECT message FROM s6_dead_letter
+  ) m ON m.message->>'shop' = wr.shop AND m.message->>'webhookId' = wr.webhook_id
+  WHERE wr.topic = 'COMPANY_LOCATIONS_DELETE'
+    AND COALESCE(m.message->>'resourceGid', '') <> ''
+)
+SELECT ba."holdState", ba."manualHold", ba.bypass, ba."syncPending",
+       (ba.gated_at IS NOT NULL) AS gated,
+       COUNT(DISTINCT ba.id) AS account_count,
+       COUNT(DISTINCT i.id) AS invoice_count,
+       COUNT(*) FILTER (WHERE i.outstanding > 0) AS outstanding_gt_0_count,
+       COUNT(*) FILTER (WHERE i."dueAt" < NOW() - INTERVAL '1 day') AS more_than_1_day_past_due_count
+FROM deleted_locations dl
+JOIN "BuyerAccount" ba ON ba."companyLocationId" = dl.company_location_gid
 LEFT JOIN "Invoice" i ON i."buyerAccountId" = ba.id AND i.status = 'open' AND i.outstanding > 0
-WHERE ba."companyLocationId" IN ('gid://shopify/CompanyLocation/24539398309',
-                                 'gid://shopify/CompanyLocation/24544084133')
-ORDER BY 1, i."dueAt";
+GROUP BY 1, 2, 3, 4, 5
+ORDER BY 1, 2, 3, 4, 5;
 
 \echo '== Q5 enqueue_credit_status_recomputes: position of gated_at in prosrc (0 = #127 version)'
 SELECT proname, position('gated_at' in prosrc) AS gated_at_pos

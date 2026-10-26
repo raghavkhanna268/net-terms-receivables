@@ -597,4 +597,120 @@ describeWithDb("Draft Order Sync", () => {
       }
     });
   });
+
+  describe("#292 Per-draft-order currency guard", () => {
+    it("skips non-INR draft order (draft_order_currency_not_supported)", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/draft-${TEST_SUFFIX}-usd`,
+        name: "#USD-DRAFT",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        totalPriceSet: {
+          shopMoney: { amount: "5000.00", currencyCode: "USD" },
+        },
+        paymentTerms: {
+          id: "pt-usd",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processDraftOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "DRAFT_ORDERS_CREATE",
+        draftOrder,
+        `wh-draft-${TEST_SUFFIX}-usd`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("draft_order_currency_not_supported");
+
+      // Verify no record was created
+      const records = await sql`
+        SELECT * FROM s8_draft_orders WHERE draft_order_id = ${draftOrder.id}
+      `;
+      expect(records).toHaveLength(0);
+    });
+
+    it("skips draft order with missing currency (draft_order_currency_missing)", async () => {
+      const draftOrder: ShopifyDraftOrder = {
+        id: `gid://shopify/DraftOrder/draft-${TEST_SUFFIX}-nocurrency`,
+        name: "#NOCURRENCY-DRAFT",
+        createdAt: "2025-07-15T10:00:00.000Z",
+        paymentTerms: {
+          id: "pt-nocurrency",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+        },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_ID },
+          location: { id: TEST_LOCATION_ID },
+        },
+      };
+
+      const result = await processDraftOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "DRAFT_ORDERS_CREATE",
+        draftOrder,
+        `wh-draft-${TEST_SUFFIX}-nocurrency`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toBe("draft_order_currency_missing");
+
+      // Verify no record was created
+      const records = await sql`
+        SELECT * FROM s8_draft_orders WHERE draft_order_id = ${draftOrder.id}
+      `;
+      expect(records).toHaveLength(0);
+    });
+
+    it("DELETE still deletes regardless of currency", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/draft-${TEST_SUFFIX}-delete-nocurrency`;
+
+      // Create record first (would have been created when shop was INR)
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_ID}, '#D-DELETE', '15000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Delete with a draft order that has no currency (simulating shop switched away)
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#D-DELETE",
+        createdAt: "2025-07-15T10:00:00.000Z",
+      };
+
+      const result = await processDraftOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "DRAFT_ORDERS_DELETE",
+        draftOrder,
+        `wh-draft-${TEST_SUFFIX}-delete-nocurrency`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("deleted");
+
+      // Record should be gone
+      const records = await sql`
+        SELECT * FROM s8_draft_orders WHERE draft_order_id = ${draftOrderId}
+      `;
+      expect(records).toHaveLength(0);
+    });
+  });
 });

@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -115,6 +116,12 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
       DELETE FROM s18_global_sends 
       WHERE send_key = 'global' AND send_month = ${FIXED_MONTH_STR}
     `;
+
+    const allDomains = [TEST_SHOP_DOMAIN, OTHER_SHOP_DOMAIN];
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN ${sql(allDomains)}`;
+
+    await assertNoQueueLeftovers(sql, allDomains, "reminders-optout-send-db.test.ts");
+
     await sql.end();
   });
 
@@ -146,6 +153,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceId = `inv-optout-send-${TEST_SUFFIX}`;
@@ -218,6 +226,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceId = `inv-not-optout-${TEST_SUFFIX}`;
@@ -276,6 +285,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceId = `inv-catchup-optout-${TEST_SUFFIX}`;
@@ -348,6 +358,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceId = `inv-reenable-${TEST_SUFFIX}`;
@@ -565,6 +576,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceId = `inv-headers-${TEST_SUFFIX}`;
@@ -621,6 +633,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceId = `inv-catchup-headers-${TEST_SUFFIX}`;
@@ -686,6 +699,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         RESEND_FROM: "noreply@test-reminders.example",
         REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
         SHOPIFY_APP_URL: "https://example.com",
+        RESEND_TEST_RECIPIENTS: "optout-buyer@test-reminders.example,other-buyer@test-reminders.example",
       };
 
       const invoiceIdA = `inv-shop-a-${TEST_SUFFIX}`;

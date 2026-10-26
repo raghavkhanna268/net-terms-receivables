@@ -4,6 +4,7 @@ api_version = "2026-10"
 name = "Hide Terms for Held Accounts"
 handle = "hide-terms-payment"
 type = "function"
+uid = "12518dd2-a186-d5c4-d77a-0fbd4538a75adc2befe5"
 
   [[extensions.targeting]]
   target = "cart.payment-methods.transform.run"

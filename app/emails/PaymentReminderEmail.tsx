@@ -125,7 +125,7 @@ export function renderPaymentReminderEmail(
                 For questions about this invoice, please contact <strong>${escapeHtml(merchantName)}</strong>.
               </p>
               <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center;">
-                This is an automated reminder from Net Terms Receivables.
+                This is an automated reminder from Termwise.
               </p>
             </td>
           </tr>

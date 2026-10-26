@@ -68,13 +68,10 @@ vi.mock("~/services/compliance", () => ({
 }));
 
 const mockGraphql = vi.fn();
-const mockUnauthenticatedAdmin = vi.fn();
-vi.mock("~/shopify.server", () => ({
-  getShopifyApp: () => ({
-    unauthenticated: {
-      admin: mockUnauthenticatedAdmin,
-    },
-  }),
+const mockAdmin = { graphql: mockGraphql };
+const mockGetOfflineAdminContext = vi.fn();
+vi.mock("~/lib/offline-admin.server", () => ({
+  getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
 }));
 
 function createMockActionArgs(
@@ -102,18 +99,26 @@ describe("webhooks.compliance", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Set required env vars for getOfflineAdminContext and webhook verification
+    process.env = {
+      ...originalEnv,
+      SHOPIFY_API_KEY: "test-api-key",
+      SHOPIFY_API_SECRET: "test-secret",
+    };
     mockDeleteAllForShop.mockResolvedValue(0);
     mockRecordWebhookReceipt.mockResolvedValue(true);
     mockParseTriggeredAt.mockReturnValue(null);
     mockDeleteWebhookReceiptsForShop.mockResolvedValue(0);
-    // Mock unauthenticated.admin to return shop email
+    // Mock getOfflineAdminContext to return admin client with shop email
     mockGraphql.mockResolvedValue({
       json: async () => ({ data: { shop: { email: "owner@shop.com", contactEmail: null } } }),
     });
-    mockUnauthenticatedAdmin.mockResolvedValue({ admin: { graphql: mockGraphql } });
+    mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
     mockDeleteShop.mockResolvedValue({
       deleted: true,
       shopId: "shop-123",
+      skippedReinstalled: false,
+      sessionsDeleted: 0,
       refetchNullPurged: 0,
       bulkOperationsPurged: 0,
       orderGapPurged: 0,
@@ -123,6 +128,8 @@ describe("webhooks.compliance", () => {
       pgmqSyncArchivePurged: 0,
       pgmqBulkArchivePurged: 0,
       deadLetterPurged: 0,
+      processedWebhooksPurged: 0,
+      webhookReceiptsPurged: 0,
     });
     mockPurgePgmqMessages.mockResolvedValue({ purged: false, reason: "deleteShop handles it" });
     mockRedactCustomer.mockResolvedValue({
@@ -142,7 +149,6 @@ describe("webhooks.compliance", () => {
     mockPersistDataRequest.mockResolvedValue({ id: "dr-1", alreadyExists: false });
     mockPurgeExpiredDataRequests.mockResolvedValue(0);
     mockSendDataRequestNotification.mockResolvedValue({ sent: false, skippedReason: "no_api_key" });
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
   });
 
   afterEach(() => {
@@ -487,7 +493,12 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockUnauthenticatedAdmin).toHaveBeenCalledWith("test-shop.myshopify.com");
+      expect(mockGetOfflineAdminContext).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-shop.myshopify.com",
+        "test-api-key",
+        "test-secret"
+      );
       expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
         "test-shop.myshopify.com",
         "owner@shop.com",
@@ -528,10 +539,48 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
     });
 
+    it("skips email when getOfflineAdminContext throws (DB/lock error)", async () => {
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      // Mock getOfflineAdminContext throwing (DB error, lock error, rethrown unexpected error)
+      mockGetOfflineAdminContext.mockRejectedValueOnce(new Error("DB connection failed"));
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const payload = {
+        shop_domain: "test-shop.myshopify.com",
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-shop.myshopify.com",
+        topic: "customers/data_request",
+        webhookId: "test-webhook",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      // Must return 200 even when getOfflineAdminContext throws
+      expect(response.status).toBe(200);
+      expect(mockPersistDataRequest).toHaveBeenCalled();
+      expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("data_request_email_skipped")
+      );
+      consoleSpy.mockRestore();
+    });
+
     it("skips email when shop email cannot be fetched", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
       // Mock admin API failure
-      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("No session"));
+      mockGetOfflineAdminContext.mockResolvedValueOnce({ success: false, errorCode: "no_session", retryable: false });
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       const payload = {
@@ -699,7 +748,24 @@ describe("webhooks.compliance", () => {
     });
 
     it("deletes sessions and the Shop row (cascade deletes all data)", async () => {
-      mockDeleteAllForShop.mockResolvedValue(3);
+      // Session deletion is now handled inside deleteShop
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 3,
+        refetchNullPurged: 1,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
 
       const payload = { shop_domain: "test-shop.myshopify.com", shop_id: 123 };
 
@@ -722,18 +788,20 @@ describe("webhooks.compliance", () => {
 
       expect(response.status).toBe(200);
       expect(mockVerifyPayloadShopMatch).toHaveBeenCalledWith("test-shop.myshopify.com", payload);
-      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-shop.myshopify.com");
+      // Session deletion is now inside deleteShop, not via sessionStorage
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalledWith(
         expect.anything(),
         "test-shop.myshopify.com"
       );
     });
 
-    it("returns 200 even when no sessions exist (idempotent)", async () => {
-      mockDeleteAllForShop.mockResolvedValue(0);
+    it("returns 200 even when shop not found (idempotent)", async () => {
       mockDeleteShop.mockResolvedValue({
         deleted: false,
         shopId: null,
+        skippedReinstalled: false,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -743,6 +811,8 @@ describe("webhooks.compliance", () => {
         pgmqSyncArchivePurged: 0,
         pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
       });
 
       const payload = { shop_domain: "test-no-sessions-shop.myshopify.com", shop_id: 999 };
@@ -765,7 +835,8 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockDeleteAllForShop).toHaveBeenCalledWith("test-no-sessions-shop.myshopify.com");
+      // Session deletion is handled inside deleteShop
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).toHaveBeenCalled();
     });
 
@@ -844,6 +915,103 @@ describe("webhooks.compliance", () => {
       expect(mockDeleteAllForShop).not.toHaveBeenCalled();
       expect(mockDeleteShop).not.toHaveBeenCalled();
     });
+
+    it("returns 200 and skips deletion when shop reinstalled (uninstalledAt is NULL)", async () => {
+      // deleteShop returns skippedReinstalled=true, sessions not deleted
+      mockDeleteShop.mockResolvedValue({
+        deleted: false,
+        shopId: "shop-reinstalled-123",
+        skippedReinstalled: true,
+        sessionsDeleted: 0,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: "test-reinstalled.myshopify.com", shop_id: 123 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-reinstalled.myshopify.com",
+        topic: "shop/redact",
+        webhookId: "test-webhook-reinstalled",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      // Session deletion is now handled inside deleteShop, not in route
+      // On skip path, mockDeleteAllForShop should NOT be called
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
+      expect(mockDeleteShop).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-reinstalled.myshopify.com"
+      );
+    });
+
+    it("deletes sessions via deleteShop when shop is erased (not reinstalled)", async () => {
+      // deleteShop returns deleted=true, sessions deleted
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-erase-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 2,
+        refetchNullPurged: 1,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: "test-erase.myshopify.com", shop_id: 456 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-erase.myshopify.com",
+        topic: "shop/redact",
+        webhookId: "test-webhook-erase",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      expect(response.status).toBe(200);
+      // Session deletion is handled inside deleteShop, not in route
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
+      expect(mockDeleteShop).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-erase.myshopify.com"
+      );
+    });
   });
 
   describe("context injection", () => {
@@ -851,8 +1019,26 @@ describe("webhooks.compliance", () => {
       mockVerifyPayloadShopMatch.mockImplementation((headerShop: string) => headerShop);
     });
 
-    it("uses sessionStorage from context (not module-level state)", async () => {
-      mockDeleteAllForShop.mockResolvedValue(1);
+    it("shop/redact no longer uses sessionStorage (sessions deleted inside deleteShop)", async () => {
+      // Session deletion was moved from the route into deleteShop's transaction
+      // to ensure sessions are only deleted when shop is actually erased (#291)
+      mockDeleteShop.mockResolvedValue({
+        deleted: true,
+        shopId: "shop-context-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 1,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
       const payload = { shop_domain: "test-context.myshopify.com" };
 
       mockVerifyWebhook.mockResolvedValue({
@@ -871,7 +1057,9 @@ describe("webhooks.compliance", () => {
 
       await action(createMockActionArgs(request));
 
-      expect(mockDeleteAllForShop).toHaveBeenCalled();
+      // sessionStorage.deleteAllForShop should NOT be called in the route
+      expect(mockDeleteAllForShop).not.toHaveBeenCalled();
+      expect(mockDeleteShop).toHaveBeenCalled();
     });
   });
 
@@ -1086,7 +1274,7 @@ describe("webhooks.compliance", () => {
 
     it("CUSTOMERS_DATA_REQUEST email skipped (no shop email) path logs no shop domain", async () => {
       mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
-      mockUnauthenticatedAdmin.mockRejectedValueOnce(new Error("No session"));
+      mockGetOfflineAdminContext.mockResolvedValueOnce({ success: false, errorCode: "no_session", retryable: false });
 
       const payload = {
         shop_domain: TEST_SHOP,
@@ -1184,10 +1372,11 @@ describe("webhooks.compliance", () => {
     });
 
     it("SHOP_REDACT success path logs no shop domain", async () => {
-      mockDeleteAllForShop.mockResolvedValue(3);
       mockDeleteShop.mockResolvedValue({
         deleted: true,
         shopId: "shop-del-123",
+        skippedReinstalled: false,
+        sessionsDeleted: 3,
         refetchNullPurged: 1,
         bulkOperationsPurged: 1,
         orderGapPurged: 1,
@@ -1197,6 +1386,8 @@ describe("webhooks.compliance", () => {
         pgmqSyncArchivePurged: 1,
         pgmqBulkArchivePurged: 1,
         deadLetterPurged: 1,
+        processedWebhooksPurged: 1,
+        webhookReceiptsPurged: 1,
       });
 
       const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
@@ -1220,11 +1411,12 @@ describe("webhooks.compliance", () => {
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
     });
 
-    it("SHOP_REDACT shop not found path logs no shop domain", async () => {
-      mockDeleteAllForShop.mockResolvedValue(0);
+    it("SHOP_REDACT skipped reinstall path logs shop_redact_skipped_reinstalled with shopHash only, no domain", async () => {
       mockDeleteShop.mockResolvedValue({
         deleted: false,
-        shopId: null,
+        shopId: "shop-reinstalled-456",
+        skippedReinstalled: true,
+        sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
         orderGapPurged: 0,
@@ -1234,6 +1426,48 @@ describe("webhooks.compliance", () => {
         pgmqSyncArchivePurged: 0,
         pgmqBulkArchivePurged: 0,
         deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
+      });
+
+      const payload = { shop_domain: TEST_SHOP, shop_id: 123 };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "shop/redact",
+        webhookId: "wh-shop-redact-reinstalled",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+      expect(response.status).toBe(200);
+      expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
+    });
+
+    it("SHOP_REDACT shop not found path logs no shop domain", async () => {
+      mockDeleteShop.mockResolvedValue({
+        deleted: false,
+        shopId: null,
+        skippedReinstalled: false,
+        sessionsDeleted: 0,
+        refetchNullPurged: 0,
+        bulkOperationsPurged: 0,
+        orderGapPurged: 0,
+        piiFallbackPurged: 0,
+        pgmqSyncQueuePurged: 0,
+        pgmqBulkQueuePurged: 0,
+        pgmqSyncArchivePurged: 0,
+        pgmqBulkArchivePurged: 0,
+        deadLetterPurged: 0,
+        processedWebhooksPurged: 0,
+        webhookReceiptsPurged: 0,
       });
 
       const payload = { shop_domain: TEST_SHOP, shop_id: 123 };

@@ -8,7 +8,7 @@
 > - SELECT-only, inside `BEGIN TRANSACTION READ ONLY … ROLLBACK`. Run it with `PGOPTIONS="-c default_transaction_read_only=on"` too, the same as #75.
 > - Every query is scoped to one shop (`:'shop'` domain, resolved to `:'shop_id'`). The one exception is `pgmq.metrics_all()` in the manual step M3, which is global by design.
 > - **No customer PII (DPDP minimisation).** The script never selects `email`, `display_name`, `BuyerAccount.name`, `Invoice.name`, `Payment.payerText`, `Payment.narration`, `PayerAlias.payerKey`, DLQ `error` text or message bodies. Error text is only classified with `LIKE` into fixed labels. The seed company names appear only in `WHERE` clauses, to find seeded rows. They are synthetic business names from `scripts/seed.ts`, and they are never output.
-> - PCD policy is Level 1 plus email and name. Nothing here reads phone or address, and none of it is echoed.
+> - PCD policy is Level 2 (protected customer fields: Name, Email only). Nothing here reads phone or address, and none of it is echoed.
 > - All fixtures referenced here are **synthetic**: seed `.example` contacts, `ntr-seed-net*` tags, and `tests/fixtures/banks/synthetic/*.csv`.
 > - **Placeholders** look like `<LIKE_THIS>`. They mark values that can't be read from the code. Fill them in from DevOps logs or the pre-redrive diagnostics. Don't guess them.
 

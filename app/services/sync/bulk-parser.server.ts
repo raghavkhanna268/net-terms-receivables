@@ -243,17 +243,23 @@ function attachScheduleToOrder(
 /**
  * Convert bulk CompanyLocation line to full ShopifyCompanyLocation format.
  *
+ * mainContact is on Company, not Location. Pass the company's mainContact to attach
+ * it to the location's company reference (B2B recipient is the company's main contact).
+ *
  * @param location - Bulk line data
+ * @param companyMainContact - Optional mainContact from the parent Company line
  * @returns Full ShopifyCompanyLocation for sync processing
  */
 export function bulkLocationToShopifyLocation(
-  location: BulkCompanyLocationLine
+  location: BulkCompanyLocationLine,
+  companyMainContact?: BulkCompanyLine["mainContact"]
 ): ShopifyCompanyLocation {
   return {
     id: location.id,
     name: location.name,
     company: {
       id: location.__parentId,
+      mainContact: companyMainContact,
     },
     billingAddress: location.billingAddress,
     buyerExperienceConfiguration: location.buyerExperienceConfiguration,

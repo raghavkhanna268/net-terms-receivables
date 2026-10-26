@@ -15,7 +15,7 @@ This section maps public privacy policy data categories to internal database tab
 | s8_tagged_customers | Customer GID, tags, tag_active, email*, displayName* | 2.3 Tagged Customer Data |
 | s8_draft_orders | Draft order GID, buyer account ref, total, status | 2.3 Tagged Customer Data |
 
-*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Protected Customer Data (PCD) approval. Level 1 + Name and Email fields have been requested in the Partner Dashboard; the fields remain NULL until approval is granted and the flag is enabled.
+*Email and displayName are **gated** by `CUSTOMER_PII_FIELDS=1` env var, which requires Protected Customer Data (PCD) approval. Level 2 (protected customer fields: Name, Email only): request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing. As of 26 Oct. The fields remain NULL until approval and the flag is enabled.
 
 **PII Minimisation (S22):** When a tagged customer becomes `tag_active=false` and has no open invoices, their email and displayName are automatically nulled.
 
@@ -97,6 +97,11 @@ Implementation details for data export:
 - **NO customer PII** is included in the email (no GID, email, name, or tags)
 - Shop owner email is fetched via Admin API (`shop { email contactEmail }`) using the app's offline session at send time and **never stored or logged**
 - If `RESEND_API_KEY` or `RESEND_FROM` is not set, email is skipped and logged as `data_request_email_skipped`
+- Pre-launch recipient allowlist guard: when `RESEND_RECIPIENT_ALLOWLIST_ENFORCED` is not exactly `"false"` (default: enforced), the allowlist blocks sends:
+  - If `RESEND_TEST_RECIPIENTS` is empty/unset, email is skipped with reason `recipient_allowlist_empty`
+  - If recipient is not in `RESEND_TEST_RECIPIENTS` allowlist, email is skipped with reason `recipient_not_allowlisted`
+- When `RESEND_RECIPIENT_ALLOWLIST_ENFORCED=false`, the allowlist guard is disabled and all recipients are allowed
+- **No diagnostics output exists for this flag** (Actions cannot read Worker secret values). Verification at the launch flip is a live send to a non-allowlisted test inbox, performed by DevOps after setting the flag to exactly `"false"`, and only with owner approval. The flag stays enforced until then.
 - Resend API failures do not fail the webhook (still returns 200, logs status code only, export still available)
 
 ### `customers/redact` Handler
@@ -260,7 +265,7 @@ The app performs nightly reconciliation to ensure local ledger consistency with 
 
 When enabled:
 - `s8_tagged_customers.email` and `s8_tagged_customers.displayName` are populated from Shopify
-- Requires Shopify PCD approval (Level 1 + Name and Email fields)
+- Requires Shopify PCD approval, Level 2 (protected customer fields: Name, Email only)
 
 When disabled or unset:
 - Email and displayName fields remain NULL

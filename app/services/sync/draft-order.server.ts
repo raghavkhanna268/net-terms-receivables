@@ -22,6 +22,8 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { ShopifyDraftOrder, SyncResult } from "./types";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
+import { SUPPORTED_SHOP_CURRENCY } from "~/lib/shop-currency.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * Process a DraftOrder webhook event.
@@ -68,8 +70,23 @@ export async function processDraftOrderWebhook(
   const shopId = shop.id;
 
   // Handle DELETE: remove the draft order record
+  // Currency guard not needed for delete - we want to remove records regardless of currency
   if (topic === "DRAFT_ORDERS_DELETE") {
     return await deleteDraftOrder(sql, shopId, draftOrder.id, webhookId);
+  }
+
+  // #292: Per-draft-order currency guard - skip drafts with missing or non-INR currency
+  // Draft orders created before the shop switched to INR should not be stored as INR amounts
+  const draftCurrency = draftOrder.totalPriceSet?.shopMoney?.currencyCode;
+  if (!draftCurrency || draftCurrency !== SUPPORTED_SHOP_CURRENCY) {
+    const hash = await shopHash(shopDomain);
+    safeLog("info", "drain_skip_non_inr_draft_order", { shopHash: hash, count: 1 });
+    await markWebhookProcessed(sql, webhookId, topic, draftOrder.id);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: draftCurrency ? "draft_order_currency_not_supported" : "draft_order_currency_missing",
+    };
   }
 
   // Skip draft orders without payment terms

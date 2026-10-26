@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { sendBulkMessage } from "~/lib/pgmq.server";
 import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
+import { safeLog, shopHash } from "~/lib/log.server";
 
 /**
  * Webhook handler for bulk operation completion.
@@ -39,18 +40,22 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   };
 
   const bulkOperationId = typedPayload.admin_graphql_api_id;
+  const status = String(typedPayload.status ?? "").toUpperCase();
 
   if (!bulkOperationId) {
-    console.warn(
-      `[webhooks.bulk_operations.finish] Missing admin_graphql_api_id wh=${webhookId}`
-    );
+    const hash = await shopHash(shop);
+    safeLog("warn", "bulk_finish_missing_id", {
+      shopHash: hash,
+    });
     return new Response(null, { status: 200 });
   }
 
-  if (typedPayload.status !== "COMPLETED") {
-    console.log(
-      `[webhooks.bulk_operations.finish] Ignoring non-completed operation: ${typedPayload.status} wh=${webhookId}`
-    );
+  if (status !== "COMPLETED") {
+    const hash = await shopHash(shop);
+    safeLog("info", "bulk_finish_ignored_status", {
+      shopHash: hash,
+      status,
+    });
     return new Response(null, { status: 200 });
   }
 
@@ -60,18 +65,29 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const bulkType = await lookupBulkOperationType(sql, bulkOperationId);
 
   if (!bulkType) {
-    console.warn(
-      `[webhooks.bulk_operations.finish] Unknown bulk operation ${bulkOperationId} wh=${webhookId}, skipping`
-    );
+    const hash = await shopHash(shop);
+    safeLog("warn", "bulk_finish_unknown_op", {
+      shopHash: hash,
+    });
     return new Response(null, { status: 200 });
   }
 
   // S20: Edge idempotency + enqueue in ONE transaction
+  // S25: Also set finish_received_at for exactly-once tracking
   const result = await sql.begin(async (tx) => {
     const isNew = await recordWebhookReceipt(tx, shop, webhookId, "BULK_OPERATIONS_FINISH", triggeredAt);
     if (!isNew) {
       return { duplicate: true };
     }
+
+    // S25: Mark that the finish webhook was received
+    // Shop filter ensures cross-shop mismatches are rejected
+    await tx`
+      UPDATE s6_bulk_operations
+      SET finish_received_at = NOW()
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND shop = ${shop}
+    `;
 
     await sendBulkMessage(tx, {
       topic,
@@ -86,13 +102,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   });
 
   if (result.duplicate) {
-    console.log(`[webhooks.bulk_operations.finish] Duplicate wh=${webhookId}, skipping`);
+    const hash = await shopHash(shop);
+    safeLog("info", "bulk_finish_duplicate", {
+      shopHash: hash,
+    });
     return new Response(null, { status: 200 });
   }
 
-  console.log(
-    `[webhooks.bulk_operations.finish] Enqueued ${bulkType} bulk operation wh=${webhookId}: ${bulkOperationId}`
-  );
+  const hash = await shopHash(shop);
+  safeLog("info", "bulk_finish_enqueued", {
+    shopHash: hash,
+    bulkType,
+  });
 
   return new Response(null, { status: 200 });
 };

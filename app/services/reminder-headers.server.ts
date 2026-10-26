@@ -22,10 +22,12 @@ import {
 
 /**
  * Headers object for Resend's send-email API headers field.
+ * Includes index signature for compatibility with Record<string, string>.
  */
 export interface UnsubscribeHeaders {
   "List-Unsubscribe": string;
   "List-Unsubscribe-Post": string;
+  [key: string]: string;
 }
 
 /**

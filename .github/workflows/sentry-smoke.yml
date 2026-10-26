@@ -1,0 +1,67 @@
+# Sentry live check
+#
+# Sends ONE synthetic Sentry event (fixed message "ntr-sentry-smoke", tag
+# smoke_id=<run id>). Delivery is confirmed from the ingest response (HTTP 200
+# plus a returned event id). The current SENTRY_AUTH_TOKEN cannot read events
+# (403), so there is NO API-side read confirmation (api_read=unavailable).
+#
+# SAFETY (Actions logs are public):
+#   - Manual trigger only (workflow_dispatch), main branch only, no inputs
+#   - No PII, shop, user or request data in the event (scripts/ops/sentry-smoke.ts)
+#   - Output is one line of booleans/counts/enums only:
+#       sent=<bool> ingest_ok=<bool> event_id_returned=<bool> api_read=unavailable
+#       (api_read=ok adds arrived=<bool> event_count=<n> if the token can read)
+#   - The DSN, host, key, org/project ids and the event id are never printed
+
+name: Sentry Smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentry-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Send and verify synthetic event
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout (smoke script)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          sparse-checkout: |
+            scripts/ops/sentry-smoke.ts
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+
+      - name: Check required secrets
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          dsn_set=false; token_set=false
+          [ -n "$SENTRY_DSN" ] && dsn_set=true
+          [ -n "$SENTRY_AUTH_TOKEN" ] && token_set=true
+          echo "dsn_set=$dsn_set auth_token_set=$token_set"
+          if [ "$dsn_set" != "true" ]; then
+            echo "::error::SENTRY_DSN secret is not set"
+            exit 1
+          fi
+
+      - name: Send and verify
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SMOKE_ID: ${{ github.run_id }}
+        run: node --experimental-strip-types scripts/ops/sentry-smoke.ts

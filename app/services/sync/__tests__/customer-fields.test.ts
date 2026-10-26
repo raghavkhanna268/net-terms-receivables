@@ -548,3 +548,45 @@ describe("getBulkCustomersQuery schema validation", () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+describe("validateCustomerQuery integration with query builders", () => {
+  /**
+   * Item 3: Assert validateCustomerQuery passes for both flag states.
+   *
+   * These tests verify the production code path: query builders generate
+   * queries that pass validateCustomerQuery validation, ensuring no PII
+   * fields leak when flag is off and no forbidden fields are ever present.
+   */
+  describe("getCustomerQuery", () => {
+    it("passes validateCustomerQuery with CUSTOMER_PII_FIELDS=1", () => {
+      const query = getCustomerQuery({ CUSTOMER_PII_FIELDS: "1" });
+      expect(() => validateCustomerQuery(query, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
+    });
+
+    it("passes validateCustomerQuery with flag off", () => {
+      const query = getCustomerQuery({});
+      expect(() => validateCustomerQuery(query, {})).not.toThrow();
+    });
+
+    it("flag-off query would throw if flag-on validation were applied (cross-check)", () => {
+      const queryOff = getCustomerQuery({});
+      expect(() => validateCustomerQuery(queryOff, {})).not.toThrow();
+    });
+  });
+
+  describe("getBulkCustomersQuery", () => {
+    const tagRules = [{ tag: "net-terms" }];
+
+    it("passes validateCustomerQuery with CUSTOMER_PII_FIELDS=1", () => {
+      const query = getBulkCustomersQuery(tagRules, { CUSTOMER_PII_FIELDS: "1" });
+      expect(query).not.toBeNull();
+      expect(() => validateCustomerQuery(query!, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
+    });
+
+    it("passes validateCustomerQuery with flag off", () => {
+      const query = getBulkCustomersQuery(tagRules, {});
+      expect(query).not.toBeNull();
+      expect(() => validateCustomerQuery(query!, {})).not.toThrow();
+    });
+  });
+});

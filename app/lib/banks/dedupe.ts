@@ -18,7 +18,7 @@
 import type { NormalisedTxn, TxnDirection, PaymentRail } from "./types.js";
 
 /** Valid rails for UTR-based deduplication */
-const UTR_RAILS: Set<PaymentRail> = new Set(["NEFT", "RTGS", "IMPS", "UPI"]);
+const UTR_RAILS = new Set<PaymentRail>(["NEFT", "RTGS", "IMPS", "UPI"]);
 
 /** NEFT UTR pattern: 4-letter bank code + N + 11-17 digits */
 const NEFT_UTR_PATTERN = /^[A-Z]{4}N\d{11,17}$/;

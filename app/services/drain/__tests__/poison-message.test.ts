@@ -16,7 +16,8 @@ vi.mock("../admin-client.server", () => ({
     retryable: false,
   }),
   COMPANY_QUERY: "query CompanyById",
-  COMPANY_LOCATION_QUERY: "query CompanyLocationById",
+  getCompanyLocationQuery: vi.fn().mockReturnValue("query CompanyLocationById"),
+  getCompanyLocationQueryWithoutContact: vi.fn().mockReturnValue("query CompanyLocationById"),
   ORDER_QUERY: "query OrderById",
   BULK_OPERATION_STATUS_QUERY: "query BulkOperationStatus",
 }));
@@ -50,7 +51,7 @@ vi.mock("~/services/sync/order.server", () => ({
 
 vi.mock("~/services/sync/bulk-operations.server", () => ({
   registerBulkOperation: vi.fn().mockResolvedValue(undefined),
-  BULK_COMPANIES_QUERY: "mutation BulkCompaniesExport",
+  getBulkCompaniesQuery: vi.fn().mockReturnValue("mutation BulkCompaniesExport"),
   BULK_ORDERS_QUERY: "mutation BulkOrdersExport",
   parseBulkOperationResult: vi.fn().mockReturnValue({
     success: true,
@@ -207,6 +208,11 @@ describe("Per-message isolation (poison message test)", () => {
           return Promise.resolve([{ delete: true }]);
         }
 
+        // #292: Shop currency lookup - return INR for test shop
+        if (query.includes("Shop") && query.includes("currency")) {
+          return Promise.resolve([{ domain: "test.myshopify.com", currency: "INR" }]);
+        }
+
         return Promise.resolve([]);
       });
       return fn;
@@ -216,8 +222,9 @@ describe("Per-message isolation (poison message test)", () => {
       createMockSqlFn(),
       {
         json: vi.fn((v: unknown) => v),
+        array: vi.fn((arr: unknown[]) => arr),
         begin: vi.fn().mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => {
-          const txSql = Object.assign(createMockSqlFn(), { json: vi.fn((v: unknown) => v) });
+          const txSql = Object.assign(createMockSqlFn(), { json: vi.fn((v: unknown) => v), array: vi.fn((arr: unknown[]) => arr) });
           return callback(txSql);
         }),
       }
