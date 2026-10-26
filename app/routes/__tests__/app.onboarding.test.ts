@@ -85,12 +85,20 @@ vi.mock("~/services/plan.server", () => ({
   }),
 }));
 
+const mockGetUsageStats = vi.fn().mockResolvedValue({
+  companies: { current: 0, limit: 25 },
+  importsThisMonth: { current: 0, limit: -1 },
+});
+const mockIsGatingEnforced = vi.fn().mockReturnValue(false);
+
 vi.mock("~/services/gating.server", () => ({
-  getUsageStats: vi.fn().mockResolvedValue({
-    companies: { current: 0, limit: 25 },
-    importsThisMonth: { current: 0, limit: -1 },
-  }),
-  isGatingEnforced: vi.fn().mockReturnValue(false),
+  getUsageStats: mockGetUsageStats,
+  isGatingEnforced: mockIsGatingEnforced,
+}));
+
+vi.mock("~/lib/plan-url", () => ({
+  getAppHandle: vi.fn().mockReturnValue("net-terms-receivables"),
+  buildPlanSelectionUrl: vi.fn().mockReturnValue("https://admin.shopify.com/plans"),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
@@ -119,6 +127,11 @@ describe("app.onboarding", () => {
     mockEnsureValidation.mockReset();
     mockEnsurePaymentCustomization.mockReset();
     mockEnsureMetafieldDefinitions.mockReset();
+    mockIsGatingEnforced.mockReturnValue(false);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 0, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
   });
 
   describe("action - dismiss", () => {
@@ -2100,6 +2113,7 @@ describe("S23-03: tag-rules link in buyer-setup step", () => {
           },
           registrationStatus: null,
           initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle", formData: null }),
@@ -2140,6 +2154,7 @@ describe("S23-03: tag-rules link in buyer-setup step", () => {
           },
           registrationStatus: null,
           initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
         }),
         useActionData: () => null,
         useNavigation: () => ({ state: "idle", formData: null }),
@@ -2307,5 +2322,234 @@ describe("S23-22: ErrorBoundary", () => {
     expect(html).not.toContain("Sensitive error");
     expect(html).not.toContain("test-shop.myshopify.com");
     expect(html).toContain("An unexpected error occurred");
+  });
+});
+
+describe("T4: newAccountsPausedBanner", () => {
+  const TEST_SHOP = "test-shop.myshopify.com";
+  const TEST_SHOP_ID = "shop-123";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsGatingEnforced.mockReturnValue(false);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 0, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("loader returns newAccountsPausedBanner.show=false when gating is off", async () => {
+    mockIsGatingEnforced.mockReturnValue(false);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+      }
+      if (query.includes("COUNT(*)")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const mockGraphql = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ data: {} }),
+    });
+
+    const { loader } = await import("../app.onboarding");
+
+    const result = await loader({
+      request: new Request("https://example.com/app/onboarding"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs);
+
+    expect(result.newAccountsPausedBanner).toBeDefined();
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(mockGetUsageStats).not.toHaveBeenCalled();
+  });
+
+  it("loader returns newAccountsPausedBanner.show=true when gating on and at limit", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 25, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+      }
+      if (query.includes("COUNT(*)")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const mockGraphql = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ data: {} }),
+    });
+
+    const { loader } = await import("../app.onboarding");
+
+    const result = await loader({
+      request: new Request("https://example.com/app/onboarding"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs);
+
+    expect(result.newAccountsPausedBanner).toBeDefined();
+    expect(result.newAccountsPausedBanner.show).toBe(true);
+    expect(result.newAccountsPausedBanner.heading).toBe("25 of 25 buyer accounts");
+    expect(result.newAccountsPausedBanner.upgradeUrl).toBeDefined();
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+  });
+
+  it("loader returns newAccountsPausedBanner.show=false when gating on but under limit", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 10, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, defaultTermsDays: 30, onboardingDismissedAt: null }]);
+      }
+      if (query.includes("COUNT(*)")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const mockGraphql = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ data: {} }),
+    });
+
+    const { loader } = await import("../app.onboarding");
+
+    const result = await loader({
+      request: new Request("https://example.com/app/onboarding"),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              admin: { graphql: mockGraphql },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs);
+
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+  });
+
+  it("renders banner when newAccountsPausedBanner.show is true", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: {
+            show: true,
+            heading: "25 of 25 buyer accounts",
+            bodyText: "New accounts can't be added or imported over your plan limit.",
+            upgradeUrl: "https://admin.shopify.com/plans",
+          },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("25 of 25 buyer accounts");
+    expect(html).toContain("Upgrade your plan");
+    expect(html).toContain("https://admin.shopify.com/plans");
+  });
+
+  it("does not render banner when newAccountsPausedBanner.show is false", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: {
+            show: false,
+            heading: "",
+            bodyText: "",
+            upgradeUrl: null,
+          },
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).not.toContain("Account limit reached");
+    expect(html).not.toContain("Upgrade your plan");
   });
 });

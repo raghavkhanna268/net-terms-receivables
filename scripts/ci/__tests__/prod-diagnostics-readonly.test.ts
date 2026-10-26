@@ -1150,7 +1150,7 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
       });
     }
 
-    it("prints count, ids and per-function booleans/ints only, never text or titles", () => {
+    it("prints count, ordinal indices and per-function booleans/ints only, never GIDs, text or titles", () => {
       const { stdout, json } = cross({
         data: {
           shopifyFunctions: {
@@ -1167,17 +1167,19 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
         function_count: 2,
         functions: [
           {
-            id: "01a1681b-c9af-7830-9995-f515e3eada0b",
+            function_idx: 1,
             handle_is_credit_check_validation: true,
             input_query_null: false,
             input_query_length: [...MULTILINE_APP_PREFIX].length,
             has_credit_status: true,
           },
-          { id: "fn-2", handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown" },
+          { function_idx: 2, handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown" },
         ],
       });
       expect(stdout).not.toContain(SENTINEL);
       expect(stdout).not.toContain("metafield(");
+      expect(stdout).not.toContain("01a1681b-c9af-7830-9995-f515e3eada0b");
+      expect(stdout).not.toContain("fn-2");
     });
 
     it("per-function has_credit_status: null => \"unknown\", empty string and non-matching => false", () => {
@@ -1195,16 +1197,18 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
         },
       });
       const fns = (json[0] as { functions: Array<Record<string, unknown>> }).functions;
-      expect(fns.map((f) => [f.id, f.input_query_null, f.has_credit_status])).toEqual([
-        ["fn-null", true, "unknown"],
-        ["fn-missing", true, "unknown"],
-        ["fn-empty", false, false],
-        ["fn-nomatch", false, false],
-        ["fn-match", false, true],
+      expect(fns.map((f) => [f.function_idx, f.input_query_null, f.has_credit_status])).toEqual([
+        [1, true, "unknown"],
+        [2, true, "unknown"],
+        [3, false, false],
+        [4, false, false],
+        [5, false, true],
       ]);
       expect(stdout).not.toContain(SENTINEL);
       expect(stdout).not.toContain("buyerIdentity");
       expect(stdout).not.toContain("lines {");
+      expect(stdout).not.toContain("fn-null");
+      expect(stdout).not.toContain("fn-match");
     });
 
     it("soft-fails on HTTP error and on GraphQL errors (codes only)", () => {
@@ -1278,5 +1282,460 @@ describe("Active subscriptions probe (counts/booleans only)", () => {
     expect(g).toContain("active_subscriptions=error error_codes=ACCESS_DENIED");
     expect(g).not.toContain(SENTINEL);
     expect(probe("not json")).toContain("active_subscriptions=error parse_failed");
+  });
+});
+
+/**
+ * Second-shop sync failure detail: which getInitialSyncState() condition
+ * fired, per s6_bulk_operations row and per DLQ row (index + enums/counts),
+ * and the Shopify-side status of each bulk op (enums only).
+ */
+describe("prod-diagnostics second-shop sync failure detail", () => {
+  const PLANTED_GID = "gid://shopify/BulkOperation/987654321";
+  const PLANTED_CUSTOMER_GID = "gid://shopify/Customer/555";
+  let dbStep: WorkflowStep;
+  let adminStep: WorkflowStep;
+
+  beforeAll(() => {
+    const wf = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = wf.jobs?.e2e_second_shop?.steps ?? [];
+    dbStep = steps.find((s) => s.name === "E2E DB checks") as WorkflowStep;
+    adminStep = steps.find((s) => s.name === "E2E Admin checks") as WorkflowStep;
+    expect(dbStep).toBeDefined();
+    expect(adminStep).toBeDefined();
+  });
+
+  function withFile<T>(content: string, fn: (path: string) => T): T {
+    const dir = mkdtempSync(join(tmpdir(), "diag-e2e-detail-"));
+    try {
+      const f = join(dir, "f");
+      writeFileSync(f, content);
+      return fn(f);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  describe("DB sync detail", () => {
+    const START = "# E2E sync detail summary";
+    const END = "# End E2E sync detail";
+
+    it("SQL mirrors getInitialSyncState() incl. closed_at IS NULL, and is filtered by the selected shop", () => {
+      const run = dbStep.run ?? "";
+      // Status mirror and detail block both ignore reinstall_reset rows.
+      expect((run.match(/AND closed_at IS NULL/g) ?? []).length).toBe(4);
+      expect(run).toContain("WHERE completed_at IS NULL AND closed_at IS NULL");
+      expect(run).toContain("live AS (SELECT * FROM bulk WHERE closed_at IS NULL AND origin = 'reconcile')");
+      expect(run).toContain("FROM s6_bulk_operations b WHERE b.shop = :'shop'");
+      expect(run).toContain("WHERE r.shop = :'shop' AND r.topic = 'BULK_OPERATIONS_FINISH'");
+      for (const key of [
+        "e2e_sync_failure_reason",
+        "e2e_sync_failed_companies_failure_count",
+        "e2e_sync_failed_customers_failure_count",
+        "e2e_sync_failed_orders_failure_count",
+        "e2e_sync_linked_dlq_rows",
+        "e2e_bulk_finish_receipts",
+        "e2e_bulk_ops_closed",
+        "e2e_bulk_ops_open_unclosed",
+        "e2e_sync_reinstall_reset_ops",
+        "e2e_sync_shop_age_min",
+        "e2e_sync_shop_created_after_first_bulk_op",
+        "e2e_sync_app_uninstalled_receipts",
+        "e2e_sync_reinstall_evidence",
+      ]) {
+        expect(run).toContain(`'${key}'`);
+      }
+      for (const k of ["type", "origin", "stage", "open", "closed_reason", "failure_count", "age_min", "finish_receipt", "finish_msg", "closed_at"]) {
+        expect(run).toContain(`'${k}'`);
+      }
+      for (const k of ["queue", "topic", "error_disposition", "error_code", "attempt_count", "age_min", "bulk_op", "error_class", "error_len"]) {
+        expect(run).toContain(`'${k}'`);
+      }
+      // bulk_type x failure_count x lifecycle groups, counts only.
+      expect(run).toContain("'e2e_bulk_grp_' || gt || '_fc' || gf || '_' || gs");
+      for (const k of ["closed", "completed", "open"]) {
+        expect(run).toContain(`'${k}'`);
+      }
+      // Never selects the error text, the GID or payload columns into the output.
+      expect(run).not.toMatch(/'e2e_[a-z0-9_]*'\s*,\s*(d\.)?error\b/);
+      expect(run).not.toMatch(/\(\d+,\s*'[a-z_0-9]+',\s*[a-z]?\.?(bulk_operation_id|error|message)\b[^>]/);
+      expect(run).toContain("E2E_SYNC_DETAIL_QUERY_FAILED");
+    });
+
+    it("prints allow-listed lines and redacts GIDs, domains, names and free text", () => {
+      const rows = [
+        "e2e_sync_mirror_ignores_closed|true",
+        "e2e_sync_failed_companies_failure_count|false",
+        "e2e_sync_linked_dlq_rows|2",
+        "e2e_sync_failure_reason|dlq_reconcile_orders",
+        "e2e_bulk_op_1_type|companies",
+        "e2e_bulk_op_1_open|true",
+        "e2e_bulk_op_1_age_min|143",
+        "e2e_bulk_op_1_finish_msg|none",
+        "e2e_dlq_row_1_topic|RECONCILE_ORDERS",
+        "e2e_dlq_row_1_error_code|graphql_error:THROTTLED",
+        "e2e_dlq_row_1_attempt_count|unknown",
+        "e2e_dlq_row_1_error_class|free_text",
+        "e2e_dlq_row_1_error_len|212",
+        "e2e_bulk_grp_orders_fc5_open|1",
+        "e2e_bulk_op_1_closed_at|2026-10-26T01:02:03Z",
+        "e2e_bulk_op_2_closed_at|2026-10-26 01:02:03+00",
+        "e2e_sync_reinstall_evidence|true",
+        `e2e_dlq_row_2_error_code|${E2E_PLANTED_DOMAIN}`,
+        `e2e_dlq_row_2_topic|${E2E_PLANTED_NAME}`,
+        `e2e_bulk_op_2_type|${PLANTED_GID}`,
+        `e2e_dlq_row_2_queue|${E2E_PLANTED_EMAIL}`,
+        `${E2E_PLANTED_DOMAIN}|1`,
+        `not_an_e2e_key|1`,
+      ].join("\n");
+      withFile(rows + "\n", (f) => {
+        const r = runE2eSnippet(dbStep.run ?? "", START, END, { env: { DETAIL_OUT: f } });
+        expect(r.stderr).toBe("");
+        expect(r.status).toBe(0);
+        const lines = r.stdout.trim().split("\n");
+        expect(lines).toEqual([
+          "e2e_sync_mirror_ignores_closed=true",
+          "e2e_sync_failed_companies_failure_count=false",
+          "e2e_sync_linked_dlq_rows=2",
+          "e2e_sync_failure_reason=dlq_reconcile_orders",
+          "e2e_bulk_op_1_type=companies",
+          "e2e_bulk_op_1_open=true",
+          "e2e_bulk_op_1_age_min=143",
+          "e2e_bulk_op_1_finish_msg=none",
+          "e2e_dlq_row_1_topic=RECONCILE_ORDERS",
+          "e2e_dlq_row_1_error_code=graphql_error:THROTTLED",
+          "e2e_dlq_row_1_attempt_count=unknown",
+          "e2e_dlq_row_1_error_class=free_text",
+          "e2e_dlq_row_1_error_len=212",
+          "e2e_bulk_grp_orders_fc5_open=1",
+          "e2e_bulk_op_1_closed_at=2026-10-26T01:02:03Z",
+          "e2e_bulk_op_2_closed_at=invalid",
+          "e2e_sync_reinstall_evidence=true",
+          "e2e_dlq_row_2_error_code=invalid",
+          "e2e_dlq_row_2_topic=invalid",
+          "e2e_bulk_op_2_type=invalid",
+          "e2e_dlq_row_2_queue=invalid",
+        ]);
+        expectNoPlanted(r.stdout);
+        expect(r.stdout).not.toMatch(/gid:\/\//);
+      });
+    });
+
+    it("rejects bare numeric ids, digit runs inside codes and money-like values", () => {
+      const rows = [
+        // (a) 13-digit value -> invalid; 12 digits is the cap.
+        "e2e_bulk_op_1_type|7654321098765",
+        "e2e_bulk_op_1_age_min|999999999999",
+        // (b) ids riding inside a code or enum.
+        "e2e_dlq_row_1_error_code|graphql_error:7654321098",
+        "e2e_dlq_row_2_error_code|graphql_error:THROTTLED,7654321098",
+        "e2e_dlq_row_3_error_code|graphql_error:A7654321098",
+        "e2e_dlq_row_4_error_code|shop_7654321098",
+        "e2e_dlq_row_5_topic|ORDER_7654321098765",
+        "e2e_dlq_row_6_error_code|graphql_error:throttled",
+        // (c) decimals / money-like.
+        "e2e_bulk_op_1_age_min|12.50",
+        "e2e_bulk_op_2_failure_count|1250.00",
+        "e2e_bulk_op_3_failure_count|-5",
+        "e2e_bulk_op_4_failure_count|1e9",
+        "e2e_bulk_op_5_failure_count|5000,00",
+        // Legit shapes keep validating.
+        "e2e_dlq_row_7_queue|s6_bulk",
+        "e2e_dlq_row_7_error_code|graphql_error:MAX_COST_EXCEEDED,THROTTLED",
+        "e2e_bulk_op_6_age_min|0",
+        "e2e_bulk_op_6_closed_at|2026-10-26T01:02:03Z",
+        "e2e_bulk_grp_orders_fc5_closed|3",
+      ].join("\n");
+      withFile(rows + "\n", (f) => {
+        const r = runE2eSnippet(dbStep.run ?? "", START, END, { env: { DETAIL_OUT: f } });
+        expect(r.stderr).toBe("");
+        expect(r.status).toBe(0);
+        expect(r.stdout.trim().split("\n")).toEqual([
+          "e2e_bulk_op_1_type=invalid",
+          "e2e_bulk_op_1_age_min=999999999999",
+          "e2e_dlq_row_1_error_code=invalid",
+          "e2e_dlq_row_2_error_code=invalid",
+          "e2e_dlq_row_3_error_code=invalid",
+          "e2e_dlq_row_4_error_code=invalid",
+          "e2e_dlq_row_5_topic=invalid",
+          "e2e_dlq_row_6_error_code=invalid",
+          "e2e_bulk_op_1_age_min=invalid",
+          "e2e_bulk_op_2_failure_count=invalid",
+          "e2e_bulk_op_3_failure_count=invalid",
+          "e2e_bulk_op_4_failure_count=invalid",
+          "e2e_bulk_op_5_failure_count=invalid",
+          "e2e_dlq_row_7_queue=s6_bulk",
+          "e2e_dlq_row_7_error_code=graphql_error:MAX_COST_EXCEEDED,THROTTLED",
+          "e2e_bulk_op_6_age_min=0",
+          "e2e_bulk_op_6_closed_at=2026-10-26T01:02:03Z",
+          "e2e_bulk_grp_orders_fc5_closed=3",
+        ]);
+        expect(r.stdout).not.toContain("7654321098");
+        expect(r.stdout).not.toMatch(/[0-9]\.[0-9]/);
+      });
+    });
+
+    describe("SQL shape: no printed value selects an id, *_id or amount column", () => {
+      const FORBIDDEN_COL = /^(?:[a-z_][a-z0-9_]*\.)?(?:"?id"?|[a-z0-9_]*_id|[a-z0-9_]*amount[a-z0-9_]*)$/i;
+      const COMPARISON_AFTER = /^\s*(?:IN\b|NOT\s+IN\b|=|<>|!=|<|>|IS\b|LIKE\b|~)/i;
+      const COMPARISON_BEFORE = /(?:\bIN|=|<>|!=|<|>|\bIS|\bLIKE|~)\s*$/i;
+
+      /** Text between a `(` at `open` and its matching `)`. */
+      function balanced(s: string, open: number): string {
+        let depth = 0;
+        for (let i = open; i < s.length; i++) {
+          if (s[i] === "(") depth++;
+          else if (s[i] === ")" && --depth === 0) return s.slice(open + 1, i);
+        }
+        throw new Error("unbalanced SQL");
+      }
+
+      /** Every `(o, 'key', <expr>)` tuple in the printed VALUES lists. */
+      function valueTuples(sql: string): Array<{ key: string; expr: string }> {
+        const out: Array<{ key: string; expr: string }> = [];
+        const re = /\((\d+),\s*'([a-z0-9_]+)',\s*/g;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(sql)) !== null) {
+          const body = balanced(sql, m.index);
+          out.push({ key: m[2], expr: body.slice(body.indexOf(m[2]) + m[2].length + 2).trim() });
+        }
+        return out;
+      }
+
+      /**
+       * Column references an expression can emit as a value: a forbidden column is
+       * fine only as an operand of a comparison/membership test (boolean result) or
+       * inside an aggregate like count(id). Subquery WHERE clauses are predicates.
+       */
+      function emittedForbidden(expr: string): string[] {
+        let e = expr.replace(/'(?:[^']|'')*'/g, "''");
+        // Aggregates collapse to a number.
+        e = e.replace(/\b(count|sum|min|max|avg)\s*\([^()]*\)/gi, "0");
+        // Drop WHERE/ORDER BY/GROUP BY clauses inside subqueries (predicates, not values).
+        e = e.replace(/\b(WHERE|ORDER\s+BY|GROUP\s+BY)\b[^()]*(?:\([^()]*\)[^()]*)*/gi, " ");
+        const hits: string[] = [];
+        const ref = /(?:[a-z_][a-z0-9_]*\.)?"?[a-z_][a-z0-9_]*"?/gi;
+        let m: RegExpExecArray | null;
+        while ((m = ref.exec(e)) !== null) {
+          const tok = m[0];
+          if (!FORBIDDEN_COL.test(tok)) continue;
+          if (/\(\s*$/.test(e.slice(0, m.index)) && /^\s*\(/.test(e.slice(m.index + tok.length))) continue;
+          const before = e.slice(0, m.index);
+          const after = e.slice(m.index + tok.length);
+          if (COMPARISON_AFTER.test(after) || COMPARISON_BEFORE.test(before)) continue;
+          // `x IN (SELECT id FROM ...)`: the subquery list feeds a membership test.
+          if (/\bIN\s*\(\s*SELECT\s+(?:DISTINCT\s+)?$/i.test(before)) continue;
+          // FROM/JOIN table names and aliases are not values.
+          if (/\b(FROM|JOIN|AS)\s+$/i.test(before)) continue;
+          hits.push(tok);
+        }
+        return hits;
+      }
+
+      function detailSql(): string {
+        const run = dbStep.run ?? "";
+        const start = run.indexOf("# E2E sync detail (allow-listed shapes only)");
+        const end = run.indexOf("# E2E sync detail summary");
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(end).toBeGreaterThan(start);
+        const block = run.slice(start, end);
+        const sql = block.slice(block.indexOf("<<'EOSQL'") + 9, block.lastIndexOf("EOSQL"));
+        expect(sql).toContain("SELECT k, v FROM (");
+        return sql;
+      }
+
+      it("the checker flags planted id/amount selects and allows counts and comparisons", () => {
+        expect(emittedForbidden("b.bulk_operation_id")).toEqual(["b.bulk_operation_id"]);
+        expect(emittedForbidden("d.id::text")).toEqual(["d.id"]);
+        expect(emittedForbidden("COALESCE(i.order_id, 'null')")).toEqual(["i.order_id"]);
+        expect(emittedForbidden("(SELECT amount_paise FROM t LIMIT 1)::text")).toEqual(["amount_paise"]);
+        expect(emittedForbidden("(SELECT b.id::text FROM bulk b WHERE b.n = 1)")).toEqual(["b.id"]);
+        expect(emittedForbidden("(SELECT COUNT(id) FROM t)::text")).toEqual([]);
+        expect(emittedForbidden("(b.bulk_operation_id IN (SELECT bulk_operation_id FROM ids))::text")).toEqual([]);
+        expect(emittedForbidden("(d.id IN (SELECT id FROM linked))::text")).toEqual([]);
+        expect(emittedForbidden(
+          "COALESCE((SELECT b.n::text FROM bulk b WHERE b.bulk_operation_id = d.message->>'bulkOperationId'), 'none')",
+        )).toEqual([]);
+      });
+
+      it("detail SQL: every printed value is free of id/*_id/amount columns", () => {
+        const sql = detailSql();
+        const tuples = valueTuples(sql);
+        // scalars + bulk_rows + dlq_rows.
+        expect(tuples.length).toBeGreaterThanOrEqual(19 + 13 + 11);
+        const offenders = tuples
+          .map((t) => ({ key: t.key, hits: emittedForbidden(t.expr) }))
+          .filter((t) => t.hits.length > 0);
+        expect(offenders).toEqual([]);
+        // Group rows print COUNT(*) only; the final select prints k, v only.
+        expect(sql).toContain("COUNT(*)::text AS v");
+        expect(sql).toMatch(/SELECT k, v FROM \(\s*SELECT 1 AS g, 0 AS n, o, k, v FROM scalars/);
+        expect(sql).not.toMatch(/\bamount\b/i);
+      });
+
+      it("bulk op ids query feeds only the request body file, never stdout", () => {
+        const run = adminStep.run ?? "";
+        expect(run).toContain('"$DATABASE_URL" > "$BULK_IDS_FILE" <<\'EOSQL\'');
+        expect(run).not.toMatch(/(cat|echo|printf)[^\n]*\$BULK_IDS_FILE/);
+        expect(run).not.toMatch(/(cat|echo|printf)[^\n]*\$BULK_QUERY_FILE/);
+        // Printed per-row values are enums/counts/booleans keyed by row index.
+        expect(run).not.toMatch(/e2e_bulk_op_\\\(\$ns\[\$i\]\)_[a-z_]*=\\\(\$op\.id/);
+      });
+    });
+  });
+
+  describe("Admin bulk op status", () => {
+    const START = "# E2E bulk op status (enums only)";
+    const END = "# End E2E bulk op status";
+
+    function runAdmin(ids: string, curlBody: unknown, curlStatus = "200") {
+      const dir = mkdtempSync(join(tmpdir(), "diag-e2e-bulk-"));
+      try {
+        const idsFile = join(dir, "ids");
+        writeFileSync(idsFile, ids);
+        const queryFile = join(dir, "query");
+        writeFileSync(queryFile, "");
+        const ordersQueryFile = join(dir, "orders-query");
+        writeFileSync(ordersQueryFile, "");
+        const resp = join(dir, "resp");
+        writeFileSync(resp, "");
+        const r = runE2eSnippet(adminStep.run ?? "", START, END, {
+          env: {
+            E2E_SHOP_DOMAIN: E2E_PLANTED_DOMAIN,
+            BULK_IDS_FILE: idsFile,
+            BULK_QUERY_FILE: queryFile,
+            ORDERS_QUERY_FILE: ordersQueryFile,
+            HTTP_RESPONSE: resp,
+          },
+          curlBody: typeof curlBody === "string" ? curlBody : JSON.stringify(curlBody),
+          curlStatus,
+        });
+        return { ...r, query: readFileSync(queryFile, "utf-8"), ordersQuery: readFileSync(ordersQueryFile, "utf-8") };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("is a read-only nodes(ids:) query; ids go only in the request body file", () => {
+      const run = adminStep.run ?? "";
+      expect(run).toContain(
+        "nodes(ids: $ids) { ... on BulkOperation { status errorCode type objectCount url partialDataUrl } }",
+      );
+      expect(run).toContain("ordersCount(limit: null) { count precision }");
+      expect(run).toContain('--data-binary "@$BULK_QUERY_FILE"');
+      expect(run).toContain("ORDER BY started_at, bulk_operation_id");
+    });
+
+    it("prints row index + status/errorCode/type enums; never the GID", () => {
+      const ids = [
+        "gid://shopify/BulkOperation/1",
+        PLANTED_CUSTOMER_GID,
+        "gid://shopify/BulkOperation/3",
+        "gid://shopify/BulkOperation/4",
+      ].join("\n") + "\n";
+      const r = runAdmin(ids, {
+        data: {
+          nodes: [
+            {
+              status: "COMPLETED",
+              errorCode: null,
+              type: "QUERY",
+              objectCount: "0",
+              url: null,
+              partialDataUrl: null,
+              id: PLANTED_GID,
+            },
+            { status: "RUNNING", errorCode: null, type: "QUERY", objectCount: "12", url: `https://${E2E_PLANTED_DOMAIN}/x` },
+            null,
+          ],
+        },
+      });
+      expect(r.stderr).toBe("");
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim().split("\n")).toEqual([
+        "e2e_bulk_shopify_rows=4",
+        "e2e_bulk_shopify_invalid_ids=1",
+        "e2e_bulk_shopify=ok",
+        "e2e_bulk_op_2_shopify_status=invalid_id",
+        "e2e_bulk_op_1_shopify_status=COMPLETED",
+        "e2e_bulk_op_1_shopify_error_code=null",
+        "e2e_bulk_op_1_shopify_type=QUERY",
+        "e2e_bulk_op_1_shopify_object_count=0",
+        "e2e_bulk_op_1_shopify_url_present=false",
+        "e2e_bulk_op_1_shopify_partial_url_present=false",
+        "e2e_bulk_op_3_shopify_status=RUNNING",
+        "e2e_bulk_op_3_shopify_error_code=null",
+        "e2e_bulk_op_3_shopify_type=QUERY",
+        "e2e_bulk_op_3_shopify_object_count=12",
+        "e2e_bulk_op_3_shopify_url_present=true",
+        "e2e_bulk_op_3_shopify_partial_url_present=false",
+        "e2e_bulk_op_4_shopify_status=not_found",
+        "e2e_bulk_shopify_running=1",
+        "e2e_bulk_shopify_created=0",
+        // The fake curl returns the same body for the ordersCount call.
+        "e2e_shopify_orders=ok",
+        "e2e_shopify_orders_count=unknown",
+        "e2e_shopify_orders_count_precision=unknown",
+        "e2e_shopify_orders_any=unknown",
+      ]);
+      // Invalid ids are never sent; valid ones only in the body file.
+      const q = JSON.parse(r.query);
+      expect(q.variables.ids).toEqual([
+        "gid://shopify/BulkOperation/1",
+        "gid://shopify/BulkOperation/3",
+        "gid://shopify/BulkOperation/4",
+      ]);
+      expect(r.stdout).not.toMatch(/gid:\/\//);
+      expectNoPlanted(r.stdout);
+    });
+
+    it("maps non-enum values to INVALID and soft-fails with fixed lines", () => {
+      const ok = runAdmin("gid://shopify/BulkOperation/1\n", {
+        data: { nodes: [{ status: E2E_PLANTED_NAME, errorCode: E2E_PLANTED_DOMAIN, type: "QUERY" }] },
+      });
+      expect(ok.stdout).toContain("e2e_bulk_op_1_shopify_status=INVALID");
+      expect(ok.stdout).toContain("e2e_bulk_op_1_shopify_error_code=INVALID");
+      const http = runAdmin("gid://shopify/BulkOperation/1\n", E2E_PLANTED_DOMAIN, "401");
+      expect(http.stdout).toContain("e2e_bulk_shopify=error http_status=401");
+      const parse = runAdmin("gid://shopify/BulkOperation/1\n", `not json ${E2E_PLANTED_NAME}`);
+      expect(parse.stdout).toContain("e2e_bulk_shopify=error parse_failed");
+      const gql = runAdmin("gid://shopify/BulkOperation/1\n", {
+        errors: [{ message: E2E_PLANTED_NAME, extensions: { code: "THROTTLED" } }],
+      });
+      expect(gql.stdout).toContain("e2e_bulk_shopify=error error_codes=THROTTLED");
+      const none = runAdmin("", {});
+      expect(none.stdout).toContain("e2e_bulk_shopify=skipped_no_ids");
+      for (const r of [ok, http, parse, gql, none]) {
+        expect(r.status).toBe(0);
+        expectNoPlanted(r.stdout);
+        expect(r.stdout).not.toMatch(/gid:\/\//);
+      }
+      expect(http.stdout).toContain("e2e_shopify_orders=error http_status=401");
+      expect(parse.stdout).toContain("e2e_shopify_orders=error parse_failed");
+      expect(gql.stdout).toContain("e2e_shopify_orders=error error_codes=THROTTLED");
+    });
+
+    it("prints the store's order count and an any-orders boolean, nothing else", () => {
+      const zero = runAdmin("", { data: { ordersCount: { count: 0, precision: "EXACT" } } });
+      expect(zero.stdout.trim().split("\n")).toEqual([
+        "e2e_bulk_shopify_rows=0",
+        "e2e_bulk_shopify_invalid_ids=0",
+        "e2e_bulk_shopify=skipped_no_ids",
+        "e2e_shopify_orders=ok",
+        "e2e_shopify_orders_count=0",
+        "e2e_shopify_orders_count_precision=EXACT",
+        "e2e_shopify_orders_any=false",
+      ]);
+      const some = runAdmin("", { data: { ordersCount: { count: 3, precision: E2E_PLANTED_NAME } } });
+      expect(some.stdout).toContain("e2e_shopify_orders_count=3");
+      expect(some.stdout).toContain("e2e_shopify_orders_count_precision=unknown");
+      expect(some.stdout).toContain("e2e_shopify_orders_any=true");
+      expect(JSON.parse(some.ordersQuery).query).toBe("query E2eOrdersCount { ordersCount(limit: null) { count precision } }");
+      for (const r of [zero, some]) {
+        expect(r.status).toBe(0);
+        expect(r.stderr).toBe("");
+        expectNoPlanted(r.stdout);
+      }
+    });
   });
 });
