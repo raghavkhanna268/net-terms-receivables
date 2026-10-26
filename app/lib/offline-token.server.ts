@@ -531,6 +531,17 @@ async function performTokenRefresh(
         };
       }
 
+      // Handle 401 invalid_request - Shopify returns this for unknown, replaced, expired,
+      // or revoked refresh tokens, and for app uninstall. Treat the same as invalid_grant.
+      // @see https://shopify.dev/docs/apps/build/authentication-authorization/implement-token-exchange
+      if (response.status === 401 && errorBody.error === "invalid_request") {
+        return {
+          success: false,
+          errorCode: "invalid_grant",
+          error: "Token refresh failed: invalid_grant",
+        };
+      }
+
       return {
         success: false,
         errorCode: "http_error",

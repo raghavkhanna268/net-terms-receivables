@@ -886,3 +886,392 @@ describeWithDb("concurrent refresh safety (CAS)", () => {
     expect(results[0].accessToken).toBe(rows[0].accessToken);
   });
 });
+
+/**
+ * Issue #310: 401 invalid_request must be treated as invalid_grant.
+ *
+ * Shopify returns HTTP 401 with {"error":"invalid_request"} when the refresh token
+ * is unknown, replaced, expired, revoked, or the app was uninstalled. This must be
+ * treated the same as 400 invalid_grant: re-read for a concurrent winner; if none,
+ * mark needsReauth and return non-retryable invalid_grant.
+ */
+describeWithDb("401 invalid_request handling (issue #310)", () => {
+  let sql: ReturnType<typeof postgres>;
+
+  beforeEach(async () => {
+    sql = postgres(TEST_DATABASE_URL!, {
+      max: 10,
+      prepare: true,
+      transform: { undefined: null },
+      connect_timeout: 10,
+      fetch_types: false,
+    });
+
+    await sql`DELETE FROM "Session" WHERE shop = ${TEST_SHOP}`;
+  });
+
+  afterEach(async () => {
+    global.fetch = originalFetch;
+    await sql`DELETE FROM "Session" WHERE shop = ${TEST_SHOP}`;
+    await sql.end();
+  });
+
+  it("401 invalid_request sets needsReauth and returns non-retryable invalid_grant", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_dead_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    // Mock Shopify returning 401 invalid_request (dead refresh token)
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({
+        error: "invalid_request",
+        error_description: "This request requires an active refresh_token",
+      }),
+    }) as unknown as typeof fetch;
+
+    const result = await refreshOfflineTokenIfNeeded(
+      sql,
+      TEST_SHOP,
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET
+    );
+
+    // Must return invalid_grant (not http_error)
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("invalid_grant");
+    expect(result.error).toContain("invalid_grant");
+
+    // needsReauth must be set
+    const rows = await sql<Array<{ accessToken: string; needsReauth: boolean }>>`
+      SELECT "accessToken", "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].needsReauth).toBe(true);
+  });
+
+  it("401 invalid_request with concurrent winner uses winner's token and does NOT set needsReauth", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_single_use_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    let callCount = 0;
+    // First call succeeds, second call gets 401 invalid_request (single-use token consumed)
+    global.fetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      const myCallNumber = callCount;
+
+      // Add delay to simulate concurrent execution
+      await new Promise((resolve) => setTimeout(resolve, myCallNumber === 1 ? 10 : 50));
+
+      if (myCallNumber === 1) {
+        // First caller wins
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            access_token: "shpat_winner_token",
+            expires_in: 3600,
+            refresh_token: "shprt_new_refresh_token",
+            refresh_token_expires_in: 7776000,
+            scope: "read_products",
+          }),
+        };
+      } else {
+        // Second caller gets 401 invalid_request because refresh token was consumed
+        return {
+          ok: false,
+          status: 401,
+          json: () => Promise.resolve({
+            error: "invalid_request",
+            error_description: "This request requires an active refresh_token",
+          }),
+        };
+      }
+    }) as unknown as typeof fetch;
+
+    // Launch two concurrent refresh attempts
+    const results = await Promise.all([
+      refreshOfflineTokenIfNeeded(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+      refreshOfflineTokenIfNeeded(sql, TEST_SHOP, TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+    ]);
+
+    // Both should succeed - loser detects winner and uses their token
+    expect(results[0].success).toBe(true);
+    expect(results[1].success).toBe(true);
+
+    // Both should return the winner's token
+    expect(results[0].accessToken).toBe("shpat_winner_token");
+    expect(results[1].accessToken).toBe("shpat_winner_token");
+
+    // needsReauth must NOT be set (shop is healthy, winner refreshed)
+    const rows = await sql<Array<{ accessToken: string; needsReauth: boolean }>>`
+      SELECT "accessToken", "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].accessToken).toBe("shpat_winner_token");
+    expect(rows[0].needsReauth).toBe(false);
+  });
+
+  it("5xx errors (503) are retryable and do NOT set needsReauth", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    // Mock Shopify returning 503 Service Unavailable
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        error: "service_unavailable",
+      }),
+    }) as unknown as typeof fetch;
+
+    const result = await refreshOfflineTokenIfNeeded(
+      sql,
+      TEST_SHOP,
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET
+    );
+
+    // Must return http_error (retryable)
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("http_error");
+    expect(result.error).toContain("HTTP 503");
+
+    // needsReauth must NOT be set
+    const rows = await sql<Array<{ needsReauth: boolean }>>`
+      SELECT "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].needsReauth).toBe(false);
+  });
+
+  it("429 rate limit errors are retryable and do NOT set needsReauth", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    // Mock Shopify returning 429 Too Many Requests
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      json: () => Promise.resolve({
+        error: "too_many_requests",
+      }),
+    }) as unknown as typeof fetch;
+
+    const result = await refreshOfflineTokenIfNeeded(
+      sql,
+      TEST_SHOP,
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET
+    );
+
+    // Must return http_error (retryable)
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("http_error");
+    expect(result.error).toContain("HTTP 429");
+
+    // needsReauth must NOT be set
+    const rows = await sql<Array<{ needsReauth: boolean }>>`
+      SELECT "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].needsReauth).toBe(false);
+  });
+
+  it("401 with different error body stays http_error (not invalid_grant)", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        'shpat_old_token',
+        'shprt_refresh_token',
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    // Mock Shopify returning 401 with a different error type (not invalid_request)
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({
+        error: "unauthorized_client",
+        error_description: "Client is not authorized",
+      }),
+    }) as unknown as typeof fetch;
+
+    const result = await refreshOfflineTokenIfNeeded(
+      sql,
+      TEST_SHOP,
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET
+    );
+
+    // Must return http_error (NOT invalid_grant)
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("http_error");
+    expect(result.error).toContain("HTTP 401");
+
+    // needsReauth must NOT be set (http_error is retryable)
+    const rows = await sql<Array<{ needsReauth: boolean }>>`
+      SELECT "needsReauth"
+      FROM "Session"
+      WHERE id = ${TEST_SESSION_ID}
+    `;
+    expect(rows[0].needsReauth).toBe(false);
+  });
+});
+
+/**
+ * Leak test: verify no token or shop domain appears in console output.
+ * Uses the REAL log.server (not mocked) to ensure safeLog redaction works.
+ */
+describeWithDb("401 invalid_request leak test (issue #310)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let consoleOutput: string[] = [];
+  const originalConsoleLog = console.log;
+  const originalConsoleError = console.error;
+
+  beforeEach(async () => {
+    sql = postgres(TEST_DATABASE_URL!, {
+      max: 5,
+      prepare: true,
+      transform: { undefined: null },
+      connect_timeout: 10,
+      fetch_types: false,
+    });
+
+    await sql`DELETE FROM "Session" WHERE shop = ${TEST_SHOP}`;
+
+    // Capture console output
+    consoleOutput = [];
+    console.log = (...args: unknown[]) => {
+      consoleOutput.push(args.map(String).join(" "));
+      originalConsoleLog.apply(console, args);
+    };
+    console.error = (...args: unknown[]) => {
+      consoleOutput.push(args.map(String).join(" "));
+      originalConsoleError.apply(console, args);
+    };
+  });
+
+  afterEach(async () => {
+    global.fetch = originalFetch;
+    console.log = originalConsoleLog;
+    console.error = originalConsoleError;
+    await sql`DELETE FROM "Session" WHERE shop = ${TEST_SHOP}`;
+    await sql.end();
+  });
+
+  it("401 invalid_request path does not leak tokens or shop domain in logs", async () => {
+    const fakeAccessToken = "shpat_fake_access_token_12345";
+    const fakeRefreshToken = "shprt_fake_refresh_token_67890";
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await sql`
+      INSERT INTO "Session" (
+        id, shop, state, "isOnline", scope, expires, "accessToken",
+        "refreshToken", "refreshTokenExpires", "needsReauth"
+      ) VALUES (
+        ${TEST_SESSION_ID}, ${TEST_SHOP}, 'state', false, 'read_products',
+        ${twoMinutesAgo.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        ${fakeAccessToken},
+        ${fakeRefreshToken},
+        ${new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()}::timestamptz AT TIME ZONE 'UTC',
+        false
+      )
+    `;
+
+    // Mock Shopify returning 401 invalid_request
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({
+        error: "invalid_request",
+        error_description: "This request requires an active refresh_token",
+      }),
+    }) as unknown as typeof fetch;
+
+    const result = await refreshOfflineTokenIfNeeded(
+      sql,
+      TEST_SHOP,
+      TEST_CLIENT_ID,
+      TEST_CLIENT_SECRET
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("invalid_grant");
+
+    // Join all console output and check for leaks
+    const allOutput = consoleOutput.join("\n");
+
+    // CRITICAL: No token values should appear
+    expect(allOutput).not.toContain(fakeAccessToken);
+    expect(allOutput).not.toContain(fakeRefreshToken);
+    expect(allOutput).not.toContain("shpat_");
+    expect(allOutput).not.toContain("shprt_");
+
+    // CRITICAL: Shop domain should not appear in logs (only hash)
+    expect(allOutput).not.toContain(TEST_SHOP);
+    expect(allOutput).not.toContain("myshopify.com");
+
+    // The error message returned should also not contain sensitive data
+    expect(result.error).not.toContain(fakeAccessToken);
+    expect(result.error).not.toContain(fakeRefreshToken);
+    expect(result.error).not.toContain(TEST_SHOP);
+  });
+});

@@ -376,6 +376,127 @@ describeWithDb("getOfflineAdminContext (DB-backed)", () => {
       // No fetch call should be made
       expect(fetchCallCount).toBe(0);
     });
+
+    /**
+     * Issue #310: 401 invalid_request must be treated as invalid_grant.
+     */
+    it("401 invalid_request sets needsReauth and returns non-retryable failure", async () => {
+      // Create session with expired token
+      await createTestSession({
+        accessToken: "shpat_expired",
+        expiresInMs: -60 * 1000,
+      });
+
+      // Mock 401 invalid_request response (Shopify returns this for dead refresh tokens)
+      global.fetch = vi.fn(async () => {
+        fetchCallCount++;
+        return new Response(
+          JSON.stringify({
+            error: "invalid_request",
+            error_description: "This request requires an active refresh_token",
+          }),
+          { status: 401 }
+        );
+      });
+
+      const { getOfflineAdminContext } = await import("../offline-admin.server");
+
+      const result = await getOfflineAdminContext(
+        sql,
+        TEST_SHOP,
+        TEST_CLIENT_ID,
+        TEST_CLIENT_SECRET
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("invalid_grant");
+      expect(result.retryable).toBe(false);
+      expect(result.needsReauth).toBe(true);
+
+      // Verify session was marked needsReauth
+      const [session] = await sql<{ needsReauth: boolean }[]>`
+        SELECT "needsReauth" FROM "Session" WHERE id = ${TEST_SESSION_ID}
+      `;
+      expect(session.needsReauth).toBe(true);
+    });
+
+    it("5xx errors (503) are retryable and do NOT set needsReauth", async () => {
+      // Create session with expired token
+      await createTestSession({
+        accessToken: "shpat_expired",
+        expiresInMs: -60 * 1000,
+      });
+
+      // Mock 503 Service Unavailable
+      global.fetch = vi.fn(async () => {
+        fetchCallCount++;
+        return new Response(
+          JSON.stringify({
+            error: "service_unavailable",
+          }),
+          { status: 503 }
+        );
+      });
+
+      const { getOfflineAdminContext } = await import("../offline-admin.server");
+
+      const result = await getOfflineAdminContext(
+        sql,
+        TEST_SHOP,
+        TEST_CLIENT_ID,
+        TEST_CLIENT_SECRET
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("http_error");
+      expect(result.retryable).toBe(true);
+      expect(result.needsReauth).toBe(false);
+
+      // Verify needsReauth was NOT set
+      const [session] = await sql<{ needsReauth: boolean }[]>`
+        SELECT "needsReauth" FROM "Session" WHERE id = ${TEST_SESSION_ID}
+      `;
+      expect(session.needsReauth).toBe(false);
+    });
+
+    it("429 rate limit errors are retryable and do NOT set needsReauth", async () => {
+      // Create session with expired token
+      await createTestSession({
+        accessToken: "shpat_expired",
+        expiresInMs: -60 * 1000,
+      });
+
+      // Mock 429 Too Many Requests
+      global.fetch = vi.fn(async () => {
+        fetchCallCount++;
+        return new Response(
+          JSON.stringify({
+            error: "too_many_requests",
+          }),
+          { status: 429 }
+        );
+      });
+
+      const { getOfflineAdminContext } = await import("../offline-admin.server");
+
+      const result = await getOfflineAdminContext(
+        sql,
+        TEST_SHOP,
+        TEST_CLIENT_ID,
+        TEST_CLIENT_SECRET
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("http_error");
+      expect(result.retryable).toBe(true);
+      expect(result.needsReauth).toBe(false);
+
+      // Verify needsReauth was NOT set
+      const [session] = await sql<{ needsReauth: boolean }[]>`
+        SELECT "needsReauth" FROM "Session" WHERE id = ${TEST_SESSION_ID}
+      `;
+      expect(session.needsReauth).toBe(false);
+    });
   });
 
   describe("Session error from unauthenticated.admin", () => {
