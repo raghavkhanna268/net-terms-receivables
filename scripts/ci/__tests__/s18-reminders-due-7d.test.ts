@@ -2,11 +2,12 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import { checkSql } from "../check-readonly-columns";
+import { SHOP_LABELS_CTE, stripShopLabelsCte } from "../shop-labels";
 
 /**
  * scripts/readonly/s18-reminders-due-7d.sql: counts of reminders that
  * s18_enqueue_reminders() Part 3 would pick up over the next 7 shop-local days,
- * per shop_idx and recipient domain class. Must stay read-only, print only
+ * per shop_kind identity label and recipient domain class. Must stay read-only, print only
  * counts/enums/booleans/ids (never addresses), mirror the latest enqueue
  * function's selection, and be runnable from prod-readonly-query.yml.
  */
@@ -18,6 +19,9 @@ const code = sql
   .split("\n")
   .filter((l) => !l.trimStart().startsWith("--"))
   .join("\n");
+// the canonical shop_labels CTE is the only place that reads s.domain and
+// :'allowed' / :'e2e' (pinned by shop-identity-labels.test.ts)
+const codeNoLabels = stripShopLabelsCte(code);
 const sqlOnly = code
   .split("\n")
   .filter((l) => !/^\\(set ON_ERROR_STOP 1|echo '[^']*')$/.test(l.trim()))
@@ -46,12 +50,12 @@ describe("s18-reminders-due-7d.sql", () => {
     const { violations, columns } = checkSql(rel, sql);
     expect(violations).toEqual([]);
     expect(columns).toEqual([
-      { column: "shop_idx", kind: "id", via: "derived" },
+      { column: "shop_kind", kind: "enum", via: "derived" },
       { column: "installed", kind: "boolean", via: "derived" },
       { column: "currency_class", kind: "enum", via: "derived" },
       { column: "reminders_enabled", kind: "boolean", via: "derived" },
       { column: "enabled_email_rules", kind: "count", via: "derived" },
-      { column: "shop_idx", kind: "id", via: "derived" },
+      { column: "shop_kind", kind: "enum", via: "derived" },
       { column: "recipient_class", kind: "enum", via: "derived" },
       { column: "would_fire_7d", kind: "count", via: "derived" },
       { column: "would_fire_email_7d", kind: "count", via: "derived" },
@@ -65,20 +69,24 @@ describe("s18-reminders-due-7d.sql", () => {
     ]);
   });
 
-  it("is read-only, rolls back and uses no psql variables", () => {
-    expect(code).toMatch(/BEGIN TRANSACTION READ ONLY;/);
+  it("is read-only, rolls back and uses no psql variables outside shop_labels", () => {
+    // one snapshot for both shop_labels copies (other_N agrees across sections)
+    expect(code).toMatch(/^BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;$/m);
     expect(code.trimEnd()).toMatch(/ROLLBACK;$/);
     expect(sqlOnly).not.toMatch(
       /\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|COPY|CALL|DO|SET|COMMIT|nextval|setval|pgmq|s18_enqueue_reminders)\b/i,
     );
-    // no psql variables (:'x' / :x); the ::DATE cast is not one
-    expect(code).not.toMatch(/(?<!:):(?!:)['"]?[a-z_]+/i);
+    // no psql variables (:'x' / :x) besides the shop_labels CTE (both
+    // sections); the ::DATE cast is not one
+    expect(code.split(SHOP_LABELS_CTE)).toHaveLength(3);
+    expect(codeNoLabels).not.toMatch(/\.domain\b/);
+    expect(codeNoLabels).not.toMatch(/(?<!:):(?!:)['"]?[a-z_]+/i);
   });
 
   it("never prints a recipient address or the allowlist", () => {
     expect(code).not.toMatch(/RESEND_TEST_RECIPIENTS/);
     // the address column only feeds the class CASE and COUNT(DISTINCT ...)
-    const finalSelect = code.split(/\)\s*SELECT c\.shop_idx/)[1] ?? "";
+    const finalSelect = code.split(/\)\s*SELECT c\.shop_kind/)[1] ?? "";
     expect(finalSelect).not.toBe("");
     expect(finalSelect.match(/c\.rcpt/g)).toHaveLength(2);
     expect(finalSelect.match(/COUNT\(DISTINCT c\.rcpt\)/g)).toHaveLength(2);
@@ -146,7 +154,7 @@ describe("s18-reminders-due-7d.sql", () => {
     for (const pred of [
       /r\.channel = 'email'::"ReminderChannel" AS is_email/,
       /COALESCE\(srs\.enabled, false\) AND s\."uninstalledAt" IS NULL/,
-      /DENSE_RANK\(\) OVER \(ORDER BY s\.id\) AS shop_idx/,
+      /INNER JOIN shop_labels sl ON sl\.shop_id = s\.id/,
     ]) {
       expect(code).toMatch(pred);
     }
