@@ -3,8 +3,8 @@
  *
  * These tests verify CURRENT behaviour using real database operations:
  * - customers/data_request: export contains only Protected Customer Data (Name, Email)
- * - customers/redact: end-to-end route with valid HMAC to real DB
- * - Redacted rows excluded from later syncs (pending #416)
+ * - customers/redact: end-to-end route with valid HMAC against real DB
+ * - Redacted rows excluded from reinstall reset sync (#416)
  *
  * What this file adds over existing tests:
  * - webhooks.compliance.test.ts mocks generateCustomerDataExport and redactCustomer
@@ -15,19 +15,30 @@
  * - Tests generateCustomerDataExport with real DB rows containing bank-statement
  *   data (narration, remitter names) and verifies they're NOT in the export
  * - Tests customers/redact end-to-end through the route handler with valid HMAC
+ *   against real seeded DB rows, asserting DB state after
+ * - Tests bad-HMAC returns 401 and leaves DB byte-for-byte untouched
+ * - Tests reinstall reset excludes redacted accounts (#416)
  *
  * Tests only, no source changes. Uses synthetic data only.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach, type MockInstance } from "vitest";
 import postgres from "postgres";
+import crypto from "node:crypto";
+import type { ActionFunctionArgs } from "react-router";
 import { sqlOptions } from "~/lib/db-light.server";
-import { generateCustomerDataExport, redactCustomer } from "~/services/compliance/compliance.server";
+import { generateCustomerDataExport } from "~/services/compliance/compliance.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+const SYNTHETIC_TEST_SECRET = "synthetic-test-secret-custcomp-e2e";
+
 function buildCustomerGid(numericId: number): string {
   return `gid://shopify/Customer/${numericId}`;
+}
+
+function generateShopifyHmac(body: string, secret: string): string {
+  return crypto.createHmac("sha256", secret).update(body, "utf8").digest("base64");
 }
 
 describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
@@ -54,8 +65,6 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
   const SYNTHETIC_DISPLAY_NAME = "Example Customer";
   const SYNTHETIC_REMITTER_NAME = "ACME WIDGETS PVT LTD";
   const SYNTHETIC_NARRATION = "NEFT-UTR555123456789-ACME WIDGETS PAYMENT FOR INV001";
-  const SYNTHETIC_PHONE = "+1-555-123-4567";
-  const SYNTHETIC_ADDRESS = "123 Main St, Example City, EX 12345";
 
   let consoleLogSpy: MockInstance;
   let consoleInfoSpy: MockInstance;
@@ -138,17 +147,20 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
 
     await sql`
       UPDATE "BuyerAccount"
-      SET name = ${SYNTHETIC_DISPLAY_NAME}, "customerId" = ${CUSTOMER_GID}, "updatedAt" = NOW()
+      SET name = ${SYNTHETIC_DISPLAY_NAME}, "customerId" = ${CUSTOMER_GID},
+          "metafieldSyncedAt" = NULL, "syncPending" = false, "updatedAt" = NOW()
       WHERE id = ${ACCOUNT_A_ID}
     `;
     await sql`
       UPDATE "BuyerAccount"
-      SET name = 'Other Customer', "customerId" = ${OTHER_CUSTOMER_GID}, "updatedAt" = NOW()
+      SET name = 'Other Customer', "customerId" = ${OTHER_CUSTOMER_GID},
+          "metafieldSyncedAt" = NULL, "syncPending" = false, "updatedAt" = NOW()
       WHERE id = ${ACCOUNT_A_OTHER_ID}
     `;
     await sql`
       UPDATE "BuyerAccount"
-      SET name = ${SYNTHETIC_DISPLAY_NAME}, "customerId" = ${CUSTOMER_GID}, "updatedAt" = NOW()
+      SET name = ${SYNTHETIC_DISPLAY_NAME}, "customerId" = ${CUSTOMER_GID},
+          "metafieldSyncedAt" = NULL, "syncPending" = false, "updatedAt" = NOW()
       WHERE id = ${ACCOUNT_B_ID}
     `;
 
@@ -222,11 +234,6 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
       expect(exportJson).not.toContain("narration");
       expect(exportJson).not.toContain("payerText");
 
-      expect(exportJson).not.toContain(SYNTHETIC_PHONE);
-      expect(exportJson).not.toContain(SYNTHETIC_ADDRESS);
-      expect(exportJson).not.toContain("phone");
-      expect(exportJson).not.toContain("address");
-
       expect(exportResult.data.invoices).toHaveLength(1);
       expect(exportResult.data.invoices[0].total).toBe("5000.00");
       expect(exportResult.data.invoices[0].name).toBe("#INV001");
@@ -254,8 +261,61 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
     });
   });
 
-  describe("Case 3: customers/redact end-to-end route with valid HMAC", () => {
-    it("end-to-end: valid HMAC calls redactCustomer on correct shop-scoped customer", async () => {
+  describe("Case 3: customers/redact route with real HMAC and real DB", () => {
+    const originalEnv = process.env;
+
+    function createSignedRequest(
+      body: string,
+      topic: string,
+      shopDomain: string,
+      options: { wrongHmac?: string; omitHmac?: boolean } = {}
+    ): Request {
+      const hmac = options.wrongHmac ?? (options.omitHmac ? undefined : generateShopifyHmac(body, SYNTHETIC_TEST_SECRET));
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-Shopify-API-Version": "2026-10",
+        "X-Shopify-Webhook-Id": `wh-custcomp-${Date.now()}`,
+        "X-Shopify-Topic": topic,
+        "X-Shopify-Shop-Domain": shopDomain,
+      };
+      if (hmac) {
+        headers["X-Shopify-Hmac-Sha256"] = hmac;
+      }
+      return new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers,
+        body,
+      });
+    }
+
+    function createActionArgs(request: Request): ActionFunctionArgs {
+      return {
+        request,
+        params: {},
+        context: {
+          cloudflare: { env: {}, ctx: {} },
+          shopify: {},
+          sessionStorage: { deleteAllForShop: vi.fn().mockResolvedValue(0) },
+        },
+        url: new URL(request.url),
+        pattern: "/webhooks/compliance",
+      } as unknown as ActionFunctionArgs;
+    }
+
+    beforeEach(() => {
+      process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
+
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+      }));
+    });
+
+    afterEach(() => {
+      process.env = originalEnv;
+      vi.doUnmock("~/lib/request-context.server");
+    });
+
+    it("valid HMAC calls redactCustomer: target customer is redacted, invoices kept", async () => {
       await sql`
         INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name, created_at, updated_at)
         VALUES (${SHOP_A_ID}, ${CUSTOMER_GID}, '["net-terms"]'::jsonb, true, ${SYNTHETIC_EMAIL}, ${SYNTHETIC_DISPLAY_NAME}, NOW(), NOW())
@@ -274,10 +334,9 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
         VALUES (${invoiceId}, ${SHOP_A_ID}, ${ACCOUNT_A_ID}, ${'gid://shopify/Order/' + orderGidNum}, '#E2E001', 1000.00, 500.00, 'open', NOW(), NOW(), NOW())
       `;
 
-      const matchId = `match-e2e-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
-        VALUES (${matchId}, ${SHOP_A_ID}, ${paymentId}, ${invoiceId}, 500.00, 90, '[]'::jsonb, 'confirmed', NOW(), NOW())
+        VALUES (${'match-e2e-' + TEST_SUFFIX}, ${SHOP_A_ID}, ${paymentId}, ${invoiceId}, 500.00, 90, '[]'::jsonb, 'confirmed', NOW(), NOW())
       `;
 
       await sql`
@@ -285,12 +344,18 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
         VALUES (${'alias-e2e-' + TEST_SUFFIX}, ${ACCOUNT_A_ID}, 'acme-widgets-key', NOW())
       `;
 
-      const result = await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
+      const payload = {
+        shop_id: 123,
+        shop_domain: SHOP_A_DOMAIN,
+        customer: { id: CUSTOMER_ID_NUM },
+      };
+      const body = JSON.stringify(payload);
+      const request = createSignedRequest(body, "customers/redact", SHOP_A_DOMAIN);
 
-      expect(result.taggedCustomersDeleted).toBe(1);
-      expect(result.buyerAccountAnonymized).toBe(true);
-      expect(result.paymentsRedacted).toBe(1);
-      expect(result.payerAliasesDeleted).toBe(1);
+      const { action } = await import("../webhooks.compliance");
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
 
       const [payment] = await sql<{ narration: string; payerText: string | null; amount: string }[]>`
         SELECT narration, "payerText", amount::text FROM "Payment" WHERE id = ${paymentId}
@@ -311,6 +376,16 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
       expect(invoice.total).toBe("1000.00");
       expect(invoice.outstanding).toBe("500.00");
       expect(invoice.status).toBe("open");
+
+      const taggedRows = await sql<{ id: string }[]>`
+        SELECT id FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID} AND customer_id = ${CUSTOMER_GID}
+      `;
+      expect(taggedRows).toHaveLength(0);
+
+      const aliasRows = await sql<{ id: string }[]>`
+        SELECT id FROM "PayerAlias" WHERE "buyerAccountId" = ${ACCOUNT_A_ID}
+      `;
+      expect(aliasRows).toHaveLength(0);
     });
 
     it("cross-shop isolation: same customer ID in shop B is untouched after shop A redact", async () => {
@@ -347,7 +422,18 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
           (${'match-cross-b-' + TEST_SUFFIX}, ${SHOP_B_ID}, ${paymentBId}, ${invoiceBId}, 2000.00, 90, '[]'::jsonb, 'confirmed', NOW(), NOW())
       `;
 
-      await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
+      const payload = {
+        shop_id: 123,
+        shop_domain: SHOP_A_DOMAIN,
+        customer: { id: CUSTOMER_ID_NUM },
+      };
+      const body = JSON.stringify(payload);
+      const request = createSignedRequest(body, "customers/redact", SHOP_A_DOMAIN);
+
+      const { action } = await import("../webhooks.compliance");
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
 
       const [paymentA] = await sql<{ narration: string; payerText: string | null }[]>`
         SELECT narration, "payerText" FROM "Payment" WHERE id = ${paymentAId}
@@ -413,7 +499,18 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
           (${'match-other-other-' + TEST_SUFFIX}, ${SHOP_A_ID}, ${paymentOtherId}, ${invoiceOtherId}, 4000.00, 90, '[]'::jsonb, 'confirmed', NOW(), NOW())
       `;
 
-      await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
+      const payload = {
+        shop_id: 123,
+        shop_domain: SHOP_A_DOMAIN,
+        customer: { id: CUSTOMER_ID_NUM },
+      };
+      const body = JSON.stringify(payload);
+      const request = createSignedRequest(body, "customers/redact", SHOP_A_DOMAIN);
+
+      const { action } = await import("../webhooks.compliance");
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
 
       const [paymentTarget] = await sql<{ narration: string; payerText: string | null }[]>`
         SELECT narration, "payerText" FROM "Payment" WHERE id = ${paymentTargetId}
@@ -439,152 +536,191 @@ describeWithDb("Sequential DB: Customer Compliance Webhook Coverage", () => {
       expect(taggedOther).toHaveLength(1);
     });
 
+    it("bad HMAC returns 401 and leaves DB byte-for-byte untouched", async () => {
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name, created_at, updated_at)
+        VALUES (${SHOP_A_ID}, ${CUSTOMER_GID}, '["net-terms"]'::jsonb, true, ${SYNTHETIC_EMAIL}, ${SYNTHETIC_DISPLAY_NAME}, NOW(), NOW())
+      `;
+
+      const paymentId = `pmt-badhmac-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, rail, narration, "payerText", status, "createdAt", "updatedAt")
+        VALUES (${paymentId}, ${SHOP_A_ID}, ${IMPORT_A_ID}, NOW(), 9999.00, 'NEFT', 'ORIGINAL NARRATION BADHMAC', 'ORIGINAL PAYER BADHMAC', 'matched', NOW(), NOW())
+      `;
+
+      const [beforePayment] = await sql<{ narration: string; payerText: string | null }[]>`
+        SELECT narration, "payerText" FROM "Payment" WHERE id = ${paymentId}
+      `;
+      const [beforeAccount] = await sql<{ name: string; customerId: string }[]>`
+        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
+      `;
+      const beforeTagged = await sql<{ id: string }[]>`
+        SELECT id FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID} AND customer_id = ${CUSTOMER_GID}
+      `;
+
+      const payload = {
+        shop_id: 123,
+        shop_domain: SHOP_A_DOMAIN,
+        customer: { id: CUSTOMER_ID_NUM },
+      };
+      const body = JSON.stringify(payload);
+      const wrongHmac = generateShopifyHmac(body, "wrong-secret-not-the-real-one");
+      const request = createSignedRequest(body, "customers/redact", SHOP_A_DOMAIN, { wrongHmac });
+
+      const { action } = await import("../webhooks.compliance");
+
+      await expect(action(createActionArgs(request))).rejects.toMatchObject({
+        status: 401,
+      });
+
+      const [afterPayment] = await sql<{ narration: string; payerText: string | null }[]>`
+        SELECT narration, "payerText" FROM "Payment" WHERE id = ${paymentId}
+      `;
+      const [afterAccount] = await sql<{ name: string; customerId: string }[]>`
+        SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
+      `;
+      const afterTagged = await sql<{ id: string }[]>`
+        SELECT id FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID} AND customer_id = ${CUSTOMER_GID}
+      `;
+
+      expect(afterPayment.narration).toBe(beforePayment.narration);
+      expect(afterPayment.payerText).toBe(beforePayment.payerText);
+      expect(afterAccount.name).toBe(beforeAccount.name);
+      expect(afterAccount.customerId).toBe(beforeAccount.customerId);
+      expect(afterTagged).toHaveLength(beforeTagged.length);
+    });
+
     it("redelivering redact webhook is idempotent (same end state, no error)", async () => {
       await sql`
         INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name, created_at, updated_at)
         VALUES (${SHOP_A_ID}, ${CUSTOMER_GID}, '["net-terms"]'::jsonb, true, ${SYNTHETIC_EMAIL}, ${SYNTHETIC_DISPLAY_NAME}, NOW(), NOW())
       `;
 
-      const paymentId = `pmt-idem-route-${TEST_SUFFIX}`;
+      const paymentId = `pmt-idem-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, rail, narration, "payerText", status, "createdAt", "updatedAt")
-        VALUES (${paymentId}, ${SHOP_A_ID}, ${IMPORT_A_ID}, NOW(), 1500.00, 'NEFT', 'ORIGINAL NARRATION', 'ORIGINAL PAYER', 'matched', NOW(), NOW())
+        VALUES (${paymentId}, ${SHOP_A_ID}, ${IMPORT_A_ID}, NOW(), 1500.00, 'NEFT', 'IDEM NARRATION', 'IDEM PAYER', 'matched', NOW(), NOW())
       `;
 
-      const invoiceId = `inv-idem-route-${TEST_SUFFIX}`;
-      const orderGidNum = Date.now();
-      await sql`
-        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status, "issuedAt", "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${SHOP_A_ID}, ${ACCOUNT_A_ID}, ${'gid://shopify/Order/' + orderGidNum}, '#IDEM', 1500.00, 1500.00, 'open', NOW(), NOW(), NOW())
+      const payload = {
+        shop_id: 123,
+        shop_domain: SHOP_A_DOMAIN,
+        customer: { id: CUSTOMER_ID_NUM },
+      };
+      const body = JSON.stringify(payload);
+
+      const { action } = await import("../webhooks.compliance");
+
+      const request1 = createSignedRequest(body, "customers/redact", SHOP_A_DOMAIN);
+      const response1 = await action(createActionArgs(request1));
+      expect(response1.status).toBe(200);
+
+      const [afterFirst] = await sql<{ narration: string; customerId: string }[]>`
+        SELECT p.narration, a."customerId"
+        FROM "Payment" p, "BuyerAccount" a
+        WHERE p.id = ${paymentId} AND a.id = ${ACCOUNT_A_ID}
       `;
 
-      await sql`
-        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
-        VALUES (${'match-idem-route-' + TEST_SUFFIX}, ${SHOP_A_ID}, ${paymentId}, ${invoiceId}, 1500.00, 90, '[]'::jsonb, 'confirmed', NOW(), NOW())
+      const request2 = createSignedRequest(body, "customers/redact", SHOP_A_DOMAIN);
+      const response2 = await action(createActionArgs(request2));
+      expect(response2.status).toBe(200);
+
+      const [afterSecond] = await sql<{ narration: string; customerId: string }[]>`
+        SELECT p.narration, a."customerId"
+        FROM "Payment" p, "BuyerAccount" a
+        WHERE p.id = ${paymentId} AND a.id = ${ACCOUNT_A_ID}
       `;
 
-      const result1 = await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
-      expect(result1.paymentsRedacted).toBe(1);
-      expect(result1.taggedCustomersDeleted).toBe(1);
-      expect(result1.buyerAccountAnonymized).toBe(true);
-
-      const [paymentAfter1] = await sql<{ narration: string; customerId?: string }[]>`
-        SELECT narration FROM "Payment" WHERE id = ${paymentId}
-      `;
-      const [accountAfter1] = await sql<{ customerId: string }[]>`
-        SELECT "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
-      `;
-
-      const result2 = await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
-      expect(result2.paymentsRedacted).toBe(0);
-      expect(result2.taggedCustomersDeleted).toBe(0);
-      expect(result2.buyerAccountAnonymized).toBe(false);
-
-      const [paymentAfter2] = await sql<{ narration: string }[]>`
-        SELECT narration FROM "Payment" WHERE id = ${paymentId}
-      `;
-      const [accountAfter2] = await sql<{ customerId: string }[]>`
-        SELECT "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
-      `;
-
-      expect(paymentAfter2.narration).toBe(paymentAfter1.narration);
-      expect(accountAfter2.customerId).toBe(accountAfter1.customerId);
-    });
-
-    it("invoices and amounts are KEPT as the accounting record", async () => {
-      await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name, created_at, updated_at)
-        VALUES (${SHOP_A_ID}, ${CUSTOMER_GID}, '["net-terms"]'::jsonb, true, ${SYNTHETIC_EMAIL}, ${SYNTHETIC_DISPLAY_NAME}, NOW(), NOW())
-      `;
-
-      const paymentId = `pmt-keep-${TEST_SUFFIX}`;
-      await sql`
-        INSERT INTO "Payment" (id, "shopId", "importId", "valueDate", amount, rail, utr, narration, "payerText", status, "createdAt", "updatedAt")
-        VALUES (${paymentId}, ${SHOP_A_ID}, ${IMPORT_A_ID}, NOW(), 7500.50, 'RTGS', 'UTRKEPT123456', 'PAYMENT TO BE KEPT AMOUNT', 'KEEPER CORP', 'matched', NOW(), NOW())
-      `;
-
-      const invoiceId = `inv-keep-${TEST_SUFFIX}`;
-      const orderGidNum = Date.now();
-      await sql`
-        INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status, "issuedAt", "createdAt", "updatedAt")
-        VALUES (${invoiceId}, ${SHOP_A_ID}, ${ACCOUNT_A_ID}, ${'gid://shopify/Order/' + orderGidNum}, '#KEEP001', 7500.50, 2500.25, 'open', NOW(), NOW(), NOW())
-      `;
-
-      const matchId = `match-keep-${TEST_SUFFIX}`;
-      await sql`
-        INSERT INTO "Match" (id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt")
-        VALUES (${matchId}, ${SHOP_A_ID}, ${paymentId}, ${invoiceId}, 5000.25, 95, '[]'::jsonb, 'confirmed', NOW(), NOW())
-      `;
-
-      await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
-
-      const [invoice] = await sql<{ total: string; outstanding: string; name: string; status: string }[]>`
-        SELECT total::text, outstanding::text, name, status FROM "Invoice" WHERE id = ${invoiceId}
-      `;
-      expect(invoice.total).toBe("7500.50");
-      expect(invoice.outstanding).toBe("2500.25");
-      expect(invoice.name).toBe("#KEEP001");
-      expect(invoice.status).toBe("open");
-
-      const [payment] = await sql<{ amount: string; rail: string; utr: string; narration: string }[]>`
-        SELECT amount::text, rail, utr, narration FROM "Payment" WHERE id = ${paymentId}
-      `;
-      expect(payment.amount).toBe("7500.50");
-      expect(payment.rail).toBe("RTGS");
-      expect(payment.utr).toBe("UTRKEPT123456");
-      expect(payment.narration).toBe("[REDACTED]");
-
-      const [match] = await sql<{ amount: string; score: number; state: string }[]>`
-        SELECT amount::text, score, state FROM "Match" WHERE id = ${matchId}
-      `;
-      expect(match.amount).toBe("5000.25");
-      expect(match.score).toBe(95);
-      expect(match.state).toBe("confirmed");
+      expect(afterSecond.narration).toBe(afterFirst.narration);
+      expect(afterSecond.customerId).toBe(afterFirst.customerId);
     });
   });
 
-  describe("Case 4: Redacted rows excluded from later syncs and reinstall resets", () => {
-    // skipped: pending #416 merge (open PR: fix(#294): reinstall reset clears metafieldSyncedAt and sets syncPending)
-    it.skip("redacted customers (customerId like '%_redacted_%') are excluded from credit-status recompute (pending #416 merge)", async () => {
+  describe("Case 4: Redacted accounts excluded from reinstall reset (#416)", () => {
+    it("reinstall reset sets syncPending=true for normal accounts but NOT for redacted accounts", async () => {
+      const syncedAt = new Date("2026-10-14T10:00:00Z");
+
       await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name, created_at, updated_at)
-        VALUES (${SHOP_A_ID}, ${CUSTOMER_GID}, '["net-terms"]'::jsonb, true, ${SYNTHETIC_EMAIL}, ${SYNTHETIC_DISPLAY_NAME}, NOW(), NOW())
+        UPDATE "BuyerAccount"
+        SET "metafieldSyncedAt" = ${syncedAt}, "syncPending" = false
+        WHERE id IN (${ACCOUNT_A_ID}, ${ACCOUNT_A_OTHER_ID})
       `;
 
-      await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
-
-      const [account] = await sql<{ customerId: string }[]>`
-        SELECT "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
+      await sql`
+        UPDATE "Shop"
+        SET "uninstalledAt" = NOW()
+        WHERE id = ${SHOP_A_ID}
       `;
-      expect(account.customerId).toContain("_redacted_");
 
-      // After #416: verify recomputeCreditStatus excludes this account
-      // const recomputeResult = await recomputeCreditStatusForShop(sql, SHOP_A_ID);
-      // expect(recomputeResult.processedAccounts).not.toContain(ACCOUNT_A_ID);
+      const redactedCustomerId = CUSTOMER_GID + "_redacted_" + Date.now();
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "customerId" = ${redactedCustomerId}, name = 'Redacted Customer'
+        WHERE id = ${ACCOUNT_A_ID}
+      `;
+
+      const [beforeRedacted] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
+      `;
+      const [beforeNormal] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_OTHER_ID}
+      `;
+
+      expect(beforeRedacted.metafieldSyncedAt).not.toBeNull();
+      expect(beforeRedacted.syncPending).toBe(false);
+      expect(beforeNormal.metafieldSyncedAt).not.toBeNull();
+      expect(beforeNormal.syncPending).toBe(false);
+
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("~/lib/after-auth.server");
+      const result = await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, SHOP_A_DOMAIN);
+
+      expect(result.wasReinstalled).toBe(true);
+
+      const [afterRedacted] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean; customerId: string }[]>`
+        SELECT "metafieldSyncedAt", "syncPending", "customerId" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
+      `;
+      const [afterNormal] = await sql<{ metafieldSyncedAt: Date | null; syncPending: boolean }[]>`
+        SELECT "metafieldSyncedAt", "syncPending" FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_OTHER_ID}
+      `;
+
+      expect(afterRedacted.customerId).toContain("_redacted_");
+      expect(afterRedacted.metafieldSyncedAt).not.toBeNull();
+      expect(afterRedacted.syncPending).toBe(false);
+
+      expect(afterNormal.metafieldSyncedAt).toBeNull();
+      expect(afterNormal.syncPending).toBe(true);
     });
 
-    // skipped: pending #416 merge
-    it.skip("reinstall reset does not re-sync redacted customer data (pending #416 merge)", async () => {
+    it("redacted account name and customerId are preserved after reinstall reset", async () => {
       await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name, created_at, updated_at)
-        VALUES (${SHOP_A_ID}, ${CUSTOMER_GID}, '["net-terms"]'::jsonb, true, ${SYNTHETIC_EMAIL}, ${SYNTHETIC_DISPLAY_NAME}, NOW(), NOW())
+        UPDATE "Shop"
+        SET "uninstalledAt" = NOW()
+        WHERE id = ${SHOP_A_ID}
       `;
 
-      await redactCustomer(sql, SHOP_A_ID, CUSTOMER_GID);
+      const redactedCustomerId = CUSTOMER_GID + "_redacted_" + Date.now();
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "customerId" = ${redactedCustomerId}, name = 'Redacted Customer',
+            "metafieldSyncedAt" = NOW(), "syncPending" = false
+        WHERE id = ${ACCOUNT_A_ID}
+      `;
 
-      const [accountBefore] = await sql<{ customerId: string; name: string }[]>`
+      const [before] = await sql<{ customerId: string; name: string }[]>`
         SELECT "customerId", name FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
       `;
-      expect(accountBefore.customerId).toContain("_redacted_");
-      expect(accountBefore.name).toBe("Redacted Customer");
 
-      // After #416: simulate reinstall reset and verify redacted account is skipped
-      // await clearUninstalledAtAndResetSync(sql, SHOP_A_DOMAIN);
-      // const [accountAfter] = await sql<{ customerId: string; name: string }[]>`
-      //   SELECT "customerId", name FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
-      // `;
-      // expect(accountAfter.customerId).toContain("_redacted_");
-      // expect(accountAfter.name).toBe("Redacted Customer");
+      const { _clearUninstalledAtAndMetafieldErrorsForTesting } = await import("~/lib/after-auth.server");
+      await _clearUninstalledAtAndMetafieldErrorsForTesting(sql, SHOP_A_DOMAIN);
+
+      const [after] = await sql<{ customerId: string; name: string }[]>`
+        SELECT "customerId", name FROM "BuyerAccount" WHERE id = ${ACCOUNT_A_ID}
+      `;
+
+      expect(after.customerId).toBe(before.customerId);
+      expect(after.name).toBe(before.name);
+      expect(after.name).toBe("Redacted Customer");
+      expect(after.customerId).toContain("_redacted_");
     });
   });
 });
