@@ -5,18 +5,18 @@
  * 1. Query counts are constant regardless of data size (N+1 detection)
  * 2. All lists are paginated or capped
  * 3. Response sizes stay under pinned limits
- * 4. Bank import parse/match timing (reported only, no assertions)
+ * 4. Bank import parse/match timing with real parser
  *
  * Uses a synthetic INR shop with realistic upper-size data:
- * - FULL: ~500 buyers, ~3000 invoices, ~1500 bank payments, ~200 reminder sends
- * - HALF: ~250 buyers, ~1500 invoices, ~750 bank payments, ~100 reminder sends
+ * - FULL: ~500 buyers, ~3000 invoices, ~1500 bank payments
+ * - HALF: ~250 buyers, ~1500 invoices, ~750 bank payments
+ * - SMALL: ~5 buyers, ~15 invoices, ~10 bank payments (for visible N+1 detection)
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
   FULL_SIZE,
-  HALF_SIZE,
   generateAllData,
   generateSyntheticHdfcStatement,
   type SeedConfig,
@@ -27,7 +27,17 @@ import { createSqlSpy, type SqlSpy } from "../helpers/sql-spy";
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+const SMALL_SIZE: Omit<SeedConfig, "shopId" | "shopDomain"> = {
+  buyerCount: 5,
+  invoiceCount: 15,
+  bankPaymentCount: 10,
+  reminderSendCount: 5,
+  draftOrderCount: 5,
+};
+
+// Mock ONLY Shopify Admin API and billing callers - DB services use real seeded data
 vi.mock("~/services/plan.server", () => ({
+  // Justification: resolvePlan calls Shopify Billing API (activeSubscriptions query)
   resolvePlan: vi.fn().mockResolvedValue({
     plan: { key: "growth" },
     subscriptionName: "Growth",
@@ -35,86 +45,38 @@ vi.mock("~/services/plan.server", () => ({
   }),
 }));
 
-vi.mock("~/services/gating.server", () => ({
-  getUsageStats: vi.fn().mockResolvedValue({
-    companies: { current: 100, limit: 500 },
-    importsThisMonth: { current: 10, limit: -1 },
-  }),
-  isGatingEnforced: vi.fn().mockReturnValue(false),
-  isAccountActive: vi.fn().mockReturnValue(true),
-}));
-
-vi.mock("~/services/access-log.server", () => ({
-  recordAccess: vi.fn(),
-  getActorFromSessionToken: vi.fn().mockReturnValue("test-actor"),
-}));
-
-vi.mock("~/services/reminder-optout.server", () => ({
-  getBuyerOptOutStatus: vi.fn().mockResolvedValue(null),
-  setBuyerOptOut: vi.fn(),
-  clearBuyerOptOut: vi.fn(),
-}));
-
-vi.mock("~/services/credit-status.server", () => ({
-  getCreditStatusDisplay: vi.fn().mockResolvedValue({
-    creditLimitAmount: 100000,
-    creditLimitPaise: 10000000n,
-    exposurePaise: 5000000n,
-    draftExposurePaise: 0n,
-    availableCreditPaise: 5000000n,
-    currency: "INR",
-    holdState: "OK",
-    manualHold: false,
-    holdReasonCode: null,
-    holdNote: null,
-    isOnHold: false,
-    holdReasonDisplay: null,
-    isOverLimit: false,
-    isOverdue: false,
-    utilizationPercent: 50,
-    syncPending: false,
-    syncErrorCode: null,
-    metafieldSyncedAt: new Date(),
-  }),
-  getCompanyTotals: vi.fn().mockResolvedValue(null),
-  updateCreditStatus: vi.fn().mockResolvedValue({ success: true }),
-}));
-
 vi.mock("~/services/shop-currency-recovery.server", () => ({
+  // Justification: checkAndRecoverCurrency calls Shopify Admin API (shop query)
   checkAndRecoverCurrency: vi.fn().mockResolvedValue({ currency: "INR", flipBlocked: false }),
 }));
 
 vi.mock("~/services/plan-welcome.server", () => ({
+  // Justification: processPlanWelcome calls Shopify Billing API
   processPlanWelcome: vi.fn().mockResolvedValue({ refreshed: false, skipped: true }),
 }));
 
 vi.mock("~/lib/currency-gate.server", () => ({
+  // Justification: config-based gate, not DB
   isCurrencyGateOpen: vi.fn().mockReturnValue(true),
   getEffectiveCurrency: vi.fn().mockReturnValue("INR"),
 }));
 
-vi.mock("~/services/compliance", () => ({
-  getPendingDataRequests: vi.fn().mockResolvedValue([]),
-  purgeExpiredDataRequests: vi.fn().mockResolvedValue(undefined),
-}));
-
 interface QueryCountResult {
   route: string;
+  smallCount: number;
   fullCount: number;
-  halfCount: number;
   pinnedBound: number;
 }
 
 interface ResponseSizeResult {
   route: string;
-  fullSize: number;
-  halfSize: number;
+  bytes: number;
   pinnedLimit: number;
 }
 
 interface TimingResult {
   parseMs: number;
-  suggestMs: number;
+  matchMs: number;
   rowCount: number;
 }
 
@@ -125,8 +87,6 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
   const TEST_SHOP_ID = `shop-scale-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-scale-${TEST_SUFFIX}.myshopify.com`;
 
-  let fullData: GeneratedData;
-  let halfData: GeneratedData;
   const queryCountResults: QueryCountResult[] = [];
   const responseSizeResults: ResponseSizeResult[] = [];
   let timingResult: TimingResult | null = null;
@@ -137,18 +97,34 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
     ...FULL_SIZE,
   };
 
-  const halfConfig: SeedConfig = {
+  const smallConfig: SeedConfig = {
     shopId: TEST_SHOP_ID,
     shopDomain: TEST_SHOP_DOMAIN,
-    ...HALF_SIZE,
+    ...SMALL_SIZE,
   };
 
-  async function seedData(config: SeedConfig, data: GeneratedData): Promise<void> {
+  async function cleanupData(): Promise<void> {
+    await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Match" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM s22_data_requests WHERE shop_id = ${TEST_SHOP_ID}`;
+  }
+
+  async function seedShop(): Promise<void> {
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt", "onboarding_dismissed_at")
-      VALUES (${config.shopId}, ${config.shopDomain}, 'INR', 'Asia/Kolkata', NOW(), NOW(), NOW())
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW(), NOW())
       ON CONFLICT (domain) DO UPDATE SET "updatedAt" = NOW()
     `;
+  }
+
+  async function seedData(config: SeedConfig, data: GeneratedData): Promise<void> {
+    await seedShop();
 
     await sql`
       INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
@@ -316,25 +292,36 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
         ON CONFLICT DO NOTHING
       `;
     }
-  }
 
-  async function cleanupData(): Promise<void> {
-    await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "Match" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "Payment" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    // Seed reminder logs
+    if (data.reminderLogs.length > 0) {
+      const logValues = data.reminderLogs.map((log) => ({
+        id: log.id,
+        shopId: log.shopId,
+        ruleId: log.ruleId,
+        invoiceId: log.invoiceId,
+        status: log.status,
+        sentAt: log.sentAt?.toISOString() ?? null,
+      }));
+
+      await sql`
+        INSERT INTO "ReminderLog" (
+          id, "shopId", "ruleId", "invoiceId", status, "sentAt"
+        )
+        SELECT
+          r.id, r."shopId", r."ruleId", r."invoiceId", r.status::"ReminderLogStatus",
+          r."sentAt"::timestamptz
+        FROM jsonb_to_recordset(${sql.json(logValues)}) AS r(
+          id text, "shopId" text, "ruleId" text, "invoiceId" text, status text, "sentAt" text
+        )
+        ON CONFLICT DO NOTHING
+      `;
+    }
   }
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
     spy = createSqlSpy(sql);
-
-    fullData = generateAllData(fullConfig);
-    halfData = generateAllData(halfConfig);
   });
 
   afterAll(async () => {
@@ -343,18 +330,18 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
     await sql.end();
 
     console.log("\n=== SCALE TEST RESULTS ===\n");
-    console.log("Query Counts (route | full | half | pinned):");
+    console.log("Query Counts (route | small | full | pinned):");
     for (const r of queryCountResults) {
-      console.log(`  ${r.route.padEnd(25)} | ${String(r.fullCount).padStart(4)} | ${String(r.halfCount).padStart(4)} | ${r.pinnedBound}`);
+      console.log(`  ${r.route.padEnd(25)} | ${String(r.smallCount).padStart(4)} | ${String(r.fullCount).padStart(4)} | ${r.pinnedBound}`);
     }
-    console.log("\nResponse Sizes (route | full | half | limit):");
+    console.log("\nResponse Sizes (route | bytes | limit):");
     for (const r of responseSizeResults) {
-      console.log(`  ${r.route.padEnd(25)} | ${String(r.fullSize).padStart(6)} | ${String(r.halfSize).padStart(6)} | ${r.pinnedLimit}`);
+      console.log(`  ${r.route.padEnd(25)} | ${String(r.bytes).padStart(8)} | ${r.pinnedLimit}`);
     }
     if (timingResult) {
       console.log(`\nHDFC Statement Timing (${timingResult.rowCount} rows):`);
       console.log(`  Parse: ${timingResult.parseMs}ms`);
-      console.log(`  Suggest: ${timingResult.suggestMs}ms`);
+      console.log(`  Match: ${timingResult.matchMs}ms`);
     }
   });
 
@@ -369,7 +356,7 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
         shopify: {
           authenticate: {
             admin: vi.fn().mockResolvedValue({
-              session: { shop: TEST_SHOP_DOMAIN },
+              session: { shop: TEST_SHOP_DOMAIN, accessToken: "test-token" },
               sessionToken: { sub: "test-user" },
               redirect: vi.fn((p: string) => {
                 throw new Response(null, { status: 302, headers: { Location: p } });
@@ -387,7 +374,7 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
   async function measureLoader(
     loaderFn: (args: unknown) => Promise<unknown>,
     args: unknown
-  ): Promise<{ queryCount: number; responseSize: number }> {
+  ): Promise<{ queryCount: number; responseSize: number; data: unknown }> {
     spy.reset();
     const result = await loaderFn(args);
 
@@ -399,36 +386,24 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
     if (typeof data === "object" && data !== null && "dashboardData" in data) {
       const dd = data as { dashboardData: Promise<unknown> };
       if (dd.dashboardData && typeof dd.dashboardData.then === "function") {
-        await dd.dashboardData;
+        const resolved = await dd.dashboardData;
+        data = { ...data as object, ...resolved as object };
       }
     }
 
     const responseSize = JSON.stringify(data).length;
-    return { queryCount: spy.getQueryCount(), responseSize };
+    return { queryCount: spy.getQueryCount(), responseSize, data };
   }
 
-  describe("SEED: synthetic INR shop data", () => {
-    it("seeds FULL size data", async () => {
-      await seedData(fullConfig, fullData);
-
-      const [buyerCount] = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}
-      `;
-      const [invoiceCount] = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}
-      `;
-      const [paymentCount] = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Payment" WHERE "shopId" = ${TEST_SHOP_ID}
-      `;
-
-      expect(parseInt(buyerCount.count, 10)).toBe(FULL_SIZE.buyerCount);
-      expect(parseInt(invoiceCount.count, 10)).toBe(FULL_SIZE.invoiceCount);
-      expect(parseInt(paymentCount.count, 10)).toBe(FULL_SIZE.bankPaymentCount);
-    });
-  });
-
   describe("QUERY COUNTS: dashboard (app._index)", () => {
-    it("query count is constant at FULL and HALF size", async () => {
+    const PINNED_BOUND = 12;
+    const RESPONSE_SIZE_LIMIT = 25000;
+
+    beforeEach(async () => {
+      await cleanupData();
+    });
+
+    it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => spy.sql,
@@ -437,42 +412,89 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
       const { loader } = await import("~/routes/app._index");
 
-      const fullResult = await measureLoader(
+      // Seed SMALL (5 buyers visible on page 1)
+      const smallData = generateAllData(smallConfig);
+      await seedData(smallConfig, smallData);
+
+      const smallResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app", { skipOnboarding: "true" })
       );
 
       await cleanupData();
-      await seedData(halfConfig, halfData);
 
-      const halfResult = await measureLoader(
+      // Seed FULL (only 20 buyers visible on page 1 due to pagination)
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+
+      const fullResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app", { skipOnboarding: "true" })
       );
 
       queryCountResults.push({
         route: "app._index",
+        smallCount: smallResult.queryCount,
         fullCount: fullResult.queryCount,
-        halfCount: halfResult.queryCount,
-        pinnedBound: fullResult.queryCount,
+        pinnedBound: PINNED_BOUND,
       });
 
       responseSizeResults.push({
         route: "app._index",
-        fullSize: fullResult.responseSize,
-        halfSize: halfResult.responseSize,
-        pinnedLimit: Math.ceil(fullResult.responseSize * 1.1),
+        bytes: fullResult.responseSize,
+        pinnedLimit: RESPONSE_SIZE_LIMIT,
       });
 
-      expect(halfResult.queryCount).toBe(fullResult.queryCount);
+      // N+1 check: count must be same at small and full
+      expect(fullResult.queryCount).toBe(smallResult.queryCount);
+      // Pinned bound check
+      expect(fullResult.queryCount).toBeLessThanOrEqual(PINNED_BOUND);
+      // Response size check
+      expect(fullResult.responseSize).toBeLessThan(RESPONSE_SIZE_LIMIT);
+    });
+
+    it("buyer ledger returns exactly 20 rows when data exceeds page size", async () => {
+      vi.resetModules();
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => spy.sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      const { loader } = await import("~/routes/app._index");
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+
+      const result = await measureLoader(
+        loader as (args: unknown) => Promise<unknown>,
+        createLoaderArgs("/app", { skipOnboarding: "true" })
+      );
+
+      const data = result.data as {
+        buyerLedger: { rows: unknown[]; totalCount: number } | null;
+        pagination: { page: number; pageSize: number; totalCount: number };
+      };
+
+      expect(data.buyerLedger).not.toBeNull();
+      expect(data.buyerLedger!.rows.length).toBe(20);
+      expect(data.pagination).toMatchObject({
+        page: 1,
+        pageSize: 20,
+      });
+      expect(data.pagination.totalCount).toBeGreaterThan(20);
     });
   });
 
   describe("QUERY COUNTS: accounts.$id", () => {
-    it("query count is constant at FULL and HALF size", async () => {
-      await cleanupData();
-      await seedData(fullConfig, fullData);
+    const PINNED_BOUND = 10;
+    const RESPONSE_SIZE_LIMIT = 15000;
+    let testAccountId: string;
+    let manyInvoicesBuyerId: string;
 
+    beforeEach(async () => {
+      await cleanupData();
+    });
+
+    it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => spy.sql,
@@ -480,45 +502,121 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
       }));
 
       const { loader } = await import("~/routes/app.accounts.$id");
-      const testAccountId = fullData.buyers[0].id;
+
+      // Seed SMALL
+      const smallData = generateAllData(smallConfig);
+      await seedData(smallConfig, smallData);
+      testAccountId = smallData.buyers[0].id;
+
+      const smallResult = await measureLoader(
+        loader as (args: unknown) => Promise<unknown>,
+        createLoaderArgs(`/app/accounts/${testAccountId}`, { id: testAccountId })
+      );
+
+      await cleanupData();
+
+      // Seed FULL
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+      testAccountId = fullData.buyers[0].id;
 
       const fullResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs(`/app/accounts/${testAccountId}`, { id: testAccountId })
       );
 
-      await cleanupData();
-      await seedData(halfConfig, halfData);
-
-      const halfAccountId = halfData.buyers[0].id;
-      const halfResult = await measureLoader(
-        loader as (args: unknown) => Promise<unknown>,
-        createLoaderArgs(`/app/accounts/${halfAccountId}`, { id: halfAccountId })
-      );
-
       queryCountResults.push({
         route: "app.accounts.$id",
+        smallCount: smallResult.queryCount,
         fullCount: fullResult.queryCount,
-        halfCount: halfResult.queryCount,
-        pinnedBound: fullResult.queryCount,
+        pinnedBound: PINNED_BOUND,
       });
 
       responseSizeResults.push({
         route: "app.accounts.$id",
-        fullSize: fullResult.responseSize,
-        halfSize: halfResult.responseSize,
-        pinnedLimit: Math.ceil(fullResult.responseSize * 1.1),
+        bytes: fullResult.responseSize,
+        pinnedLimit: RESPONSE_SIZE_LIMIT,
       });
 
-      expect(halfResult.queryCount).toBe(fullResult.queryCount);
+      expect(fullResult.queryCount).toBe(smallResult.queryCount);
+      expect(fullResult.queryCount).toBeLessThanOrEqual(PINNED_BOUND);
+      expect(fullResult.responseSize).toBeLessThan(RESPONSE_SIZE_LIMIT);
+    });
+
+    it("invoices are capped at 10 rows for buyer with >10 invoices", async () => {
+      vi.resetModules();
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => spy.sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      const { loader } = await import("~/routes/app.accounts.$id");
+
+      // Seed a buyer with many invoices
+      await seedShop();
+      manyInvoicesBuyerId = `buyer-many-inv-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "customerId", name, "holdState", "createdAt", "updatedAt"
+        ) VALUES (
+          ${manyInvoicesBuyerId}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER',
+          ${"cust-many-" + TEST_SUFFIX}, 'Buyer With Many Invoices', 'OK', NOW(), NOW()
+        )
+      `;
+
+      // Create 15 invoices for this buyer
+      const invoiceValues = Array.from({ length: 15 }, (_, i) => ({
+        id: `inv-many-${TEST_SUFFIX}-${i}`,
+        shopId: TEST_SHOP_ID,
+        buyerAccountId: manyInvoicesBuyerId,
+        orderId: `order-many-${TEST_SUFFIX}-${i}`,
+        name: `#MANY-${i}`,
+        total: 1000 + i * 100,
+        outstanding: 500 + i * 50,
+        issuedAt: new Date().toISOString(),
+        dueAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        dueSource: "schedule",
+        status: "open",
+      }));
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt"
+        )
+        SELECT
+          r.id, r."shopId", r."buyerAccountId", r."orderId", r.name,
+          r.total::decimal(14,2), r.outstanding::decimal(14,2), r."issuedAt"::timestamptz,
+          r."dueAt"::timestamptz, r."dueSource"::"DueSource", r.status::"InvoiceStatus",
+          NOW(), NOW()
+        FROM jsonb_to_recordset(${sql.json(invoiceValues)}) AS r(
+          id text, "shopId" text, "buyerAccountId" text, "orderId" text, name text,
+          total numeric, outstanding numeric, "issuedAt" text, "dueAt" text,
+          "dueSource" text, status text
+        )
+      `;
+
+      const result = await measureLoader(
+        loader as (args: unknown) => Promise<unknown>,
+        createLoaderArgs(`/app/accounts/${manyInvoicesBuyerId}`, { id: manyInvoicesBuyerId })
+      );
+
+      const data = result.data as { invoices: { rows: unknown[]; totalCount: number } };
+      expect(data.invoices.rows.length).toBe(10);
+      expect(data.invoices.totalCount).toBe(15);
     });
   });
 
   describe("QUERY COUNTS: reconcile", () => {
-    it("query count is constant at FULL and HALF size", async () => {
-      await cleanupData();
-      await seedData(fullConfig, fullData);
+    const PINNED_BOUND = 12;
+    const RESPONSE_SIZE_LIMIT = 20000;
 
+    beforeEach(async () => {
+      await cleanupData();
+    });
+
+    it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => spy.sql,
@@ -527,42 +625,80 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
       const { loader } = await import("~/routes/app.reconcile");
 
-      const fullResult = await measureLoader(
+      // Seed SMALL
+      const smallData = generateAllData(smallConfig);
+      await seedData(smallConfig, smallData);
+
+      const smallResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app/reconcile", { view: "suggested" })
       );
 
       await cleanupData();
-      await seedData(halfConfig, halfData);
 
-      const halfResult = await measureLoader(
+      // Seed FULL
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+
+      const fullResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app/reconcile", { view: "suggested" })
       );
 
       queryCountResults.push({
         route: "app.reconcile",
+        smallCount: smallResult.queryCount,
         fullCount: fullResult.queryCount,
-        halfCount: halfResult.queryCount,
-        pinnedBound: fullResult.queryCount,
+        pinnedBound: PINNED_BOUND,
       });
 
       responseSizeResults.push({
         route: "app.reconcile",
-        fullSize: fullResult.responseSize,
-        halfSize: halfResult.responseSize,
-        pinnedLimit: Math.ceil(fullResult.responseSize * 1.1),
+        bytes: fullResult.responseSize,
+        pinnedLimit: RESPONSE_SIZE_LIMIT,
       });
 
-      expect(halfResult.queryCount).toBe(fullResult.queryCount);
+      expect(fullResult.queryCount).toBe(smallResult.queryCount);
+      expect(fullResult.queryCount).toBeLessThanOrEqual(PINNED_BOUND);
+      expect(fullResult.responseSize).toBeLessThan(RESPONSE_SIZE_LIMIT);
+    });
+
+    it("matches are paginated at exactly 20 rows", async () => {
+      vi.resetModules();
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => spy.sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      const { loader } = await import("~/routes/app.reconcile");
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+
+      const result = await measureLoader(
+        loader as (args: unknown) => Promise<unknown>,
+        createLoaderArgs("/app/reconcile", { view: "suggested" })
+      );
+
+      const data = result.data as {
+        matches: unknown[];
+        pagination: { page: number; pageSize: number; totalCount: number };
+      };
+
+      expect(data.matches.length).toBeLessThanOrEqual(20);
+      expect(data.pagination.pageSize).toBe(20);
+      expect(data.pagination.page).toBe(1);
     });
   });
 
   describe("QUERY COUNTS: imports", () => {
-    it("query count is constant at FULL and HALF size", async () => {
-      await cleanupData();
-      await seedData(fullConfig, fullData);
+    const PINNED_BOUND = 3;
+    const RESPONSE_SIZE_LIMIT = 2000;
 
+    beforeEach(async () => {
+      await cleanupData();
+    });
+
+    it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => spy.sql,
@@ -571,42 +707,54 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
       const { loader } = await import("~/routes/app.imports");
 
-      const fullResult = await measureLoader(
+      // Seed SMALL
+      const smallData = generateAllData(smallConfig);
+      await seedData(smallConfig, smallData);
+
+      const smallResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app/imports")
       );
 
       await cleanupData();
-      await seedData(halfConfig, halfData);
 
-      const halfResult = await measureLoader(
+      // Seed FULL
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+
+      const fullResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app/imports")
       );
 
       queryCountResults.push({
         route: "app.imports",
+        smallCount: smallResult.queryCount,
         fullCount: fullResult.queryCount,
-        halfCount: halfResult.queryCount,
-        pinnedBound: fullResult.queryCount,
+        pinnedBound: PINNED_BOUND,
       });
 
       responseSizeResults.push({
         route: "app.imports",
-        fullSize: fullResult.responseSize,
-        halfSize: halfResult.responseSize,
-        pinnedLimit: Math.ceil(fullResult.responseSize * 1.1),
+        bytes: fullResult.responseSize,
+        pinnedLimit: RESPONSE_SIZE_LIMIT,
       });
 
-      expect(halfResult.queryCount).toBe(fullResult.queryCount);
+      expect(fullResult.queryCount).toBe(smallResult.queryCount);
+      expect(fullResult.queryCount).toBeLessThanOrEqual(PINNED_BOUND);
+      expect(fullResult.responseSize).toBeLessThan(RESPONSE_SIZE_LIMIT);
     });
   });
 
   describe("QUERY COUNTS: data-requests", () => {
-    it("query count is constant at FULL and HALF size", async () => {
-      await cleanupData();
-      await seedData(fullConfig, fullData);
+    const PINNED_BOUND = 4;
+    const RESPONSE_SIZE_LIMIT = 5000;
 
+    beforeEach(async () => {
+      await cleanupData();
+    });
+
+    it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => spy.sql,
@@ -615,122 +763,123 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
       const { loader } = await import("~/routes/app.data-requests");
 
-      const fullResult = await measureLoader(
+      // Seed SMALL with data requests
+      const smallData = generateAllData(smallConfig);
+      await seedData(smallConfig, smallData);
+
+      // Add some data requests
+      await sql`
+        INSERT INTO s22_data_requests (id, shop_id, customer_gid, request_id, status, created_at)
+        VALUES
+          (${"dr-small-1-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'gid://shopify/Customer/1', 'req-1', 'pending', NOW()),
+          (${"dr-small-2-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, 'gid://shopify/Customer/2', 'req-2', 'pending', NOW())
+      `;
+
+      const smallResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app/data-requests")
       );
 
       await cleanupData();
-      await seedData(halfConfig, halfData);
 
-      const halfResult = await measureLoader(
+      // Seed FULL with more data requests
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+
+      // Add more data requests for FULL size
+      const drValues = Array.from({ length: 20 }, (_, i) => ({
+        id: `dr-full-${i}-${TEST_SUFFIX}`,
+        shopId: TEST_SHOP_ID,
+        customerGid: `gid://shopify/Customer/${1000 + i}`,
+        requestId: `req-full-${i}`,
+        status: "pending",
+      }));
+
+      await sql`
+        INSERT INTO s22_data_requests (id, shop_id, customer_gid, request_id, status, created_at)
+        SELECT r.id, r."shopId", r."customerGid", r."requestId", r.status, NOW()
+        FROM jsonb_to_recordset(${sql.json(drValues)}) AS r(
+          id text, "shopId" text, "customerGid" text, "requestId" text, status text
+        )
+      `;
+
+      const fullResult = await measureLoader(
         loader as (args: unknown) => Promise<unknown>,
         createLoaderArgs("/app/data-requests")
       );
 
       queryCountResults.push({
         route: "app.data-requests",
+        smallCount: smallResult.queryCount,
         fullCount: fullResult.queryCount,
-        halfCount: halfResult.queryCount,
-        pinnedBound: fullResult.queryCount,
+        pinnedBound: PINNED_BOUND,
       });
 
       responseSizeResults.push({
         route: "app.data-requests",
-        fullSize: fullResult.responseSize,
-        halfSize: halfResult.responseSize,
-        pinnedLimit: Math.ceil(fullResult.responseSize * 1.1),
+        bytes: fullResult.responseSize,
+        pinnedLimit: RESPONSE_SIZE_LIMIT,
       });
 
-      expect(halfResult.queryCount).toBe(fullResult.queryCount);
+      expect(fullResult.queryCount).toBe(smallResult.queryCount);
+      expect(fullResult.queryCount).toBeLessThanOrEqual(PINNED_BOUND);
+      expect(fullResult.responseSize).toBeLessThan(RESPONSE_SIZE_LIMIT);
     });
   });
 
-  describe("BOUNDS: pagination and caps", () => {
-    it("dashboard buyer ledger is paginated at 20 rows", async () => {
+  describe("TIMINGS: HDFC statement parse and match", () => {
+    beforeEach(async () => {
       await cleanupData();
-      await seedData(fullConfig, fullData);
-
-      vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestSql: () => spy.sql,
-        getRequestWaitUntil: () => undefined,
-      }));
-
-      const { loader } = await import("~/routes/app._index");
-      const result = await loader(createLoaderArgs("/app", { skipOnboarding: "true" }) as never);
-
-      let data: Record<string, unknown> = (result as { data: Record<string, unknown> }).data;
-      if (data.dashboardData && typeof (data.dashboardData as Promise<unknown>).then === "function") {
-        data = { ...data, ...(await data.dashboardData as Record<string, unknown>) };
-      }
-
-      const buyerLedger = data.buyerLedger as { rows: unknown[]; totalCount: number } | null;
-      expect(buyerLedger).toBeDefined();
-      expect(buyerLedger!.rows.length).toBeLessThanOrEqual(20);
-      expect(data.pagination).toMatchObject({ pageSize: 20 });
     });
 
-    it("reconcile matches are paginated at 20 rows", async () => {
-      vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestSql: () => spy.sql,
-        getRequestWaitUntil: () => undefined,
-      }));
+    it("times 2000-row HDFC statement with real parser and matcher", async () => {
+      // Generate synthetic HDFC statement rows
+      const hdfcRows = generateSyntheticHdfcStatement(2000);
 
-      const { loader } = await import("~/routes/app.reconcile");
-      const result = await loader(createLoaderArgs("/app/reconcile", { view: "suggested" }) as never);
+      // Convert to CSV format that HDFC parser expects
+      const csvHeader = "Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance";
+      const csvRows = hdfcRows.map((row) =>
+        `${row.date},${row.narration},${row.chqRefNo},${row.valueDate},${row.withdrawal},${row.deposit},${row.closingBalance}`
+      );
+      const csvContent = [csvHeader, ...csvRows].join("\n");
+      const csvBuffer = new TextEncoder().encode(csvContent).buffer;
 
-      const data = (result as { matches: unknown[]; pagination: { pageSize: number } });
-      expect(data.matches.length).toBeLessThanOrEqual(20);
-      expect(data.pagination.pageSize).toBe(20);
-    });
-
-    it("accounts.$id invoices are capped at 10 rows", async () => {
-      vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestSql: () => spy.sql,
-        getRequestWaitUntil: () => undefined,
-      }));
-
-      const { loader } = await import("~/routes/app.accounts.$id");
-      const testAccountId = fullData.buyers[0].id;
-
-      const result = await loader(createLoaderArgs(`/app/accounts/${testAccountId}`, { id: testAccountId }) as never);
-
-      const data = result as { invoices: { rows: unknown[] } };
-      expect(data.invoices.rows.length).toBeLessThanOrEqual(10);
-    });
-  });
-
-  describe("TIMINGS: HDFC statement parse and match suggest", () => {
-    it("times 2000-row HDFC statement processing (report only)", async () => {
-      const rows = generateSyntheticHdfcStatement(2000);
+      // Time REAL HDFC parsing
+      const { parseBankStatement } = await import("~/lib/banks");
 
       const parseStart = performance.now();
-      const parsedCredits = rows.map((row) => ({
-        date: row.date.split("/").reverse().join("-"),
-        amountPaise: Math.round(parseFloat(row.deposit) * 100),
-        rail: "NEFT",
-        utr: row.chqRefNo,
-        payerName: row.narration.split("/")[2] || "UNKNOWN",
-        narration: row.narration,
-      }));
+      const parseResult = await parseBankStatement(csvBuffer, { fileName: "hdfc-test.csv" });
       const parseMs = Math.round(performance.now() - parseStart);
 
-      const suggestStart = performance.now();
-      const suggestions = parsedCredits.slice(0, 100).map((_credit, idx) => ({
-        paymentId: `pay-timing-${idx}`,
-        invoiceId: `inv-timing-${idx}`,
-        score: 50 + (idx % 50),
-        reasons: [{ type: "amount_exact", points: 20 }],
+      expect(parseResult.detection.bank).toBe("HDFC");
+      expect(parseResult.transactions.length).toBeGreaterThan(0);
+
+      // Seed shop for matching
+      await seedShop();
+      const fullData = generateAllData(fullConfig);
+      await seedData(fullConfig, fullData);
+
+      // Time REAL matcher
+      vi.resetModules();
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
       }));
-      const suggestMs = Math.round(performance.now() - suggestStart);
 
-      timingResult = { parseMs, suggestMs, rowCount: rows.length };
+      const { runMatcher } = await import("~/services/matcher.server");
 
-      expect(parsedCredits.length).toBe(2000);
-      expect(suggestions.length).toBe(100);
+      const matchStart = performance.now();
+      const matchResult = await runMatcher(sql, TEST_SHOP_ID, { limit: 10 });
+      const matchMs = Math.round(performance.now() - matchStart);
+
+      timingResult = {
+        parseMs,
+        matchMs,
+        rowCount: hdfcRows.length,
+      };
+
+      expect(parseResult.transactions.length).toBeGreaterThan(1900);
+      expect(matchResult).toBeDefined();
     });
   });
 });

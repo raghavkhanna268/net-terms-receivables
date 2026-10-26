@@ -84,10 +84,6 @@ export function syntheticUtr(index: number, rail: string): string {
   }
 }
 
-export function syntheticAccountNumber(): string {
-  return `${Math.floor(Math.random() * 900000000000) + 100000000000}`;
-}
-
 const INVOICE_STATUS_DISTRIBUTION = ["open", "open", "open", "open", "paid", "paid", "paid", "cancelled"];
 const PAYMENT_RAILS = ["NEFT", "NEFT", "NEFT", "RTGS", "IMPS", "UPI"];
 
