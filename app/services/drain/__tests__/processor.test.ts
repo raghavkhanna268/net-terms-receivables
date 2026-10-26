@@ -2657,7 +2657,7 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
       expect(result.retryable).toBe(false);
     });
 
-    it("Shop query that throws propagates error (fail-open)", async () => {
+    it("Shop query DB error throws and leaves message for retry (not incorrectly ACKed)", async () => {
       const mockAdminGraphQL = (await import("../admin-client.server"))
         .adminGraphQL as ReturnType<typeof vi.fn>;
       mockAdminGraphQL.mockResolvedValueOnce({
@@ -2688,9 +2688,9 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
         enqueuedAt: new Date().toISOString(),
       };
 
-      // When Shop query throws, the error propagates and the handler fails
-      // This is "fail-open": the message stays in queue for retry rather than
-      // being incorrectly ACKed as shop_not_found
+      // When Shop query throws, the error propagates and the handler throws.
+      // The drain treats uncaught exceptions as retryable, so the message
+      // stays in queue for retry rather than being incorrectly ACKed.
       await expect(handler!(mockSql as never, message)).rejects.toThrow(
         "Database connection failed"
       );
