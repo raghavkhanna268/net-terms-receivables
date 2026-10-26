@@ -823,11 +823,13 @@ describe("S10b BULK_OPERATIONS_FINISH handler", () => {
     expect(result.status).toBe("complete");
     // Should chain because nextStage='customers', not because of webhookId
     // Fourth arg is manualKey (undefined for cron path since mock returns undefined)
+    // Fifth arg is prevBulkOperationId (#293)
     expect(mockEnqueueReconcileStage).toHaveBeenCalledWith(
       mockSql,
       "test.myshopify.com",
       "customers",
-      undefined
+      undefined,
+      "gid://shopify/BulkOperation/123"
     );
   });
 
