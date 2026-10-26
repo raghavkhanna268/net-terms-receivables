@@ -261,63 +261,286 @@ describe("#292 currency gate on /app/accounts/:id", () => {
     });
   });
 
-  describe("action", () => {
-    it("USD shop: rejects credit-limit edit with 'Currency not supported'", async () => {
-      setupSqlMock("USD");
+  describe("action - all intents rejected for unsupported currencies", () => {
+    describe("credit-limit edit", () => {
+      it("USD shop: rejects credit-limit edit", async () => {
+        setupSqlMock("USD");
 
-      const formData = new FormData();
-      formData.append("_action", "updateCredit");
-      formData.append("creditLimit", "50000");
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("creditLimit", "50000");
 
-      const { action } = await import("../app.accounts.$id");
-      const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toBe("Currency not supported");
-      expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("XXX shop: rejects credit-limit edit (fail-closed)", async () => {
+        setupSqlMock("XXX");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("creditLimit", "75000");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("NULL currency: rejects credit-limit edit (fail-closed)", async () => {
+        setupSqlMock(null);
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("creditLimit", "100000");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("INR shop: allows credit-limit edit", async () => {
+        setupSqlMock("INR");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("creditLimit", "50000");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(true);
+        expect(mockUpdateCreditStatus).toHaveBeenCalled();
+      });
     });
 
-    it("XXX shop: rejects all edits, fail-closed", async () => {
-      setupSqlMock("XXX");
+    describe("place hold (manualHold=true, holdOnly=true)", () => {
+      it("USD shop: rejects place hold", async () => {
+        setupSqlMock("USD");
 
-      const formData = new FormData();
-      formData.append("_action", "updateCredit");
-      formData.append("manualHold", "true");
-      formData.append("holdOnly", "true");
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "true");
+        formData.append("holdReasonCode", "MANUAL_HOLD");
 
-      const { action } = await import("../app.accounts.$id");
-      const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toBe("Currency not supported");
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("XXX shop: rejects place hold (fail-closed)", async () => {
+        setupSqlMock("XXX");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "true");
+        formData.append("holdReasonCode", "DISPUTED_INVOICE");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("NULL currency: rejects place hold (fail-closed)", async () => {
+        setupSqlMock(null);
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "true");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("INR shop: allows place hold", async () => {
+        setupSqlMock("INR");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "true");
+        formData.append("holdReasonCode", "MANUAL_HOLD");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(true);
+        expect(mockUpdateCreditStatus).toHaveBeenCalledWith(
+          expect.anything(),
+          TEST_ACCOUNT_ID,
+          expect.objectContaining({ manualHold: true })
+        );
+      });
     });
 
-    it("NULL currency: rejects edits, fail-closed", async () => {
-      setupSqlMock(null);
+    describe("release hold (manualHold=false, holdOnly=true)", () => {
+      it("USD shop: rejects release hold", async () => {
+        setupSqlMock("USD");
 
-      const formData = new FormData();
-      formData.append("_action", "updateReminderOptOut");
-      formData.append("enable", "true");
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "false");
 
-      const { action } = await import("../app.accounts.$id");
-      const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toBe("Currency not supported");
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("XXX shop: rejects release hold (fail-closed)", async () => {
+        setupSqlMock("XXX");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "false");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("NULL currency: rejects release hold (fail-closed)", async () => {
+        setupSqlMock(null);
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "false");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("INR shop: allows release hold", async () => {
+        setupSqlMock("INR");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("holdOnly", "true");
+        formData.append("manualHold", "false");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(true);
+        expect(mockUpdateCreditStatus).toHaveBeenCalledWith(
+          expect.anything(),
+          TEST_ACCOUNT_ID,
+          expect.objectContaining({ manualHold: false })
+        );
+      });
     });
 
-    it("INR shop: allows credit-limit edit", async () => {
-      setupSqlMock("INR");
+    describe("reminder opt-out", () => {
+      it("USD shop: rejects reminder opt-out change", async () => {
+        setupSqlMock("USD");
 
-      const formData = new FormData();
-      formData.append("_action", "updateCredit");
-      formData.append("creditLimit", "50000");
+        const formData = new FormData();
+        formData.append("_action", "updateReminderOptOut");
+        formData.append("enable", "true");
 
-      const { action } = await import("../app.accounts.$id");
-      const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
-      expect(result.success).toBe(true);
-      expect(mockUpdateCreditStatus).toHaveBeenCalled();
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+      });
+
+      it("XXX shop: rejects reminder opt-out change (fail-closed)", async () => {
+        setupSqlMock("XXX");
+
+        const formData = new FormData();
+        formData.append("_action", "updateReminderOptOut");
+        formData.append("enable", "false");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+      });
+
+      it("NULL currency: rejects reminder opt-out change (fail-closed)", async () => {
+        setupSqlMock(null);
+
+        const formData = new FormData();
+        formData.append("_action", "updateReminderOptOut");
+        formData.append("enable", "true");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+      });
+    });
+
+    describe("no-limit toggle", () => {
+      it("USD shop: rejects no-limit toggle", async () => {
+        setupSqlMock("USD");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("noLimit", "true");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Currency not supported");
+        expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
+      });
+
+      it("INR shop: allows no-limit toggle", async () => {
+        setupSqlMock("INR");
+
+        const formData = new FormData();
+        formData.append("_action", "updateCredit");
+        formData.append("noLimit", "true");
+
+        const { action } = await import("../app.accounts.$id");
+        const result = await action(createActionArgs(formData)) as Record<string, unknown>;
+
+        expect(result.success).toBe(true);
+        expect(mockUpdateCreditStatus).toHaveBeenCalledWith(
+          expect.anything(),
+          TEST_ACCOUNT_ID,
+          expect.objectContaining({ noLimit: true })
+        );
+      });
     });
   });
 });
