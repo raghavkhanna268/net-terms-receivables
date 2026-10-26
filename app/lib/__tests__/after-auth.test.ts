@@ -724,4 +724,137 @@ describe("after-auth", () => {
     });
   });
 
+  describe("#292: shop_config metafield write on auth", () => {
+    it("shop_config is written with fetched currency during syncShopInfo", async () => {
+      const mockWriteShopConfigMetafield = vi.fn().mockResolvedValue({ success: true });
+      vi.doMock("~/services/shop-config.server", () => ({
+        writeShopConfigMetafield: mockWriteShopConfigMetafield,
+      }));
+
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      vi.resetModules();
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () =>
+            Promise.resolve({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/12345",
+                  ianaTimezone: "America/New_York",
+                  currencyCode: "USD",
+                },
+              },
+            }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "test-shop-config-write.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("test-shop-config-write.myshopify.com")).toBe(true);
+      });
+
+      expect(mockWriteShopConfigMetafield).toHaveBeenCalledWith(
+        mockAdmin,
+        "gid://shopify/Shop/12345",
+        "USD",
+      );
+    });
+
+    it("shop_config_write_failed is logged via real safeLog on write failure, Shop upsert still runs", async () => {
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const mockWriteShopConfigMetafield = vi
+        .fn()
+        .mockResolvedValue({ success: false, error: "user_errors" });
+      vi.doMock("~/services/shop-config.server", () => ({
+        writeShopConfigMetafield: mockWriteShopConfigMetafield,
+      }));
+
+      mockEnsureValidation.mockResolvedValue({
+        id: "gid://shopify/Validation/123",
+        created: true,
+      });
+
+      let upsertCalled = false;
+      mockSqlQuery.mockImplementation((strings: TemplateStringsArray) => {
+        const query = Array.isArray(strings) ? strings.join("") : String(strings);
+        if (query.includes("INSERT INTO") && query.includes('"Shop"')) {
+          upsertCalled = true;
+        }
+        return Promise.resolve([{ id: "shop-uuid-test", closed_count: 0 }]);
+      });
+
+      vi.resetModules();
+
+      const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+        await import("../after-auth.server");
+
+      _resetSetupCacheForTesting();
+
+      const mockAdmin = {
+        graphql: vi.fn().mockResolvedValue({
+          json: () =>
+            Promise.resolve({
+              data: {
+                shop: {
+                  id: "gid://shopify/Shop/99999",
+                  ianaTimezone: "America/Los_Angeles",
+                  currencyCode: "INR",
+                },
+              },
+            }),
+        }),
+      };
+
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      runAfterAuth(
+        "test-shop-config-fail.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      await vi.waitFor(() => {
+        expect(_isShopSetupComplete("test-shop-config-fail.myshopify.com")).toBe(true);
+      });
+
+      const safeLogCall = consoleWarnSpy.mock.calls.find(
+        (call) =>
+          typeof call[0] === "string" && call[0].includes("shop_config_write_failed"),
+      );
+      expect(safeLogCall).toBeDefined();
+
+      const logOutput = safeLogCall![0] as string;
+      expect(logOutput).toContain('"event":"shop_config_write_failed"');
+      expect(logOutput).toContain('"err":"user_errors"');
+
+      expect(upsertCalled).toBe(true);
+
+      consoleWarnSpy.mockRestore();
+    });
+  });
+
 });

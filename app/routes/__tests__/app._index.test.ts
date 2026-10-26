@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 
 /**
@@ -11,26 +13,103 @@ import type { LoaderFunctionArgs } from "react-router";
  * 4. Error handling
  */
 
+/**
+ * Type for the loader result data.
+ */
+interface LoaderResult {
+  shopName: string;
+  shopDomain: string;
+  storeHandle: string;
+  shopCurrency: string;
+  plan: { key: string; name: string; isTest: boolean } | null;
+  usage: {
+    companies: { current: number; limit: number };
+    importsThisMonth: { current: number; limit: number };
+  } | null;
+  appHandle: string;
+  gatingEnforced: boolean;
+  newAccountsPausedBanner: {
+    show: boolean;
+    heading: string;
+    bodyText: string;
+    upgradeUrl: string | null;
+  };
+  agingTotals: {
+    totalByCurrency: Record<string, string>;
+    buckets: Record<string, { byCurrency: Record<string, string> }>;
+    overdueByCurrency: Record<string, string>;
+    oldestOverdueDays: number | null;
+  } | null;
+  buyerLedger: {
+    rows: Array<{
+      buyer_account_id: string;
+      buyer_name: string;
+      credit_limit_paise: string | null;
+      hold_state: string;
+      currency: string;
+      outstanding_paise: string;
+      overdue_paise: string;
+      oldest_overdue_days: number | null;
+      is_gated: boolean;
+    }>;
+    totalCount: number;
+  } | null;
+  selectedBuyerInvoices: {
+    rows: Array<unknown>;
+    totalCount: number;
+    buyerName: string;
+  } | null;
+  selectedBuyerId: string | null;
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalCount: number;
+  };
+  sortBy: string;
+  sortOrder: string;
+  onlyOverLimit: boolean;
+  overLimitCount: number;
+  error: string | null;
+}
+
+/**
+ * Helper to extract loader data from result.
+ * The loader returns data() which wraps the response.
+ */
+function extractLoaderData(result: unknown): LoaderResult {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: LoaderResult }).data;
+  }
+  return result as LoaderResult;
+}
+
 // Mock SQL client
 const mockSql = Object.assign(vi.fn(), { unsafe: vi.fn((s) => s) });
 
 // Mock modules
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: vi.fn(() => undefined),
 }));
 
 vi.mock("~/services/plan.server", () => ({
   resolvePlan: vi.fn().mockResolvedValue({
-    plan: { key: "free" },
-    subscriptionName: "Free",
+    plan: { key: "none" },
+    subscriptionName: null,
     isTest: false,
   }),
 }));
 
 vi.mock("~/services/gating.server", () => ({
   getUsageStats: vi.fn().mockResolvedValue({
-    companies: { current: 2, limit: 3 },
-    importsThisMonth: { current: 0, limit: 1 },
+    companies: { current: 2, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
   }),
   isGatingEnforced: vi.fn().mockReturnValue(false),
 }));
@@ -46,9 +125,12 @@ import {
   getBuyerLedger,
   getBuyerInvoices,
 } from "~/lib/aging-queries.server";
+import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 
 const mockGetShopAgingTotals = vi.mocked(getShopAgingTotals);
 const mockGetBuyerLedger = vi.mocked(getBuyerLedger);
+const mockGetUsageStats = vi.mocked(getUsageStats);
+const mockIsGatingEnforced = vi.mocked(isGatingEnforced);
 const mockGetBuyerInvoices = vi.mocked(getBuyerInvoices);
 
 describe("app._index loader", () => {
@@ -141,7 +223,7 @@ describe("app._index loader", () => {
   describe("empty state", () => {
     it("returns empty aging totals when no invoices exist", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toEqual({
         totalByCurrency: {},
@@ -176,7 +258,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency).toEqual({ INR: "10000000" });
       expect(result.agingTotals?.overdueByCurrency).toEqual({ INR: "5000000" });
@@ -198,7 +280,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals?.totalByCurrency.INR).toBe("10000000");
       expect(result.agingTotals?.totalByCurrency.USD).toBe("5000000");
@@ -341,7 +423,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.buyerLedger?.rows).toHaveLength(1);
       expect(result.buyerLedger?.rows[0].buyer_name).toBe("Acme Corp");
@@ -384,7 +466,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ buyer: "buyer-1" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ buyer: "buyer-1" })));
 
       expect(mockGetBuyerInvoices).toHaveBeenCalledWith(
         expect.anything(),
@@ -409,7 +491,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ buyer: "buyer-unknown" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ buyer: "buyer-unknown" })));
 
       expect(result.selectedBuyerInvoices?.buyerName).toBe("Test Buyer");
     });
@@ -420,7 +502,7 @@ describe("app._index loader", () => {
       mockGetShopAgingTotals.mockRejectedValue(new Error("Database error"));
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.error).toBe("Failed to load aging data. Please try again.");
       expect(result.agingTotals).toBeNull();
@@ -447,7 +529,7 @@ describe("app._index loader", () => {
       mockSql.mockImplementation(() => Promise.resolve([]));
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.agingTotals).toBeNull();
       expect(result.buyerLedger).toBeNull();
@@ -457,7 +539,7 @@ describe("app._index loader", () => {
   describe("shop metadata", () => {
     it("returns shop domain and currency", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.shopDomain).toBe(TEST_SHOP);
       expect(result.shopCurrency).toBe("INR");
@@ -468,7 +550,7 @@ describe("app._index loader", () => {
   describe("over-limit account filter", () => {
     it("defaults onlyOverLimit to false when no query param", async () => {
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
     });
@@ -515,7 +597,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ overlimit: "true" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ overlimit: "true" })));
 
       expect(result.onlyOverLimit).toBe(true);
     });
@@ -561,7 +643,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       // overLimitCount is from SQL (2), not from current page (which has 0 gated)
       expect(result.overLimitCount).toBe(2);
@@ -623,7 +705,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs({ overlimit: "true" }));
+      const result = await extractLoaderData(await loader(createLoaderArgs({ overlimit: "true" })));
 
       expect(result.onlyOverLimit).toBe(true);
       expect(result.buyerLedger?.rows).toHaveLength(2);
@@ -663,7 +745,7 @@ describe("app._index loader", () => {
       });
 
       const { loader } = await import("../app._index");
-      const result = await loader(createLoaderArgs());
+      const result = extractLoaderData(await loader(createLoaderArgs()));
 
       expect(result.onlyOverLimit).toBe(false);
       expect(result.buyerLedger?.rows).toHaveLength(2);
@@ -689,17 +771,176 @@ describe("S21 over-limit banner using buildOverLimitBannerState helper", () => {
     expect(state.show).toBe(false);
   });
 
-  it("banner shows enforcement note when gatingEnforced is false", async () => {
+  it("banner is hidden when gatingEnforced is false (T1: no banner when gating off)", async () => {
     const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildOverLimitBannerState(2, false);
-    expect(state.show).toBe(true);
-    expect(state.enforcementNote).toBe("(Limits are not currently enforced.)");
+    expect(state.show).toBe(false);
   });
 
   it("banner does not show enforcement note when gatingEnforced is true", async () => {
     const { buildOverLimitBannerState } = await import("~/lib/over-limit-banner");
     const state = buildOverLimitBannerState(2, true);
     expect(state.enforcementNote).toBeNull();
+  });
+});
+
+/**
+ * T4 Tests: newAccountsPausedBanner loader behavior with flag on/off and usage error.
+ */
+describe("T4 newAccountsPausedBanner loader tests", () => {
+  const TEST_SHOP = "test-t4-banner.myshopify.com";
+  const TEST_SHOP_ID = "shop-t4-banner";
+
+  function createLoaderArgs() {
+    const url = new URL("https://example.com/app?skipOnboarding=true");
+    return {
+      request: new Request(url.toString()),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+              sessionToken: "mock-token",
+              redirect: vi.fn(),
+              admin: {
+                graphql: vi.fn().mockResolvedValue({
+                  json: vi.fn().mockResolvedValue({
+                    data: { shop: { id: "gid://shopify/Shop/123", currencyCode: "INR" } },
+                  }),
+                }),
+              },
+            }),
+          },
+        },
+        cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
+      },
+      params: {},
+    } as unknown as LoaderFunctionArgs;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
+      }
+      if (query.includes("onboarding_dismissed_at")) {
+        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    mockGetShopAgingTotals.mockResolvedValue({
+      totalByCurrency: {},
+      buckets: {
+        current: { byCurrency: {} },
+        "1-30": { byCurrency: {} },
+        "31-60": { byCurrency: {} },
+        "61-90": { byCurrency: {} },
+        "90+": { byCurrency: {} },
+      },
+      overdueByCurrency: {},
+      oldestOverdueDays: null,
+    });
+
+    mockGetBuyerLedger.mockResolvedValue({ rows: [], totalCount: 0 });
+  });
+
+  it("flag off: getUsageStats is called and usage is returned, banner is hidden", async () => {
+    mockIsGatingEnforced.mockReturnValue(false);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 20, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    const { loader } = await import("../app._index");
+    const result = extractLoaderData(await loader(createLoaderArgs()));
+
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toEqual({
+      companies: { current: 20, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+  });
+
+  it("flag on, usage available, at limit: banner shown with correct heading", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockResolvedValue({
+      companies: { current: 25, limit: 25 },
+      importsThisMonth: { current: 0, limit: -1 },
+    });
+
+    const { loader } = await import("../app._index");
+    const result = extractLoaderData(await loader(createLoaderArgs()));
+
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+    expect(result.gatingEnforced).toBe(true);
+    expect(result.newAccountsPausedBanner.show).toBe(true);
+    expect(result.newAccountsPausedBanner.heading).toContain("25 of 25");
+  });
+
+  it("flag on, usage null (getUsageStats error): banner show:false, no Limit Reached", async () => {
+    mockIsGatingEnforced.mockReturnValue(true);
+    mockGetUsageStats.mockRejectedValue(new Error("Database error"));
+
+    const { loader } = await import("../app._index");
+    const result = extractLoaderData(await loader(createLoaderArgs()));
+
+    expect(mockGetUsageStats).toHaveBeenCalledOnce();
+    expect(result.usage).toBeNull();
+    expect(result.newAccountsPausedBanner.show).toBe(false);
+    expect(result.newAccountsPausedBanner.heading).toBe("");
+  });
+});
+
+/**
+ * T4 Render Tests: Index component wiring with null usage.
+ * Verifies the component chain renders correctly when usage is null.
+ *
+ * Tests the actual rendering behavior via PlanBanner (the component that
+ * receives usageUnavailable prop) plus code inspection to verify wiring.
+ */
+describe("T4 Index component wiring with usage null", () => {
+  it("PlanBanner with usageUnavailable:true renders no Limit Reached, no 0 / 0, no Usage:", async () => {
+    const { PlanBanner } = await import("~/components/UpgradePrompt");
+
+    const html = renderToString(
+      createElement(PlanBanner, {
+        planKey: "starter" as const,
+        planName: "Starter",
+        isTest: false,
+        companiesUsed: 0,
+        companiesLimit: -1,
+        gatingEnforced: true,
+        upgradeUrl: "https://upgrade.test",
+        usageUnavailable: true,
+      })
+    );
+
+    expect(html).not.toContain("Limit Reached");
+    expect(html).not.toContain("0 / 0");
+    expect(html).not.toContain("Upgrade to Add More");
+    expect(html).not.toContain("Usage:");
+    expect(html).toContain("Starter");
+  });
+
+  it("Index component source: usage === null sets usageUnavailable and passes to PlanBanner", async () => {
+    const { readFileSync } = await import("fs");
+    const indexSource = readFileSync("app/routes/app._index.tsx", "utf-8");
+
+    expect(indexSource).toContain("const usageUnavailable = usage === null");
+    expect(indexSource).toContain("usageUnavailable={usageUnavailable}");
   });
 });
 
@@ -802,7 +1043,7 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs() as never);
+    const result = await extractLoaderData(await loader(createLoaderArgs() as never));
 
     expect(result.buyerLedger?.rows).toHaveLength(2);
 
@@ -846,8 +1087,146 @@ describe("S21 gated accounts in dashboard listing and totals", () => {
     });
 
     const { loader } = await import("../app._index");
-    const result = await loader(createLoaderArgs() as never);
+    const result = await extractLoaderData(await loader(createLoaderArgs() as never));
 
     expect(result.overLimitCount).toBe(1);
+  });
+});
+
+/**
+ * Render tests for BuyerLedgerTable (T1 plan-limit gating).
+ *
+ * Verifies that all accounts are rendered (no hiding) regardless of gating,
+ * and that "over plan limit" badges only appear when gating is enforced.
+ */
+describe("BuyerLedgerTable render tests (T1)", () => {
+  const baseLedgerRows = [
+    {
+      buyer_account_id: "acct-1",
+      buyer_name: "Buyer One Corp",
+      currency: "INR",
+      outstanding_paise: "1000000",
+      overdue_paise: "0",
+      credit_limit_paise: "5000000",
+      oldest_overdue_days: null,
+      hold_state: "OK" as const,
+      is_gated: false,
+    },
+    {
+      buyer_account_id: "acct-2",
+      buyer_name: "Buyer Two Ltd",
+      currency: "INR",
+      outstanding_paise: "2000000",
+      overdue_paise: "500000",
+      credit_limit_paise: "3000000",
+      oldest_overdue_days: 15,
+      hold_state: "NEAR_LIMIT" as const,
+      is_gated: true, // This account is over the plan limit
+    },
+    {
+      buyer_account_id: "acct-3",
+      buyer_name: "Buyer Three Inc",
+      currency: "INR",
+      outstanding_paise: "500000",
+      overdue_paise: "0",
+      credit_limit_paise: null,
+      oldest_overdue_days: null,
+      hold_state: "OK" as const,
+      is_gated: true, // This account is also over the plan limit
+    },
+  ];
+
+  const baseTableProps = {
+    rows: baseLedgerRows,
+    sortBy: "name",
+    sortOrder: "asc" as const,
+    page: 1,
+    totalCount: 3,
+    pageSize: 20,
+    onlyOverLimit: false,
+    onNextPage: "?page=2",
+    onPreviousPage: "?page=0",
+  };
+
+  it("gating OFF, none plan over limit: renders ALL account rows, no 'over plan limit' badges", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: false,
+      })
+    );
+
+    // All 3 accounts are rendered (check buyer names)
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // Count rendered accounts - each has its buyer_name in the output
+    // This verifies no accounts are hidden (all 3 from input are shown)
+    expect(baseLedgerRows.every(row => html.includes(row.buyer_name))).toBe(true);
+
+    // No "over plan limit" badge when gating is OFF
+    expect(html).not.toContain("over plan limit");
+  });
+
+  it("gating OFF, starter plan over limit: renders ALL account rows, no badges", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    // Same test but conceptually for a paid plan over its limit
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: false,
+      })
+    );
+
+    // All 3 accounts are rendered
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // Verify count matches input - all accounts rendered, none hidden
+    const inputCount = baseLedgerRows.length;
+    const renderedCount = baseLedgerRows.filter(row => html.includes(row.buyer_name)).length;
+    expect(renderedCount).toBe(inputCount);
+
+    // No "over plan limit" badge
+    expect(html).not.toContain("over plan limit");
+    expect(html).not.toContain("Limit Reached");
+  });
+
+  it("gating ON, none plan over limit: renders ALL accounts, shows 'over plan limit' badges on gated rows", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        gatingEnforced: true,
+      })
+    );
+
+    // All 3 accounts are still rendered (gating doesn't hide accounts)
+    expect(html).toContain("Buyer One Corp");
+    expect(html).toContain("Buyer Two Ltd");
+    expect(html).toContain("Buyer Three Inc");
+
+    // "over plan limit" badges ARE shown for gated accounts (2 of them)
+    const badgeCount = (html.match(/over plan limit/g) || []).length;
+    expect(badgeCount).toBe(2); // Two accounts have is_gated: true
+  });
+
+  it("empty rows: renders empty state, not hidden accounts", async () => {
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        rows: [],
+        totalCount: 0,
+        gatingEnforced: false,
+      })
+    );
+
+    // Empty state message, not "hidden" accounts
+    expect(html).toContain("No outstanding invoices");
+    expect(html).toContain("All your buyers have paid their invoices");
   });
 });

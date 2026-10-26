@@ -23,6 +23,7 @@ import {
   markWebhookProcessed,
 } from "~/services/sync/company.server";
 import { processCustomerWebhook, type CustomerPiiMode } from "~/services/sync/customer.server";
+import { validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 import { processDraftOrderWebhook } from "~/services/sync/draft-order.server";
 import { processCompanyLocationWebhook } from "~/services/sync/company-location.server";
@@ -38,9 +39,10 @@ import type {
 import {
   adminGraphQL,
   COMPANY_QUERY,
-  COMPANY_LOCATION_QUERY,
   ORDER_QUERY,
   DRAFT_ORDER_QUERY,
+  getCompanyLocationQuery,
+  getCompanyLocationQueryWithoutContact,
 } from "./admin-client.server";
 import {
   fetchCustomerWithFallback,
@@ -58,6 +60,7 @@ import {
   type StartReconcileResult,
 } from "./reconcile-handlers.server";
 import { toErrorCode, safeLog, shopHash } from "~/lib/log.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 import {
   isShopNotFoundReason,
   sanitizeSyncMessage,
@@ -207,6 +210,10 @@ async function handleCompany(sql: Sql, message: SyncMessage): Promise<SyncResult
 /**
  * Handler for COMPANY_LOCATIONS_* topics.
  * Fetches the location via GraphQL and processes it.
+ *
+ * PII handling: Uses getRequestEnv() to read CUSTOMER_PII_FIELDS flag.
+ * When flag is on, mainContact.customer { email displayName } are stored.
+ * The query is built dynamically to only request PII when the flag is on.
  */
 async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check (S20: use shop for new table)
@@ -218,6 +225,9 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
     };
   }
 
+  // Get Worker env for PII flag (passed to sync functions)
+  const env = getRequestEnv() ?? {};
+
   // For DELETE, process without fetch
   if (message.topic === "COMPANY_LOCATIONS_DELETE") {
     const location: ShopifyCompanyLocation = {
@@ -225,15 +235,44 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId);
+    return processCompanyLocationWebhook(sql, message.shop, message.topic, location, message.webhookId, env);
   }
+
+  // Build query dynamically based on PII flag (data minimization)
+  const query = getCompanyLocationQuery(env);
+  validateCustomerQuery(query, env);
 
   // Fetch location data via GraphQL
   const result = await adminGraphQL<{
     node: ShopifyCompanyLocation | null;
-  }>(message.shop, COMPANY_LOCATION_QUERY, { id: message.resourceGid });
+  }>(message.shop, query, { id: message.resourceGid });
 
   if (!result.success) {
+    // Handle access denied on mainContact gracefully - don't fail the whole sync
+    // Match only on errorCode, not message text (more reliable)
+    if (result.errorCode === "ACCESS_DENIED") {
+      safeLog("warn", "company_location_contact_access_denied", {
+        shopHash: await shopHash(message.shop),
+        locationGid: message.resourceGid,
+      });
+      // Retry with a query that completely omits mainContact
+      const baseResult = await adminGraphQL<{
+        node: ShopifyCompanyLocation | null;
+      }>(message.shop, getCompanyLocationQueryWithoutContact(), { id: message.resourceGid });
+      
+      if (baseResult.success && baseResult.data?.node) {
+        // Pass contactKnown=false to preserve any existing stored contact
+        return processCompanyLocationWebhook(
+          sql,
+          message.shop,
+          message.topic,
+          baseResult.data.node,
+          message.webhookId,
+          env,
+          false // contactKnown=false: preserve existing stored contact
+        );
+      }
+    }
     return {
       success: false,
       action: "skipped",
@@ -249,7 +288,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
       name: "",
       company: { id: "" },
     };
-    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId);
+    return processCompanyLocationWebhook(sql, message.shop, "COMPANY_LOCATIONS_DELETE", location, message.webhookId, env);
   }
 
   return processCompanyLocationWebhook(
@@ -257,7 +296,8 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
     message.shop,
     message.topic,
     result.data.node,
-    message.webhookId
+    message.webhookId,
+    env
   );
 }
 
@@ -719,13 +759,16 @@ registerSyncHandler("DRAFT_ORDERS_DELETE", handleDraftOrder);
  * - Chains to the next stage in sequence: companies → customers → orders
  * - Uses nextStage from result (based on origin/stage in s6_bulk_operations)
  * - Manual key is propagated from the original stage's webhookId
+ *
+ * #293: Passes prevBulkOperationId to enqueueReconcileStage so it can check
+ * that the previous stage's bulk operation is not closed (reinstall reset).
  */
 async function handleBulkOperationsFinish(sql: Sql, message: BulkMessage): Promise<BulkProcessResult> {
   const result = await processBulkOperation(sql, message);
 
   if (result.nextStage) {
     const manualKey = await getManualKeyForBulkOp(sql, message.bulkOperationId, message.shop);
-    await enqueueReconcileStage(sql, message.shop, result.nextStage, manualKey);
+    await enqueueReconcileStage(sql, message.shop, result.nextStage, manualKey, message.bulkOperationId);
   }
 
   return result;
@@ -1108,6 +1151,31 @@ async function moveToDeadLetter(
 }
 
 /**
+ * #292: Batch lookup shop currencies for INR-only filtering.
+ * Returns a map of shop domain to currency (or undefined if shop not found).
+ */
+async function loadShopCurrencies(
+  sql: Sql,
+  shopDomains: string[]
+): Promise<Map<string, string | undefined>> {
+  if (shopDomains.length === 0) {
+    return new Map();
+  }
+
+  const uniqueDomains = [...new Set(shopDomains)];
+  // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
+  const rows = await sql<{ domain: string; currency: string | null }[]>`
+    SELECT domain, currency FROM "Shop" WHERE domain IN ${sql(uniqueDomains)}
+  `;
+
+  const result = new Map<string, string | undefined>();
+  for (const row of rows) {
+    result.set(row.domain, row.currency ?? undefined);
+  }
+  return result;
+}
+
+/**
  * Process the s6_sync queue.
  */
 async function processSyncQueue(
@@ -1129,12 +1197,29 @@ async function processSyncQueue(
 
   const messages = await readSyncMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
+  // #292: Batch lookup shop currencies for INR-only filtering
+  const shopDomains = messages.map((m) => m.message.shop);
+  const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
+  const skippedNonInrCounts = new Map<string, number>();
+
   for (const msg of messages) {
     // Check time budget
     const elapsed = Date.now() - startTime;
     if (elapsed >= config.timeBudgetMs) {
       result.timedOut = true;
       break;
+    }
+
+    // #292: Skip non-INR shops
+    const shopCurrency = shopCurrencies.get(msg.message.shop);
+    if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
+      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+      result.skipped++;
+      skippedNonInrCounts.set(
+        msg.message.shop,
+        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
+      );
+      continue;
     }
 
     // Skip already-sanitized messages (re-enqueued by hand)
@@ -1284,6 +1369,15 @@ async function processSyncQueue(
     }
   }
 
+  // #292: Log aggregated non-INR skip counts
+  for (const [domain, count] of skippedNonInrCounts) {
+    safeLog("info", "drain_skip_non_inr_shop", {
+      queue: S6_QUEUES.SYNC,
+      shopHash: await shopHash(domain),
+      count,
+    });
+  }
+
   result.elapsedMs = Date.now() - startTime;
   return result;
 }
@@ -1309,12 +1403,29 @@ async function processBulkQueue(
 
   const messages = await readBulkMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
+  // #292: Batch lookup shop currencies for INR-only filtering
+  const shopDomains = messages.map((m) => m.message.shop);
+  const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
+  const skippedNonInrCounts = new Map<string, number>();
+
   for (const msg of messages) {
     // Check time budget
     const currentElapsed = Date.now() - startTime;
     if (currentElapsed >= config.timeBudgetMs) {
       result.timedOut = true;
       break;
+    }
+
+    // #292: Skip non-INR shops
+    const shopCurrency = shopCurrencies.get(msg.message.shop);
+    if (shopCurrency !== undefined && !isShopCurrencySupported(shopCurrency)) {
+      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+      result.skipped++;
+      skippedNonInrCounts.set(
+        msg.message.shop,
+        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
+      );
+      continue;
     }
 
     // Skip already-sanitized messages (re-enqueued by hand)
@@ -1453,6 +1564,15 @@ async function processBulkQueue(
         code: errorCode,
       });
     }
+  }
+
+  // #292: Log aggregated non-INR skip counts
+  for (const [domain, count] of skippedNonInrCounts) {
+    safeLog("info", "drain_skip_non_inr_shop", {
+      queue: S6_QUEUES.BULK,
+      shopHash: await shopHash(domain),
+      count,
+    });
   }
 
   result.elapsedMs = Date.now() - startTime;

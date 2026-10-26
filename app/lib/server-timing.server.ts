@@ -1,0 +1,285 @@
+/**
+ * Server-Timing instrumentation for /app load measurement.
+ *
+ * Records named phases with high-resolution timing and exports a
+ * Server-Timing header value. Designed for performance measurement
+ * only; timing failures are silently ignored.
+ *
+ * Phase codes (fixed allowlist, PCD-compliant):
+ * - auth_layout: authenticate.admin in app/routes/app.tsx
+ * - auth_index: authenticate.admin in app._index.tsx
+ * - shop_lookup: Shop query by domain
+ * - onboarding_checks: Onboarding redirect logic
+ * - plan_resolve: Plan resolution via resolvePlan
+ * - ledger_rows: Buyer ledger query
+ * - ledger_count: Over-limit count query
+ * - loader_total: Total loader time
+ *
+ * Privacy: Only phase codes and durations are recorded.
+ * No shop domain, IDs, or descriptions are included.
+ *
+ * @module
+ */
+
+import { safeLog } from "./log.server";
+
+/**
+ * Allowed phase codes for Server-Timing header.
+ * These are the ONLY phase names that can appear in headers.
+ */
+const ALLOWED_PHASES = new Set([
+  "auth_layout",
+  "auth_index",
+  "shop_lookup",
+  "onboarding_checks",
+  "plan_resolve",
+  "ledger_rows",
+  "ledger_count",
+  "loader_total",
+]);
+
+/**
+ * Stage codes for logging (includes _cold variants).
+ * The `stage` key is in the safeLog allowlist.
+ */
+export type PhaseStage =
+  | "auth_layout"
+  | "auth_layout_cold"
+  | "auth_index"
+  | "auth_index_cold"
+  | "shop_lookup"
+  | "shop_lookup_cold"
+  | "onboarding_checks"
+  | "onboarding_checks_cold"
+  | "plan_resolve"
+  | "plan_resolve_cold"
+  | "ledger_rows"
+  | "ledger_rows_cold"
+  | "ledger_count"
+  | "ledger_count_cold"
+  | "loader_total"
+  | "loader_total_cold";
+
+/**
+ * Track cold start (first request in this isolate) per loader context object.
+ * Using WeakMap ensures concurrent requests don't interfere with each other.
+ *
+ * We key by loader context (not Request) because React Router 7.18.4 creates
+ * a new Request for each loader unless future.v8_passThroughRequests is set.
+ * The context object is created once per fetch in workers/app.ts (~:46) and
+ * passed unchanged to every loader.
+ */
+const coldByContext = new WeakMap<object, boolean>();
+let served = 0;
+
+/**
+ * Read cold flag once per request. Both layout and index get the same value
+ * when passed the same context object. The first request in the isolate is cold.
+ *
+ * @param key - The loader context object (must be the same instance for layout and index)
+ */
+export function readColdOnce(key: object): boolean {
+  let v = coldByContext.get(key);
+  if (v === undefined) {
+    v = served++ === 0;
+    coldByContext.set(key, v);
+  }
+  return v;
+}
+
+/**
+ * Reset isolate state for testing only.
+ * @internal
+ */
+export function _resetIsolateStateForTesting(): void {
+  served = 0;
+}
+
+/**
+ * A single phase timing entry.
+ */
+interface PhaseEntry {
+  start: number;
+  end?: number;
+}
+
+/**
+ * Server timing tracker for a single request.
+ */
+export class ServerTiming {
+  private phases: Map<string, PhaseEntry> = new Map();
+  private requestStart: number;
+  private cold: boolean;
+
+  /**
+   * @param cold - Whether this is a cold start request. Use readColdOnce(request)
+   *               to get the correct value for both layout and index loaders.
+   */
+  constructor(cold: boolean = false) {
+    this.requestStart = performance.now();
+    this.cold = cold;
+  }
+
+  /**
+   * Start timing a phase.
+   * Silently ignores unknown phase codes.
+   */
+  startPhase(phase: string): void {
+    try {
+      if (!ALLOWED_PHASES.has(phase)) return;
+      this.phases.set(phase, { start: performance.now() });
+    } catch {
+      // Timing must never throw
+    }
+  }
+
+  /**
+   * End timing a phase.
+   * Silently ignores unknown phase codes or phases not started.
+   */
+  endPhase(phase: string): void {
+    try {
+      if (!ALLOWED_PHASES.has(phase)) return;
+      const entry = this.phases.get(phase);
+      if (entry) {
+        entry.end = performance.now();
+      }
+    } catch {
+      // Timing must never throw
+    }
+  }
+
+  /**
+   * Time an async operation as a named phase.
+   * Returns the operation result. Timing failures are ignored.
+   */
+  async time<T>(phase: string, fn: () => Promise<T>): Promise<T> {
+    this.startPhase(phase);
+    try {
+      return await fn();
+    } finally {
+      this.endPhase(phase);
+    }
+  }
+
+  /**
+   * Get the duration of a phase in milliseconds.
+   * Returns undefined if phase not recorded or not ended.
+   */
+  getDuration(phase: string): number | undefined {
+    try {
+      const entry = this.phases.get(phase);
+      if (!entry || entry.end === undefined) return undefined;
+      return entry.end - entry.start;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Get the total time from construction to now.
+   */
+  getTotalDuration(): number {
+    try {
+      return performance.now() - this.requestStart;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Whether this is a cold start request.
+   */
+  isCold(): boolean {
+    return this.cold;
+  }
+
+  /**
+   * Build Server-Timing header value.
+   * Format: phase;dur=X.X, phase2;dur=Y.Y
+   * Only includes phases with completed timing.
+   */
+  toHeaderValue(): string {
+    try {
+      const parts: string[] = [];
+      for (const [phase, entry] of this.phases) {
+        if (entry.end !== undefined) {
+          const dur = (entry.end - entry.start).toFixed(1);
+          parts.push(`${phase};dur=${dur}`);
+        }
+      }
+      return parts.join(", ");
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Log all completed phases with safeLog.
+   * Emits one app_home_timing line per phase with:
+   * { route: 'app_home', stage: <phase>_cold | <phase>, durationMs }
+   *
+   * The cold flag is encoded in the stage name because `cold` is not
+   * in the safeLog allowlist, but `stage` is.
+   */
+  logAllPhases(): void {
+    try {
+      for (const [phase, entry] of this.phases) {
+        if (entry.end !== undefined) {
+          const stage: PhaseStage = (this.cold ? `${phase}_cold` : phase) as PhaseStage;
+          const durationMs = Math.round(entry.end - entry.start);
+          safeLog("info", "app_home_timing", {
+            route: "app_home",
+            stage,
+            durationMs,
+          });
+        }
+      }
+    } catch {
+      // Timing must never throw
+    }
+  }
+}
+
+/**
+ * Merge Server-Timing header values from multiple sources.
+ * Used to combine layout and index loader timings.
+ */
+export function mergeServerTimingHeaders(...values: (string | null | undefined)[]): string {
+  try {
+    const parts: string[] = [];
+    for (const value of values) {
+      if (value) {
+        parts.push(value);
+      }
+    }
+    return parts.join(", ");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Validate that a Server-Timing header value contains only allowed phase entries.
+ * Used for testing compliance.
+ */
+export function isValidServerTimingHeader(value: string): boolean {
+  if (!value) return true;
+  const entryPattern = /^[a-z_]+;dur=\d+(\.\d+)?$/;
+  const entries = value.split(/,\s*/);
+  for (const entry of entries) {
+    if (!entry) continue;
+    if (!entryPattern.test(entry)) return false;
+    const phase = entry.split(";")[0];
+    if (!ALLOWED_PHASES.has(phase)) return false;
+  }
+  return true;
+}
+
+/**
+ * Get the set of allowed phase codes.
+ * Exported for testing.
+ */
+export function getAllowedPhases(): Set<string> {
+  return new Set(ALLOWED_PHASES);
+}

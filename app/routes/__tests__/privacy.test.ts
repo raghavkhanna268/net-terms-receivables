@@ -53,7 +53,7 @@ describe("/privacy route", () => {
     expect(response.status).toBe(200);
   });
 
-  it("contains privacy contact email, owner info, no placeholder email, no stale TBD strings", async () => {
+  it("contains privacy contact email, owner info, no placeholder email, no phone or address", async () => {
     const { loader } = await import("../privacy");
 
     const request = new Request("https://example.com/privacy");
@@ -77,6 +77,10 @@ describe("/privacy route", () => {
     expect(html).not.toContain("[TBD: legal entity]");
     expect(html).not.toContain("[TBD: contact email]");
     expect(html).not.toContain("[TBD: effective date]");
+
+    expect(html).not.toMatch(/phone|telephone|mobile/i);
+    expect(html).not.toContain("postal address");
+    expect(html).not.toContain("mailing address");
   });
 
   it("renders HTML with proper structure", async () => {
@@ -445,5 +449,36 @@ describe("data-retention.md content requirements", () => {
 
   it("specifies 30-day backup retention period", () => {
     expect(retentionContent).toContain("30 days (nightly backup, rolling deletion)");
+  });
+});
+
+describe("legal docs contain no TBD or TODO markers", () => {
+  const privacyPath = resolve(process.cwd(), "docs/privacy.md");
+  const privacyContent = readFileSync(privacyPath, "utf-8");
+  const termsPath = resolve(process.cwd(), "docs/legal/merchant-terms.md");
+  const termsContent = readFileSync(termsPath, "utf-8");
+
+  it("privacy.md contains no '[TBD' markers", () => {
+    expect(privacyContent).not.toContain("[TBD");
+  });
+
+  it("privacy.md contains no 'TODO' markers", () => {
+    expect(privacyContent).not.toMatch(/TODO/i);
+  });
+
+  it("privacy.md contains no '[Raghav to confirm' markers", () => {
+    expect(privacyContent).not.toContain("[Raghav to confirm");
+  });
+
+  it("merchant-terms.md contains no '[TBD' markers", () => {
+    expect(termsContent).not.toContain("[TBD");
+  });
+
+  it("merchant-terms.md contains no 'TODO' markers", () => {
+    expect(termsContent).not.toMatch(/TODO/i);
+  });
+
+  it("merchant-terms.md contains no '[Raghav to confirm' markers", () => {
+    expect(termsContent).not.toContain("[Raghav to confirm");
   });
 });

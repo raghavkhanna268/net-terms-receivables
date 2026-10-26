@@ -12,7 +12,7 @@ export type BankId = "HDFC" | "ICICI" | "SBI" | "AXIS" | "UNKNOWN";
 export type TxnDirection = "CR" | "DR";
 
 /** Payment rail type */
-export type PaymentRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CHEQUE" | "OTHER";
+export type PaymentRail = "NEFT" | "RTGS" | "IMPS" | "UPI" | "ACH" | "CMS" | "CHEQUE" | "OTHER";
 
 /** Confidence level for bank detection */
 export interface DetectionResult {

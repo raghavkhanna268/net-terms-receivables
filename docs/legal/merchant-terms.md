@@ -109,7 +109,7 @@ We use the following sub-processors to provide the App:
 | Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit | Global (Worker placed near ap-south-1) |
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored App data | AWS ap-south-1 (Mumbai, India) |
 | Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
-| Functional Software, Inc. (Sentry) | Error monitoring. Data is stored in Sentry's EU data region (Germany). [TBD: Sentry data scope] | Sanitized error and performance events | EU (Germany) |
+| Functional Software, Inc. (Sentry) | Error monitoring (used only when configured). Data is stored in Sentry's EU data region (Germany). Exception values are replaced with error codes; breadcrumbs are removed; request headers, cookies, and bodies are removed; tags, extra fields, and contexts are limited to an allowlist; event messages have email addresses, shop domains, and access tokens redacted. | Sanitized error and performance events | EU (Germany) |
 
 **Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa)
 
@@ -131,7 +131,7 @@ We implement appropriate technical and organizational measures:
 - **Encryption at rest:** Supabase encrypts data at rest with AES-256; database backups are encrypted with age (public-key encryption)
 - **Access control:** OAuth 2.0 with shop-scoped sessions; a single person (the developer/operator) has access to production systems and data
 - **Authentication:** Password manager with unique passwords and 2FA on all accounts used to run the App
-- **PII redaction in logs:** All logs are scrubbed to remove personal data before storage
+- **Log data:** Application logs carry only IDs, counts, enums, booleans, timestamps, and error codes; Sentry scrubbing is described in section 4
 
 ### 7. Data Retention
 
@@ -155,7 +155,7 @@ We do not provide audit rights. Upon written request, we will provide reasonable
 
 Personal data may be transferred to:
 - **Japan:** Resend (ap-northeast-1 data region) for email delivery
-- **EU (Germany):** Sentry for error monitoring
+- **EU (Germany):** Sentry for error monitoring (when configured)
 - **Global:** Cloudflare edge nodes (transient processing only)
 
 ### 11. Term and Termination

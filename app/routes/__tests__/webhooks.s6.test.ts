@@ -620,9 +620,43 @@ describe("S6 Webhook Handlers", () => {
       ).rejects.toEqual(hmacError);
     });
 
-    it("enqueues completed bulk operation and returns 200", async () => {
+    it("enqueues completed bulk operation with lowercase status (Shopify webhook format)", async () => {
       const { action } = await import("../webhooks.bulk_operations.finish");
       const bulkOpGid = "gid://shopify/BulkOperation/123";
+      mockShopify.authenticate.webhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "BULK_OPERATIONS_FINISH",
+        payload: {
+          admin_graphql_api_id: bulkOpGid,
+          status: "completed",
+          type: "query",
+          error_code: null,
+          created_at: "2026-10-25T12:00:00Z",
+          completed_at: "2026-10-25T12:01:00Z",
+        },
+        webhookId: TEST_WEBHOOK_ID,
+      });
+
+      const request = new Request(
+        "https://example.com/webhooks/bulk_operations/finish",
+        { method: "POST" }
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendBulkMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          topic: "BULK_OPERATIONS_FINISH",
+          bulkOperationId: bulkOpGid,
+        })
+      );
+    });
+
+    it("enqueues completed bulk operation with uppercase status (backward compat)", async () => {
+      const { action } = await import("../webhooks.bulk_operations.finish");
+      const bulkOpGid = "gid://shopify/BulkOperation/789";
       mockShopify.authenticate.webhook.mockResolvedValue({
         shop: TEST_SHOP,
         topic: "BULK_OPERATIONS_FINISH",
@@ -651,14 +685,38 @@ describe("S6 Webhook Handlers", () => {
       );
     });
 
-    it("skips non-completed bulk operations", async () => {
+    it("skips lowercase failed bulk operations (200, no processing)", async () => {
       const { action } = await import("../webhooks.bulk_operations.finish");
       mockShopify.authenticate.webhook.mockResolvedValue({
         shop: TEST_SHOP,
         topic: "BULK_OPERATIONS_FINISH",
         payload: {
           admin_graphql_api_id: "gid://shopify/BulkOperation/456",
-          status: "FAILED",
+          status: "failed",
+          error_code: "access_denied",
+        },
+        webhookId: TEST_WEBHOOK_ID,
+      });
+
+      const request = new Request(
+        "https://example.com/webhooks/bulk_operations/finish",
+        { method: "POST" }
+      );
+
+      const response = await action(createActionArgs(request));
+
+      expect(response.status).toBe(200);
+      expect(mockSendBulkMessage).not.toHaveBeenCalled();
+    });
+
+    it("skips lowercase canceled bulk operations (200, no processing)", async () => {
+      const { action } = await import("../webhooks.bulk_operations.finish");
+      mockShopify.authenticate.webhook.mockResolvedValue({
+        shop: TEST_SHOP,
+        topic: "BULK_OPERATIONS_FINISH",
+        payload: {
+          admin_graphql_api_id: "gid://shopify/BulkOperation/789",
+          status: "canceled",
         },
         webhookId: TEST_WEBHOOK_ID,
       });
@@ -679,7 +737,7 @@ describe("S6 Webhook Handlers", () => {
       mockShopify.authenticate.webhook.mockResolvedValue({
         shop: TEST_SHOP,
         topic: "BULK_OPERATIONS_FINISH",
-        payload: { status: "COMPLETED" }, // Missing admin_graphql_api_id
+        payload: { status: "completed" },
         webhookId: TEST_WEBHOOK_ID,
       });
 

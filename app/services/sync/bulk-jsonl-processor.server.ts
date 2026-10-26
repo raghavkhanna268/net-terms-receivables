@@ -23,7 +23,8 @@
 import type { Sql } from "~/lib/db-light.server";
 import type { BulkMessage } from "~/lib/pgmq.server";
 import type { SyncResult } from "./types";
-import { safeLog, toErrorCode } from "~/lib/log.server";
+import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { SUPPORTED_SHOP_CURRENCY } from "~/lib/shop-currency.server";
 import {
   parseCompanyBulkJsonl,
   parseOrderBulkJsonl,
@@ -407,11 +408,21 @@ export function decodeTailAsLine(
 /**
  * Process a batch of JSONL lines for companies.
  * Also handles orphan locations by looking up parent company in DB.
+ *
+ * Orphan location handling: Orphan locations (whose parent company was in an
+ * earlier chunk) are marked with contactKnown=false so their mainContact*
+ * columns are preserved rather than overwritten with NULL.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param lines - JSONL lines to process
+ * @param env - Environment for PII flag (required)
  */
 async function processCompanyLines(
   sql: Sql,
   shopId: string,
-  lines: string[]
+  lines: string[],
+  env: import("./customer-fields.server").PiiEnv
 ): Promise<number> {
   const jsonl = lines.join("\n");
   const { companies, orphanLocations, errors } = parseCompanyBulkJsonl(jsonl);
@@ -423,22 +434,25 @@ async function processCompanyLines(
   }
 
   // Map company locations to buyer accounts
-  const accounts: ReturnType<typeof mapCompanyLocationToBuyerAccount>[] = [];
+  const accounts: import("./company-location.server").MappedBuyerAccount[] = [];
 
   // Process locations from companies in this batch
-  for (const { locations } of companies.values()) {
+  // Pass company's mainContact to each location (B2B recipient is the company's main contact)
+  // contactKnown=true because we have the company data
+  for (const { company, locations } of companies.values()) {
     for (const loc of locations) {
-      const shopifyLoc = bulkLocationToShopifyLocation(loc);
-      accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));
+      const shopifyLoc = bulkLocationToShopifyLocation(loc, company.mainContact);
+      accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc, env, true));
     }
   }
 
   // Handle orphan locations: parent company from earlier chunk or slice
   // Map unconditionally using parent company GID - guarded upserts handle duplicates
   // This ensures locations are processed even when company ended previous slice
+  // contactKnown=false so existing mainContact* values are preserved
   for (const orphanLoc of orphanLocations) {
     const shopifyLoc = bulkLocationToShopifyLocation(orphanLoc);
-    accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));
+    accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc, env, false));
   }
 
   return await bulkUpsertBuyerAccounts(sql, accounts);
@@ -458,6 +472,7 @@ async function processCompanyLines(
 export async function processOrderLines(
   sql: Sql,
   shopId: string,
+  shopDomain: string,
   lines: string[],
   context?: EligibilityContext
 ): Promise<number> {
@@ -467,6 +482,22 @@ export async function processOrderLines(
   if (errors.length > 0) {
     console.warn(`[bulk-jsonl] ${errors.length} parse errors in orders batch`);
   }
+
+  // #292: Filter out orders with missing or non-INR currency (fail-closed)
+  // Orders created before shop switched to INR should not be stored as INR amounts
+  // Orders without currency code are also skipped
+  const skippedOrders = orders.filter((o) => {
+    const currency = o.totalPriceSet?.shopMoney?.currencyCode;
+    return !currency || currency !== SUPPORTED_SHOP_CURRENCY;
+  });
+  if (skippedOrders.length > 0) {
+    const hash = await shopHash(shopDomain);
+    safeLog("info", "drain_skip_non_inr_order", { shopHash: hash, count: skippedOrders.length });
+  }
+  const inrOrders = orders.filter((o) => {
+    const currency = o.totalPriceSet?.shopMoney?.currencyCode;
+    return currency && currency === SUPPORTED_SHOP_CURRENCY;
+  });
 
   if (attachedChildCount > 0 || orphanChildCount > 0) {
     console.log(`[bulk-jsonl] PaymentSchedule children: ${attachedChildCount} attached, ${orphanChildCount} orphaned`);
@@ -525,13 +556,13 @@ export async function processOrderLines(
     }
   }
 
-  if (orders.length === 0) {
+  if (inrOrders.length === 0) {
     return orphansUpdated;
   }
 
   // Batch lookup: find existing invoices with their buyer account IDs, merchant overrides, and status (P2 fix)
   // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
-  const orderIds = orders.map((o) => o.id);
+  const orderIds = inrOrders.map((o) => o.id);
   const existingInvoices = await sql<{
     orderId: string;
     buyerAccountId: string;
@@ -549,9 +580,9 @@ export async function processOrderLines(
   const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i]));
 
   // Separate orders into existing and new for different processing paths
-  const ordersWithExisting: typeof orders = [];
-  const ordersWithoutExisting: typeof orders = [];
-  for (const order of orders) {
+  const ordersWithExisting: typeof inrOrders = [];
+  const ordersWithoutExisting: typeof inrOrders = [];
+  for (const order of inrOrders) {
     if (existingByOrderId.has(order.id)) {
       ordersWithExisting.push(order);
     } else {
@@ -754,16 +785,18 @@ export async function loadBulkOperationProgress(
 ): Promise<{
   byteOffset: number;
   completedAt: Date | null;
+  closedAt: Date | null;
   chunkSize: number;
   failureCount: number;
 } | null> {
   const [row] = await sql<{
     byte_offset: string | null;
     completed_at: Date | null;
+    closed_at: Date | null;
     chunk_size: number;
     failure_count: number;
   }[]>`
-    SELECT byte_offset, completed_at, chunk_size, failure_count
+    SELECT byte_offset, completed_at, closed_at, chunk_size, failure_count
     FROM s6_bulk_operations
     WHERE bulk_operation_id = ${bulkOperationId}
   `;
@@ -773,6 +806,7 @@ export async function loadBulkOperationProgress(
   return {
     byteOffset: row.byte_offset !== null ? parseInt(row.byte_offset, 10) : 0,
     completedAt: row.completed_at,
+    closedAt: row.closed_at,
     chunkSize: row.chunk_size,
     failureCount: row.failure_count,
   };
@@ -781,6 +815,9 @@ export async function loadBulkOperationProgress(
 /**
  * Save bulk operation progress to database.
  * byte_offset is the end of the last fully processed line.
+ *
+ * #293: Only updates rows where closed_at IS NULL. Returns whether a row was updated.
+ * This prevents reopening a closed row and allows the caller to skip chaining.
  */
 export async function saveBulkOperationProgress(
   sql: Sql,
@@ -788,23 +825,27 @@ export async function saveBulkOperationProgress(
   byteOffset: number,
   completedAt: Date | null = null,
   chunkSize?: number
-): Promise<void> {
+): Promise<{ rowUpdated: boolean }> {
+  let result;
   if (chunkSize !== undefined) {
-    await sql`
+    result = await sql`
       UPDATE s6_bulk_operations
       SET byte_offset = ${byteOffset},
           completed_at = ${completedAt},
           chunk_size = ${chunkSize}
       WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
     `;
   } else {
-    await sql`
+    result = await sql`
       UPDATE s6_bulk_operations
       SET byte_offset = ${byteOffset},
           completed_at = ${completedAt}
       WHERE bulk_operation_id = ${bulkOperationId}
+        AND closed_at IS NULL
     `;
   }
+  return { rowUpdated: result.count > 0 };
 }
 
 /**
@@ -817,11 +858,14 @@ async function processLines(
   bulkType: string,
   lines: string[]
 ): Promise<number> {
+  // Get Worker env for PII flag (used by companies and customers)
+  const env = getRequestEnv() ?? {};
+  
   switch (bulkType) {
     case "companies":
-      return await processCompanyLines(sql, shopId, lines);
+      return await processCompanyLines(sql, shopId, lines, env);
     case "orders":
-      return await processOrderLines(sql, shopId, lines);
+      return await processOrderLines(sql, shopId, shop, lines);
     case "customers":
       return await processCustomerLines(sql, shop, lines);
     default:
@@ -888,8 +932,8 @@ export async function processBulkOperation(
     };
   }
 
-  // If already completed, skip
-  if (progress.completedAt) {
+  // If already completed or closed, skip
+  if (progress.completedAt || progress.closedAt) {
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -899,7 +943,9 @@ export async function processBulkOperation(
     return {
       success: true,
       action: "skipped",
-      skipReason: "Bulk operation already completed",
+      skipReason: progress.closedAt
+        ? "Bulk operation closed (reinstall reset)"
+        : "Bulk operation already completed",
       status: "complete",
     };
   }
@@ -979,8 +1025,8 @@ export async function processBulkOperation(
 
   // Handle empty response at EOF
   if (bytes.length === 0 && chunkResult.isEof) {
-    // Mark as completed
-    await saveBulkOperationProgress(
+    // Mark as completed (only if not closed)
+    const { rowUpdated } = await saveBulkOperationProgress(
       sql,
       bulkOperationId,
       startByteOffset,
@@ -999,11 +1045,15 @@ export async function processBulkOperation(
       status: "eof_reached",
     });
 
-    const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
-    const nextStage =
-      metadata?.origin === "reconcile"
-        ? getNextStage(metadata.reconcileStage)
-        : undefined;
+    // Only chain to next stage if the row was actually updated (not closed)
+    let nextStage: "customers" | "orders" | undefined;
+    if (rowUpdated) {
+      const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
+      nextStage =
+        metadata?.origin === "reconcile"
+          ? getNextStage(metadata.reconcileStage)
+          : undefined;
+    }
 
     return {
       success: true,
@@ -1136,7 +1186,8 @@ export async function processBulkOperation(
     chunkResult.isEof && linesToProcess.length === allLines.length;
 
   if (isComplete) {
-    await saveBulkOperationProgress(
+    // Mark as completed (only if not closed)
+    const { rowUpdated } = await saveBulkOperationProgress(
       sql,
       bulkOperationId,
       newByteOffset,
@@ -1156,11 +1207,15 @@ export async function processBulkOperation(
       upsertedCount: totalUpserted,
     });
 
-    const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
-    const nextStage =
-      metadata?.origin === "reconcile"
-        ? getNextStage(metadata.reconcileStage)
-        : undefined;
+    // Only chain to next stage if the row was actually updated (not closed)
+    let nextStage: "customers" | "orders" | undefined;
+    if (rowUpdated) {
+      const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
+      nextStage =
+        metadata?.origin === "reconcile"
+          ? getNextStage(metadata.reconcileStage)
+          : undefined;
+    }
 
     return {
       success: true,
