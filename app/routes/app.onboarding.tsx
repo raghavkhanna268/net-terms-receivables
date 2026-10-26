@@ -752,12 +752,24 @@ function SyncStatusBadge({ status }: { status: InitialSyncStatus }) {
 function InitialSyncSection({
   syncState,
   isStarting,
+  currencySupported,
 }: {
   syncState: InitialSyncState;
   isStarting: boolean;
+  currencySupported: boolean;
 }) {
   const canStart = canStartSync(syncState.status);
   const buttonLabel = syncState.status === "failed" ? "Retry" : "Start sync";
+
+  if (!currencySupported) {
+    return (
+      <s-stack gap="base">
+        <s-paragraph>
+          Initial sync is available once the store currency is INR.
+        </s-paragraph>
+      </s-stack>
+    );
+  }
 
   return (
     <s-stack gap="base">
@@ -860,7 +872,8 @@ export default function OnboardingPage() {
   const currentSyncState: InitialSyncState = { status: loaderSyncStatus };
 
   useEffect(() => {
-    if (loaderSyncStatus === "in_progress") {
+    const shouldPoll = loaderSyncStatus === "in_progress" && currencySupported;
+    if (shouldPoll) {
       if (!pollIntervalRef.current) {
         pollIntervalRef.current = setInterval(() => {
           if (revalidator.state === "idle") {
@@ -881,7 +894,7 @@ export default function OnboardingPage() {
         pollIntervalRef.current = null;
       }
     };
-  }, [loaderSyncStatus, revalidator]);
+  }, [loaderSyncStatus, revalidator, currencySupported]);
 
   if (error || !state) {
     return (
@@ -1025,6 +1038,7 @@ export default function OnboardingPage() {
         <InitialSyncSection
           syncState={currentSyncState}
           isStarting={isStartingSync}
+          currencySupported={currencySupported ?? false}
         />
       </s-section>
 

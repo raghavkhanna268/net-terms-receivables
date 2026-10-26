@@ -327,3 +327,134 @@ describeWithDb("getInitialSyncState (DB-backed)", () => {
     });
   });
 });
+
+describeWithDb("Sequential DB: Initial Sync currency scenarios", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-currsync";
+  const TEST_USD_SHOP = `test-usd-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_INR_SHOP = `test-inr-${TEST_SUFFIX}.myshopify.com`;
+  let usdShopId: string;
+  let inrShopId: string;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const [usdShop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+      VALUES (${TEST_USD_SHOP}, 'America/New_York', 'USD', 'starter', NOW(), NOW())
+      RETURNING id
+    `;
+    usdShopId = usdShop.id;
+
+    const [inrShop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
+      VALUES (${TEST_INR_SHOP}, 'Asia/Kolkata', 'INR', 'starter', NOW(), NOW())
+      RETURNING id
+    `;
+    inrShopId = inrShop.id;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' IN (${TEST_USD_SHOP}, ${TEST_INR_SHOP})`;
+    await sql`DELETE FROM s6_bulk_operations WHERE shop IN (${TEST_USD_SHOP}, ${TEST_INR_SHOP})`;
+    await sql`DELETE FROM "Shop" WHERE id IN (${usdShopId}, ${inrShopId})`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' IN (${TEST_USD_SHOP}, ${TEST_INR_SHOP})`;
+    await sql`DELETE FROM s6_bulk_operations WHERE shop IN (${TEST_USD_SHOP}, ${TEST_INR_SHOP})`;
+  });
+
+  describe("(a) USD shop with no ops", () => {
+    it("returns not_started for USD shop with no bulk operations (fails on revert)", async () => {
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(sql, TEST_USD_SHOP);
+
+      expect(result.status).toBe("not_started");
+    });
+
+    it("isShopCurrencySupported returns false for USD", async () => {
+      const { isShopCurrencySupported } = await import("../shop-currency.server");
+      expect(isShopCurrencySupported("USD")).toBe(false);
+    });
+  });
+
+  describe("(b) INR-to-USD flip: USD shop with open companies op", () => {
+    it("getInitialSyncState returns in_progress for USD shop with open companies op (fails on revert)", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/usd-open-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, completed_at, failure_count
+        )
+        VALUES (
+          ${bulkOpId}, ${TEST_USD_SHOP}, 'companies', 'reconcile', 'companies',
+          NOW(), NULL, 0
+        )
+      `;
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(sql, TEST_USD_SHOP);
+
+      expect(result.status).toBe("in_progress");
+    });
+
+    it("enqueueInitialSync returns unsupported_currency for USD shop (fails on revert)", async () => {
+      const { enqueueInitialSync } = await import("../initial-sync.server");
+      const result = await enqueueInitialSync(sql, TEST_USD_SHOP);
+
+      expect(result.enqueued).toBe(false);
+      expect(result.reason).toBe("unsupported_currency");
+    });
+  });
+
+  describe("(c) INR shop with open op", () => {
+    it("getInitialSyncState returns in_progress for INR shop with open companies op (fails on revert)", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/inr-open-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, completed_at, failure_count
+        )
+        VALUES (
+          ${bulkOpId}, ${TEST_INR_SHOP}, 'companies', 'reconcile', 'companies',
+          NOW(), NULL, 0
+        )
+      `;
+
+      const { getInitialSyncState } = await import("../initial-sync.server");
+      const result = await getInitialSyncState(sql, TEST_INR_SHOP);
+
+      expect(result.status).toBe("in_progress");
+    });
+
+    it("isShopCurrencySupported returns true for INR", async () => {
+      const { isShopCurrencySupported } = await import("../shop-currency.server");
+      expect(isShopCurrencySupported("INR")).toBe(true);
+    });
+
+    it("enqueueInitialSync returns in_progress for INR shop with existing open op (fails on revert)", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/inr-enqueue-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, completed_at, failure_count
+        )
+        VALUES (
+          ${bulkOpId}, ${TEST_INR_SHOP}, 'companies', 'reconcile', 'companies',
+          NOW(), NULL, 0
+        )
+      `;
+
+      const { enqueueInitialSync } = await import("../initial-sync.server");
+      const result = await enqueueInitialSync(sql, TEST_INR_SHOP);
+
+      expect(result.enqueued).toBe(false);
+      expect(result.reason).toBe("in_progress");
+    });
+  });
+});
