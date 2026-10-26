@@ -84,6 +84,25 @@ export const DEFAULT_MAX_LINES = 100;
 export const MAX_FAILURE_COUNT = 5;
 
 /**
+ * Processing lease duration in seconds.
+ * A processor must acquire the lease before processing.
+ */
+export const PROCESSING_LEASE_SECONDS = 60;
+
+/**
+ * Safe error codes for DLQ and logging.
+ * These codes are allowlisted and do not contain sensitive data.
+ */
+export const BULK_ERROR_CODES = {
+  NO_RESULT_URL: "bulk_no_result_url",
+  MAX_FAILURES: "bulk_max_failures",
+  CHUNK_HTTP_4XX: "bulk_chunk_http_4xx",
+  PROCESSING_ERROR: "bulk_processing_error",
+  LEASE_CONTENTION: "bulk_lease_contention",
+  STALE_RECOVERY: "bulk_stale_recovery",
+} as const;
+
+/**
  * Error classification for retry logic.
  * - retryable: network, 5xx, 429, timeouts - increment failure_count, retry until 5
  * - permanent: 4xx (not 429), bad data - go straight to DLQ
@@ -140,18 +159,26 @@ export interface BulkProcessResult extends SyncResult {
   chainToOrders?: boolean;
   /** Error classification for retry logic (only set when status='error') */
   errorType?: ErrorType;
+  /** Safe error code for DLQ and logging */
+  errorCode?: string;
 }
 
 /**
  * Bulk operation status from Shopify.
+ */
+/**
+ * Bulk operation status from Shopify.
+ * Note: objectCount is UnsignedInt64 in Shopify's schema, serialized as STRING in JSON.
+ * See: https://shopify.dev/docs/api/admin-graphql/latest/scalars/UnsignedInt64
  */
 interface BulkOperationStatus {
   id: string;
   status: string;
   url: string | null;
   fileSize: number | null;
-  objectCount: number | null;
+  objectCount: string | null;
   errorCode: string | null;
+  partialDataUrl?: string | null;
 }
 
 /**
@@ -509,10 +536,11 @@ export async function processOrderLines(
   if (orphanSchedules.length > 0) {
     const orphanParentIds = orphanSchedules.map((s) => s.__parentId);
     // Batch lookup existing open invoices for orphan parents (skip paid/cancelled/closed)
+    // S25: Use IN ${sql(ids)} for fetch_types:false compatibility
     const existingOrphanInvoices = await sql<{ id: string; orderId: string }[]>`
       SELECT id, "orderId" FROM "Invoice"
       WHERE "shopId" = ${shopId}
-        AND "orderId" = ANY(${orphanParentIds})
+        AND "orderId" IN ${sql(orphanParentIds)}
         AND status = 'open'
     `;
     const invoiceByOrderId = new Map(existingOrphanInvoices.map((i) => [i.orderId, i.id]));
@@ -561,9 +589,9 @@ export async function processOrderLines(
   }
 
   // Batch lookup: find existing invoices with their buyer account IDs, merchant overrides, and status (P2 fix)
-  // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
+  // S25: Handle empty list case by skipping query
   const orderIds = inrOrders.map((o) => o.id);
-  const existingInvoices = await sql<{
+  let existingInvoices: {
     orderId: string;
     buyerAccountId: string;
     dueOverrideAt: Date | null;
@@ -571,12 +599,16 @@ export async function processOrderLines(
     dueAt: Date | null;
     outstanding: string;
     status: "open" | "paid" | "cancelled";
-  }[]>`
-    SELECT "orderId", "buyerAccountId", "dueOverrideAt", "dueSource", "dueAt",
-           outstanding::text, status::"InvoiceStatus"
-    FROM "Invoice"
-    WHERE "shopId" = ${shopId} AND "orderId" IN ${sql(orderIds)}
-  `;
+  }[] = [];
+  
+  if (orderIds.length > 0) {
+    existingInvoices = await sql<typeof existingInvoices>`
+      SELECT "orderId", "buyerAccountId", "dueOverrideAt", "dueSource", "dueAt",
+             outstanding::text, status::"InvoiceStatus"
+      FROM "Invoice"
+      WHERE "shopId" = ${shopId} AND "orderId" IN ${sql(orderIds)}
+    `;
+  }
   const existingByOrderId = new Map(existingInvoices.map((i) => [i.orderId, i]));
 
   // Separate orders into existing and new for different processing paths
@@ -816,14 +848,15 @@ export async function loadBulkOperationProgress(
  * Save bulk operation progress to database.
  * byte_offset is the end of the last fully processed line.
  *
- * #293: Only updates rows where closed_at IS NULL. Returns whether a row was updated.
- * This prevents reopening a closed row and allows the caller to skip chaining.
+ * S25: Progress saves never write completed_at, only advance byte_offset.
+ * Only updates if byte_offset < new AND completed_at IS NULL.
+ * This prevents reopening a closed/completed row.
  */
 export async function saveBulkOperationProgress(
   sql: Sql,
   bulkOperationId: string,
   byteOffset: number,
-  completedAt: Date | null = null,
+  _completedAt: Date | null = null,
   chunkSize?: number
 ): Promise<{ rowUpdated: boolean }> {
   let result;
@@ -831,21 +864,102 @@ export async function saveBulkOperationProgress(
     result = await sql`
       UPDATE s6_bulk_operations
       SET byte_offset = ${byteOffset},
-          completed_at = ${completedAt},
           chunk_size = ${chunkSize}
       WHERE bulk_operation_id = ${bulkOperationId}
         AND closed_at IS NULL
+        AND completed_at IS NULL
+        AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
     `;
   } else {
     result = await sql`
       UPDATE s6_bulk_operations
-      SET byte_offset = ${byteOffset},
-          completed_at = ${completedAt}
+      SET byte_offset = ${byteOffset}
       WHERE bulk_operation_id = ${bulkOperationId}
         AND closed_at IS NULL
+        AND completed_at IS NULL
+        AND (byte_offset IS NULL OR byte_offset < ${byteOffset})
     `;
   }
   return { rowUpdated: result.count > 0 };
+}
+
+/**
+ * Claim bulk operation completion atomically.
+ * Only the winner gets to chain nextStage; losers mark their message processed and skip.
+ *
+ * S25: This is the ONLY path that writes completed_at.
+ *
+ * @returns true if this caller won the claim, false otherwise
+ */
+export async function claimBulkCompletion(
+  sql: Sql,
+  bulkOperationId: string
+): Promise<boolean> {
+  const result = await sql`
+    UPDATE s6_bulk_operations
+    SET completed_at = now()
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND completed_at IS NULL
+      AND closed_at IS NULL
+    RETURNING bulk_operation_id
+  `;
+  return result.count > 0;
+}
+
+/**
+ * Acquire processing lease atomically.
+ * Returns true if lease acquired, false if another processor holds the lease.
+ *
+ * S25: Processing lease prevents concurrent processing of the same bulk op.
+ * Losing the lease is retryable WITHOUT bumping failure_count.
+ */
+export async function acquireProcessingLease(
+  sql: Sql,
+  bulkOperationId: string
+): Promise<boolean> {
+  const result = await sql`
+    UPDATE s6_bulk_operations
+    SET processing_lease_until = now() + interval '${sql.unsafe(String(PROCESSING_LEASE_SECONDS))} seconds'
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
+      AND (processing_lease_until IS NULL OR processing_lease_until < now())
+    RETURNING bulk_operation_id
+  `;
+  return result.count > 0;
+}
+
+/**
+ * Release processing lease (e.g., on completion or when giving up).
+ */
+export async function releaseProcessingLease(
+  sql: Sql,
+  bulkOperationId: string
+): Promise<void> {
+  await sql`
+    UPDATE s6_bulk_operations
+    SET processing_lease_until = NULL
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND closed_at IS NULL
+  `;
+}
+
+/**
+ * Set next_stage_enqueued_at atomically to prevent duplicate nextStage enqueues.
+ * Returns true if this is the first enqueue, false if already set.
+ */
+export async function markNextStageEnqueued(
+  sql: Sql,
+  bulkOperationId: string
+): Promise<boolean> {
+  const result = await sql`
+    UPDATE s6_bulk_operations
+    SET next_stage_enqueued_at = now()
+    WHERE bulk_operation_id = ${bulkOperationId}
+      AND next_stage_enqueued_at IS NULL
+      AND closed_at IS NULL
+    RETURNING bulk_operation_id
+  `;
+  return result.count > 0;
 }
 
 /**
@@ -950,19 +1064,93 @@ export async function processBulkOperation(
     };
   }
 
+  // S25: Acquire processing lease to prevent concurrent processing
+  const leaseAcquired = await acquireProcessingLease(sql, bulkOperationId);
+  if (!leaseAcquired) {
+    // Losing the lease is retryable WITHOUT bumping failure_count
+    return {
+      success: false,
+      action: "skipped",
+      error: BULK_ERROR_CODES.LEASE_CONTENTION,
+      errorCode: BULK_ERROR_CODES.LEASE_CONTENTION,
+      status: "error",
+      errorType: "retryable",
+    };
+  }
+
+  // S25: Use try/finally to ensure lease is ALWAYS released on any exit path
+  try {
   // Check failure count - if already at max, this goes to DLQ
   if (progress.failureCount >= MAX_FAILURE_COUNT) {
     return {
       success: false,
       action: "skipped",
-      error: `Max failures exceeded (${progress.failureCount})`,
+      error: BULK_ERROR_CODES.MAX_FAILURES,
+      errorCode: BULK_ERROR_CODES.MAX_FAILURES,
       status: "error",
-      errorType: "permanent", // Already exhausted retries
+      errorType: "permanent",
     };
   }
 
   // Get result URL from Shopify
   const statusResult = await getBulkOperationStatus(shop, bulkOperationId);
+
+  // S25: Handle empty results (COMPLETED with url null and objectCount 0)
+  // Per Shopify docs: COMPLETED with url=null and objectCount=0 is a valid empty result
+  // Note: objectCount is UnsignedInt64 serialized as STRING in Shopify's JSON response
+  if (statusResult.success && statusResult.data) {
+    const { status, url, objectCount, partialDataUrl } = statusResult.data;
+    const parsedObjectCount = objectCount != null ? Number(objectCount) : null;
+    
+    if (status === "COMPLETED" && url === null && parsedObjectCount === 0) {
+      // Empty result - complete the operation with 0 lines processed
+      const claimed = await claimBulkCompletion(sql, bulkOperationId);
+      await markWebhookProcessed(
+        sql,
+        webhookId,
+        "BULK_OPERATIONS_FINISH",
+        bulkOperationId
+      );
+
+      safeLog("info", "bulk_jsonl_completed", {
+        shopId,
+        bulkType,
+        status: "empty_result",
+        lineCount: 0,
+      });
+
+      // Only chain to next stage if this caller won the completion claim
+      let nextStage: "customers" | "orders" | undefined;
+      if (claimed) {
+        const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
+        nextStage =
+          metadata?.origin === "reconcile"
+            ? getNextStage(metadata.reconcileStage)
+            : undefined;
+      }
+
+      return {
+        success: true,
+        action: "updated",
+        entityId: bulkOperationId,
+        status: "complete",
+        nextStage,
+        chainToOrders: nextStage === "orders",
+      };
+    }
+
+    // S25: partialDataUrl set or objectCount > 0 with no url is a permanent error
+    if (status === "COMPLETED" && url === null && (partialDataUrl || (parsedObjectCount != null && parsedObjectCount > 0))) {
+      return {
+        success: false,
+        action: "skipped",
+        error: BULK_ERROR_CODES.NO_RESULT_URL,
+        errorCode: BULK_ERROR_CODES.NO_RESULT_URL,
+        status: "error",
+        errorType: "permanent",
+      };
+    }
+  }
 
   if (!statusResult.success || !statusResult.data?.url) {
     // Increment failure count for retryable API error
@@ -971,10 +1159,12 @@ export async function processBulkOperation(
       bulkOperationId
     );
     const exhaustedRetries = newFailureCount >= MAX_FAILURE_COUNT;
+    const errorCode = exhaustedRetries ? BULK_ERROR_CODES.MAX_FAILURES : BULK_ERROR_CODES.NO_RESULT_URL;
     return {
       success: false,
       action: "skipped",
-      error: statusResult.error || "No result URL available",
+      error: errorCode,
+      errorCode,
       status: "error",
       errorType: exhaustedRetries ? "permanent" : "retryable",
     };
@@ -1000,7 +1190,8 @@ export async function processBulkOperation(
       return {
         success: false,
         action: "skipped",
-        error: chunkResult.error || "Failed to fetch chunk",
+        error: BULK_ERROR_CODES.CHUNK_HTTP_4XX,
+        errorCode: BULK_ERROR_CODES.CHUNK_HTTP_4XX,
         status: "error",
         errorType: "permanent",
       };
@@ -1012,10 +1203,12 @@ export async function processBulkOperation(
       bulkOperationId
     );
     const exhaustedRetries = newFailureCount >= MAX_FAILURE_COUNT;
+    const errorCode = exhaustedRetries ? BULK_ERROR_CODES.MAX_FAILURES : BULK_ERROR_CODES.PROCESSING_ERROR;
     return {
       success: false,
       action: "skipped",
-      error: chunkResult.error || "Failed to fetch chunk",
+      error: errorCode,
+      errorCode,
       status: "error",
       errorType: exhaustedRetries ? "permanent" : "retryable",
     };
@@ -1025,13 +1218,8 @@ export async function processBulkOperation(
 
   // Handle empty response at EOF
   if (bytes.length === 0 && chunkResult.isEof) {
-    // Mark as completed (only if not closed)
-    const { rowUpdated } = await saveBulkOperationProgress(
-      sql,
-      bulkOperationId,
-      startByteOffset,
-      new Date()
-    );
+    // S25: Use claimBulkCompletion for exactly-once completion
+    const claimed = await claimBulkCompletion(sql, bulkOperationId);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1045,9 +1233,9 @@ export async function processBulkOperation(
       status: "eof_reached",
     });
 
-    // Only chain to next stage if the row was actually updated (not closed)
+    // Only chain to next stage if this caller won the completion claim
     let nextStage: "customers" | "orders" | undefined;
-    if (rowUpdated) {
+    if (claimed) {
       const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
       nextStage =
         metadata?.origin === "reconcile"
@@ -1153,14 +1341,16 @@ export async function processBulkOperation(
         bulkType,
         linesToProcess
       );
-    } catch (err) {
+    } catch {
       // Increment failure count on processing error
       await incrementBulkOperationFailureCount(sql, bulkOperationId);
       return {
         success: false,
         action: "skipped",
-        error: `retryable:${toErrorCode(err)}`,
+        error: BULK_ERROR_CODES.PROCESSING_ERROR,
+        errorCode: BULK_ERROR_CODES.PROCESSING_ERROR,
         status: "error",
+        errorType: "retryable",
       };
     }
   }
@@ -1186,13 +1376,8 @@ export async function processBulkOperation(
     chunkResult.isEof && linesToProcess.length === allLines.length;
 
   if (isComplete) {
-    // Mark as completed (only if not closed)
-    const { rowUpdated } = await saveBulkOperationProgress(
-      sql,
-      bulkOperationId,
-      newByteOffset,
-      new Date()
-    );
+    // S25: Use claimBulkCompletion for exactly-once completion
+    const claimed = await claimBulkCompletion(sql, bulkOperationId);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1207,9 +1392,9 @@ export async function processBulkOperation(
       upsertedCount: totalUpserted,
     });
 
-    // Only chain to next stage if the row was actually updated (not closed)
+    // Only chain to next stage if this caller won the completion claim
     let nextStage: "customers" | "orders" | undefined;
-    if (rowUpdated) {
+    if (claimed) {
       const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
       nextStage =
         metadata?.origin === "reconcile"
@@ -1249,4 +1434,8 @@ export async function processBulkOperation(
     entityId: bulkOperationId,
     status: "progress",
   };
+  } finally {
+    // S25: Always release processing lease on any exit path
+    await releaseProcessingLease(sql, bulkOperationId);
+  }
 }

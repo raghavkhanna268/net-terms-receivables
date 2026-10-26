@@ -56,6 +56,7 @@ export interface DeleteShopResult {
   sessionsDeleted: number;
   refetchNullPurged: number;
   bulkOperationsPurged: number;
+  reconcileClaimsPurged: number;
   orderGapPurged: number;
   piiFallbackPurged: number;
   pgmqSyncQueuePurged: number;
@@ -155,6 +156,7 @@ export async function deleteShop(
         sessionsDeleted: 0,
         refetchNullPurged: 0,
         bulkOperationsPurged: 0,
+        reconcileClaimsPurged: 0,
         orderGapPurged: 0,
         piiFallbackPurged: 0,
         pgmqSyncQueuePurged: 0,
@@ -186,6 +188,12 @@ export async function deleteShop(
     // s6_bulk_operations (bulk op tracking, shop text column)
     const bulkOpsResult = await tx`
       DELETE FROM s6_bulk_operations
+      WHERE shop = ${shopDomain}
+    `;
+
+    // s6_reconcile_stage_claims (S25 exactly-once reconcile claims, shop text column)
+    const reconcileClaimsResult = await tx`
+      DELETE FROM s6_reconcile_stage_claims
       WHERE shop = ${shopDomain}
     `;
 
@@ -283,6 +291,7 @@ export async function deleteShop(
       sessionsDeleted: sessionsResult.count,
       refetchNullPurged: refetchResult.count,
       bulkOperationsPurged: bulkOpsResult.count,
+      reconcileClaimsPurged: reconcileClaimsResult.count,
       orderGapPurged: outstandingResult.count,
       piiFallbackPurged: piiResult.count,
       pgmqSyncQueuePurged: pgmqSyncQueueResult.count,
