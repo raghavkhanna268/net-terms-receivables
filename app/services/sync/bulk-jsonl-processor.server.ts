@@ -408,11 +408,21 @@ export function decodeTailAsLine(
 /**
  * Process a batch of JSONL lines for companies.
  * Also handles orphan locations by looking up parent company in DB.
+ *
+ * Orphan location handling: Orphan locations (whose parent company was in an
+ * earlier chunk) are marked with contactKnown=false so their mainContact*
+ * columns are preserved rather than overwritten with NULL.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param lines - JSONL lines to process
+ * @param env - Environment for PII flag (required)
  */
 async function processCompanyLines(
   sql: Sql,
   shopId: string,
-  lines: string[]
+  lines: string[],
+  env: import("./customer-fields.server").PiiEnv
 ): Promise<number> {
   const jsonl = lines.join("\n");
   const { companies, orphanLocations, errors } = parseCompanyBulkJsonl(jsonl);
@@ -424,22 +434,25 @@ async function processCompanyLines(
   }
 
   // Map company locations to buyer accounts
-  const accounts: ReturnType<typeof mapCompanyLocationToBuyerAccount>[] = [];
+  const accounts: import("./company-location.server").MappedBuyerAccount[] = [];
 
   // Process locations from companies in this batch
-  for (const { locations } of companies.values()) {
+  // Pass company's mainContact to each location (B2B recipient is the company's main contact)
+  // contactKnown=true because we have the company data
+  for (const { company, locations } of companies.values()) {
     for (const loc of locations) {
-      const shopifyLoc = bulkLocationToShopifyLocation(loc);
-      accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));
+      const shopifyLoc = bulkLocationToShopifyLocation(loc, company.mainContact);
+      accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc, env, true));
     }
   }
 
   // Handle orphan locations: parent company from earlier chunk or slice
   // Map unconditionally using parent company GID - guarded upserts handle duplicates
   // This ensures locations are processed even when company ended previous slice
+  // contactKnown=false so existing mainContact* values are preserved
   for (const orphanLoc of orphanLocations) {
     const shopifyLoc = bulkLocationToShopifyLocation(orphanLoc);
-    accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc));
+    accounts.push(mapCompanyLocationToBuyerAccount(shopId, shopifyLoc, env, false));
   }
 
   return await bulkUpsertBuyerAccounts(sql, accounts);
@@ -845,9 +858,12 @@ async function processLines(
   bulkType: string,
   lines: string[]
 ): Promise<number> {
+  // Get Worker env for PII flag (used by companies and customers)
+  const env = getRequestEnv() ?? {};
+  
   switch (bulkType) {
     case "companies":
-      return await processCompanyLines(sql, shopId, lines);
+      return await processCompanyLines(sql, shopId, lines, env);
     case "orders":
       return await processOrderLines(sql, shopId, shop, lines);
     case "customers":

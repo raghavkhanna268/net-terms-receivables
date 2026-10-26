@@ -101,6 +101,7 @@ Implementation details for data export:
   - If `RESEND_TEST_RECIPIENTS` is empty/unset, email is skipped with reason `recipient_allowlist_empty`
   - If recipient is not in `RESEND_TEST_RECIPIENTS` allowlist, email is skipped with reason `recipient_not_allowlisted`
 - When `RESEND_RECIPIENT_ALLOWLIST_ENFORCED=false`, the allowlist guard is disabled and all recipients are allowed
+- **No diagnostics output exists for this flag** (Actions cannot read Worker secret values). Verification at the launch flip is a live send to a non-allowlisted test inbox, performed by DevOps after setting the flag to exactly `"false"`, and only with owner approval. The flag stays enforced until then.
 - Resend API failures do not fail the webhook (still returns 200, logs status code only, export still available)
 
 ### `customers/redact` Handler

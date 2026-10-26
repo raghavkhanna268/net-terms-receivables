@@ -770,6 +770,7 @@ describeWithDb("Shop-dependent services after fresh install (DB)", () => {
         "COMPANY_LOCATIONS_CREATE",
         location,
         `webhook-company-${TEST_SUFFIX}`,
+        {}
       );
       
       expect(result.success).toBe(true);
