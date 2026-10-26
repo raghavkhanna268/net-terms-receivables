@@ -15,6 +15,8 @@ import {
   mapDraftOrder,
   bulkUpsertDraftOrders,
   processBulkDraftOrder,
+  processDraftOrderWebhook,
+  getPendingExposure,
 } from "../draft-order.server";
 import {
   parseDraftOrderBulkJsonl,
@@ -56,6 +58,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
   afterAll(async () => {
     await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_bulk_operations WHERE shop = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-parity-" + TEST_SUFFIX + "%"}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql.end();
@@ -327,7 +330,7 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
       expect(result!.status).toBe("invoice_sent");
     });
 
-    it("bucket 3: neither company nor customer - SKIPPED (no buyer account)", async () => {
+    it("bucket 3: neither company nor customer - tracked with null buyer_account_id", async () => {
       const draftOrder: ShopifyDraftOrder = {
         id: `gid://shopify/DraftOrder/bucket3-neither-${TEST_SUFFIX}`,
         name: "#BUCKET3-NEITHER",
@@ -416,6 +419,148 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         WHERE draft_order_id = ${`gid://shopify/DraftOrder/rerun-${TEST_SUFFIX}`}
       `;
       expect(rows).toHaveLength(1);
+    });
+  });
+
+  describe("webhook/bulk parity for 'neither' drafts (null buyer_account_id)", () => {
+    it("webhook and bulk paths produce equivalent rows for 'neither' draft", async () => {
+      const webhookDraftId = `gid://shopify/DraftOrder/parity-webhook-${TEST_SUFFIX}`;
+      const bulkDraftId = `gid://shopify/DraftOrder/parity-bulk-${TEST_SUFFIX}`;
+
+      const baseDraftOrder: ShopifyDraftOrder = {
+        id: webhookDraftId,
+        name: "#PARITY-WH",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "3000.00", currencyCode: "INR" } },
+        paymentTerms: {
+          id: "pt-parity",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+        },
+      };
+
+      const webhookResult = await processDraftOrderWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "DRAFT_ORDERS_CREATE",
+        baseDraftOrder,
+        `wh-parity-${TEST_SUFFIX}`
+      );
+      expect(webhookResult.success).toBe(true);
+      expect(webhookResult.action).toBe("created");
+
+      const bulkDraftOrder: ShopifyDraftOrder = {
+        ...baseDraftOrder,
+        id: bulkDraftId,
+        name: "#PARITY-BULK",
+      };
+
+      const bulkMapped = await processBulkDraftOrder(sql, TEST_SHOP_DOMAIN, bulkDraftOrder);
+      expect(bulkMapped).not.toBeNull();
+      expect(bulkMapped!.buyerAccountId).toBeNull();
+      await bulkUpsertDraftOrders(sql, [bulkMapped!]);
+
+      const [webhookRow] = await sql<{
+        buyer_account_id: string | null;
+        total: string;
+        has_payment_terms: boolean;
+        status: string;
+      }[]>`
+        SELECT buyer_account_id, total, has_payment_terms, status
+        FROM s8_draft_orders WHERE draft_order_id = ${webhookDraftId}
+      `;
+      const [bulkRow] = await sql<{
+        buyer_account_id: string | null;
+        total: string;
+        has_payment_terms: boolean;
+        status: string;
+      }[]>`
+        SELECT buyer_account_id, total, has_payment_terms, status
+        FROM s8_draft_orders WHERE draft_order_id = ${bulkDraftId}
+      `;
+
+      expect(webhookRow.buyer_account_id).toBeNull();
+      expect(bulkRow.buyer_account_id).toBeNull();
+      expect(webhookRow.total).toBe(bulkRow.total);
+      expect(webhookRow.has_payment_terms).toBe(bulkRow.has_payment_terms);
+      expect(webhookRow.status).toBe(bulkRow.status);
+    });
+
+    it("null-buyer draft never counts toward any buyer account exposure", async () => {
+      const nullBuyerDraftId = `gid://shopify/DraftOrder/null-exp-${TEST_SUFFIX}`;
+
+      const mapped = mapDraftOrder(
+        TEST_SHOP_ID,
+        {
+          id: nullBuyerDraftId,
+          name: "#NULL-EXP",
+          createdAt: "2026-10-25T10:00:00Z",
+          status: "open",
+          totalPriceSet: { shopMoney: { amount: "5000.00", currencyCode: "INR" } },
+          paymentTerms: { id: "pt", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        },
+        null
+      );
+      await bulkUpsertDraftOrders(sql, [mapped]);
+
+      const exposureForKnownAccount = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposureForKnownAccount).toBe("0.00");
+
+      const [draft] = await sql`
+        SELECT buyer_account_id FROM s8_draft_orders WHERE draft_order_id = ${nullBuyerDraftId}
+      `;
+      expect(draft.buyer_account_id).toBeNull();
+    });
+
+    it("null-buyer draft does not trigger any BuyerAccount hold", async () => {
+      const nullBuyerDraftId = `gid://shopify/DraftOrder/null-hold-${TEST_SUFFIX}`;
+
+      const mapped = mapDraftOrder(
+        TEST_SHOP_ID,
+        {
+          id: nullBuyerDraftId,
+          name: "#NULL-HOLD",
+          createdAt: "2026-10-25T10:00:00Z",
+          status: "open",
+          totalPriceSet: { shopMoney: { amount: "10000.00", currencyCode: "INR" } },
+          paymentTerms: { id: "pt", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        },
+        null
+      );
+      await bulkUpsertDraftOrders(sql, [mapped]);
+
+      const holdRows = await sql`
+        SELECT id FROM "BuyerAccount"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+          AND "holdState" = 'HELD'
+      `;
+      expect(holdRows).toHaveLength(0);
+    });
+
+    it("null-buyer draft creates no ReminderLog rows", async () => {
+      const nullBuyerDraftId = `gid://shopify/DraftOrder/null-rem-${TEST_SUFFIX}`;
+
+      const mapped = mapDraftOrder(
+        TEST_SHOP_ID,
+        {
+          id: nullBuyerDraftId,
+          name: "#NULL-REM",
+          createdAt: "2026-10-25T10:00:00Z",
+          status: "open",
+          totalPriceSet: { shopMoney: { amount: "8000.00", currencyCode: "INR" } },
+          paymentTerms: { id: "pt", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        },
+        null
+      );
+      await bulkUpsertDraftOrders(sql, [mapped]);
+
+      const reminderRows = await sql`
+        SELECT id FROM "ReminderLog"
+        WHERE "shopId" = ${TEST_SHOP_ID}
+      `;
+      expect(reminderRows).toHaveLength(0);
     });
   });
 });
