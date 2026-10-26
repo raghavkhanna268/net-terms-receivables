@@ -6,7 +6,6 @@ Step-by-step checklists for launch prerequisites. Complete these before Shopify 
 
 | Document | Owner | Status |
 |----------|-------|--------|
-| Protected customer data request (Partner Dashboard > API access requests) | Raghav | Pending Shopify review: request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing (Level 2: Name, Email). As of 26 Oct. |
 | [Sentry Setup](./sentry-setup.md) | Raghav | Pending |
 | [Workers Paid Upgrade](./workers-paid-upgrade.md) | Raghav | Pending |
 | [Request `read_all_orders` Scope](./read-all-orders-request.md) | Raghav | Pending |
