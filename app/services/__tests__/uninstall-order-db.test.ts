@@ -10,8 +10,8 @@
  * - Failure during session DELETE rolls back both (trigger-based injection)
  * - Duplicate delivery keeps the FIRST uninstalledAt (COALESCE)
  * - Shop row missing: sessions are still deleted
- * - Helper blocks while Shop row is locked (real concurrency test)
- * - Helper serializes with deleteShop's FOR UPDATE (real concurrency test)
+ * - Helper blocks while Shop row is locked by FOR SHARE (drain guard lock)
+ * - Helper serializes with deleteShop's FOR UPDATE (deterministic lock detection)
  * - Reinstall scenario: afterAuth clears uninstalledAt and creates new session
  * - KNOWN-GAP: late uninstall after reinstall deletes fresh session
  *
@@ -28,6 +28,32 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 const TEST_SUFFIX = `uninstall_order_${Date.now()}`;
 const TEST_SHOP_DOMAIN = `test-${TEST_SUFFIX}.myshopify.com`;
 const TEST_SESSION_ID = `offline_${TEST_SHOP_DOMAIN}`;
+
+async function waitForBlocking(
+  sql: ReturnType<typeof postgres>,
+  blockedPid: number,
+  blockerPid: number,
+  deadlineMs: number = 5000
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < deadlineMs) {
+    const [result] = await sql<[{ blocking_pids: number[] }]>`
+      SELECT pg_blocking_pids(${blockedPid}) as blocking_pids
+    `;
+    if (result.blocking_pids.includes(blockerPid)) {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return false;
+}
+
+function isPromiseSettled<T>(p: Promise<T>): Promise<boolean> {
+  return Promise.race([
+    p.then(() => true, () => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 0)),
+  ]);
+}
 
 describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
   let sql: ReturnType<typeof postgres>;
@@ -165,43 +191,47 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
     expect(sessions2.length).toBe(0);
   });
 
-  it("helper blocks while Shop row is locked by FOR UPDATE (real concurrency)", async () => {
+  it("helper blocks while Shop row is locked by FOR SHARE (drain guard lock)", async () => {
     const { markUninstalledAndDeleteSessions } = await import("../compliance/compliance.server");
 
     const connA = postgres(TEST_DATABASE_URL!, sqlOptions);
-    const connB = postgres(TEST_DATABASE_URL!, sqlOptions);
-    const LOCK_TIMEOUT_MS = 300;
+    const connB = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
+
+    let releaseGate: () => void = () => {};
 
     try {
-      let connACommitted = false;
+      const gatePromise = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
 
+      const [{ pid: pidA }] = await connA<[{ pid: number }]>`SELECT pg_backend_pid() as pid`;
+      const [{ pid: pidB }] = await connB<[{ pid: number }]>`SELECT pg_backend_pid() as pid`;
+
+      let lockAcquired = false;
       const connATransaction = connA.begin(async (txA) => {
         await txA`
           SELECT id FROM "Shop"
           WHERE domain = ${TEST_SHOP_DOMAIN}
-          FOR UPDATE
+          FOR SHARE
         `;
+        lockAcquired = true;
 
-        await new Promise((r) => setTimeout(r, LOCK_TIMEOUT_MS + 100));
-        connACommitted = true;
+        await gatePromise;
       });
 
-      await new Promise((r) => setTimeout(r, 50));
+      while (!lockAcquired) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
 
       const helperPromise = markUninstalledAndDeleteSessions(connB, TEST_SHOP_DOMAIN);
 
-      const timeoutPromise = new Promise<"timeout">((resolve) =>
-        setTimeout(() => resolve("timeout"), LOCK_TIMEOUT_MS)
-      );
+      const isBlocking = await waitForBlocking(sql, pidB, pidA, 5000);
+      expect(isBlocking).toBe(true);
 
-      const raceResult = await Promise.race([
-        helperPromise.then(() => "completed" as const),
-        timeoutPromise,
-      ]);
+      const settled = await isPromiseSettled(helperPromise);
+      expect(settled).toBe(false);
 
-      expect(raceResult).toBe("timeout");
-      expect(connACommitted).toBe(false);
-
+      releaseGate();
       await connATransaction;
 
       const helperResult = await helperPromise;
@@ -218,18 +248,21 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
       `;
       expect(sessions.length).toBe(0);
     } finally {
+      releaseGate();
       await connA.end();
       await connB.end();
     }
   });
 
-  it("helper serializes with deleteShop's FOR UPDATE (real concurrency)", async () => {
+  it("helper serializes with deleteShop's FOR UPDATE (deterministic lock detection)", async () => {
     const { markUninstalledAndDeleteSessions } = await import("../compliance/compliance.server");
     const { deleteShop } = await import("../compliance/compliance.server");
 
-    const connA = postgres(TEST_DATABASE_URL!, sqlOptions);
-    const connB = postgres(TEST_DATABASE_URL!, sqlOptions);
-    const LOCK_TIMEOUT_MS = 300;
+    const connA = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
+    const connB = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
+
+    const triggerFnName = `hold_shop_delete_${TEST_SUFFIX}`;
+    const triggerName = `trg_hold_shop_delete_${TEST_SUFFIX}`;
 
     await sql`
       UPDATE "Shop"
@@ -238,31 +271,56 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
     `;
 
     try {
-      let connACommitted = false;
+      await sql`
+        CREATE OR REPLACE FUNCTION ${sql(triggerFnName)}()
+        RETURNS TRIGGER AS $$
+        DECLARE
+          wait_result BOOLEAN;
+        BEGIN
+          IF OLD.domain LIKE 'test-uninstall_order_%' THEN
+            -- Poll for gate release via advisory lock (released by test)
+            LOOP
+              SELECT pg_try_advisory_lock(hashtext(OLD.domain)) INTO wait_result;
+              IF wait_result THEN
+                PERFORM pg_advisory_unlock(hashtext(OLD.domain));
+                EXIT;
+              END IF;
+              PERFORM pg_sleep(0.02);
+            END LOOP;
+          END IF;
+          RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql
+      `;
 
-      const deleteShopPromise = deleteShop(connA, TEST_SHOP_DOMAIN).then((result) => {
-        connACommitted = true;
-        return result;
-      });
+      await sql`
+        CREATE TRIGGER ${sql(triggerName)}
+        BEFORE DELETE ON "Shop"
+        FOR EACH ROW
+        EXECUTE FUNCTION ${sql(triggerFnName)}()
+      `;
 
-      await new Promise((r) => setTimeout(r, 50));
+      await sql`SELECT pg_advisory_lock(hashtext(${TEST_SHOP_DOMAIN}))`;
+
+      const [{ pid: pidA }] = await connA<[{ pid: number }]>`SELECT pg_backend_pid() as pid`;
+      const [{ pid: pidB }] = await connB<[{ pid: number }]>`SELECT pg_backend_pid() as pid`;
+
+      const deleteShopPromise = deleteShop(connA, TEST_SHOP_DOMAIN);
+
+      await new Promise((r) => setTimeout(r, 100));
 
       const helperPromise = markUninstalledAndDeleteSessions(connB, TEST_SHOP_DOMAIN);
 
-      const timeoutPromise = new Promise<"timeout">((resolve) =>
-        setTimeout(() => resolve("timeout"), LOCK_TIMEOUT_MS)
-      );
+      const isBlocking = await waitForBlocking(sql, pidB, pidA, 5000);
+      expect(isBlocking).toBe(true);
 
-      const raceResult = await Promise.race([
-        helperPromise.then(() => "completed" as const),
-        timeoutPromise,
-      ]);
+      const settled = await isPromiseSettled(helperPromise);
+      expect(settled).toBe(false);
 
-      expect(raceResult).toBe("timeout");
+      await sql`SELECT pg_advisory_unlock(hashtext(${TEST_SHOP_DOMAIN}))`;
 
       const deleteResult = await deleteShopPromise;
       expect(deleteResult.deleted).toBe(true);
-      expect(connACommitted).toBe(true);
 
       const helperResult = await helperPromise;
       expect(helperResult.shopFound).toBe(false);
@@ -273,6 +331,9 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
       `;
       expect(shops.length).toBe(0);
     } finally {
+      await sql`SELECT pg_advisory_unlock_all()`.catch(() => {});
+      await sql`DROP TRIGGER IF EXISTS ${sql(triggerName)} ON "Shop"`;
+      await sql`DROP FUNCTION IF EXISTS ${sql(triggerFnName)}()`;
       await connA.end();
       await connB.end();
     }

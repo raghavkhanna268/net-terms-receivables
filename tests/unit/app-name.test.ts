@@ -69,12 +69,12 @@ const PENDING_FOLLOWUP_ALLOWLIST: Array<{
   },
   {
     file: "app/services/compliance/__tests__/compliance.test.ts",
-    line: 1091,
+    line: 1058,
     reason: "pending follow-up: remove after Developer PR merges",
   },
   {
     file: "app/services/compliance/__tests__/compliance.test.ts",
-    line: 1093,
+    line: 1060,
     reason: "pending follow-up: remove after Developer PR merges",
   },
 ];
