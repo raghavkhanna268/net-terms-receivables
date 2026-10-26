@@ -89,6 +89,11 @@ function createMockSql() {
       return [];
     }
 
+    // #292: Shop currency query for INR-only guard
+    if (query.includes("currency") && query.includes("\"Shop\"") && query.includes("WHERE id")) {
+      return mockResults.get("shop_currency") ?? [{ currency: "INR" }];
+    }
+
     return [];
   };
 

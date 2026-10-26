@@ -33,6 +33,7 @@ import { renderPaymentReminderEmail } from "~/emails/PaymentReminderEmail";
 import { validateTimezone } from "~/lib/aging-dates.server";
 import { DateTime } from "luxon";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 import {
   isBuyerOptedOut,
   recordSkippedOptedOut,
@@ -799,6 +800,18 @@ export async function sendPaymentReminder(
     };
   }
 
+  // #292: Gate 3b: Check if shop currency is supported (INR-only in v1)
+  const [shopCurrencyRow] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE id = ${shopId}
+  `;
+  if (!isShopCurrencySupported(shopCurrencyRow?.currency)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "shop_currency_unsupported",
+    };
+  }
+
   // Gate 4: Check if buyer account is gated (over plan limit)
   // When PLAN_GATING_ENFORCED=true, no reminders to gated accounts.
   // This check happens BEFORE any claim or reservation, writes no 'sent' row.
@@ -1197,6 +1210,19 @@ export async function sendCatchupReminder(
       success: true,
       action: "skipped",
       skipReason: "shop_uninstalled",
+    };
+  }
+
+  // #292: Gate 4b: Check if shop currency is supported (INR-only in v1)
+  const [shopCurrencyRow] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE id = ${shopId}
+  `;
+  if (!isShopCurrencySupported(shopCurrencyRow?.currency)) {
+    await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "shop_currency_unsupported",
     };
   }
 
