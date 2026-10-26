@@ -96,6 +96,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
             session: { shop: shopDomain, accessToken: "test-token" },
             sessionToken: { sub: "12345" },
             admin: { graphql: mockGraphQL },
+            redirect: (url: string) => new Response(null, { status: 302, headers: { Location: url } }),
           }),
         },
       },
@@ -165,12 +166,12 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
 
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", name, "orderId", "orderName",
-        total, outstanding, currency, status, "dueAt", "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", name, "orderId",
+        total, outstanding, currency, status, "issuedAt", "dueAt", "createdAt", "updatedAt"
       )
       VALUES
-        (${INVOICE_A_ID}, ${SHOP_A_ID}, ${BUYER_A_ID}, 'INV-A-001', ${"order-a-" + TEST_SUFFIX}, '#1001', 10000.00, 10000.00, 'INR', 'open', NOW() + interval '30 days', NOW(), NOW()),
-        (${INVOICE_B_ID}, ${SHOP_B_ID}, ${BUYER_B_ID}, 'INV-B-001', ${"order-b-" + TEST_SUFFIX}, '#2001', ${SHOP_B_INVOICE_AMOUNT}, ${SHOP_B_INVOICE_AMOUNT}, 'INR', 'open', NOW() + interval '30 days', NOW(), NOW())
+        (${INVOICE_A_ID}, ${SHOP_A_ID}, ${BUYER_A_ID}, 'INV-A-001', ${"order-a-" + TEST_SUFFIX}, 10000.00, 10000.00, 'INR', 'open', NOW(), NOW() + interval '30 days', NOW(), NOW()),
+        (${INVOICE_B_ID}, ${SHOP_B_ID}, ${BUYER_B_ID}, 'INV-B-001', ${"order-b-" + TEST_SUFFIX}, ${SHOP_B_INVOICE_AMOUNT}, ${SHOP_B_INVOICE_AMOUNT}, 'INR', 'open', NOW(), NOW() + interval '30 days', NOW(), NOW())
     `;
 
     await sql`
@@ -206,10 +207,10 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     `;
 
     await sql`
-      INSERT INTO "S22DataRequest" (id, "shopId", "customerGid", "requestId", status, "receivedAt", "expiresAt")
+      INSERT INTO s22_data_requests (id, shop_id, customer_gid, request_id, status, received_at, expires_at, export_data)
       VALUES
-        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, 'cust-a-1', 'req-a-id', 'pending', NOW(), NOW() + interval '30 days'),
-        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, 'cust-b-1', 'req-b-id', 'pending', NOW(), NOW() + interval '30 days')
+        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, 'cust-a-1', 'req-a-id', 'completed', NOW(), NOW() + interval '30 days', '{"customerId": "cust-a-1"}'::jsonb),
+        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, 'cust-b-1', 'req-b-id', 'completed', NOW(), NOW() + interval '30 days', '{"customerId": "cust-b-1"}'::jsonb)
     `;
   });
 
@@ -219,7 +220,7 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
     await sql`DELETE FROM "Invoice" WHERE id IN (${INVOICE_A_ID}, ${INVOICE_B_ID})`;
     await sql`DELETE FROM "BankImport" WHERE id IN (${IMPORT_A_ID}, ${IMPORT_B_ID})`;
     await sql`DELETE FROM "ReminderRule" WHERE id IN (${REMINDER_RULE_A_ID}, ${REMINDER_RULE_B_ID})`;
-    await sql`DELETE FROM "S22DataRequest" WHERE id IN (${DATA_REQUEST_A_ID}, ${DATA_REQUEST_B_ID})`;
+    await sql`DELETE FROM s22_data_requests WHERE id IN (${DATA_REQUEST_A_ID}, ${DATA_REQUEST_B_ID})`;
     await sql`DELETE FROM "BuyerAccount" WHERE id IN (${BUYER_A_ID}, ${BUYER_B_ID})`;
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
@@ -764,6 +765,7 @@ describeWithDb("Tenant Isolation - PLAN_GATING_ENFORCED=false", () => {
             session: { shop: SHOP_DOMAIN, accessToken: "test-token" },
             sessionToken: { sub: "12345" },
             admin: { graphql: vi.fn() },
+            redirect: (url: string) => new Response(null, { status: 302, headers: { Location: url } }),
           }),
         },
       },
