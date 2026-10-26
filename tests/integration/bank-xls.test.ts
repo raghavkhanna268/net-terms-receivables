@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
+import * as XLSX from "xlsx";
 import { parseBankStatement } from "../../app/lib/banks/index.js";
 import type { ParseResult, NormalisedTxn } from "../../app/lib/banks/types.js";
 import {
@@ -531,22 +532,14 @@ describe("HDFC BIFF8 .xls parsing", () => {
 });
 
 describe("fixture format validation", () => {
-  it("all 4 fixtures have amounts with at most 2 decimal places", () => {
-    const fixtures = [
-      "icici-synthetic.csv",
-      "icici-synthetic.xls",
-      "hdfc-synthetic.csv",
-      "hdfc-synthetic.xls",
-    ];
+  it("CSV fixtures have amounts with at most 2 decimal places", () => {
+    const csvFixtures = ["icici-synthetic.csv", "hdfc-synthetic.csv"];
     
-    for (const fixture of fixtures) {
-      const content = readFileSync(join(FIXTURES_DIR, fixture));
-      const text = fixture.endsWith(".csv") 
-        ? content.toString("utf-8")
-        : content.toString("latin1");
+    for (const fixture of csvFixtures) {
+      const content = readFileSync(join(FIXTURES_DIR, fixture), "utf-8");
       
       const floatNoisePattern = /\b\d+\.\d{3,}\b/g;
-      const matches = text.match(floatNoisePattern) ?? [];
+      const matches = content.match(floatNoisePattern) ?? [];
       
       const badMatches = matches.filter(m => {
         if (/^\d{2}\.\d{4}$/.test(m)) return false;
@@ -557,55 +550,141 @@ describe("fixture format validation", () => {
       expect(badMatches, `${fixture} has float noise: ${badMatches.slice(0, 5).join(", ")}`).toHaveLength(0);
     }
   });
+
+  it("XLS fixtures have numeric amounts equal to their 2dp rounding", () => {
+    const xlsFixtures = ["icici-synthetic.xls", "hdfc-synthetic.xls"];
+    
+    for (const fixture of xlsFixtures) {
+      const content = readFileSync(join(FIXTURES_DIR, fixture));
+      const workbook = XLSX.read(content, { type: "buffer" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      
+      const badCells: string[] = [];
+      const range = XLSX.utils.decode_range(sheet["!ref"] ?? "A1");
+      
+      for (let r = range.s.r; r <= range.e.r; r++) {
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          const addr = XLSX.utils.encode_cell({ r, c });
+          const cell = sheet[addr];
+          
+          if (cell && cell.t === "n" && typeof cell.v === "number") {
+            const value = cell.v;
+            const rounded = Math.round(value * 100) / 100;
+            if (Math.abs(value - rounded) > 1e-10) {
+              badCells.push(`${addr}=${value}`);
+            }
+          }
+        }
+      }
+      
+      expect(badCells, `${fixture} has float noise in cells: ${badCells.slice(0, 5).join(", ")}`).toHaveLength(0);
+    }
+  });
 });
 
 describe("pinned dedupe keys and refNo", () => {
-  it("pins HDFC refNo values from fixture", async () => {
-    const xlsContent = readFileSync(join(FIXTURES_DIR, "hdfc-synthetic.xls"));
-    const xlsFile = new File([xlsContent], "hdfc-synthetic.xls", { type: "application/vnd.ms-excel" });
-    const result = await parseBankStatement(xlsFile);
+  const ICICI_DEDUPE_KEYS = [
+    "utr:UPI:CR:600000000001",
+    "utr:UPI:CR:600000000002",
+    "utr:UPI:CR:600000000003",
+    "utr:UPI:CR:600000000004",
+    "sha256:987c6b4778c2ec2ff024d964fb26ce11c28b1225298e4b53f775ebbf0a41e105",
+    "sha256:0090a081a40ebb988cff792ac38adf8f21d6c1b857f31ec5d04f6f2037ae56cd",
+    "utr:UPI:DR:600000000005",
+    "sha256:8bd12bb863557eeeb45f36bb8eafd806e2128e3a97172efbda1c258b5b69e3ba",
+    "utr:UPI:DR:600000000006",
+    "utr:UPI:DR:600000000007",
+    "sha256:b9da47a10f660783ad1b061be884fef90097ce9306d9deaa457720dafdfcdc9f",
+    "utr:UPI:DR:600000000008",
+    "utr:UPI:CR:600000000009",
+    "utr:UPI:DR:600000000010",
+    "utr:UPI:CR:600000000011",
+  ];
 
-    const firstTxn = result.transactions.find(t => t.narration.includes("SYNT VENDOR PVT LTD"));
-    expect(firstTxn).toBeDefined();
-    expect(firstTxn!.refNo).toBe("0000600000000001");
+  const ICICI_REF_NOS: (string | undefined)[] = [
+    undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined,
+  ];
 
-    const diffRefTxn = result.transactions.find(t => t.narration.includes("SYNT RETAILER"));
-    expect(diffRefTxn).toBeDefined();
-    expect(diffRefTxn!.refNo).toBe("1234600000000003");
+  const HDFC_DEDUPE_KEYS = [
+    "utr:UPI:CR:600000000001",
+    "utr:UPI:CR:600000000002",
+    "utr:UPI:CR:600000000003",
+    "utr:UPI:CR:600000000004",
+    "utr:UPI:DR:600000000005",
+    "sha256:38017f6a0d3756425c07a65dc20093e24726124719600866e54e9468bf09d52e",
+    "sha256:77b64155ea45b8b2f34b2a9f6e700c72e93b60d8f103113964e5f545404e8118",
+    "utr:UPI:DR:600000000006",
+    "utr:UPI:DR:600000000007",
+    "sha256:b9584010d385a49f756ced2b4df3c65367a384ad540fee7a17943d1dca74d6a3",
+    "sha256:6c81fdd5a7596f655f20da74bc150acd1a3769c362c916da0f227f640ef3a79b",
+    "utr:UPI:CR:600000000008",
+    "utr:UPI:DR:600000000009",
+    "sha256:3363b5c3749e527d937dcd9d4012d8d208288ec783264b820c29c8213f79e3f6",
+    "utr:UPI:CR:600000000010",
+  ];
 
-    const alphaRefTxn = result.transactions.find(t => t.narration.includes("SYNT TRADERS"));
-    expect(alphaRefTxn).toBeDefined();
-    expect(alphaRefTxn!.refNo).toBe("ABC6000000000004");
-  });
+  const HDFC_REF_NOS = [
+    "0000600000000001",
+    "0000600000000002",
+    "1234600000000003",
+    "ABC6000000000004",
+    "0000600000000005",
+    "0000000000123456",
+    "0000000000234567",
+    "0000600000000006",
+    "0000600000000007",
+    "0000000000345678",
+    "0000000000456789",
+    "0000600000000008",
+    "000600000000009",
+    "0000000000567890",
+    "0000600000000010",
+  ];
 
-  it("pins HDFC dedupeKey format and stability", async () => {
-    const xlsContent = readFileSync(join(FIXTURES_DIR, "hdfc-synthetic.xls"));
-    const xlsFile = new File([xlsContent], "hdfc-synthetic.xls", { type: "application/vnd.ms-excel" });
-    const result = await parseBankStatement(xlsFile);
-
-    const firstTxn = result.transactions.find(t => t.narration.includes("SYNT VENDOR PVT LTD"));
-    expect(firstTxn).toBeDefined();
-    expect(firstTxn!.dedupeKey).toBe("utr:UPI:CR:600000000001");
-
-    for (const txn of result.transactions) {
-      expect(txn.dedupeKey).toBeDefined();
-      expect(txn.dedupeKey.length).toBeGreaterThan(10);
-    }
-  });
-
-  it("pins ICICI dedupeKey format and stability", async () => {
+  it("pins all ICICI dedupeKey values", async () => {
     const xlsContent = readFileSync(join(FIXTURES_DIR, "icici-synthetic.xls"));
     const xlsFile = new File([xlsContent], "icici-synthetic.xls", { type: "application/vnd.ms-excel" });
     const result = await parseBankStatement(xlsFile);
 
-    const firstTxn = result.transactions.find(t => t.narration.includes("SYNT VENDOR PVT LTD"));
-    expect(firstTxn).toBeDefined();
-    expect(firstTxn!.dedupeKey).toBe("utr:UPI:CR:600000000001");
+    expect(result.transactions.length).toBe(ICICI_DEDUPE_KEYS.length);
+    result.transactions.forEach((txn, i) => {
+      expect(txn.dedupeKey, `ICICI row ${i + 1} dedupeKey`).toBe(ICICI_DEDUPE_KEYS[i]);
+    });
+  });
 
-    for (const txn of result.transactions) {
-      expect(txn.dedupeKey).toBeDefined();
-      expect(txn.dedupeKey.length).toBeGreaterThan(10);
-    }
+  it("pins all ICICI refNo values", async () => {
+    const xlsContent = readFileSync(join(FIXTURES_DIR, "icici-synthetic.xls"));
+    const xlsFile = new File([xlsContent], "icici-synthetic.xls", { type: "application/vnd.ms-excel" });
+    const result = await parseBankStatement(xlsFile);
+
+    expect(result.transactions.length).toBe(ICICI_REF_NOS.length);
+    result.transactions.forEach((txn, i) => {
+      expect(txn.refNo, `ICICI row ${i + 1} refNo`).toBe(ICICI_REF_NOS[i]);
+    });
+  });
+
+  it("pins all HDFC dedupeKey values", async () => {
+    const xlsContent = readFileSync(join(FIXTURES_DIR, "hdfc-synthetic.xls"));
+    const xlsFile = new File([xlsContent], "hdfc-synthetic.xls", { type: "application/vnd.ms-excel" });
+    const result = await parseBankStatement(xlsFile);
+
+    expect(result.transactions.length).toBe(HDFC_DEDUPE_KEYS.length);
+    result.transactions.forEach((txn, i) => {
+      expect(txn.dedupeKey, `HDFC row ${i + 1} dedupeKey`).toBe(HDFC_DEDUPE_KEYS[i]);
+    });
+  });
+
+  it("pins all HDFC refNo values", async () => {
+    const xlsContent = readFileSync(join(FIXTURES_DIR, "hdfc-synthetic.xls"));
+    const xlsFile = new File([xlsContent], "hdfc-synthetic.xls", { type: "application/vnd.ms-excel" });
+    const result = await parseBankStatement(xlsFile);
+
+    expect(result.transactions.length).toBe(HDFC_REF_NOS.length);
+    result.transactions.forEach((txn, i) => {
+      expect(txn.refNo, `HDFC row ${i + 1} refNo`).toBe(HDFC_REF_NOS[i]);
+    });
   });
 });
 
