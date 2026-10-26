@@ -794,7 +794,7 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
   beforeEach(async () => {
     await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
     vi.resetModules();
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(FIXED_TIME);
   });
 
@@ -1997,7 +1997,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
     const FIXED_TIME = new Date("2026-10-20T14:00:00Z");
 
     beforeEach(() => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(FIXED_TIME);
     });
 
