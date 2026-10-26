@@ -1,19 +1,18 @@
-# Privacy Policy — Net Terms Receivables
+# Privacy Policy — Termwise: Net Terms & Credit
 
-**Effective Date:** [TBD: effective date]
+**Effective Date:** 2026-10-25
 
-**Last Updated:** [TBD: effective date]
+**Last Updated:** 2026-10-25
 
 ---
 
 ## 1. Introduction
 
-Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wholesale merchants manage net-terms invoices, track credit limits, and match bank transfer payments. This Privacy Policy describes what data we collect, why we collect it, how we use it, and your rights.
+Termwise: Net Terms & Credit ("the App", "we", "us") is a Shopify app built for Indian merchants with INR (Indian rupee) stores, helping them manage net-terms invoices, track credit limits, and match bank transfer payments. This Privacy Policy describes what data we collect, why we collect it, how we use it, and your rights.
 
-**Legal Entity and Contact:**
-- [TBD: legal entity] — Company name, address, and registration details
-- **Contact Email:** [TBD: contact email]
-- **Data Protection Officer:** [TBD: legal entity] (if applicable)
+**Owner/Operator:** Raghav Khanna, individual developer, India
+
+**Contact:** raghavkhanna468@gmail.com
 
 ---
 
@@ -34,22 +33,29 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 | Data Category | Purpose | Source |
 |---------------|---------|--------|
 | Buyer Account | Credit management (account kind, display name, credit limit, terms, hold state) | Synced from Shopify |
+| B2B Main Contact | Payment reminders for B2B accounts (email, display name, customer ID) | Synced from Shopify Company.mainContact |
 | Reminder Opt-Out | Payment reminder preference (opt-out timestamp, opt-out source) | Buyer unsubscribe link or merchant toggle |
 | Invoice | Receivables tracking (invoice name, amounts, due date, status) | Synced from Shopify orders |
 | Payer Alias | Payment matching (normalized payer key) | Derived from bank statements |
 
+**Note on B2B Main Contact:** For B2B (COMPANY) buyer accounts, the main contact's email and display name are stored for payment reminder emails. These fields require Shopify's Protected Customer Data (PCD) approval. The mainContactCustomerId links to the Shopify Customer GID for customers/redact matching.
+
 **Note on Reminder Opt-Out:** When a buyer opts out of payment reminders (via unsubscribe link in email or merchant toggle), the opt-out record stores only a timestamp and a source ('link' or 'merchant'), linked to the buyer account. Opted-out buyers receive no reminder emails until a merchant re-enables reminders.
 
-### 2.3 Tagged Customer Data
+### 2.3 Customer Data from Shopify (Protected Customer Data)
 
-| Data Category | Purpose | Retention |
-|---------------|---------|-----------|
-| Tagged Customers | Tag-based buyer accounts (customer ID, tags, status, email, display name) | Until customer erasure or shop uninstall |
+Termwise: Net Terms & Credit uses Shopify protected customer data, including the **Name** and **Email** fields (Shopify's "Level 2"). We use it for store management and app functionality, and only for customers who match one of the merchant's net-terms tag rules. We do not request or store phone numbers or addresses. Shopify reviews our access as part of our app submission; until that review completes for a store, Shopify withholds these fields and the related features (reminders to tag-based buyers, email-based matching hints) do not run.
+
+| Data | Purpose | Retention |
+|------|---------|-----------|
+| Customer ID, tags, tag status | Create and maintain tag-based net-terms buyer accounts | Until customer erasure, or 48 hours after uninstall (shop/redact) |
+| Email (Shopify customer email) | (1) Recipient of payment-reminder emails for that buyer's open invoices; (2) a matching hint: we compare the part of the address before the "@" with the payer name on the merchant's bank statement, and suggest a match that the merchant must confirm | As above, and see "Minimisation" |
+| Name (Shopify customer display name) | The greeting in payment-reminder emails ("Dear …"). Not used for matching | As above, and see "Minimisation" |
 | Draft Orders | Pending credit exposure (draft order ID, buyer account, total, status) | Until draft completed/deleted |
 
-**Note:** Email and display name fields require Shopify's Protected Customer Data (PCD) approval. These fields remain empty until approval is granted and the feature is enabled.
+**Minimisation:** When a customer no longer matches a net-terms tag and has no open invoices, we clear their email and name. We do this when the tag is removed; if invoices are still open then, the email and name are kept until the customer's erasure request or until 48 hours after uninstall.
 
-**PII Minimisation:** When a tagged customer becomes inactive and has no open invoices, their email and display name are automatically cleared.
+Buyer accounts for Shopify B2B companies use the company or location name and do not store a contact's email or name.
 
 ### 2.4 Bank Statement Data
 
@@ -89,13 +95,19 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 
 ## 3. How We Use Data
 
-| Purpose | Legal Basis |
-|---------|-------------|
-| Provide core app functionality (invoicing, credit management, payment matching) | Contract performance |
-| Send payment reminders to buyers | Contract performance |
-| Error monitoring and debugging | Legitimate interest |
-| Comply with Shopify App Store requirements | Legal obligation |
-| Respond to GDPR/CCPA data requests | Legal obligation |
+| Purpose | Data used | Legal basis |
+|---------|-----------|-------------|
+| Provide core app functionality (invoices, credit limits, terms, holds) | Shop, buyer account, invoice and order data | Contract performance (on behalf of the merchant) |
+| Match bank payments to invoices (merchant confirms every match) | Bank payer name and narration uploaded by the merchant; buyer account name; learned payer aliases; customer email (before the "@") as a hint | Contract performance |
+| Send transactional payment reminders for open invoices, on the merchant's schedule | Customer email and name; invoice number, amount and due date; shop name | Contract performance; the merchant is responsible for having a lawful basis to contact its buyers (see Merchant Terms) |
+| Error monitoring and debugging | Sanitized error events (see Subprocessors) | Legitimate interest |
+| Respond to Shopify privacy webhooks and data requests | Data listed in §2 | Legal obligation |
+
+We do not use customer data for marketing or advertising, profiling, analytics resale, or training models, and we do not sell or share it. Buyers can stop reminders with the one-click unsubscribe link in every email; merchants can also turn reminders off for any buyer.
+
+### 3.1 Automated decisions
+
+The merchant sets each buyer's credit limit and payment terms. When a buyer goes over the limit or has an overdue invoice, Termwise: Net Terms & Credit can automatically place the buyer on credit hold, which hides the net-terms payment option at checkout and can hold fulfilment. These decisions use only invoice amounts, due dates and the limits the merchant set; they do not use the buyer's name or email. The merchant can review, override, or release any hold at any time, and a buyer can ask the merchant to review a hold. Bank payment matches are suggestions only: a person at the merchant confirms each one.
 
 ---
 
@@ -118,19 +130,20 @@ Net Terms Receivables ("the App", "we", "us") is a Shopify app that helps B2B wh
 - **Session Isolation:** Sessions are isolated per shop with proper scoping
 - **Input Validation:** Shop domain format validation on all webhook handlers
 - **No PII in Logs:** Compliance webhook handlers do not log customer identifiers or personal data
+- **Access Control:** A single person (the developer/operator) has access to production systems and data
+- **Authentication:** Password manager with unique passwords and 2FA on all accounts used to run the App
+- **Breach Response:** Contain the incident first; then notify affected merchants and Shopify within 72 hours of becoming aware of a breach involving personal data, and, where it applies, report to CERT-In within the timelines required by Indian law (currently 6 hours under CERT-In's April 2022 directions)
 
 ---
 
 ## 5. Subprocessors
 
-| Subprocessor | Purpose | Location | DPA |
-|--------------|---------|----------|-----|
-| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | Global (Worker placed ap-south-1) | [TBD: DPA] |
-| Supabase, Inc. | Database hosting (Postgres) | AWS ap-south-1 (Mumbai) | [TBD: DPA] |
-| Resend, Inc. | Email delivery (data request notifications, payment reminders) | US | [Resend DPA](https://resend.com/legal/dpa) |
-| Functional Software, Inc. | Error monitoring (Sentry) | [TBD] | [Sentry DPA](https://sentry.io/legal/dpa/) |
-
-**Note:** Sentry is only active when error monitoring is enabled. Error events are scrubbed before transmission: request headers, cookies, query strings, and body data are removed; exception messages are replaced with error codes; breadcrumbs are deleted; and only allowlisted metadata keys (shopId, code, errorCode, requestId, webhookId, jobId, topic, status) are retained.
+| Subprocessor | Purpose | Data | Location |
+|--------------|---------|------|----------|
+| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All app data in transit | Global (Worker placed near ap-south-1) |
+| Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored app data | AWS ap-south-1 (Mumbai, India) |
+| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
+| Functional Software, Inc. (Sentry) | Error monitoring (used only when configured). Data is stored in Sentry's EU data region (Germany). It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts. | Sanitized error and performance events | EU (Germany) |
 
 **Resend data handling:**
 
@@ -139,15 +152,19 @@ Data request notification emails:
 - Shop owner email is fetched at send time from Shopify Admin API and passed directly to Resend; **never stored** in our database or logged
 
 Payment reminder emails (sent to buyer email address):
-- Recipient: buyer email address (from tagged customer record)
+- Recipient: buyer email address
+  - For B2B (COMPANY) accounts: main contact email from the buyer account
+  - For tagged customer accounts: email from the tagged customer record
 - Invoice name (e.g. "#1001")
 - Invoice total (formatted with shop currency)
 - Invoice due date (formatted in shop timezone)
-- Buyer display name (from tagged customer record, or "Customer" if not available)
+- Buyer display name (mainContactName or displayName, or "Customer" if not available)
 - Shop name (derived from shop domain)
 - Reminder type label (e.g. "Payment due today")
 
-Resend is only used when email delivery is configured; emails are not sent otherwise
+Resend is only used when email delivery is configured; emails are not sent otherwise.
+
+**International transfer:** Reminder emails are processed by Resend in Japan (ap-northeast-1 data region).
 
 ---
 
@@ -155,9 +172,12 @@ Resend is only used when email delivery is configured; emails are not sent other
 
 | Data Category | Retention Period | Deletion Trigger |
 |---------------|------------------|------------------|
+| Access Logs | Until 48 hours after uninstall (shop/redact) | Automatic cascade. An automatic 1-year deletion is planned and will be stated here once it is active. |
 | OAuth Sessions | Until logout, expiry, or uninstall | App uninstall webhook or session expiry |
-| Shop and Account Data | Until 48 hours after uninstall | Shop redact webhook (sent by Shopify 48h after uninstall) |
+| Shop and Account Data | Until 48 hours after uninstall (shop/redact) | Shop redact webhook (sent by Shopify 48h after uninstall) |
+| Payment and Financial Records | Until 48 hours after uninstall (shop/redact) | Deleted on Shopify's shop/redact request |
 | Tagged Customer Data | Until customer erasure or shop redact | Compliance webhooks |
+| B2B Main Contact (email, name, customer ID) | Until customer erasure or shop redact | Nulled on customer erasure when mainContactCustomerId matches; deleted with account on shop redact |
 | Invoices | Retained (no customer-identifying fields) | Buyer relationship anonymized on customer erasure |
 | Payments (matched) | Until shop redact | Narration/payer text redacted on customer erasure if linked to customer |
 | Payments (unmatched narration) | **180 days** | Narration/payer text cleared daily; amounts/UTR/rail retained |
@@ -169,7 +189,7 @@ Resend is only used when email delivery is configured; emails are not sent other
 
 **Background job queue:** Background jobs for the shop are deleted when the shop's data is deleted. A job that is being processed at the exact moment of deletion may still be kept in a list of failed jobs afterwards; such leftover entries are purged automatically, up to about 37 days later.
 
-**Database backups:** Supabase-managed database backups may retain deleted data for the provider's backup retention window (7–30 days depending on plan). See [Supabase Backups documentation](https://supabase.com/docs/guides/platform/backups).
+**Database backups:** Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted.
 
 **Shopify metafields:** The app's credit status field on Shopify Company records is not explicitly cleared by the app on uninstall or shop/redact. Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafields/definitions), when a user uninstalls an app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafield values without a definition; cleanup of the retained data runs asynchronously (no guaranteed timeframe). Uninstalling the app removes the app's Shopify Functions, so the field value cannot affect checkout even if it persists temporarily.
 
@@ -196,7 +216,9 @@ When a customer requests their data:
    - Tagged customer data: ID, tags, status, email, display name
    - Draft orders linked to customer's buyer account
    - Buyer account details
+   - B2B buyer accounts where this customer is the main contact (Company.mainContact)
    - Invoice history linked to buyer account
+   - Payment matches linked to buyer account invoices
 3. **Generate** JSON export with all found data
 4. **Persist** data request record with status, export data, and 30-day expiration
 5. **Notify** shop owner via email (if configured)
@@ -222,20 +244,23 @@ When a customer must be deleted (GDPR/CCPA erasure request):
 1. **Verify** payload shop matches header shop (returns 401 on mismatch)
 2. **All operations run in a single database transaction** for atomicity. If any step fails, the entire redaction rolls back, allowing Shopify's retry mechanism to safely re-execute.
 3. **Delete** tagged customer row for the customer
-4. **Delete** draft orders linked to customer's buyer account
-5. **Delete** data request records for the customer (contains PII in export)
-6. **Redact** payment fields for payments linked to customer:
+4. **Null** B2B main contact fields on buyer accounts where mainContactCustomerId matches the customer:
+   - mainContactEmail, mainContactName, mainContactCustomerId all set to NULL
+   - No reminder emails can be sent to redacted contacts
+5. **Delete** draft orders linked to customer's buyer account
+6. **Delete** data request records for the customer (contains PII in export)
+7. **Redact** payment fields for payments linked to customer:
    - Payer text cleared
    - Narration set to "[REDACTED]"
    - Preserved: amount, UTR, rail, value date, and all match history
    - Queries are shop-scoped for security
-7. **Delete** payer alias rows for the customer's buyer account (learned payer keys)
-8. **Anonymize** buyer account:
+8. **Delete** payer alias rows for the customer's buyer account (learned payer keys)
+9. **Anonymize** buyer account:
    - Set name to "Redacted Customer"
    - Modify customer ID to prevent FK conflicts
-9. **Preserve** invoice records for legal/tax compliance (Invoice has no customer-identifying fields; buyer link is through anonymized buyer account)
+10. **Preserve** invoice records for legal/tax compliance (Invoice has no customer-identifying fields; buyer link is through anonymized buyer account)
 
-**Legal retention reasoning:** Invoices must be retained for tax compliance (typically 7+ years in India). The invoice itself is a business record; the buyer link is anonymized.
+**Retention reasoning:** After a customer erasure, invoice amounts and dates are kept for the merchant's bookkeeping, linked only to an anonymised buyer account. The merchant's records of order and tax data stay in Shopify, which is the system of record; Termwise: Net Terms & Credit deletes all of its invoice records 48 hours after uninstall (shop/redact).
 
 ### 7.4 Shop Redact
 
@@ -281,8 +306,8 @@ We may update this Privacy Policy from time to time. Material changes will be co
 ## 11. Contact
 
 For privacy inquiries:
-- **Email:** [TBD: contact email]
-- **Address:** [TBD: legal entity]
+- **Email:** raghavkhanna468@gmail.com
+- **Owner/Operator:** Raghav Khanna, individual developer, India
 
 ---
 
@@ -292,11 +317,12 @@ The app requests the following scopes to provide its core features.
 
 Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/access-scopes) 'How it works' section: "Any scope that writes a resource also grants read access to it, so request the write scope only when your app needs both." We request only `write_*` scopes for resources we both read and write.
 
-### Read Scopes (2)
+### Read Scopes (3)
 
 | Scope | Purpose |
 |-------|---------|
 | `read_draft_orders` | View draft orders to calculate pending credit exposure |
+| `read_all_orders` | Access orders older than 60 days for historical invoice reconciliation |
 | `read_payment_terms` | View payment terms on orders and company locations |
 
 ### Write Scopes (6)
@@ -310,4 +336,4 @@ Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/acc
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
-**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been approved. The email and display name fields are fetched for tagged customers.
+**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) provides access to Shopify protected customer data. We have requested access to protected customer data and to the **Name** and **Email** protected fields (Shopify's Level 2) for store management and app functionality. Shopify reviews this request with our app submission; until that review completes, Shopify returns only redacted values for these fields (development stores receive unredacted values during development). We do not request the Phone or Address fields.

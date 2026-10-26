@@ -35,6 +35,7 @@ vi.mock("~/services/reminder-status.server", () => ({
     sent: 0,
     delayed: 0,
     skippedDailyLimit: 0,
+    skippedOptedOut: 0,
   }),
   getDelayedReminders: vi.fn().mockResolvedValue([]),
   getShopSentTodayCount: vi.fn().mockResolvedValue(0),
@@ -1353,6 +1354,7 @@ describe("Reminder Settings Route - loader passthrough", () => {
       sent: 10,
       delayed: 3,
       skippedDailyLimit: 2,
+      skippedOptedOut: 1,
     });
     (getDelayedReminders as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
@@ -1377,6 +1379,7 @@ describe("Reminder Settings Route - loader passthrough", () => {
       sent: 10,
       delayed: 3,
       skippedDailyLimit: 2,
+      skippedOptedOut: 1,
     });
     expect(result.delayedReminders).toHaveLength(1);
     expect(result.delayedReminders[0].invoiceName).toBe("#INV-001");
@@ -1415,7 +1418,7 @@ describe("Reminder Settings Route - render tests", () => {
           providerConfigured: true,
           shopTimezone: "Asia/Kolkata",
           shopSentToday: 0,
-          statusCounts: { sent: 1, delayed: 1, skippedDailyLimit: 1 },
+          statusCounts: { sent: 1, delayed: 1, skippedDailyLimit: 1, skippedOptedOut: 0 },
           delayedReminders: [],
         }),
         useNavigation: () => ({ state: "idle" }),
@@ -1456,7 +1459,7 @@ describe("Reminder Settings Route - render tests", () => {
           providerConfigured: true,
           shopTimezone: "UTC",
           shopSentToday: 0,
-          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0 },
+          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [],
         }),
         useNavigation: () => ({ state: "idle" }),
@@ -1494,7 +1497,7 @@ describe("Reminder Settings Route - render tests", () => {
           providerConfigured: true,
           shopTimezone: "UTC",
           shopSentToday: 0,
-          statusCounts: { sent: 5, delayed: 2, skippedDailyLimit: 1 },
+          statusCounts: { sent: 5, delayed: 2, skippedDailyLimit: 1, skippedOptedOut: 0 },
           delayedReminders: [
             {
               id: "log-delayed-1",
@@ -1543,7 +1546,7 @@ describe("Reminder Settings Route - render tests", () => {
           providerConfigured: true,
           shopTimezone: "UTC",
           shopSentToday: 0,
-          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0 },
+          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [],
         }),
         useNavigation: () => ({ state: "idle" }),
@@ -1562,12 +1565,52 @@ describe("Reminder Settings Route - render tests", () => {
     expect(html).toContain("Total sent:");
     expect(html).toContain("Delayed (daily limit):");
     expect(html).toContain("Skipped (daily limit):");
+    expect(html).toContain("Skipped (opted out):");
     
     // The catch-up table should not be present when delayedReminders is empty
     // (No "Catch-up by" header in the delayed reminders section)
     const catchUpByOccurrences = (html.match(/Catch-up by/g) || []).length;
     // Should appear only in the aside section heading, not as a table header
     expect(catchUpByOccurrences).toBeLessThanOrEqual(1);
+  });
+
+  it("skipped_opted_out status renders 'Skipped (opted out)' badge label", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      const React = await import("react");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          settings: { enabled: true },
+          rules: [],
+          logs: [
+            { id: "log-opted-out", invoiceName: "#INV-OPTED-OUT", offsetDays: 0, status: "skipped_opted_out", date: new Date() },
+          ],
+          providerConfigured: true,
+          shopTimezone: "UTC",
+          shopSentToday: 0,
+          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 1 },
+          delayedReminders: [],
+        }),
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children?: React.ReactNode; [key: string]: unknown }) =>
+          React.createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: RemindersSettingsPage } = await import("../app.settings.reminders");
+
+    const html = renderToString(createElement(RemindersSettingsPage));
+
+    // Should render "Skipped (opted out)" label for the status
+    expect(html).toContain("Skipped (opted out)");
+    // Should NOT contain the raw enum value
+    expect(html).not.toContain("skipped_opted_out");
   });
 
   it("unknown-status fallback renders 'Skipped' not the raw enum value", async () => {
@@ -1584,12 +1627,12 @@ describe("Reminder Settings Route - render tests", () => {
           settings: { enabled: true },
           rules: [],
           logs: [
-            { id: "log-unknown", invoiceName: "#INV-UNKNOWN", offsetDays: 0, status: "skipped_opted_out", date: new Date() },
+            { id: "log-unknown", invoiceName: "#INV-UNKNOWN", offsetDays: 0, status: "unknown_future_status", date: new Date() },
           ],
           providerConfigured: true,
           shopTimezone: "UTC",
           shopSentToday: 0,
-          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0 },
+          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [],
         }),
         useNavigation: () => ({ state: "idle" }),
@@ -1603,10 +1646,10 @@ describe("Reminder Settings Route - render tests", () => {
 
     const html = renderToString(createElement(RemindersSettingsPage));
 
-    // Should render "Skipped" as the fallback label
+    // Should render "Skipped" as the fallback label for unknown statuses
     expect(html).toContain("Skipped");
     // Should NOT contain the raw enum value
-    expect(html).not.toContain("skipped_opted_out");
+    expect(html).not.toContain("unknown_future_status");
   });
 
   it("no-PII check: email-shaped fixture value must not appear in HTML", async () => {
@@ -1630,7 +1673,7 @@ describe("Reminder Settings Route - render tests", () => {
           providerConfigured: true,
           shopTimezone: "UTC",
           shopSentToday: 0,
-          statusCounts: { sent: 1, delayed: 0, skippedDailyLimit: 0 },
+          statusCounts: { sent: 1, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [
             {
               id: "log-delayed-pii",
@@ -1680,7 +1723,7 @@ describe("Reminder Settings Route - render tests", () => {
           providerConfigured: true,
           shopTimezone: "UTC",
           shopSentToday: 5,
-          statusCounts: { sent: 100, delayed: 3000, skippedDailyLimit: 0 },
+          statusCounts: { sent: 100, delayed: 3000, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [],
         }),
         useNavigation: () => ({ state: "idle" }),
@@ -1706,28 +1749,29 @@ describe("Reminder Settings Route - render tests", () => {
 });
 
 describe("formatStatus and getStatusBadgeTone exports", () => {
-  it("formatStatus handles known statuses", async () => {
+  it("formatStatus handles all 4 known statuses", async () => {
     const { formatStatus } = await import("../app.settings.reminders");
 
     expect(formatStatus("sent")).toBe("Sent");
     expect(formatStatus("delayed")).toBe("Delayed (daily limit)");
     expect(formatStatus("skipped_daily_limit")).toBe("Skipped (daily limit)");
+    expect(formatStatus("skipped_opted_out")).toBe("Skipped (opted out)");
   });
 
   it("formatStatus returns 'Skipped' for unknown status", async () => {
     const { formatStatus } = await import("../app.settings.reminders");
 
-    expect(formatStatus("skipped_opted_out")).toBe("Skipped");
     expect(formatStatus("unknown_future_status")).toBe("Skipped");
     expect(formatStatus("")).toBe("Skipped");
   });
 
-  it("getStatusBadgeTone returns correct tones", async () => {
+  it("getStatusBadgeTone returns correct tones for all 4 statuses", async () => {
     const { getStatusBadgeTone } = await import("../app.settings.reminders");
 
     expect(getStatusBadgeTone("sent")).toBe("success");
     expect(getStatusBadgeTone("delayed")).toBe("warning");
     expect(getStatusBadgeTone("skipped_daily_limit")).toBeUndefined();
+    expect(getStatusBadgeTone("skipped_opted_out")).toBeUndefined();
     expect(getStatusBadgeTone("unknown")).toBeUndefined();
   });
 });
@@ -1770,7 +1814,7 @@ describe("Catch-up by date renders correctly for all timezones", () => {
           providerConfigured: true,
           shopTimezone: "America/New_York",
           shopSentToday: 0,
-          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0 },
+          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [
             {
               id: "log-ny-tz",
@@ -1813,7 +1857,7 @@ describe("Catch-up by date renders correctly for all timezones", () => {
           providerConfigured: true,
           shopTimezone: "Asia/Kolkata",
           shopSentToday: 0,
-          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0 },
+          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [
             {
               id: "log-kolkata-tz",
@@ -1855,7 +1899,7 @@ describe("Catch-up by date renders correctly for all timezones", () => {
           providerConfigured: true,
           shopTimezone: "Pacific/Honolulu",
           shopSentToday: 0,
-          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0 },
+          statusCounts: { sent: 0, delayed: 1, skippedDailyLimit: 0, skippedOptedOut: 0 },
           delayedReminders: [
             {
               id: "log-honolulu-tz",
@@ -1879,5 +1923,121 @@ describe("Catch-up by date renders correctly for all timezones", () => {
 
     expect(html).toContain("Oct 28, 2026");
     expect(html).not.toContain("Oct 27, 2026");
+  });
+});
+
+describe("Opted-out buyer helper text", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("renders the verbatim helper text for opted-out buyers", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      const React = await import("react");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          settings: { enabled: true },
+          rules: [],
+          logs: [],
+          providerConfigured: true,
+          shopTimezone: "UTC",
+          shopSentToday: 0,
+          statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 },
+          delayedReminders: [],
+        }),
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children?: React.ReactNode; [key: string]: unknown }) =>
+          React.createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: RemindersSettingsPage } = await import("../app.settings.reminders");
+
+    const html = renderToString(createElement(RemindersSettingsPage));
+
+    // Check the VERBATIM helper text
+    expect(html).toContain("The buyer unsubscribed from reminder emails");
+    expect(html).toContain("Only you can turn reminders back on for them");
+  });
+
+  it("renders the skippedOptedOut count in status section", async () => {
+    const { renderToString } = await import("react-dom/server");
+    const { createElement } = await import("react");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      const React = await import("react");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          settings: { enabled: true },
+          rules: [],
+          logs: [],
+          providerConfigured: true,
+          shopTimezone: "UTC",
+          shopSentToday: 0,
+          statusCounts: { sent: 5, delayed: 2, skippedDailyLimit: 1, skippedOptedOut: 3 },
+          delayedReminders: [],
+        }),
+        useNavigation: () => ({ state: "idle" }),
+        Form: ({ children, ...props }: { children?: React.ReactNode; [key: string]: unknown }) =>
+          React.createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: RemindersSettingsPage } = await import("../app.settings.reminders");
+
+    const html = renderToString(createElement(RemindersSettingsPage));
+
+    // Check that the skippedOptedOut count label and value are present
+    expect(html).toContain("Skipped (opted out):");
+    expect(html).toContain(">3<"); // The count value
+  });
+});
+
+describe("ReminderLogEntry status type coverage", () => {
+  it("status type includes all 4 statuses (type-level exhaustiveness)", async () => {
+    // Import the module to get the type
+    type ReminderLogEntry = Awaited<ReturnType<typeof import("~/services/reminders.server")["getShopReminderLogs"]>>[number];
+
+    // Exhaustive switch ensures the type covers all 4 statuses
+    const checkExhaustive = (status: ReminderLogEntry["status"]): string => {
+      switch (status) {
+        case "sent":
+          return "sent";
+        case "delayed":
+          return "delayed";
+        case "skipped_daily_limit":
+          return "skipped_daily_limit";
+        case "skipped_opted_out":
+          return "skipped_opted_out";
+        default: {
+          // This line ensures exhaustiveness: TypeScript will error if a case is missing
+          const _exhaustive: never = status;
+          return _exhaustive;
+        }
+      }
+    };
+
+    // Verify each status is handled
+    expect(checkExhaustive("sent")).toBe("sent");
+    expect(checkExhaustive("delayed")).toBe("delayed");
+    expect(checkExhaustive("skipped_daily_limit")).toBe("skipped_daily_limit");
+    expect(checkExhaustive("skipped_opted_out")).toBe("skipped_opted_out");
   });
 });

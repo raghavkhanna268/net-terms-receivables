@@ -811,6 +811,7 @@ describe("credit-status.server", () => {
       }]);
 
       mockSql.setMockResult("shop", [{ domain: "test.myshopify.com", currency: "INR" }]);
+      mockSql.setMockResult("shop_currency", [{ currency: "INR" }]);
       mockSql.setMockResult("invoice_exposure", [{ total_paise: "5000000" }]);
       mockSql.setMockResult("draft_exposure", [{ total_paise: "0" }]);
       mockSql.setMockResult("overdue_check", [{ has_overdue: false }]);

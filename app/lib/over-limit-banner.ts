@@ -38,8 +38,8 @@ export function buildOverLimitBannerState(
 
   const bodyText =
     "Nothing is hidden and totals include all accounts. Only these actions " +
-    "are limited: reminders, credit-limit edits, account-detail edits and " +
-    "bulk statement import. Matching, confirming a match and mark-paid are " +
+    "are limited: reminders, credit-limit edits, and account-detail edits. " +
+    "Matching, confirming a match and mark-paid are " +
     "never gated. Credit holds and the checkout block work on every plan.";
 
   return {
@@ -71,11 +71,11 @@ export function buildAccountOverLimitBannerState(
     };
   }
 
-  const heading = "This account is over your plan limit";
+  const heading = "This account was added after you reached your plan limit";
 
   const bodyText =
     "Nothing is hidden. Only these actions are limited: reminders, credit-limit " +
-    "edits, account-detail edits and bulk statement import. Matching, confirming " +
+    "edits, and account-detail edits. Matching, confirming " +
     "a match and mark-paid are never gated. Credit holds and the checkout block " +
     "work on every plan.";
 
@@ -84,5 +84,66 @@ export function buildAccountOverLimitBannerState(
     heading,
     bodyText,
     enforcementNote: null,
+  };
+}
+
+/**
+ * Banner state for "new accounts paused" condition.
+ */
+export interface NewAccountsPausedBannerState {
+  show: boolean;
+  heading: string;
+  bodyText: string;
+  upgradeUrl: string | null;
+}
+
+/**
+ * Build the banner state for the "new accounts paused" condition.
+ * Shows on Dashboard, account detail (app.accounts.$id), Plan page, Tag rules page,
+ * and Onboarding page.
+ *
+ * Displayed when gating is enforced and the shop has reached its plan limit.
+ *
+ * @param usedCount - Number of active (non-gated) buyer accounts
+ * @param limitCount - Plan limit for buyer accounts (-1 means unlimited)
+ * @param gatingEnforced - Whether plan gating is currently enforced
+ * @param upgradeUrl - URL to upgrade page (null means no link shown)
+ * @returns Banner state with heading, body text, and upgrade URL
+ */
+export function buildNewAccountsPausedBannerState(
+  usedCount: number,
+  limitCount: number,
+  gatingEnforced: boolean,
+  upgradeUrl: string | null = null
+): NewAccountsPausedBannerState {
+  // Don't show when gating is not enforced or unlimited plan
+  if (!gatingEnforced || limitCount === -1) {
+    return {
+      show: false,
+      heading: "",
+      bodyText: "",
+      upgradeUrl: null,
+    };
+  }
+
+  // Only show when at or over limit
+  if (usedCount < limitCount) {
+    return {
+      show: false,
+      heading: "",
+      bodyText: "",
+      upgradeUrl: null,
+    };
+  }
+
+  const heading = `${usedCount} of ${limitCount} buyer accounts`;
+  const bodyText =
+    "New accounts can't be added or imported over your plan limit.";
+
+  return {
+    show: true,
+    heading,
+    bodyText,
+    upgradeUrl,
   };
 }

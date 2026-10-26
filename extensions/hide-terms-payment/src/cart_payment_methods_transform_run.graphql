@@ -1,5 +1,10 @@
 query Input {
   cart {
+    cost {
+      totalAmount {
+        currencyCode
+      }
+    }
     buyerIdentity {
       customer {
         metafield(namespace: "$app", key: "credit_status") {
@@ -21,6 +26,11 @@ query Input {
   }
   paymentCustomization {
     metafield(namespace: "$app", key: "hide-terms-config") {
+      jsonValue
+    }
+  }
+  shop {
+    metafield(namespace: "$app", key: "shop_config") {
       jsonValue
     }
   }
