@@ -493,7 +493,12 @@ describe("webhooks.compliance", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockGetOfflineAdminContext).toHaveBeenCalled();
+      expect(mockGetOfflineAdminContext).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-shop.myshopify.com",
+        "test-api-key",
+        "test-secret"
+      );
       expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
         "test-shop.myshopify.com",
         "owner@shop.com",

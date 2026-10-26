@@ -134,7 +134,7 @@ export async function getOfflineAdminContext(
     };
   } catch (err) {
     if (err instanceof InvalidSession) {
-      safeLog("error", "offline_admin_needs_reauth", {
+      safeLog("error", "offline_admin_refresh_failed", {
         shopHash: await shopHash(shop),
         code: "admin_invalid_session",
       });
@@ -165,56 +165,6 @@ export async function getOfflineAdminContext(
       };
     }
 
-    safeLog("error", "offline_admin_refresh_failed", {
-      shopHash: await shopHash(shop),
-      code: "admin_error",
-    });
-
-    return {
-      success: false,
-      errorCode: "admin_error",
-      error: "Failed to get admin context",
-      retryable: true,
-      needsReauth: false,
-    };
+    throw err;
   }
-}
-
-/**
- * Execute a function with an offline admin context.
- *
- * Convenience wrapper that handles the result checking and provides
- * the admin client to the callback function.
- *
- * @param sql - postgres.js SQL client
- * @param shop - Shop domain
- * @param clientId - Shopify app's API key
- * @param clientSecret - Shopify app's API secret
- * @param fn - Function to execute with the admin client
- * @returns Result from the function or typed failure
- */
-export async function withOfflineAdmin<T>(
-  sql: Sql,
-  shop: string,
-  clientId: string,
-  clientSecret: string,
-  fn: (admin: NonNullable<OfflineAdminResult["admin"]>) => Promise<T>
-): Promise<
-  | { success: true; data: T }
-  | { success: false; errorCode: OfflineAdminErrorCode; error?: string; retryable: boolean; needsReauth?: boolean }
-> {
-  const result = await getOfflineAdminContext(sql, shop, clientId, clientSecret);
-
-  if (!result.success || !result.admin) {
-    return {
-      success: false,
-      errorCode: result.errorCode ?? "admin_error",
-      error: result.error,
-      retryable: result.retryable,
-      needsReauth: result.needsReauth,
-    };
-  }
-
-  const data = await fn(result.admin);
-  return { success: true, data };
 }

@@ -256,11 +256,31 @@ export async function shopifyGraphQL<T = unknown>(
   const adminResult = await getOfflineAdminContext(sql, shop, clientId, clientSecret);
   
   if (!adminResult.success || !adminResult.admin) {
+    // Map admin error codes to the original shopifyGraphQL codes for compatibility
+    // with drain/processor.server.ts, sync-error-info.ts, and credit-status.server.ts
+    let errorCode = adminResult.errorCode ?? "token_refresh_failed";
+    let retryable = adminResult.retryable;
+
+    // Token refresh failures (from refreshOfflineTokenIfNeeded)
+    // Behaviour change: transient refresh failures (network_error, http_error, invalid_response)
+    // are now retryable for queue paths. Non-retryable codes: invalid_grant, no_refresh_token, no_session.
+    if (errorCode === "admin_no_session") {
+      // No session found after token refresh - shop uninstalled or never installed
+      errorCode = "no_session";
+      retryable = false;
+    } else if (errorCode === "admin_invalid_session") {
+      // InvalidSession from admin - token expired, session refresh can recover
+      errorCode = "invalid_session";
+      retryable = true;
+    }
+    // Note: other codes (invalid_grant, no_refresh_token, no_session, network_error, etc.)
+    // pass through unchanged from refreshOfflineTokenIfNeeded
+
     return {
       success: false,
-      error: adminResult.error ?? "Failed to get admin context",
-      errorCode: adminResult.errorCode ?? "admin_error",
-      retryable: adminResult.retryable,
+      error: adminResult.error ?? "Token refresh failed",
+      errorCode,
+      retryable,
       retriesAttempted: 0,
     };
   }

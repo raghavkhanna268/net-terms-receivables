@@ -371,7 +371,7 @@ describe("shopify-client.server", () => {
   });
 
   describe("Offline admin context errors", () => {
-    it("returns retryable error when getOfflineAdminContext returns admin_invalid_session", async () => {
+    it("maps admin_invalid_session to invalid_session (retryable)", async () => {
       mockGetOfflineAdminContext.mockResolvedValueOnce({
         success: false,
         errorCode: "admin_invalid_session",
@@ -386,13 +386,17 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("invalid_session");
       expect(result.retryable).toBe(true);
       expect(result.retriesAttempted).toBe(0);
-      expect(result.error).toContain("session");
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
 
-    it("returns non-retryable error when getOfflineAdminContext returns no_session (shop uninstalled)", async () => {
+    /**
+     * Processor contract: drain/processor.server.ts checks errorCode === 'no_session'
+     * for COMPANIES_* and ORDERS_* uninstalled-shop ack. This test proves the contract.
+     */
+    it("maps admin_no_session to no_session (non-retryable, processor contract)", async () => {
       mockGetOfflineAdminContext.mockResolvedValueOnce({
         success: false,
         errorCode: "admin_no_session",
@@ -407,9 +411,11 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
+      // Contract: drain/processor.server.ts checks result.errorCode === "no_session"
+      // for the ORDERS_* uninstalled-shop ack path
+      expect(result.errorCode).toBe("no_session");
       expect(result.retryable).toBe(false);
       expect(result.retriesAttempted).toBe(0);
-      expect(result.error).toContain("No session");
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
 
@@ -428,26 +434,33 @@ describe("shopify-client.server", () => {
       );
 
       expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("invalid_grant");
       expect(result.retryable).toBe(false);
       expect(result.retriesAttempted).toBe(0);
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
     });
 
-    it("returns retryable error for transient admin errors", async () => {
+    /**
+     * Behaviour change: transient refresh failures (network_error, http_error, invalid_response)
+     * are now retryable for queue paths. This is correct: a network blip during token refresh
+     * should not DLQ the message immediately.
+     */
+    it("returns retryable error for transient refresh failures (network_error)", async () => {
       mockGetOfflineAdminContext.mockResolvedValueOnce({
         success: false,
-        errorCode: "admin_error",
-        error: "Failed to get admin context",
+        errorCode: "network_error",
+        error: "Token refresh network error",
         retryable: true,
         needsReauth: false,
       });
 
       const result = await shopifyGraphQL(
-        "test-transient-error.myshopify.com",
+        "test-network-error.myshopify.com",
         "query { shop { name } }"
       );
 
       expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("network_error");
       expect(result.retryable).toBe(true);
       expect(result.retriesAttempted).toBe(0);
       expect(mockAdmin.graphql).not.toHaveBeenCalled();
