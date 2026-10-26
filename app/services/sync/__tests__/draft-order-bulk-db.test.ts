@@ -1125,6 +1125,82 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
       expect(messages[0].source).toBe("draft_change");
     });
 
+    it("processDraftOrderLines with '1000.0' vs stored '1000.00' doesn't flag (D3 2dp normalization)", async () => {
+      const draftId = `gid://shopify/DraftOrder/pdl-1dp-${BULK_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${BULK_SHOP_ID}, ${draftId}, ${BULK_ACCOUNT_A}, '#PDL-1DP', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000.0" (1 decimal place) - should be no-op
+      const jsonlLines = [
+        `{"id":"${draftId}","name":"#PDL-1DP","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000.0","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "reconcile");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(0);
+    });
+
+    it("processDraftOrderLines with '1000' vs stored '1000.00' doesn't flag (D3 0dp normalization)", async () => {
+      const draftId = `gid://shopify/DraftOrder/pdl-0dp-${BULK_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${BULK_SHOP_ID}, ${draftId}, ${BULK_ACCOUNT_A}, '#PDL-0DP', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000" (no decimal places) - should be no-op
+      const jsonlLines = [
+        `{"id":"${draftId}","name":"#PDL-0DP","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "reconcile");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(0);
+    });
+
+    it("processDraftOrderLines with '1000.01' vs stored '1000.00' does flag (real change)", async () => {
+      const draftId = `gid://shopify/DraftOrder/pdl-01diff-${BULK_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${BULK_SHOP_ID}, ${draftId}, ${BULK_ACCOUNT_A}, '#PDL-01DIFF', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000.01" (actual change)
+      const jsonlLines = [
+        `{"id":"${draftId}","name":"#PDL-01DIFF","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"1000.01","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,
+      ];
+
+      await processDraftOrderLines(sql, BULK_SHOP_DOMAIN, jsonlLines, "reconcile");
+
+      const messages = await getRecomputeMessages();
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(BULK_ACCOUNT_A);
+    });
+
     it("processDraftOrderLines with origin='initial' does NOT flag per batch", async () => {
       const jsonlLines = [
         `{"id":"gid://shopify/DraftOrder/pdl-initial-${BULK_423_SUFFIX}","name":"#PDL-INITIAL","createdAt":"2026-10-25T10:00:00Z","status":"OPEN","totalPriceSet":{"shopMoney":{"amount":"5000.00","currencyCode":"INR"}},"paymentTerms":{"id":"pt1","paymentTermsName":"Net 30","paymentTermsType":"NET"},"purchasingEntity":{"__typename":"PurchasingCompany","company":{"id":"${BULK_COMPANY_A_ID}"},"location":{"id":"${BULK_LOCATION_A_ID}"}}}`,

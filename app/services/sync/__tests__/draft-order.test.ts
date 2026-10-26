@@ -906,6 +906,130 @@ describeWithDb("Draft Order Sync", () => {
       expect(messages).toHaveLength(0);
     });
 
+    it("update with Shopify decimal '1000.0' vs stored '1000.00' doesn't flag (D3 2dp normalization)", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-1dp-${TEST_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-1DP', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000.0" (1 decimal place)
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-1DP",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1000.0", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder,
+        `wh-423-1dp-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(0);
+    });
+
+    it("update with Shopify decimal '1000' vs stored '1000.00' doesn't flag (D3 0dp normalization)", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-0dp-${TEST_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-0DP', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000" (no decimal places)
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-0DP",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1000", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder,
+        `wh-423-0dp-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(0);
+    });
+
+    it("update with Shopify decimal '1000.01' vs stored '1000.00' does flag (real change)", async () => {
+      const draftOrderId = `gid://shopify/DraftOrder/423-01diff-${TEST_423_SUFFIX}`;
+
+      // Create initial draft with 2dp total
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at
+        ) VALUES (
+          ${TEST_INR_SHOP_ID}, ${draftOrderId}, ${TEST_ACCOUNT_A}, '#423-01DIFF', '1000.00',
+          true, 'open', NOW()
+        )
+      `;
+
+      // Shopify sends "1000.01" (actual change)
+      const draftOrder: ShopifyDraftOrder = {
+        id: draftOrderId,
+        name: "#423-01DIFF",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1000.01", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        purchasingEntity: {
+          __typename: "PurchasingCompany",
+          company: { id: TEST_COMPANY_A_ID },
+          location: { id: TEST_LOCATION_A_ID },
+        },
+      };
+
+      await processDraftOrderWebhook(
+        sql,
+        TEST_INR_SHOP_DOMAIN,
+        "DRAFT_ORDERS_UPDATE",
+        draftOrder,
+        `wh-423-01diff-${TEST_423_SUFFIX}`
+      );
+
+      const messages = await getRecomputeMessages(TEST_INR_SHOP_DOMAIN);
+      expect(messages).toHaveLength(1);
+      expect(messages[0].buyerAccountId).toBe(TEST_ACCOUNT_A);
+    });
+
     it("move A->B flags both accounts", async () => {
       const draftOrderId = `gid://shopify/DraftOrder/423-move-${TEST_423_SUFFIX}`;
 

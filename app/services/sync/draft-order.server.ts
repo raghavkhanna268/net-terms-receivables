@@ -28,6 +28,18 @@ import { flagAccountsForRecompute } from "~/services/credit-status-recompute.ser
 import { captureExceptionWithTags } from "~/lib/sentry";
 
 /**
+ * Normalize a decimal amount string to exactly 2 decimal places for comparison.
+ * Used for D3 total comparison: Shopify GraphQL may return "1000", "1000.0", or "1000.00"
+ * but the DB stores Decimal(14,2) which always has 2dp as text.
+ * This is a string-safe normalization with no float math.
+ */
+function normalizeAmountTo2dp(amount: string): string {
+  const [whole, frac = ""] = amount.split(".");
+  const paddedFrac = (frac + "00").slice(0, 2);
+  return `${whole}.${paddedFrac}`;
+}
+
+/**
  * Process a DraftOrder webhook event.
  *
  * CREATE/UPDATE: Store draft if it has payment terms and buyer account
@@ -154,7 +166,8 @@ function getAccountsToFlag(
   } else if (result.oldRow) {
     // Update: check if relevant fields changed
     const buyerChanged = result.oldRow.buyer_account_id !== result.newBuyerAccountId;
-    const totalChanged = result.oldRow.total !== newData.total;
+    // D3: Compare totals at 2dp scale - Shopify may send "1000" or "1000.0" but DB has "1000.00"
+    const totalChanged = normalizeAmountTo2dp(result.oldRow.total) !== normalizeAmountTo2dp(newData.total);
     const statusChanged = result.oldRow.status !== newData.status;
     const termsChanged = result.oldRow.has_payment_terms !== newData.hasPaymentTerms;
 
@@ -491,7 +504,8 @@ export async function bulkUpsertDraftOrders(
       } else {
         // Update: check if relevant fields changed
         const buyerChanged = oldRow.buyer_account_id !== d.buyerAccountId;
-        const totalChanged = oldRow.total !== d.total;
+        // D3: Compare totals at 2dp scale - Shopify may send "1000" or "1000.0" but DB has "1000.00"
+        const totalChanged = normalizeAmountTo2dp(oldRow.total) !== normalizeAmountTo2dp(d.total);
         const statusChanged = oldRow.status !== d.status;
         const termsChanged = oldRow.has_payment_terms !== d.hasPaymentTerms;
 
