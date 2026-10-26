@@ -31,6 +31,7 @@ import {
   type CreditStatusSource,
 } from "./credit-status.server";
 import { safeLog } from "~/lib/log.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 
 /**
  * Result of a credit status recompute.
@@ -265,32 +266,41 @@ export async function recomputeCreditStatus(
  * @param buyerAccountId - Buyer account ID to recompute
  * @param source - Source of the recompute (for audit)
  */
+// Must be called with root Sql, never a TransactionSql (nested begin).
 export async function enqueueCreditStatusRecompute(
   sql: Sql,
   shopDomain: string,
   buyerAccountId: string,
-  source: "invoice_change" | "daily_sweep" | "manual",
-): Promise<void> {
-  // Deterministic dedupe key: account ID + date (for daily sweep deduplication)
-  // For event-driven, use a unique key per event
-  const today = new Date().toISOString().split("T")[0];
-  const dedupeKey =
-    source === "daily_sweep"
-      ? `credit_recompute:${buyerAccountId}:${today}`
-      : `credit_recompute:${buyerAccountId}:${Date.now()}`;
+  source: "invoice_change" | "daily_sweep" | "manual" | "draft_change",
+): Promise<boolean> {
+  const enqueued = await sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string }?]>`
+      SELECT id FROM "Shop" WHERE domain = ${shopDomain} FOR SHARE
+    `;
+    if (!shopRow) {
+      return false;
+    }
 
-  const message = {
-    topic: "CREDIT_STATUS_RECOMPUTE",
-    shop: shopDomain,
-    buyerAccountId,
-    source,
-    webhookId: dedupeKey,
-    resourceGid: buyerAccountId,
-  };
+    const today = new Date().toISOString().split("T")[0];
+    const dedupeKey =
+      source === "daily_sweep"
+        ? `credit_recompute:${buyerAccountId}:${today}`
+        : `credit_recompute:${buyerAccountId}:${Date.now()}`;
 
-  await sql`
-    SELECT pgmq.send('s6_sync', ${sql.json(message)})
-  `;
+    const message = {
+      topic: "CREDIT_STATUS_RECOMPUTE",
+      shop: shopDomain,
+      buyerAccountId,
+      source,
+      webhookId: dedupeKey,
+      resourceGid: buyerAccountId,
+    };
+
+    await tx`SELECT pgmq.send('s6_sync', ${tx.json(message)})`;
+    return true;
+  });
+
+  return enqueued;
 }
 
 /**
@@ -308,12 +318,10 @@ export async function enqueueCreditStatusRecompute(
 export async function enqueueRecomputeForInvoice(
   sql: Sql,
   invoiceId: string,
-): Promise<void> {
-  // Look up the invoice to get shop domain and buyer account
-  const [invoice] = await sql<{
-    buyerAccountId: string | null;
-    shopDomain: string;
-  }[]>`
+): Promise<boolean> {
+  const [invoice] = await sql<
+    [{ buyerAccountId: string | null; shopDomain: string }?]
+  >`
     SELECT i."buyerAccountId", s.domain AS "shopDomain"
     FROM "Invoice" i
     JOIN "Shop" s ON s.id = i."shopId"
@@ -321,13 +329,58 @@ export async function enqueueRecomputeForInvoice(
   `;
 
   if (!invoice?.buyerAccountId) {
-    return;
+    return false;
   }
 
-  await enqueueCreditStatusRecompute(
+  return enqueueCreditStatusRecompute(
     sql,
     invoice.shopDomain,
     invoice.buyerAccountId,
     "invoice_change",
   );
+}
+
+/**
+ * Flag buyer accounts for credit-status recompute after a draft-order change.
+ *
+ * Used by the draft order webhook and bulk paths after committing draft writes.
+ * Debounced: skips accounts that already have an unread CREDIT_STATUS_RECOMPUTE message.
+ * INR-guarded: non-INR shops trigger nothing. Null ids are ignored.
+ * Never throws: an enqueue failure must not fail the draft write.
+ *
+ * @param sql - Database connection
+ * @param shopDomain - Shop domain (e.g., "store.myshopify.com")
+ * @param accountIds - Buyer account IDs to flag (null/undefined values ignored)
+ * @returns Number of accounts actually enqueued
+ */
+export async function flagAccountsForRecompute(
+  sql: Sql,
+  shopDomain: string,
+  accountIds: Iterable<string | null | undefined>,
+): Promise<number> {
+  const ids = [...new Set([...accountIds].filter((x): x is string => !!x))];
+  if (ids.length === 0) return 0;
+
+  const [shop] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  if (!shop || !isShopCurrencySupported(shop.currency)) return 0;
+
+  const queued = await sql<{ id: string }[]>`
+    SELECT DISTINCT message->>'buyerAccountId' AS id
+    FROM pgmq.q_s6_sync
+    WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      AND message->>'shop' = ${shopDomain}
+      AND message->>'buyerAccountId' IN ${sql(ids)}
+      AND read_ct = 0
+  `;
+  const skip = new Set(queued.map((r) => r.id));
+
+  let sent = 0;
+  for (const id of ids) {
+    if (skip.has(id)) continue;
+    await enqueueCreditStatusRecompute(sql, shopDomain, id, "draft_change");
+    sent++;
+  }
+  return sent;
 }

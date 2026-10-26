@@ -315,7 +315,7 @@ async function buildReconcileMutation(
       SELECT id FROM "Shop" WHERE domain = ${shop}
     `;
     if (!shopRow) {
-      return null;
+      return "shop_not_found";
     }
 
     const tagRules = await getTagRules(sql, shopRow.id);
@@ -404,6 +404,18 @@ export async function startReconcileBulkOperation(
   }
 
   const mutation = await buildReconcileMutation(sql, shop, kind);
+
+  if (mutation === "shop_not_found") {
+    if (chainKey) {
+      await releaseReconcileStageClaim(sql, chainKey, kind, shop);
+    }
+    return {
+      success: false,
+      action: "skipped",
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
+    };
+  }
 
   if (!mutation) {
     // Release claim since we're skipping (no mutation to run)
@@ -637,13 +649,18 @@ export async function enqueueReconcileOrders(
 export async function incrementOrderRefetchNull(
   sql: Sql,
   shop: string
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO s10b_order_refetch_null (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, 1)
+    SELECT ${shop}, CURRENT_DATE, 1
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = s10b_order_refetch_null.count + 1
   `;
+  return result.count > 0;
 }
 
 /**
@@ -662,14 +679,19 @@ export async function incrementOrderOutstandingMissing(
   sql: Sql,
   shop: string,
   n: number = 1
-): Promise<void> {
-  if (n <= 0) return;
-  await sql`
+): Promise<boolean> {
+  if (n <= 0) return false;
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO order_outstanding_missing (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, ${n})
+    SELECT ${shop}, CURRENT_DATE, ${n}
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = order_outstanding_missing.count + ${n}
   `;
+  return result.count > 0;
 }
 
 /**

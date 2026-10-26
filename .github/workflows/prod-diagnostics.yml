@@ -90,6 +90,11 @@ on:
         required: false
         default: false
         type: boolean
+      probe_reviewer_shop:
+        description: "Read-only: access-scopes + currency probe on the single installed shop that is neither ALLOWED_DEV_STORE nor E2E_SHOP (selected in SQL, never an input, never printed). Runs ONLY the reviewer_shop_probe job; never refreshes"
+        required: false
+        default: false
+        type: boolean
       drain_cron:
         description: "NOT read-only unless none: pause/resume ONLY the s10_drain_every_minute pg_cron job (cron.alter_job active=false/true)"
         required: false
@@ -113,7 +118,7 @@ jobs:
 
     # Skipped in e2e_second_shop mode: that mode runs only the e2e_second_shop
     # job below, which never touches the allowed dev store.
-    if: github.ref == 'refs/heads/main' && !inputs.e2e_second_shop
+    if: github.ref == 'refs/heads/main' && !inputs.e2e_second_shop && !inputs.probe_reviewer_shop
 
     steps:
       # Checkout runs first so every psql step can source
@@ -743,6 +748,103 @@ jobs:
                 "any_subscription_has_plan_name=\([$subs[] | .name | select(type == "string" and length > 0)] | length > 0)"' "$HTTP_RESPONSE"
           fi
           # End active subscriptions
+
+      - name: Access scopes probe
+        id: access_scopes
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secret, so the env header prints *** (#190 F1). Only compared, never printed.
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          TOKEN_EXPIRED: ${{ steps.session.outputs.token_expired }}
+          OFFLINE_SESSION_EXISTS: ${{ steps.session.outputs.offline_session_exists }}
+          REFRESH_SUCCESS: ${{ steps.refresh.outputs.refresh_success }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+
+          # Read-only: currentAppInstallation { accessScopes { handle } }.
+          # Public-repo safe: prints ONLY shop_idx=<2|unknown>, scopes_count=<int>
+          # and has_read_all_orders=<true|false>. Never the handle list, the
+          # domain or the token. shop_idx=2 means the selected shop is the
+          # ALLOWED_DEV_STORE (main dev store); 1 is the e2e_second_shop job.
+          # Soft-fails (warning + status line) so it can't break the run.
+          echo "=== Access scopes (read-only) ==="
+          # Access scopes shop index
+          if [ -n "${ALLOWED_DEV_STORE:-}" ] && [ "${SHOP_DOMAIN:-}" = "$ALLOWED_DEV_STORE" ]; then
+            echo "shop_idx=2"
+          else
+            echo "shop_idx=unknown"
+          fi
+          # End access scopes shop index
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::warning::DATABASE_URL_MIGRATIONS secret not set"
+            echo "access_scopes=skipped_no_database_url"
+            exit 0
+          fi
+          if [ "$OFFLINE_SESSION_EXISTS" != "true" ]; then
+            echo "access_scopes=skipped_no_offline_session"
+            exit 0
+          fi
+          # Default read-only mode never refreshes; skip when the token is expired.
+          if [ "$TOKEN_EXPIRED" = "true" ] && [ "$REFRESH_SUCCESS" != "true" ]; then
+            echo "access_scopes=skipped_token_expired"
+            exit 0
+          fi
+
+          ACCESS_TOKEN=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false
+          LIMIT 1;
+          EOSQL
+          )
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "access_scopes=skipped_no_access_token"
+            exit 0
+          fi
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          CURL_CONFIG=""
+          HTTP_RESPONSE=""
+          cleanup() {
+            rm -f "$CURL_CONFIG" "$HTTP_RESPONSE"
+          }
+          trap cleanup EXIT
+
+          CURL_CONFIG=$(mktemp)
+          chmod 600 "$CURL_CONFIG"
+          cat > "$CURL_CONFIG" <<EOF
+          header = "Content-Type: application/json"
+          header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
+          EOF
+          unset ACCESS_TOKEN
+
+          # Access scopes query and summary (counts/booleans only)
+          SCOPES_QUERY='{"query":"{ currentAppInstallation { accessScopes { handle } } }"}'
+          HTTP_RESPONSE=$(mktemp)
+          SCOPES_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+            -X POST \
+            --config "$CURL_CONFIG" \
+            --data-binary "$SCOPES_QUERY" \
+            "https://${SHOP_DOMAIN}/admin/api/2026-10/graphql.json" || echo "000")
+          if [ "$SCOPES_STATUS" != "200" ]; then
+            echo "::warning::accessScopes query failed with HTTP $SCOPES_STATUS"
+            echo "access_scopes=error http_status=$SCOPES_STATUS"
+          elif ! jq -e . "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::accessScopes response was not JSON"
+            echo "access_scopes=error parse_failed"
+          elif jq -e '(.errors | length) > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::accessScopes query returned GraphQL errors"
+            echo "access_scopes=error error_codes=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN" | tostring | if test("^[A-Z0-9_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$HTTP_RESPONSE")"
+          else
+            jq -r '[.data.currentAppInstallation.accessScopes[]? | .handle? | select(type == "string")] as $h
+              | "access_scopes=ok",
+                "scopes_count=\($h | length)",
+                "has_read_all_orders=\(any($h[]; . == "read_all_orders"))"' "$HTTP_RESPONSE"
+          fi
+          # End access scopes query and summary
 
       - name: Database extensions and jobs check
         env:
@@ -2119,7 +2221,7 @@ jobs:
     name: Second-shop E2E checks (read-only)
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.ref == 'refs/heads/main' && inputs.e2e_second_shop
+    if: github.ref == 'refs/heads/main' && inputs.e2e_second_shop && !inputs.probe_reviewer_shop
 
     steps:
       - name: Checkout
@@ -2680,3 +2782,238 @@ jobs:
                 "e2e_shopify_orders_any=\(if $cs == "unknown" then "unknown" else ($cs != "0" | tostring) end)"' "$HTTP_RESPONSE"
           fi
           # End E2E bulk op status
+
+      # Read-only: currentAppInstallation { accessScopes { handle } } for the
+      # selected second shop. Prints ONLY shop_idx=1, scopes_count=<int>
+      # and has_read_all_orders=<true|false>; never the handle list,
+      # domain or token. Same gate as E2E Admin checks (never refreshes).
+      - name: E2E access scopes probe
+        id: e2e_access_scopes
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          OFFLINE_OK: ${{ steps.e2e_db.outputs.offline_session_with_token }}
+          TOKEN_EXPIRED: ${{ steps.e2e_db.outputs.token_expired }}
+          UNINSTALLED: ${{ steps.e2e_db.outputs.uninstalled }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          echo "=== Access scopes (read-only) ==="
+          echo "shop_idx=1"
+          # E2E access scopes gate
+          if [ "$UNINSTALLED" != "false" ]; then
+            echo "access_scopes=skipped_shop_uninstalled"
+            exit 0
+          fi
+          if [ "$OFFLINE_OK" != "true" ]; then
+            echo "access_scopes=skipped_no_offline_session"
+            exit 0
+          fi
+          if [ "$TOKEN_EXPIRED" != "false" ]; then
+            echo "access_scopes=skipped_token_expired"
+            exit 0
+          fi
+          # End E2E access scopes gate
+
+          ACCESS_TOKEN=$(psql -X -v ON_ERROR_STOP=1 -v shop="$E2E_SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false AND "accessToken" <> ''
+          ORDER BY expires DESC NULLS LAST
+          LIMIT 1;
+          EOSQL
+          )
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "access_scopes=skipped_no_access_token"
+            exit 0
+          fi
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          CURL_CONFIG=""
+          HTTP_RESPONSE=""
+          cleanup() {
+            rm -f "$CURL_CONFIG" "$HTTP_RESPONSE"
+          }
+          trap cleanup EXIT
+
+          CURL_CONFIG=$(mktemp)
+          chmod 600 "$CURL_CONFIG"
+          cat > "$CURL_CONFIG" <<EOF
+          header = "Content-Type: application/json"
+          header = "X-Shopify-Access-Token: $ACCESS_TOKEN"
+          EOF
+          unset ACCESS_TOKEN
+
+          # E2E access scopes query and summary (counts/booleans only)
+          SCOPES_QUERY='{"query":"{ currentAppInstallation { accessScopes { handle } } }"}'
+          HTTP_RESPONSE=$(mktemp)
+          SCOPES_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" \
+            -X POST \
+            --config "$CURL_CONFIG" \
+            --data-binary "$SCOPES_QUERY" \
+            "https://${E2E_SHOP_DOMAIN}/admin/api/2026-10/graphql.json" || echo "000")
+          if [ "$SCOPES_STATUS" != "200" ]; then
+            echo "::warning::e2e accessScopes query failed with HTTP $SCOPES_STATUS"
+            echo "access_scopes=error http_status=$SCOPES_STATUS"
+          elif ! jq -e . "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::e2e accessScopes response was not JSON"
+            echo "access_scopes=error parse_failed"
+          elif jq -e '(.errors | length) > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "::warning::e2e accessScopes query returned GraphQL errors"
+            echo "access_scopes=error error_codes=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN" | tostring | if test("^[A-Z0-9_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$HTTP_RESPONSE")"
+          else
+            jq -r '[.data.currentAppInstallation.accessScopes[]? | .handle? | select(type == "string")] as $h
+              | "access_scopes=ok",
+                "scopes_count=\($h | length)",
+                "has_read_all_orders=\(any($h[]; . == "read_all_orders"))"' "$HTTP_RESPONSE"
+          fi
+          # End E2E access scopes query and summary
+
+  # Reviewer-shop probe (read-only). Runs ONLY when probe_reviewer_shop=true;
+  # the diagnostics and e2e_second_shop jobs are skipped in this mode.
+  # SAFETY:
+  #   - No shop input: a `shop` payload value fails closed. The shop is the
+  #     single INSTALLED Shop row ("uninstalledAt" IS NULL) whose domain is
+  #     neither ALLOWED_DEV_STORE nor E2E_SHOP, chosen in SQL. Both secrets are
+  #     required and must differ; anything other than exactly 1 candidate fails
+  #     closed with a fixed code and the count.
+  #   - Refuses refresh_if_expired=true and has no refresh code path. Read-only
+  #     PGOPTIONS, SELECT only, one Admin GraphQL query, no mutation.
+  #   - Prints ONLY reviewer_candidates=<int>, reviewer_select=ok|error code=..,
+  #     shop_idx=reviewer, currency=<INR|USD|NONE|OTHER>,
+  #     token_expired=<true|false|unknown>, access_scopes=<status>,
+  #     scopes_count=<int>, has_read_all_orders=<bool>. Never a domain, id,
+  #     token or scope handle.
+  reviewer_shop_probe:
+    name: Reviewer-shop probe (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main' && inputs.probe_reviewer_shop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Reviewer shop probe
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secrets, so the env header prints ***. Only compared in SQL.
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+          # Reviewer shop selection (domain never printed)
+          fail() {
+            echo "reviewer_select=error code=$1${2:+ $2}"
+            echo "::error::reviewer shop selection failed: $1"
+            exit 1
+          }
+          SHOP_RE='^[a-z0-9-]+\.myshopify\.com$'
+          if [ -n "$(jq -r '.inputs.shop // empty' "$GITHUB_EVENT_PATH")" ]; then
+            fail REVIEWER_SHOP_INPUT_NOT_ALLOWED
+          fi
+          if [ "$(jq -r '.inputs.refresh_if_expired // false | tostring' "$GITHUB_EVENT_PATH")" != "false" ]; then
+            fail REVIEWER_REFRESH_NOT_ALLOWED
+          fi
+          [ -n "${DATABASE_URL:-}" ] || fail REVIEWER_DATABASE_URL_UNSET
+          [ -n "${ALLOWED_DEV_STORE:-}" ] || fail REVIEWER_ALLOWED_DEV_STORE_UNSET
+          [ -n "${E2E_SHOP:-}" ] || fail REVIEWER_E2E_SHOP_UNSET
+          # Validate before masking so a multi-line value cannot slip past it.
+          [[ "$ALLOWED_DEV_STORE" =~ $SHOP_RE ]] || fail REVIEWER_ALLOWED_DEV_STORE_INVALID
+          [[ "$E2E_SHOP" =~ $SHOP_RE ]] || fail REVIEWER_E2E_SHOP_INVALID
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+          echo "::add-mask::$E2E_SHOP"
+          [ "$E2E_SHOP" != "$ALLOWED_DEV_STORE" ] || fail REVIEWER_SECRETS_NOT_DISTINCT
+          N=$(psql -X -v ON_ERROR_STOP=1 -t -A -v allowed="$ALLOWED_DEV_STORE" -v e2e="$E2E_SHOP" "$DATABASE_URL" \
+            <<< "SELECT COUNT(*) FROM \"Shop\" WHERE \"uninstalledAt\" IS NULL AND domain <> :'allowed' AND domain <> :'e2e';")
+          [[ "$N" =~ ^[0-9]+$ ]] || fail REVIEWER_COUNT_INVALID
+          echo "reviewer_candidates=$N"
+          [ "$N" != "0" ] || fail REVIEWER_SHOP_NOT_FOUND
+          [ "$N" = "1" ] || fail REVIEWER_SHOP_NOT_UNIQUE "candidates=$N"
+          # Domain, currency enum and token state in one read-only query. The
+          # currency is mapped to a fixed enum in SQL; the raw value never leaves.
+          ROW=$(psql -X -v ON_ERROR_STOP=1 -t -A -F '|' -v allowed="$ALLOWED_DEV_STORE" -v e2e="$E2E_SHOP" "$DATABASE_URL" <<'EOSQL'
+          SELECT s.domain,
+                 CASE WHEN s.currency = 'INR' THEN 'INR'
+                      WHEN s.currency = 'USD' THEN 'USD'
+                      WHEN s.currency IS NULL OR s.currency = 'XXX' THEN 'NONE'
+                      ELSE 'OTHER' END,
+                 COALESCE((
+                   SELECT CASE WHEN se.expires IS NULL THEN 'false'
+                               WHEN se.expires <= (now() AT TIME ZONE 'UTC') THEN 'true'
+                               ELSE 'false' END
+                   FROM "Session" se
+                   WHERE se.shop = s.domain AND se."isOnline" = false AND se."accessToken" <> ''
+                   ORDER BY se.expires DESC NULLS LAST
+                   LIMIT 1
+                 ), 'unknown')
+          FROM "Shop" s
+          WHERE s."uninstalledAt" IS NULL AND s.domain <> :'allowed' AND s.domain <> :'e2e';
+          EOSQL
+          )
+          [ "$(printf '%s\n' "$ROW" | grep -c .)" = "1" ] || fail REVIEWER_SHOP_NOT_UNIQUE "candidates=changed"
+          IFS='|' read -r REVIEWER_SHOP_DOMAIN CUR EXP <<< "$ROW"
+          [[ "$REVIEWER_SHOP_DOMAIN" =~ $SHOP_RE ]] || fail REVIEWER_SHOP_INVALID
+          echo "::add-mask::$REVIEWER_SHOP_DOMAIN"
+          [ "$REVIEWER_SHOP_DOMAIN" != "$ALLOWED_DEV_STORE" ] || fail REVIEWER_SHOP_IS_ALLOWED_DEV_STORE
+          [ "$REVIEWER_SHOP_DOMAIN" != "$E2E_SHOP" ] || fail REVIEWER_SHOP_IS_E2E_SHOP
+          [[ "$CUR" =~ ^(INR|USD|NONE|OTHER)$ ]] || CUR=OTHER
+          [[ "$EXP" =~ ^(true|false|unknown)$ ]] || EXP=unknown
+          echo "reviewer_select=ok"
+          # End reviewer shop selection
+
+          echo "=== Access scopes (read-only) ==="
+          echo "shop_idx=reviewer"
+          echo "currency=$CUR"
+          echo "token_expired=$EXP"
+          # Reviewer access scopes gate
+          if [ "$EXP" = "unknown" ]; then
+            echo "access_scopes=skipped_no_offline_session"
+            exit 0
+          fi
+          if [ "$EXP" != "false" ]; then
+            echo "access_scopes=skipped_token_expired"
+            exit 0
+          fi
+          # End reviewer access scopes gate
+
+          ACCESS_TOKEN=$(psql -X -v ON_ERROR_STOP=1 -v shop="$REVIEWER_SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken"
+          FROM "Session"
+          WHERE shop = :'shop' AND "isOnline" = false AND "accessToken" <> ''
+          ORDER BY expires DESC NULLS LAST
+          LIMIT 1;
+          EOSQL
+          )
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "access_scopes=skipped_no_access_token"
+            exit 0
+          fi
+          echo "::add-mask::$ACCESS_TOKEN"
+          CURL_CONFIG=$(mktemp)
+          chmod 600 "$CURL_CONFIG"
+          trap 'rm -f "$CURL_CONFIG"' EXIT
+          printf 'header = "Content-Type: application/json"\nheader = "X-Shopify-Access-Token: %s"\n' "$ACCESS_TOKEN" > "$CURL_CONFIG"
+          unset ACCESS_TOKEN
+
+          # Reviewer access scopes query and summary (counts/booleans only)
+          HTTP_RESPONSE=$(mktemp)
+          SCOPES_QUERY='{"query":"{ currentAppInstallation { accessScopes { handle } } }"}'
+          SCOPES_STATUS=$(curl -s -w "%{http_code}" -o "$HTTP_RESPONSE" -X POST --config "$CURL_CONFIG" \
+            --data-binary "$SCOPES_QUERY" "https://${REVIEWER_SHOP_DOMAIN}/admin/api/2026-10/graphql.json" || echo "000")
+          if [ "$SCOPES_STATUS" != "200" ]; then
+            echo "access_scopes=error http_status=$SCOPES_STATUS"
+          elif ! jq -e . "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            echo "access_scopes=error parse_failed"
+          elif jq -e '(.errors | length) > 0' "$HTTP_RESPONSE" >/dev/null 2>&1; then
+            CODES=$(jq -r '[.errors[] | .extensions.code // "UNKNOWN" | tostring | if test("^[A-Z0-9_]{1,40}$") then . else "UNKNOWN" end] | join(",")' "$HTTP_RESPONSE")
+            echo "access_scopes=error error_codes=$CODES"
+          else
+            jq -r '[.data.currentAppInstallation.accessScopes[]? | .handle? | select(type == "string")] as $h
+              | "access_scopes=ok", "scopes_count=\($h | length)", "has_read_all_orders=\(any($h[]; . == "read_all_orders"))"' "$HTTP_RESPONSE"
+          fi
+          rm -f "$HTTP_RESPONSE"
+          # End reviewer access scopes query and summary

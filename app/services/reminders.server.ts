@@ -49,6 +49,7 @@ import {
   isAllowlistEnforced,
 } from "./recipient-allowlist.server";
 import { sendViaResend } from "./resend-client.server";
+import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 
 /**
  * Check if plan gating enforcement is enabled.
@@ -101,15 +102,12 @@ const SEND_WINDOW_END = 19;
 /**
  * Check if reminder sending is enabled.
  * Requires BOTH RESEND_API_KEY AND RESEND_FROM to be set.
+ * Delegates to shared leaf module for consistency with onboarding step.
  */
 export function isReminderSendingEnabled(
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string } = {}
 ): boolean {
-  const key = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
-  const from = env.RESEND_FROM ?? process.env.RESEND_FROM;
-  const hasKey = typeof key === "string" && key.trim().length > 0;
-  const hasFrom = typeof from === "string" && from.trim().length > 0;
-  return hasKey && hasFrom;
+  return isEmailSendingConfigured(env);
 }
 
 /**
