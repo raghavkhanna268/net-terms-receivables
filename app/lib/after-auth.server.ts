@@ -17,8 +17,9 @@ import { ensurePaymentCustomization } from "./payment-customization-registration
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
-import { validateCurrencyCode, NO_CURRENCY_SENTINEL } from "./shop-currency.server";
+import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "./shop-currency.server";
 import { writeShopConfigMetafield } from "~/services/shop-config.server";
+import { decideShopCurrencyUpdate, hasFinancialRows } from "./shop-currency-guard.server";
 import type { Sql } from "./db-light.server";
 
 /**
@@ -182,7 +183,7 @@ interface ClearUninstalledResult {
  */
 async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Promise<ClearUninstalledResult> {
   try {
-    const result = await sql<{ id: string; closed_count: number }[]>`
+    const result = await sql<{ id: string; closed_count: number; deleted_claims_count: number }[]>`
       WITH reinstalled_shop AS (
         UPDATE "Shop"
         SET "uninstalledAt" = NULL, onboarding_dismissed_at = NULL
@@ -202,18 +203,28 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
           AND EXISTS (SELECT 1 FROM reinstalled_shop)
           AND closed_at IS NULL
         RETURNING 1
+      ),
+      deleted_claims AS (
+        DELETE FROM s6_reconcile_stage_claims
+        WHERE shop = ${shop}
+          AND EXISTS (SELECT 1 FROM reinstalled_shop)
+        RETURNING 1
       )
-      SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count FROM reinstalled_shop
+      SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count,
+             (SELECT count(*) FROM deleted_claims)::int AS deleted_claims_count
+      FROM reinstalled_shop
     `;
     if (result.length > 0) {
       const closedCount = result[0].closed_count;
+      const deletedClaimsCount = result[0].deleted_claims_count;
       safeLog("info", "cleared_uninstalled_at_and_metafield_errors", {
         shopHash: await shopHash(shop),
       });
-      if (closedCount > 0) {
+      if (closedCount > 0 || deletedClaimsCount > 0) {
         safeLog("info", "reinstall_initial_sync_reset", {
           shopHash: await shopHash(shop),
           closedCount,
+          claimsDeletedCount: deletedClaimsCount,
         });
       }
       return { wasReinstalled: true, shopId: result[0].id };
@@ -316,6 +327,14 @@ async function fetchShopAuthInfo(admin: AdminGraphqlClient): Promise<ShopAuthInf
  * #292: Write order - shop_config FIRST, then DB. A failed shop_config write is logged
  * but does not block the DB upsert (install must succeed). /app will detect and retry
  * any shop_config mismatch on next load.
+ *
+ * #292 Currency Flip Safety: When live currency is INR, stored currency is NOT INR,
+ * AND the shop has financial rows (Invoice, Payment, s8_draft_orders), the currency
+ * flip is BLOCKED. In this case:
+ * - Do NOT write shop_config with INR (would relabel Rust function reads)
+ * - Do NOT update Shop.currency (preserves existing state)
+ * - Timezone update still proceeds (independent of currency)
+ * This is fail-closed: only zero financial rows allows flip to INR.
  */
 async function syncShopInfo(
   shop: string,
@@ -325,16 +344,44 @@ async function syncShopInfo(
 
   const authInfo = await fetchShopAuthInfo(admin);
 
+  // #292 Currency Flip Safety: Check if currency flip should be blocked
+  let effectiveCurrency = authInfo.currencyCode;
+  let flipBlocked = false;
+
+  if (authInfo.currencyCode === SUPPORTED_SHOP_CURRENCY) {
+    const [shopRow] = await sql<{ id: string; currency: string | null }[]>`
+      SELECT id, currency FROM "Shop" WHERE domain = ${shop}
+    `;
+
+    if (shopRow && shopRow.currency !== SUPPORTED_SHOP_CURRENCY) {
+      const hasRows = await hasFinancialRows(sql, shopRow.id);
+      const decision = decideShopCurrencyUpdate({
+        storedCurrency: shopRow.currency ?? NO_CURRENCY_SENTINEL,
+        liveCurrency: authInfo.currencyCode,
+        hasFinancialRows: hasRows,
+      });
+
+      if (decision.blocked) {
+        flipBlocked = true;
+        effectiveCurrency = decision.effectiveCurrency;
+        safeLog("info", "currency_flip_blocked_on_auth", {
+          shopHash: await shopHash(shop),
+        });
+      }
+    }
+  }
+
   // #292: Write shop_config metafield FIRST, log warning on failure but continue
-  if (authInfo.shopId) {
-    const writeResult = await writeShopConfigMetafield(admin, authInfo.shopId, authInfo.currencyCode);
+  // Skip shop_config write when flip is blocked (would relabel existing data)
+  if (authInfo.shopId && !flipBlocked) {
+    const writeResult = await writeShopConfigMetafield(admin, authInfo.shopId, effectiveCurrency);
     if (!writeResult.success) {
       safeLog("warn", "shop_config_write_failed", { err: writeResult.error ?? "unknown" });
     }
   }
 
   try {
-    await upsertShopOnAuth(sql, shop, authInfo.timezone, authInfo.currencyCode);
+    await upsertShopOnAuth(sql, shop, authInfo.timezone, effectiveCurrency);
   } catch (error) {
     const errInfo = (error as { code?: string; name?: string }).code ?? (error as Error).name;
     console.error(`[afterAuth] upsert_shop_failed reason=db_error err=${errInfo}`);
@@ -441,6 +488,11 @@ export function _isShopSetupInFlight(shop: string): boolean {
  *
  * #292: Now stores actual shop currency (not hardcoded INR) for INR-only guards.
  *
+ * #292 G4: A failed currency read (XXX) now overwrites the existing currency
+ * instead of preserving it. This ensures a shop that was INR but now has a failed
+ * re-auth read fails closed (currency=XXX → not supported) rather than keeping
+ * stale INR. Recovery can re-read and restore INR if the API becomes available.
+ *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
  * @param timezone - IANA timezone from Shopify, or null if query failed
@@ -452,7 +504,7 @@ export async function upsertShopOnAuth(
   timezone: string | null,
   currency: string,
 ): Promise<void> {
-  const result = await sql<{ id: string; closed_count: number }[]>`
+  const result = await sql<{ id: string; closed_count: number; deleted_claims_count: number }[]>`
     WITH old_state AS (
       SELECT id, "uninstalledAt" IS NOT NULL AS was_uninstalled
       FROM "Shop"
@@ -464,10 +516,9 @@ export async function upsertShopOnAuth(
       ON CONFLICT (domain)
       DO UPDATE SET
         timezone = COALESCE(${timezone}, "Shop".timezone),
-        currency = CASE
-          WHEN ${currency} = 'XXX' THEN "Shop".currency
-          ELSE ${currency}
-        END,
+        -- G4: Do NOT preserve existing currency on failed read (XXX).
+        -- A failed re-auth read must fail-closed, not keep stale INR.
+        currency = ${currency},
         "uninstalledAt" = NULL,
         onboarding_dismissed_at = CASE
           WHEN "Shop"."uninstalledAt" IS NOT NULL THEN NULL
@@ -489,16 +540,26 @@ export async function upsertShopOnAuth(
         AND EXISTS (SELECT 1 FROM old_state WHERE was_uninstalled)
         AND closed_at IS NULL
       RETURNING 1
+    ),
+    deleted_claims AS (
+      DELETE FROM s6_reconcile_stage_claims
+      WHERE shop = ${shopDomain}
+        AND EXISTS (SELECT 1 FROM old_state WHERE was_uninstalled)
+      RETURNING 1
     )
-    SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count FROM upserted
+    SELECT id, (SELECT count(*) FROM closed_ops)::int AS closed_count,
+           (SELECT count(*) FROM deleted_claims)::int AS deleted_claims_count
+    FROM upserted
   `;
   const shopId = result[0]?.id ?? 'unknown';
   const closedCount = result[0]?.closed_count ?? 0;
+  const deletedClaimsCount = result[0]?.deleted_claims_count ?? 0;
   console.log(`[afterAuth] shop_upserted shop_id=${shopId} timezone=${timezone ?? 'preserved'}`);
-  if (closedCount > 0) {
+  if (closedCount > 0 || deletedClaimsCount > 0) {
     safeLog("info", "reinstall_initial_sync_reset", {
       shopHash: await shopHash(shopDomain),
       closedCount,
+      claimsDeletedCount: deletedClaimsCount,
     });
   }
 }
@@ -519,3 +580,9 @@ export function evictShopFromSetupCache(shop: string): void {
  * @internal
  */
 export { clearUninstalledAtAndMetafieldErrors as _clearUninstalledAtAndMetafieldErrorsForTesting };
+
+/**
+ * Exported for testing: sync shop info (timezone, currency) with currency flip guard.
+ * @internal
+ */
+export { syncShopInfo as _syncShopInfoForTesting };

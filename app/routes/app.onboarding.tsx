@@ -45,7 +45,7 @@ import {
   type InitialSyncState,
 } from "~/lib/initial-sync.server";
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
-import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 
 /**
@@ -369,16 +369,21 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   }
 
   // #292 G1: Read stored currency, then recover if needed (same as /app)
+  // Pass dbData.shopId to avoid re-querying the shop row in checkAndRecoverCurrency
   const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
     SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
   const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
-  const shopCurrency = await checkAndRecoverCurrency(
+  // Defensive: handle null/undefined result with fail-closed defaults
+  const currencyResult = await checkAndRecoverCurrency(
     sql,
     shopDomain,
     storedCurrency,
     admin,
+    dbData.shopId,
   );
+  const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
   const currencySupported = isShopCurrencySupported(shopCurrency);
 
   const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
@@ -458,6 +463,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     initialSyncState: syncState,
     newAccountsPausedBanner,
     currencySupported,
+    currencyFlipBlocked,
   };
 };
 
@@ -595,17 +601,20 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   if (actionType === "start_sync") {
     // #292 G1: Recover currency first, then check if supported
+    // Pass shop.id to avoid re-querying the shop row in checkAndRecoverCurrency
+    // Defensive: handle null/undefined result with fail-closed defaults
     const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
       SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
     `;
     const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
-    const recoveredCurrency = await checkAndRecoverCurrency(
+    const currencyResult = await checkAndRecoverCurrency(
       sql,
       shopDomain,
       storedCurrency,
       admin,
+      shop.id,
     );
-    if (!isShopCurrencySupported(recoveredCurrency)) {
+    if (!isShopCurrencySupported(currencyResult?.currency ?? NO_CURRENCY_SENTINEL)) {
       return {
         success: false,
         error: "Sync not available for non-INR stores",
@@ -832,7 +841,7 @@ function OnboardingChecklist({
 const POLL_INTERVAL_MS = 5000;
 
 export default function OnboardingPage() {
-  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported, currencyFlipBlocked } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -890,8 +899,18 @@ export default function OnboardingPage() {
 
   return (
     <s-page heading="Setup Guide">
-      {/* #292: Currency Not Supported Banner */}
-      {!currencySupported && (
+      {/* #292: Currency Flip Blocked Banner (non-INR→INR with existing data) */}
+      {currencyFlipBlocked && (
+        <s-section>
+          <s-banner tone="critical" heading="Currency Conversion Not Available">
+            {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
+            Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
+          </s-banner>
+        </s-section>
+      )}
+
+      {/* #292: Currency Not Supported Banner (non-INR shop without blocked flip) */}
+      {!currencySupported && !currencyFlipBlocked && (
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
@@ -961,13 +980,13 @@ export default function OnboardingPage() {
       {state.isComplete && (
         <s-section>
           <s-banner tone="success" heading="Setup Complete">
-            You&apos;ve completed all setup steps. Your store is ready to use Net
-            Terms Receivables!
+            You&apos;ve completed all setup steps. Your store is ready to use
+            Termwise!
           </s-banner>
         </s-section>
       )}
 
-      <s-section heading="Get Started with Net Terms">
+      <s-section heading="Get Started with Termwise">
         <s-stack gap="base">
           <s-paragraph>
             Complete these steps to set up net terms management for your store.

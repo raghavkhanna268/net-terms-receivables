@@ -1,9 +1,15 @@
 /**
- * Integration tests for App Store reviewer synthetic HDFC CSV.
+ * Unit-level scoring tests for App Store reviewer synthetic HDFC CSV.
  *
- * This test pins the current parser and matcher behavior against the synthetic
- * reviewer file (hdfc-review-synthetic.csv). It documents exact scores, bands,
- * and match candidates without modifying any app code.
+ * This test pins UNIT-LEVEL scoring with:
+ * - Hand-set payerText (e.g., "TEST BUYER CO") instead of real parser output
+ * - Pre-seeded buyer aliases for payer_alias matching
+ *
+ * For what the app ACTUALLY shows (real parser output, no pre-seeded aliases),
+ * see tests/integration/review-csv-app-path.test.ts.
+ *
+ * This test documents exact scores, bands, and match candidates for the
+ * synthetic reviewer file (hdfc-review-synthetic.csv).
  *
  * All data is FICTIONAL - no real bank data.
  *
@@ -13,19 +19,20 @@
  * - amount_exact: +20 (payment equals invoice outstanding)
  * - amount_partial: +10 (payment < invoice outstanding)
  * - amount_overpayment: +10 (payment > invoice outstanding)
- * - payer_alias: +10 (exact/substring match on buyer.aliases)
+ * - payer_alias: +30 (exact/substring match on buyer.aliases, confirmed only)
  * - payer_name: +8 (fuzzy match on buyer.name, floor(10 * 0.8))
  * - email_match: +6 (email prefix match, floor(10 * 0.6))
  * - multi_invoice: +5 (bonus for subset-sum match to multiple invoices)
  *
- * Maximum single-invoice score: 30 + 20 + 10 = 60
- * CONFIDENCE_THRESHOLD: 80 (requires multi-invoice or additional signals)
+ * Maximum single-invoice score: 30 + 20 + 30 = 80 (with confirmed alias)
+ * Maximum without alias: 30 + 20 + 8 = 58
+ * CONFIDENCE_THRESHOLD: 80
  *
  * NOTE: There is NO date matching in the scorer. The invoice.dueAt field is
  * only used for oldest-due-first allocation preference, not scoring.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { parseBankStatement } from "../../app/lib/banks/index.js";
@@ -54,6 +61,7 @@ const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
  * - Invoice #1002: ₹6,000.00 outstanding (for partial/name suggestion on row 2)
  *
  * Due dates are set to November 2026 to be in the same window as the statement dates.
+ * Clock is pinned to 2026-10-20 via vi.setSystemTime for deterministic behavior.
  */
 const SYNTHETIC_BUYER: BuyerForScoring = {
   id: "buyer-synthetic-review",
@@ -75,7 +83,7 @@ const SYNTHETIC_INVOICES: InvoiceForScoring[] = [
     id: "invoice-1002",
     name: "#1002",
     orderId: "gid://shopify/Order/1002",
-    outstandingPaise: 600000n, // ₹6,000.00
+    outstandingPaise: 500000n, // ₹5,000.00 (v3: was ₹6,000)
     buyerAccountId: SYNTHETIC_BUYER.id,
     dueAt: new Date("2026-12-15"),
   },
@@ -101,6 +109,15 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
   let credits: NormalisedTxn[];
   let debits: NormalisedTxn[];
 
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-20T00:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeAll(async () => {
     const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic.csv"));
     const file = new File([content], "hdfc-review-synthetic.csv", { type: "text/csv" });
@@ -124,7 +141,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      * - Line 4: Empty line
      * - Line 5: "HDFC BANK"
      * - Line 6: "Statement of Account"
-     * - Line 7: "Account No: 00999888777666"
+     * - Line 7: "Account No: SYNT00999888777"
      * - Line 8: "Account Type: Savings Account"
      * - Line 9: "Branch: SYNTHETIC REVIEW BRANCH"
      * - Line 10: Empty line
@@ -210,11 +227,11 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       }
     });
 
-    it("pins credit amounts in paise", () => {
+    it("pins credit amounts in paise (CSV v3)", () => {
       const amounts = credits.map((c) => c.amountPaise);
       expect(amounts).toEqual([
         1000000, // Row 1: ₹10,000.00
-        400000, // Row 2: ₹4,000.00
+        500000, // Row 2: ₹5,000.00 (v3: was ₹4,000)
         250000, // Row 3: ₹2,500.00
       ]);
     });
@@ -237,17 +254,15 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      * Score breakdown:
      * - invoice_ref: +30 (#1001 found in narration, matches invoice.name)
      * - amount_exact: +20 (payment 10,000 = invoice outstanding 10,000)
-     * - payer_alias: +10 (payerText "TEST BUYER CO" matches alias "test buyer co")
-     * - Total: 60 points
+     * - payer_alias: +30 (payerText "TEST BUYER CO" matches confirmed alias)
+     * - Total: 80 points
      *
-     * This is the MAXIMUM possible score for a single-invoice match.
-     * CONFIDENCE_THRESHOLD is 80, which requires either:
-     * - Multi-invoice match (adds +5 bonus) plus perfect single-invoice scores, OR
-     * - Additional scoring factors not present in the current scorer
+     * This reaches High confidence because the alias is confirmed.
+     * CONFIDENCE_THRESHOLD is 80.
      *
      * There is NO date matching - invoice.dueAt is only for allocation ordering.
      */
-    it("Row 1: pins medium-band match (score 60 < 80 threshold) with breakdown", () => {
+    it("Row 1: pins high-band match (score 80 = threshold) with breakdown", () => {
       const row1 = credits.find((c) => c.refNo === "SYNT0001");
       expect(row1).toBeDefined();
 
@@ -269,12 +284,12 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       const allocation = result!.allocations[0];
       expect(allocation.invoiceId).toBe("invoice-1001");
 
-      // Pin exact score (60 is maximum single-invoice score)
+      // Pin exact score (80 with confirmed alias)
       const score = allocation.score;
       const band = getConfidenceBand(score);
 
-      expect(score).toBe(60);
-      expect(band).toBe("medium"); // 60 < CONFIDENCE_THRESHOLD (80)
+      expect(score).toBe(80);
+      expect(band).toBe("high"); // 80 = CONFIDENCE_THRESHOLD
       expect(allocation.allocatedPaise).toBe(1000000n);
 
       // Pin exact reason breakdown
@@ -290,29 +305,27 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
 
       expect(invoiceRefReason?.points).toBe(30);
       expect(amountExactReason?.points).toBe(20);
-      expect(payerAliasReason?.points).toBe(10);
+      expect(payerAliasReason?.points).toBe(30);
 
       // Document the breakdown
       const breakdown = formatReasons(allocation.reasons);
-      expect(breakdown).toBe("invoice_ref(+30), amount_exact(+20), payer_alias(+10)");
+      expect(breakdown).toBe("invoice_ref(+30), amount_exact(+20), payer_alias(+30)");
     });
 
     /**
-     * Row 2: UPI-SYNT0002-TEST BUYER CO-PART PAYMENT, ₹4,000.00
+     * Row 2: UPI-TEST BUYER CO-SYNT0002-#1002, ₹5,000.00 (CSV v3)
      *
      * Score breakdown:
-     * - amount_partial: +10 (payment 4,000 < invoice outstanding)
-     * - payer_alias: +10 (payerText "TEST BUYER CO" matches alias)
-     * - Total: 20 points
+     * - invoice_ref: +30 (#1002 found in narration, matches invoice.name)
+     * - amount_exact: +20 (payment 5,000 = invoice outstanding 5,000)
+     * - payer_alias: +30 (payerText "TEST BUYER CO" matches confirmed alias)
+     * - Total: 80 points
      *
-     * No invoice_ref because "PART PAYMENT" narration has no #1001 or #1002.
-     * Allocation goes to invoice-1001 (oldest-due-first preference).
-     *
-     * DEVIATION FROM STATED INTENT: The intent was "partial for #1002" but the
-     * matcher allocates to #1001 because both invoices are partial matches and
-     * #1001 has an earlier dueAt.
+     * CSV v3 changed:
+     * - Amount: ₹4,000 → ₹5,000
+     * - Narration: now includes #1002
      */
-    it("Row 2: pins partial/name suggestion behavior with breakdown", () => {
+    it("Row 2: pins high-band match (score 80, v3) with breakdown", () => {
       const row2 = credits.find((c) => c.refNo === "SYNT0002");
       expect(row2).toBeDefined();
 
@@ -326,7 +339,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       };
 
       const extractedRefs = extractInvoiceRefs(row2!.narration);
-      expect(extractedRefs.length).toBe(0); // No invoice ref in "PART PAYMENT"
+      expect(extractedRefs).toContain("1002"); // v3: has invoice ref
 
       const result = scoreMultiInvoiceMatch(payment, SYNTHETIC_INVOICES, SYNTHETIC_BUYER);
       expect(result).not.toBeNull();
@@ -336,46 +349,46 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       const score = allocation.score;
       const band = getConfidenceBand(score);
 
-      expect(score).toBe(20);
-      expect(band).toBe("low");
+      expect(score).toBe(80);
+      expect(band).toBe("high");
 
-      // Allocation goes to oldest-due invoice (#1001), not #1002
-      expect(allocation.invoiceId).toBe("invoice-1001");
-      expect(allocation.allocatedPaise).toBe(400000n);
+      // Allocation goes to #1002 (exact match)
+      expect(allocation.invoiceId).toBe("invoice-1002");
+      expect(allocation.allocatedPaise).toBe(500000n);
 
       // Pin reason breakdown
       const reasonTypes = allocation.reasons.map((r) => r.type);
-      expect(reasonTypes).toContain("amount_partial");
+      expect(reasonTypes).toContain("invoice_ref");
+      expect(reasonTypes).toContain("amount_exact");
       expect(reasonTypes).toContain("payer_alias");
-      expect(reasonTypes).not.toContain("invoice_ref");
 
       // Verify points
-      const amountPartialReason = allocation.reasons.find((r) => r.type === "amount_partial");
+      const invoiceRefReason = allocation.reasons.find((r) => r.type === "invoice_ref");
+      const amountExactReason = allocation.reasons.find((r) => r.type === "amount_exact");
       const payerAliasReason = allocation.reasons.find((r) => r.type === "payer_alias");
 
-      expect(amountPartialReason?.points).toBe(10);
-      expect(payerAliasReason?.points).toBe(10);
+      expect(invoiceRefReason?.points).toBe(30);
+      expect(amountExactReason?.points).toBe(20);
+      expect(payerAliasReason?.points).toBe(30);
 
       const breakdown = formatReasons(allocation.reasons);
-      expect(breakdown).toBe("amount_partial(+10), payer_alias(+10)");
+      expect(breakdown).toBe("invoice_ref(+30), amount_exact(+20), payer_alias(+30)");
     });
 
     /**
-     * Row 3: IMPS-SYNT0003-UNRELATED TRADERS, ₹2,500.00
+     * Row 3: IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT, ₹2,500.00 (CSV v3)
      *
      * Score breakdown:
-     * - amount_partial: +10 (payment 2,500 < invoice outstanding)
-     * - Total: 10 points
+     * - invoice_ref: +30 (#1002 found in narration, matches invoice.name)
+     * - amount_partial: +10 (payment 2,500 < invoice outstanding 5,000)
+     * - payer_alias: +30 (payerText "TEST BUYER CO" matches confirmed alias)
+     * - Total: 70 points
      *
-     * No invoice_ref (no #-prefixed number in narration).
-     * No payer match ("UNRELATED TRADERS" doesn't match "Test Buyer Co" or aliases).
-     *
-     * DEVIATION FROM STATED INTENT: The intent was "stay unmatched" but the
-     * scorer still returns a low-confidence suggestion. In production, this
-     * would be shown as a low-confidence match requiring manual review.
-     * The scorer has no explicit payer-mismatch filter - it just doesn't add points.
+     * CSV v3 changed:
+     * - Narration: now includes TEST BUYER CO and #1002
+     * - Still a partial payment
      */
-    it("Row 3: pins unmatched/low-confidence behavior with breakdown", () => {
+    it("Row 3: pins medium-band match (score 70, v3) with breakdown", () => {
       const row3 = credits.find((c) => c.refNo === "SYNT0003");
       expect(row3).toBeDefined();
 
@@ -383,13 +396,13 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
         id: "payment-row3",
         amountPaise: BigInt(row3!.amountPaise),
         narration: row3!.narration,
-        payerText: "UNRELATED TRADERS",
+        payerText: "TEST BUYER CO",
         utr: row3!.parsed.utr ?? null,
         rail: row3!.parsed.rail,
       };
 
       const extractedRefs = extractInvoiceRefs(row3!.narration);
-      expect(extractedRefs.length).toBe(0);
+      expect(extractedRefs).toContain("1002"); // v3: has invoice ref
 
       const result = scoreMultiInvoiceMatch(payment, SYNTHETIC_INVOICES, SYNTHETIC_BUYER);
       expect(result).not.toBeNull();
@@ -398,18 +411,21 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       const score = allocation.score;
       const band = getConfidenceBand(score);
 
-      expect(score).toBe(10);
-      expect(band).toBe("low");
+      expect(score).toBe(70);
+      expect(band).toBe("medium");
 
-      // Pin reason breakdown - only amount_partial, no payer match
+      // Allocation goes to #1002 (ref match)
+      expect(allocation.invoiceId).toBe("invoice-1002");
+      expect(allocation.allocatedPaise).toBe(250000n);
+
+      // Pin reason breakdown
       const reasonTypes = allocation.reasons.map((r) => r.type);
+      expect(reasonTypes).toContain("invoice_ref");
       expect(reasonTypes).toContain("amount_partial");
-      expect(reasonTypes).not.toContain("payer_alias");
-      expect(reasonTypes).not.toContain("payer_name");
-      expect(reasonTypes).not.toContain("invoice_ref");
+      expect(reasonTypes).toContain("payer_alias");
 
       const breakdown = formatReasons(allocation.reasons);
-      expect(breakdown).toBe("amount_partial(+10)");
+      expect(breakdown).toBe("invoice_ref(+30), amount_partial(+10), payer_alias(+30)");
     });
 
     /**
@@ -445,31 +461,77 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
     });
   });
 
-  describe("summary of pinned match results", () => {
+  describe("summary of pinned match results (CSV v3)", () => {
     /**
-     * Summary table of pinned match results:
+     * Summary table of pinned match results (unit-level with aliases, CSV v3):
      *
      * | Row | Ref      | Amount    | Dir | Score | Band   | Candidate    | Breakdown                                  |
      * |-----|----------|-----------|-----|-------|--------|--------------|-------------------------------------------|
-     * | 1   | SYNT0001 | 10,000.00 | CR  | 60    | medium | invoice-1001 | invoice_ref(+30), amount_exact(+20), payer_alias(+10) |
-     * | 2   | SYNT0002 | 4,000.00  | CR  | 20    | low    | invoice-1001 | amount_partial(+10), payer_alias(+10)     |
-     * | 3   | SYNT0003 | 2,500.00  | CR  | 10    | low    | invoice-1001 | amount_partial(+10)                       |
+     * | 1   | SYNT0001 | 10,000.00 | CR  | 80    | high   | invoice-1001 | invoice_ref(+30), amount_exact(+20), payer_alias(+30) |
+     * | 2   | SYNT0002 | 5,000.00  | CR  | 80    | high   | invoice-1002 | invoice_ref(+30), amount_exact(+20), payer_alias(+30) |
+     * | 3   | SYNT0003 | 2,500.00  | CR  | 70    | medium | invoice-1002 | invoice_ref(+30), amount_partial(+10), payer_alias(+30) |
      * | 4   | SYNT0004 | 1,200.00  | DR  | N/A   | N/A    | N/A          | Debit - not matched                       |
      *
      * SCORE BREAKDOWN NOTES:
-     * - Maximum single-invoice score is 60 (30 ref + 20 amount + 10 name)
-     * - CONFIDENCE_THRESHOLD is 80, requiring multi-invoice bonus or more signals
-     * - There is NO date matching - dueAt is only for allocation ordering
+     * - Maximum single-invoice score is 80 (30 ref + 20 amount + 30 alias)
+     * - CONFIDENCE_THRESHOLD is 80
+     * - High (80) requires a confirmed payer alias; without one the best is Medium (58)
      *
-     * DEVIATIONS FROM STATED INTENT:
-     * - Row 1: Intent was "high confidence" but 60 < 80 threshold → medium band
-     * - Row 2: Intent was "partial for #1002" but oldest-due preference → #1001
-     * - Row 3: Intent was "stay unmatched" but scorer returns low-confidence → still suggests
+     * NOTE: This is UNIT-LEVEL scoring with pre-seeded aliases. For real app
+     * behavior (no aliases, amount window filtering), see:
+     * - tests/integration/review-csv-matcher-db.test.ts
      */
-    it("documents all rows with their pinned scores and breakdowns", () => {
-      expect(parseResult.transactions.length).toBe(4);
-      expect(credits.length).toBe(3);
-      expect(debits.length).toBe(1);
+    it("validates pinned scores from individual tests (v3)", () => {
+      const row1 = credits.find((c) => c.refNo === "SYNT0001")!;
+      const row2 = credits.find((c) => c.refNo === "SYNT0002")!;
+      const row3 = credits.find((c) => c.refNo === "SYNT0003")!;
+
+      const buyer: BuyerForScoring = {
+        id: "buyer-1",
+        name: "Test Buyer Co",
+        aliases: ["test buyer co"],
+        email: "test@test-buyer.example",
+      };
+
+      const invoices: InvoiceForScoring[] = [
+        {
+          id: "invoice-1001",
+          name: "#1001",
+          orderId: "gid://shopify/Order/1001",
+          outstandingPaise: 1000000n,
+          buyerAccountId: buyer.id,
+          dueAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        },
+        {
+          id: "invoice-1002",
+          name: "#1002",
+          orderId: "gid://shopify/Order/1002",
+          outstandingPaise: 500000n,
+          buyerAccountId: buyer.id,
+          dueAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
+        },
+      ];
+
+      const makePayment = (row: NormalisedTxn) => ({
+        id: `payment-${row.refNo}`,
+        amountPaise: BigInt(row.amountPaise),
+        narration: row.narration,
+        payerText: "TEST BUYER CO",
+        utr: row.parsed.utr ?? null,
+        rail: row.parsed.rail,
+      });
+
+      const r1 = scoreMultiInvoiceMatch(makePayment(row1), invoices, buyer);
+      const r2 = scoreMultiInvoiceMatch(makePayment(row2), invoices, buyer);
+      const r3 = scoreMultiInvoiceMatch(makePayment(row3), invoices, buyer);
+
+      expect(r1!.allocations[0].score).toBe(80);
+      expect(r2!.allocations[0].score).toBe(80);
+      expect(r3!.allocations[0].score).toBe(70);
+
+      expect(getConfidenceBand(r1!.allocations[0].score)).toBe("high");
+      expect(getConfidenceBand(r2!.allocations[0].score)).toBe("high");
+      expect(getConfidenceBand(r3!.allocations[0].score)).toBe("medium");
     });
   });
 });

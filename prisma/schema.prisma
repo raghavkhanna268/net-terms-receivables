@@ -694,8 +694,31 @@ model S6BulkOperation {
   closedAt        DateTime? @map("closed_at") @db.Timestamptz(6)
   /// Why the operation was closed. Currently only 'reinstall_reset'.
   closedReason    String?   @map("closed_reason")
+  /// When the finish webhook was received. Set in the same tx as recording the receipt.
+  finishReceivedAt DateTime? @map("finish_received_at") @db.Timestamptz(6)
+  /// Processing lease expiry. A processor must acquire the lease before processing.
+  processingLeaseUntil DateTime? @map("processing_lease_until") @db.Timestamptz(6)
+  /// Processing lease owner token. A per-run UUID to ensure only the lease owner can renew/release.
+  processingLeaseToken String?   @map("processing_lease_token")
+  /// When the next stage was enqueued. Prevents duplicate nextStage enqueues.
+  nextStageEnqueuedAt DateTime? @map("next_stage_enqueued_at") @db.Timestamptz(6)
 
   @@map("s6_bulk_operations")
+}
+
+/// Reconcile stage claims for exactly-once stage starts (S25).
+/// Prevents duplicate bulk operations per reconcile chain stage.
+/// Each chain_key (day or manual key) can have at most one op per stage.
+model S6ReconcileStageClaim {
+  chainKey        String    @map("chain_key")
+  stage           String
+  shop            String
+  bulkOperationId String?   @map("bulk_operation_id")
+  claimedAt       DateTime  @default(now()) @map("claimed_at") @db.Timestamptz(6)
+
+  @@id([chainKey, stage])
+  @@index([shop], map: "s6_reconcile_stage_claims_shop_idx")
+  @@map("s6_reconcile_stage_claims")
 }
 
 // =============================================================================
