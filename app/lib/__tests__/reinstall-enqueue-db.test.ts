@@ -23,6 +23,17 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
+// Mock shopifyGraphQLRequest for double-write test
+let metafieldWriteCount = 0;
+const mockShopifyGraphQLRequest = vi.fn();
+vi.mock("~/services/shopify-client.server", async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    shopifyGraphQLRequest: (...args: unknown[]) => mockShopifyGraphQLRequest(...args),
+  };
+});
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -1120,6 +1131,80 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
         WHERE message->>'buyerAccountId' = ${testBuyerAccountId}
       `;
       expect(messages[0]?.source).toBe("sync");
+    });
+  });
+
+  describe("double-write prevention", () => {
+    it("reinstall + daily sweep enqueue same account; drain both → exactly 1 metafield write", async () => {
+      vi.resetModules();
+      metafieldWriteCount = 0;
+
+      const doubleWriteAccountId = `double-write-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "syncVersion", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          (${doubleWriteAccountId}, ${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/double-write', 'gid://shopify/CompanyLocation/double-write',
+           'Double Write Account', 'OK', true, 1, NULL, NOW(), NOW())
+      `;
+
+      // Mock shopifyGraphQLRequest to count writes
+      mockShopifyGraphQLRequest.mockImplementation(async () => {
+        metafieldWriteCount++;
+        return {
+          success: true,
+          data: { metafieldsSet: { metafields: [{ id: "mf-1" }], userErrors: [] } },
+        };
+      });
+
+      // 1. Enqueue via reinstall helper
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      // 2. Enqueue via enqueueCreditStatusRecompute (simulating daily sweep)
+      const { enqueueCreditStatusRecompute } = await import("~/services/credit-status-recompute.server");
+      await enqueueCreditStatusRecompute(sql, INR_SHOP, doubleWriteAccountId, "daily_sweep");
+
+      // Get both message IDs
+      const msgIds = await sql<{ msg_id: string }[]>`
+        SELECT msg_id::text AS msg_id
+        FROM pgmq.q_s6_sync
+        WHERE message->>'buyerAccountId' = ${doubleWriteAccountId}
+        ORDER BY msg_id
+      `;
+      expect(msgIds).toHaveLength(2);
+
+      // Process both messages through the real handler
+      const { getSyncHandler } = await import("~/services/drain/processor.server");
+      const handler = getSyncHandler("CREDIT_STATUS_RECOMPUTE");
+      expect(handler).toBeDefined();
+
+      for (const { msg_id } of msgIds) {
+        // Simulate pgmq.read
+        const [row] = await sql<{ message: Record<string, unknown> }[]>`
+          UPDATE pgmq.q_s6_sync
+          SET read_ct = read_ct + 1, vt = NOW() + INTERVAL '30 seconds'
+          WHERE msg_id = ${msg_id}
+          RETURNING message
+        `;
+        if (row) {
+          const result = await handler!(sql, row.message as Parameters<typeof handler>[1]);
+          if (result.success) {
+            await sql`SELECT pgmq.archive('s6_sync', ${msg_id}::bigint)`;
+          }
+        }
+      }
+
+      // Assert exactly 1 metafield write (syncVersion prevents double write)
+      expect(metafieldWriteCount).toBe(1);
+
+      // Cleanup
+      await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${inrShopId}`;
     });
   });
 });
