@@ -84,7 +84,7 @@ describe("pgmq archive purge migration", () => {
       "utf8",
     );
     expect(doc).toContain(
-      "Processed sync-queue messages are kept for 30 days for troubleshooting, then deleted.",
+      "Processed sync-queue messages are kept for 30 days for troubleshooting and will be deleted after 30 days once the purge job is enabled.",
     );
     expect(doc).toContain("pgmq_purge_archives_30d");
   });

@@ -390,9 +390,10 @@ describe("privacy.md content requirements", () => {
     expect(pcdText).not.toContain("confirmed");
   });
 
-  it("says PCD access is requested and reviewed with submission", () => {
-    expect(privacyContent).toContain("requested access to protected customer data");
-    expect(privacyContent).toContain("Shopify reviews this request with our app submission");
+  it("states PCD handling factually without request status", () => {
+    expect(privacyContent).toContain("The app accesses buyer name and email, which Shopify classifies as protected customer data");
+    expect(privacyContent).not.toContain("requested access to protected customer data");
+    expect(privacyContent).not.toContain("Shopify reviews this request");
   });
 
   it("contains Team Lead Sentry sentence", () => {
