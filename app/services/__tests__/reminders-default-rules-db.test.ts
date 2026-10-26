@@ -373,13 +373,53 @@ describeWithDb("Sequential DB", () => {
     const BUYER_ACCOUNT_ID = `acc-e2e-${TEST_SUFFIX}`;
     const CUSTOMER_ID = `gid://shopify/Customer/e2e-${TEST_SUFFIX}`;
     const OFFSET_DAYS = 0;
-    const FIXED_MONTH_STR = "2026-10";
+
+    let SHOP_TIMEZONE: string;
+    let FIXED_MONTH_STR: string;
+    let DUE_DATE_STR: string;
+
+    const CANDIDATE_ZONES = [
+      "Pacific/Auckland", "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata",
+      "Asia/Dubai", "Europe/Moscow", "Europe/Berlin", "Europe/London",
+      "Atlantic/Azores", "America/Sao_Paulo", "America/New_York",
+      "America/Chicago", "America/Denver", "America/Los_Angeles",
+      "Pacific/Honolulu",
+    ];
 
     const mockFetch = vi.fn();
 
     beforeAll(async () => {
       vi.stubGlobal("fetch", mockFetch);
       sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+      const [pgNow] = await sql<{ now: Date }[]>`SELECT NOW() AS now`;
+      const pgNowMs = pgNow.now.getTime();
+
+      let foundTz: string | null = null;
+      for (const tz of CANDIDATE_ZONES) {
+        const [hourRow] = await sql<{ h: number }[]>`
+          SELECT EXTRACT(HOUR FROM (${pgNow.now}::TIMESTAMPTZ AT TIME ZONE ${tz}))::INT AS h
+        `;
+        if (hourRow.h >= 9 && hourRow.h <= 18) {
+          foundTz = tz;
+          break;
+        }
+      }
+      if (!foundTz) {
+        throw new Error(
+          `No candidate timezone has local hour 09-18 at Postgres NOW(). ` +
+          `This should not happen with the given candidate list.`
+        );
+      }
+      SHOP_TIMEZONE = foundTz;
+
+      const [dateRow] = await sql<{ d: string; m: string }[]>`
+        SELECT 
+          (${pgNow.now}::TIMESTAMPTZ AT TIME ZONE ${SHOP_TIMEZONE})::DATE::TEXT AS d,
+          TO_CHAR(${pgNow.now}::TIMESTAMPTZ AT TIME ZONE ${SHOP_TIMEZONE}, 'YYYY-MM') AS m
+      `;
+      DUE_DATE_STR = dateRow.d;
+      FIXED_MONTH_STR = dateRow.m;
 
       await sql`
         DELETE FROM s18_global_sends 
@@ -388,7 +428,7 @@ describeWithDb("Sequential DB", () => {
 
       await sql`
         INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW())
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', ${SHOP_TIMEZONE}, 'free', NOW(), NOW())
       `;
 
       await sql`
@@ -473,12 +513,12 @@ describeWithDb("Sequential DB", () => {
         VALUES (
           ${INVOICE_ID}, ${SHOP_ID}, ${BUYER_ACCOUNT_ID},
           'gid://shopify/Order/e2e-test', '#E2E-DUP', 10000.00, 10000.00,
-          'open', NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          'open', NOW() - INTERVAL '5 days', ${DUE_DATE_STR}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: SHOP_TIMEZONE });
       vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       await sql`SELECT public.s18_enqueue_reminders()`;
@@ -501,7 +541,7 @@ describeWithDb("Sequential DB", () => {
           msg.invoiceId,
           msg.ruleId,
           OFFSET_DAYS,
-          "Asia/Kolkata",
+          SHOP_TIMEZONE,
           validEnv
         );
       }
@@ -537,7 +577,7 @@ describeWithDb("Sequential DB", () => {
         VALUES (
           ${catchupInvoiceId}, ${SHOP_ID}, ${BUYER_ACCOUNT_ID},
           'gid://shopify/Order/catchup-e2e', '#CATCHUP-E2E', 10000.00, 10000.00,
-          'open', NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          'open', NOW() - INTERVAL '5 days', ${DUE_DATE_STR}::DATE, NOW(), NOW()
         )
       `;
 
@@ -552,7 +592,7 @@ describeWithDb("Sequential DB", () => {
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: SHOP_TIMEZONE });
       vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       const result = await sendCatchupReminder(
@@ -562,7 +602,7 @@ describeWithDb("Sequential DB", () => {
         RULE_B_ID,
         "log-id-placeholder",
         OFFSET_DAYS,
-        "Asia/Kolkata",
+        SHOP_TIMEZONE,
         validEnv
       );
 
