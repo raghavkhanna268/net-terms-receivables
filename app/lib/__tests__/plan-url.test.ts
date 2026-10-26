@@ -115,5 +115,17 @@ describe("plan-url", () => {
         "https://admin.shopify.com/store/test-shop/charges/param-app/pricing_plans"
       );
     });
+
+    it("builds exactly https://admin.shopify.com/store/{store}/charges/net-terms-receivables-1/pricing_plans with APP_HANDLE='net-terms-receivables-1'", async () => {
+      (process.env as Record<string, string | undefined>).APP_HANDLE = "net-terms-receivables-1";
+      const { buildPlanSelectionUrl } = await import("../plan-url");
+
+      const placeholderStore = "example-placeholder-store";
+      const url = buildPlanSelectionUrl(`${placeholderStore}.myshopify.com`);
+
+      expect(url).toBe(
+        `https://admin.shopify.com/store/${placeholderStore}/charges/net-terms-receivables-1/pricing_plans`
+      );
+    });
   });
 });
