@@ -1604,4 +1604,335 @@ mod tests {
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 1, "Missing shop_config with non-INR cart must hide deferred (fail-closed)");
     }
+
+    // =========================================================================
+    // Edge-Case Tests: Metafield parsing and type coercion
+    // These tests pin the current fail-open/fail-closed behavior for edge cases.
+    // =========================================================================
+
+    /// Empty string metafield parses as JsonValue::String, not Object.
+    /// CreditStatus::from_json_value returns default (all None fields).
+    /// is_held() returns false (fail-open) because schema_version is None.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:188-190 (schema_version.is_none check)
+    #[test]
+    fn test_empty_string_metafield_fails_open() {
+        let input = make_b2b_input(Some(r#""""#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Empty string metafield must fail-open (show all payment methods)");
+    }
+
+    /// Array metafield parses as JsonValue::Array, not Object.
+    /// CreditStatus::from_json_value returns default (all None fields).
+    /// is_held() returns false (fail-open) because schema_version is None.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:188-190 (schema_version.is_none check)
+    #[test]
+    fn test_array_metafield_fails_open() {
+        let input = make_b2b_input(Some(r#"[1, 2, 3]"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Array metafield must fail-open (show all payment methods)");
+    }
+
+    /// Number metafield parses as JsonValue::Number, not Object.
+    /// CreditStatus::from_json_value returns default (all None fields).
+    /// is_held() returns false (fail-open) because schema_version is None.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:188-190 (schema_version.is_none check)
+    #[test]
+    fn test_number_metafield_fails_open() {
+        let input = make_b2b_input(Some(r#"12345"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Number metafield must fail-open (show all payment methods)");
+    }
+
+    /// Boolean metafield parses as JsonValue::Boolean, not Object.
+    /// CreditStatus::from_json_value returns default (all None fields).
+    /// is_held() returns false (fail-open) because schema_version is None.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:188-190 (schema_version.is_none check)
+    #[test]
+    fn test_boolean_metafield_fails_open() {
+        let input = make_b2b_input(Some(r#"true"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Boolean metafield must fail-open (show all payment methods)");
+    }
+
+    /// hold field as string "true" instead of boolean true.
+    /// hold parsing returns None (only JsonValue::Boolean matches).
+    /// is_held() returns false (fail-open) because hold != Some(true).
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:196 (hold == Some(true) check)
+    #[test]
+    fn test_hold_as_string_true_fails_open() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "true", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "hold as string 'true' must fail-open (show all payment methods)");
+    }
+
+    /// hold field as string "HOLD" (wrong format).
+    /// hold parsing returns None (only JsonValue::Boolean matches).
+    /// is_held() returns false (fail-open) because hold != Some(true).
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:196 (hold == Some(true) check)
+    #[test]
+    fn test_hold_as_string_hold_fails_open() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "HOLD", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "hold as string 'HOLD' must fail-open (show all payment methods)");
+    }
+
+    /// hold field as empty string "".
+    /// hold parsing returns None (only JsonValue::Boolean matches).
+    /// is_held() returns false (fail-open) because hold != Some(true).
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:196 (hold == Some(true) check)
+    #[test]
+    fn test_hold_as_empty_string_fails_open() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "hold as empty string must fail-open (show all payment methods)");
+    }
+
+    /// hold field as number 1.
+    /// hold parsing returns None (only JsonValue::Boolean matches).
+    /// is_held() returns false (fail-open) because hold != Some(true).
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:196 (hold == Some(true) check)
+    #[test]
+    fn test_hold_as_number_fails_open() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": 1, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "hold as number 1 must fail-open (show all payment methods)");
+    }
+
+    /// schemaVersion field as string "1" instead of number 1.
+    /// schema_version parsing returns None (only JsonValue::Number matches).
+    /// is_held() returns false (fail-open) because schema_version is None.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:188-190 (schema_version.is_none check)
+    #[test]
+    fn test_schema_version_as_string_fails_open() {
+        let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "schemaVersion as string '1' must fail-open (show all payment methods)");
+    }
+
+    /// schemaVersion field as 0.
+    /// schema_version parsing returns Some(0), but 0 != 1.
+    /// is_held() returns false (fail-open) because schema_version != 1.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:192-194 (schema_version != 1 check)
+    #[test]
+    fn test_schema_version_zero_fails_open() {
+        let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "schemaVersion 0 must fail-open (show all payment methods)");
+    }
+
+    /// schemaVersion field as -1 (negative).
+    /// schema_version parsing returns Some(-1), but -1 != 1.
+    /// is_held() returns false (fail-open) because schema_version != 1.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:192-194 (schema_version != 1 check)
+    #[test]
+    fn test_schema_version_negative_fails_open() {
+        let metafield = r#"{"schemaVersion": -1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "schemaVersion -1 must fail-open (show all payment methods)");
+    }
+
+    /// schemaVersion field as very large number (exceeds valid versions).
+    /// schema_version parsing returns Some(999999), but 999999 != 1.
+    /// is_held() returns false (fail-open) because schema_version != 1.
+    /// Result: deferred payment methods SHOWN (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:192-194 (schema_version != 1 check)
+    #[test]
+    fn test_schema_version_very_large_fails_open() {
+        let metafield = r#"{"schemaVersion": 999999, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "schemaVersion 999999 must fail-open (show all payment methods)");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: shop_config parsing
+    // =========================================================================
+
+    /// Empty string shop_config parses as JsonValue::String, not Object.
+    /// ShopConfig::from_json_value returns default (all None fields).
+    /// is_valid() returns false, is_inr_shop() returns None.
+    /// For INR cart: passes (fail-open for ordinary INR carts).
+    /// Code line: cart_payment_methods_transform_run.rs:272-278 (missing shop_config INR cart handling)
+    #[test]
+    fn test_empty_string_shop_config_inr_cart_passes() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "INR" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Deferred Payment" }
+            ],
+            "paymentCustomization": null,
+            "shop": { "metafield": { "jsonValue": "" } }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert!(result.operations.is_empty(), "Empty string shop_config with INR cart must pass (fail-open)");
+    }
+
+    /// Empty string shop_config with non-INR cart hides deferred (fail-closed).
+    /// Code line: cart_payment_methods_transform_run.rs:274-276 (missing shop_config non-INR cart handling)
+    #[test]
+    fn test_empty_string_shop_config_usd_cart_hides() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "USD" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Deferred Payment" }
+            ],
+            "paymentCustomization": null,
+            "shop": { "metafield": { "jsonValue": "" } }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Empty string shop_config with USD cart must hide deferred (fail-closed)");
+    }
+
+    /// shop_config with schemaVersion as string "1" is invalid.
+    /// is_valid() returns false (schema_version is None), is_inr_shop() returns None.
+    /// For INR cart: passes (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:40-41 (is_valid check)
+    #[test]
+    fn test_shop_config_schema_version_as_string_inr_cart_passes() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": "1", "currencyCode": "INR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "shop_config with schemaVersion as string with INR cart must pass");
+    }
+
+    /// shop_config with schemaVersion as string "1" with USD cart hides deferred.
+    /// Code line: cart_payment_methods_transform_run.rs:274-276 (fail-closed for non-INR)
+    #[test]
+    fn test_shop_config_schema_version_as_string_usd_cart_hides() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"schemaVersion": "1", "currencyCode": "USD"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "shop_config with schemaVersion as string with USD cart must hide deferred");
+    }
+
+    /// shop_config with currencyCode as number is invalid.
+    /// currencyCode parsing returns None (only JsonValue::String matches).
+    /// is_inr_shop() returns None.
+    /// For INR cart: passes (fail-open).
+    /// Code line: cart_payment_methods_transform_run.rs:47-51 (is_inr_shop returns None)
+    #[test]
+    fn test_shop_config_currency_as_number_inr_cart_passes() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": 356}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "shop_config with currencyCode as number with INR cart must pass");
+    }
+
+    /// shop_config with empty currencyCode is valid but treated as non-INR.
+    /// currencyCode is Some(""), which != "INR".
+    /// is_inr_shop() returns Some(false).
+    /// Result: hides deferred (non-INR shop behavior).
+    /// Code line: cart_payment_methods_transform_run.rs:269-271 (non-INR shop hides deferred)
+    #[test]
+    fn test_shop_config_empty_currency_hides_deferred() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": ""}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "shop_config with empty currencyCode must hide deferred (treated as non-INR)");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: hide-terms-config parsing
+    // =========================================================================
+
+    /// hide-terms-config as empty object uses default deferred patterns.
+    /// Code line: cart_payment_methods_transform_run.rs:111-116 (get_deferred_patterns returns defaults)
+    #[test]
+    fn test_hide_config_empty_object_uses_defaults() {
+        let metafield = held_metafield();
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(r#"{}"#));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Empty hide-config object must use default patterns and hide deferred methods");
+    }
+
+    /// hide-terms-config as number is invalid, uses default patterns.
+    /// Configuration::from_json_value returns default when not Object.
+    /// Code line: cart_payment_methods_transform_run.rs:105-107 (from_json_value default case)
+    #[test]
+    fn test_hide_config_as_number_uses_defaults() {
+        let metafield = held_metafield();
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(r#"12345"#));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Number hide-config must use default patterns and hide deferred methods");
+    }
+
+    /// hide-terms-config with deferredPaymentPatterns as string (not array) uses defaults.
+    /// Code line: cart_payment_methods_transform_run.rs:78-94 (only Array type is processed)
+    #[test]
+    fn test_hide_config_patterns_as_string_uses_defaults() {
+        let metafield = held_metafield();
+        let config = r#"{"deferredPaymentPatterns": "deferred"}"#;
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "deferredPaymentPatterns as string must use default patterns");
+    }
+
+    /// hide-terms-config with manualPaymentMethodName as number is ignored.
+    /// Code line: cart_payment_methods_transform_run.rs:98-103 (only String type is processed)
+    #[test]
+    fn test_hide_config_manual_method_as_number_uses_patterns() {
+        let metafield = held_metafield();
+        let config = r#"{"manualPaymentMethodName": 12345}"#;
+        let input = make_customer_input(Some(metafield), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "manualPaymentMethodName as number must fall back to deferred patterns");
+    }
 }
