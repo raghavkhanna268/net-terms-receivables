@@ -285,6 +285,63 @@ export const COMPANY_SEEDS = [
   { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
 ] as const;
 
+/**
+ * Reviewer demo company seed data.
+ *
+ * FOR THE THROWAWAY INR DEMO STORE ONLY - never the main dev store.
+ *
+ * This company "Test Buyer Co" matches the payer text in the synthetic
+ * reviewer CSV (tests/fixtures/banks/synthetic/hdfc-review-synthetic.csv).
+ * The orders created have specific amounts that match the CSV payment amounts
+ * for testing the matching flow.
+ *
+ * This is NOT included in COMPANY_SEEDS to avoid modifying the existing
+ * 5-company test data. It's seeded separately via seedReviewerDemoCompany().
+ *
+ * All data is FICTIONAL - no real company names, domains, or identifiers.
+ */
+export const REVIEWER_DEMO_COMPANY_SEED = {
+  key: "company-reviewer-demo",
+  name: "Test Buyer Co",
+  city: "Bengaluru",
+  contact: {
+    firstName: "Demo",
+    lastName: "Reviewer",
+    email: "demo.reviewer@test-buyer.example",
+  },
+} as const;
+
+/**
+ * Reviewer demo order seeds.
+ *
+ * FOR THE THROWAWAY INR DEMO STORE ONLY - never the main dev store.
+ *
+ * These orders have specific amounts matching the synthetic reviewer CSV:
+ * - Order #1001: ₹10,000 - exact match for CSV row 1 (NEFT, ₹10,000)
+ * - Order #1002: ₹5,000 - in 0.5x-2x range for CSV rows 2 and 3
+ *
+ * Order names #1001/#1002 are chosen so the invoice_ref scoring works
+ * when matching against the CSV narration "NEFT-SYNT0001-TEST BUYER CO-#1001".
+ */
+export const REVIEWER_DEMO_ORDERS = [
+  {
+    orderKey: "reviewer-demo-1001",
+    displayName: "#1001",
+    amountInr: 10000,
+    productTitle: "Reviewer Demo Product A",
+    daysAgo: 5,
+    locationTermsDays: 30,
+  },
+  {
+    orderKey: "reviewer-demo-1002",
+    displayName: "#1002",
+    amountInr: 5000,
+    productTitle: "Reviewer Demo Product B",
+    daysAgo: 5,
+    locationTermsDays: 30,
+  },
+] as const;
+
 // B2B order distribution - each company gets orders from different locations (different terms)
 // daysAgo creates backdated orders via processedAt, some will be overdue
 // locationTermsDays determines which location (and thus which payment terms) to use
@@ -3457,6 +3514,152 @@ export async function createOrder(
   return null;
 }
 
+// -- Reviewer Demo Seeding --
+
+/**
+ * Seed the reviewer demo company and orders.
+ *
+ * FOR THE THROWAWAY INR DEMO STORE ONLY - never the main dev store.
+ *
+ * This creates a company "Test Buyer Co" with specific orders that match
+ * the synthetic reviewer CSV (hdfc-review-synthetic.csv). The orders have
+ * specific amounts and names (#1001, #1002) to test the matching flow.
+ *
+ * This function is:
+ * - ADDITIVE: Does not modify the existing 5 COMPANY_SEEDS companies
+ * - IDEMPOTENT: Re-running creates no duplicates (uses externalId)
+ *
+ * The company and orders match the fixture data in:
+ * - tests/fixtures/reviewer-demo.ts
+ */
+export async function seedReviewerDemoCompany(state: SeedState): Promise<void> {
+  console.log("\n🎬 Seeding reviewer demo company...");
+  console.log("   (FOR THROWAWAY INR DEMO STORE ONLY - not main dev store)");
+
+  const seed = REVIEWER_DEMO_COMPANY_SEED;
+  const externalId = `${SEED_PREFIX}${seed.key}`;
+
+  // Check if company already exists
+  const existing = await findCompanyByExternalId(state, externalId);
+  
+  if (existing) {
+    console.log(`  ✅ Reviewer demo company already exists: ${existing.id}`);
+    
+    // Store in state for order creation
+    const contactRoles = await fetchCompanyContactRoles(state, existing.id);
+    const locations = new Map<number, string>();
+    for (const edge of existing.locations.edges) {
+      for (const loc of LOCATION_TERMS) {
+        const locName = edge.node.name;
+        if (locName.includes(loc.suffix)) {
+          locations.set(loc.dueInDays, edge.node.id);
+        }
+      }
+    }
+    
+    state.companies.set(seed.key, {
+      id: existing.id,
+      contactId: existing.contacts.edges[0]?.node.id ?? "",
+      contactCustomerId: existing.contacts.edges[0]?.node.customer.id ?? "",
+      locations,
+      contactRoles,
+    });
+    state.unchangedCount.companies++;
+  } else if (state.dryRun) {
+    console.log(`  [dry-run] Would create reviewer demo company (${externalId})`);
+    state.createdCount.companies++;
+    return;
+  } else {
+    // Create the company - cast seed to expected type (same shape as COMPANY_SEEDS)
+    // The seed has the same runtime shape but different literal types for key/name
+    const companyData = await createCompanyWithLocations(
+      state,
+      seed as unknown as (typeof COMPANY_SEEDS)[number],
+      externalId
+    );
+    if (!companyData) {
+      state.failedCount.companies++;
+      state.errors.push(`Failed to create reviewer demo company: ${externalId}`);
+      return;
+    }
+    state.companies.set(seed.key, companyData);
+    console.log(`  ✅ Created reviewer demo company: ${companyData.id}`);
+  }
+
+  // Seed the reviewer demo orders
+  await seedReviewerDemoOrders(state);
+}
+
+/**
+ * Seed the specific orders for the reviewer demo.
+ * These have specific amounts and order names (#1001, #1002) to match
+ * the synthetic reviewer CSV.
+ */
+async function seedReviewerDemoOrders(state: SeedState): Promise<void> {
+  console.log("\n📝 Seeding reviewer demo orders...");
+  console.log("   Order names #1001/#1002 match CSV narration for invoice_ref scoring");
+
+  const companyData = state.companies.get(REVIEWER_DEMO_COMPANY_SEED.key);
+  if (!companyData) {
+    console.log("  ⚠️  Skipping: reviewer demo company not found in state");
+    return;
+  }
+
+  for (const orderSpec of REVIEWER_DEMO_ORDERS) {
+    const orderTag = `${SEED_TAG}-${orderSpec.orderKey}`;
+    
+    // Check if order already exists
+    const existingOrder = await findOrderByTag(state, orderTag);
+    if (existingOrder) {
+      console.log(`  ✅ Order ${orderSpec.orderKey} already exists`);
+      state.unchangedCount.orders++;
+      continue;
+    }
+
+    const locationId = companyData.locations.get(orderSpec.locationTermsDays);
+    if (!locationId) {
+      console.log(`  ⚠️  Skipping ${orderSpec.orderKey}: no Net-${orderSpec.locationTermsDays} location`);
+      state.skippedCount.orders++;
+      continue;
+    }
+
+    const processedAt = new Date();
+    processedAt.setDate(processedAt.getDate() - orderSpec.daysAgo);
+
+    if (state.dryRun) {
+      console.log(
+        `  [dry-run] Would create reviewer demo order ${orderSpec.orderKey}: ` +
+        formatCurrency(orderSpec.amountInr, state.currencyCode)
+      );
+      state.createdCount.orders++;
+      continue;
+    }
+
+    // Create the order
+    const order = await createOrder(state, {
+      orderKey: orderSpec.orderKey,
+      companyLocationId: locationId,
+      customerId: companyData.contactCustomerId,
+      productTitle: orderSpec.productTitle,
+      amount: orderSpec.amountInr,
+      processedAt: processedAt.toISOString(),
+      expectedTermsDays: orderSpec.locationTermsDays,
+    });
+
+    if (!order) {
+      state.failedCount.orders++;
+      state.errors.push(`Failed to create reviewer demo order ${orderSpec.orderKey}`);
+      continue;
+    }
+
+    console.log(
+      `  ✅ Created reviewer demo order ${orderSpec.orderKey}: ` +
+      formatCurrency(orderSpec.amountInr, state.currencyCode)
+    );
+    state.createdCount.orders++;
+  }
+}
+
 // -- Database Seeding --
 
 /**
@@ -3813,6 +4016,9 @@ export async function main(): Promise<void> {
   
   // Seed orders for tagged (non-B2B) customers
   await seedTaggedCustomerOrders(state);
+
+  // Seed reviewer demo company and orders (for throwaway INR demo store only)
+  await seedReviewerDemoCompany(state);
 
   // Seed database for S9 inference
   await seedDatabase(state);

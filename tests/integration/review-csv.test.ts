@@ -1,9 +1,15 @@
 /**
- * Integration tests for App Store reviewer synthetic HDFC CSV.
+ * Unit-level scoring tests for App Store reviewer synthetic HDFC CSV.
  *
- * This test pins the current parser and matcher behavior against the synthetic
- * reviewer file (hdfc-review-synthetic.csv). It documents exact scores, bands,
- * and match candidates without modifying any app code.
+ * This test pins UNIT-LEVEL scoring with:
+ * - Hand-set payerText (e.g., "TEST BUYER CO") instead of real parser output
+ * - Pre-seeded buyer aliases for payer_alias matching
+ *
+ * For what the app ACTUALLY shows (real parser output, no pre-seeded aliases),
+ * see tests/integration/review-csv-app-path.test.ts.
+ *
+ * This test documents exact scores, bands, and match candidates for the
+ * synthetic reviewer file (hdfc-review-synthetic.csv).
  *
  * All data is FICTIONAL - no real bank data.
  *
