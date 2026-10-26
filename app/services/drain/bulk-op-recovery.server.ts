@@ -223,6 +223,10 @@ export async function findStrandedBulkOperations(
       AND bo.processing_lease_until IS NULL
       AND bo.finish_received_at < NOW() - make_interval(mins => ${thresholdMinutes})
       AND s."uninstalledAt" IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM s6_dead_letter dlq
+        WHERE dlq.message->>'bulkOperationId' = bo.bulk_operation_id
+      )
     ORDER BY bo.started_at ASC
   `;
   return rows;

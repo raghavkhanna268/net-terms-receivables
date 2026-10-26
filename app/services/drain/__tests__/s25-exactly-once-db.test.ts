@@ -3135,6 +3135,84 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         await sql`DELETE FROM "Shop" WHERE id = ${MAX_SHOP_ID}`;
       }
     });
+
+    it("C15g: op already in DLQ is NOT returned by findStrandedBulkOperations (legacy exclusion)", async () => {
+      // Mutation test: removing the NOT EXISTS dlq subquery would cause this to fail
+      // This handles legacy rows that failed before the terminal-marking fix
+      const { findStrandedBulkOperations } = await import("../bulk-op-recovery.server");
+
+      const DLQ_SHOP_ID = `shop-dlq-legacy-${TEST_SUFFIX}`;
+      const DLQ_SHOP_DOMAIN = `dlq-legacy-${TEST_SUFFIX}.myshopify.com`;
+      const dlqOpId = `gid://shopify/BulkOperation/dlq-legacy-${TEST_SUFFIX}`;
+      const normalOpId = `gid://shopify/BulkOperation/not-dlq-legacy-${TEST_SUFFIX}`;
+
+      try {
+        await sql`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${DLQ_SHOP_ID}, ${DLQ_SHOP_DOMAIN}, 'INR', NOW(), NOW())
+        `;
+
+        // Op that is already in DLQ (legacy case: failure_count=0, no completed_at/closed_at)
+        // This simulates a pre-fix op that failed permanently but wasn't marked terminal
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at, closed_at, failure_count
+          )
+          VALUES (
+            ${dlqOpId}, ${DLQ_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL,
+            NULL,
+            0
+          )
+        `;
+
+        // Insert the DLQ row for this op
+        await sql`
+          INSERT INTO s6_dead_letter (original_queue, original_msg_id, message, error, dead_lettered_at)
+          VALUES (
+            's6_bulk',
+            'legacy-dlq-msg',
+            ${sql.json({ topic: "BULK_OPERATIONS_FINISH", shop: DLQ_SHOP_DOMAIN, bulkOperationId: dlqOpId, bulkType: "companies" })},
+            'bulk_no_result_url',
+            NOW() - interval '1 hour'
+          )
+        `;
+
+        // Op that is NOT in DLQ - SHOULD be found
+        await sql`
+          INSERT INTO s6_bulk_operations (
+            bulk_operation_id, shop, bulk_type, origin, started_at,
+            finish_received_at, processing_lease_until, completed_at, failure_count
+          )
+          VALUES (
+            ${normalOpId}, ${DLQ_SHOP_DOMAIN}, 'companies', 'reconcile',
+            NOW() - interval '2 hours',
+            NOW() - interval '30 minutes',
+            NULL,
+            NULL,
+            0
+          )
+        `;
+
+        const stranded = await findStrandedBulkOperations(sql, 10);
+
+        // Op in DLQ should NOT be found
+        const foundDlq = stranded.find((op) => op.bulk_operation_id === dlqOpId);
+        expect(foundDlq).toBeUndefined();
+
+        // Op not in DLQ SHOULD be found
+        const foundNormal = stranded.find((op) => op.bulk_operation_id === normalOpId);
+        expect(foundNormal).toBeDefined();
+      } finally {
+        await sql`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' = ${dlqOpId}`;
+        await sql`DELETE FROM s6_bulk_operations WHERE shop = ${DLQ_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${DLQ_SHOP_ID}`;
+      }
+    });
   });
 
   // ==========================================================================
@@ -3144,15 +3222,18 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
     it.each([
       { name: "NO_RESULT_URL", errorCode: "bulk_no_result_url", setupMock: "no_result_url" },
       { name: "CHUNK_HTTP_4XX", errorCode: "bulk_chunk_http_4xx", setupMock: "chunk_4xx" },
-    ])("$name: drive permanent failure, run 3 recovery cycles, exactly 1 DLQ row", async ({ errorCode, setupMock }) => {
+      { name: "AUTH_NEEDS_REAUTH", errorCode: "bulk_auth_needs_reauth", setupMock: "auth_failure" },
+      { name: "STATUS_FETCH_FAILED", errorCode: "bulk_status_fetch_failed", setupMock: "status_fetch_failed" },
+      { name: "LINE_SIZE_CAP", errorCode: null, setupMock: "line_size_cap" },
+    ])("$name: drive permanent failure, run 3 recovery cycles, exactly 1 DLQ row", async ({ setupMock }) => {
       const { runDrain, DEFAULT_DRAIN_CONFIG } = await import("../processor.server");
       const { recoverStaleBulkOperations } = await import("../bulk-op-recovery.server");
       const { adminGraphQL } = await import("../admin-client.server");
-      const { MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
+      const { MAX_FAILURE_COUNT, MAX_CHUNK_SIZE } = await import("~/services/sync/bulk-jsonl-processor.server");
 
-      const DLQ_SHOP_ID = `shop-dlq-loop-${errorCode}-${TEST_SUFFIX}`;
-      const DLQ_SHOP_DOMAIN = `dlq-loop-${errorCode}-${TEST_SUFFIX}.myshopify.com`;
-      const bulkOpId = `gid://shopify/BulkOperation/dlq-loop-${errorCode}-${TEST_SUFFIX}`;
+      const DLQ_SHOP_ID = `shop-dlq-loop-${setupMock}-${TEST_SUFFIX}`;
+      const DLQ_SHOP_DOMAIN = `dlq-loop-${setupMock}-${TEST_SUFFIX}.myshopify.com`;
+      const bulkOpId = `gid://shopify/BulkOperation/dlq-loop-${setupMock}-${TEST_SUFFIX}`;
       const webhookId = `finish:dlq-loop:${bulkOpId}`;
 
       try {
@@ -3177,6 +3258,15 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
             0
           )
         `;
+
+        // For line_size_cap, set chunk_size to MAX_CHUNK_SIZE
+        if (setupMock === "line_size_cap") {
+          await sql`
+            UPDATE s6_bulk_operations
+            SET chunk_size = ${MAX_CHUNK_SIZE}
+            WHERE bulk_operation_id = ${bulkOpId}
+          `;
+        }
 
         // Setup mock based on the error type
         if (setupMock === "no_result_url") {
@@ -3219,6 +3309,51 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
             statusText: "Not Found",
             arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
             headers: new Headers(),
+          }));
+        } else if (setupMock === "auth_failure") {
+          // Mock adminGraphQL to return auth failure (invalid_grant)
+          vi.mocked(adminGraphQL).mockResolvedValue({
+            success: false,
+            error: "Token refresh failed: invalid_grant",
+            errorCode: "invalid_grant",
+            retryable: false,
+          });
+        } else if (setupMock === "status_fetch_failed") {
+          // Mock adminGraphQL to return non-auth, non-retryable failure
+          vi.mocked(adminGraphQL).mockResolvedValue({
+            success: false,
+            error: "Access denied",
+            errorCode: "access_denied",
+            retryable: false,
+          });
+        } else if (setupMock === "line_size_cap") {
+          // Mock adminGraphQL to return COMPLETED with url
+          vi.mocked(adminGraphQL).mockResolvedValue({
+            success: true,
+            data: {
+              node: {
+                id: bulkOpId,
+                status: "COMPLETED",
+                url: "https://example.com/result.jsonl",
+                objectCount: "10",
+                partialDataUrl: null,
+                errorCode: null,
+                fileSize: "100000000",
+              },
+            },
+            retryable: false,
+          });
+          // Mock fetch to return 206 Partial Content with no newlines
+          // Content-Range indicates more data available (not EOF)
+          const noNewlineBytes = new Uint8Array(1024).fill(65); // 'A' characters, no newlines
+          vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+            ok: true,
+            status: 206,
+            statusText: "Partial Content",
+            arrayBuffer: vi.fn().mockResolvedValue(noNewlineBytes.buffer),
+            headers: new Headers({
+              "Content-Range": `bytes 0-${MAX_CHUNK_SIZE - 1}/100000000`,
+            }),
           }));
         }
 
@@ -3808,7 +3943,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   });
 
   // ==========================================================================
-  // Auth-failure path: immediate DLQ without bumping failure_count
+  // Auth-failure path: immediate DLQ, mark op terminal to prevent nightly re-enqueue
   // ==========================================================================
   describe("Auth-failure path: immediate DLQ with bulk_auth_needs_reauth", () => {
     it("auth failure (invalid_grant) returns permanent error with bulk_auth_needs_reauth and marks op terminal", async () => {

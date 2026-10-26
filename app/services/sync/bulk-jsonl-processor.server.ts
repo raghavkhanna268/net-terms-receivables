@@ -1356,7 +1356,7 @@ export async function processBulkOperation(
   }
 
   if (!statusResult.success || !statusResult.data?.url) {
-    // Auth-failure path: immediate DLQ without bumping failure_count.
+    // Auth-failure path: immediate DLQ, mark op terminal to prevent nightly re-enqueue.
     // Auth errors mean the shop needs re-authentication - no point retrying.
     // The shop's needs_reauth flag is already set by refreshOfflineTokenIfNeeded.
     if (statusResult.errorCode && AUTH_ERROR_CODES.has(statusResult.errorCode)) {
@@ -1377,7 +1377,7 @@ export async function processBulkOperation(
       };
     }
 
-    // Other non-retryable failures: immediate DLQ without bumping failure_count.
+    // Other non-retryable failures: immediate DLQ, mark op terminal to prevent nightly re-enqueue.
     if (statusResult.retryable === false) {
       safeLog("warn", "bulk_op_status_fetch_failed", {
         shopId,
