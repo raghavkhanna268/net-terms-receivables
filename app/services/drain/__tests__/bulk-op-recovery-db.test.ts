@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { assertNoQueueLeftovers } from "../../../../test/helpers/queue-leftovers";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 vi.mock("../admin-client.server", () => ({
   adminGraphQL: vi.fn(),

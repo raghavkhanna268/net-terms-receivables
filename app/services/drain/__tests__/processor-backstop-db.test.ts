@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { assertNoQueueLeftovers } from "../../../../test/helpers/queue-leftovers";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 // Mock admin client for GraphQL calls
 vi.mock("../admin-client.server", () => ({
@@ -36,7 +36,7 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-proc-backstop";
   const TEST_SHOP_ID = `shop-proc-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `proc-test-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_SHOP_DOMAIN = `test-proc-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `acc-proc-${TEST_SUFFIX}`;
 
   beforeAll(async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { requestContext } from "~/lib/request-context.server";
-import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
+import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 
 /**
  * S8 Draft Order Delete with id-only payload - DB Integration Tests (#272)

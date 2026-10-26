@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { requestContext } from "~/lib/request-context.server";
-import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
+import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 
 /**
  * S20 Idempotency Integration Tests

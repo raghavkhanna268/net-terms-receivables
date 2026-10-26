@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { assertNoQueueLeftovers } from "../../../test/helpers/queue-leftovers";
+import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 
 /**
  * Integration tests for S6 pgmq queue operations.
