@@ -1758,56 +1758,67 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     });
 
-    it("ruleId ASC tiebreaker for different invoices with same date, amount, and invoiceId prefix", async () => {
-      // Test ruleId ordering when all other fields tie.
-      // Create two DIFFERENT invoices (to avoid Part 2 stage collapse) that happen
-      // to have the same reminder date and same outstanding amount.
-      // Order by invoiceId should distinguish them, but we verify ruleId is also in sort.
+    it("ruleId ASC tiebreaker for same invoice with two rules at same offsetDays", async () => {
+      // Test ruleId ordering when date, amount, and invoiceId all tie.
+      // Two enabled email rules with the SAME offsetDays, both delayed for the SAME invoice.
+      // Part 2 only skips stages where offsetDays < max, so equal offsetDays both survive.
+      // Part 2.5 only skips when a NEWER stage (higher offsetDays) is due today.
+      // With same offsetDays, both rules survive and should be ordered by ruleId ASC.
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
-      const invoiceId1 = `inv-tie-rule-1-${TEST_SUFFIX}`;
-      const invoiceId2 = `inv-tie-rule-2-${TEST_SUFFIX}`;
-      const orderId1 = `gid://shopify/Order/tie-rule-1-${TEST_SUFFIX}`;
-      const orderId2 = `gid://shopify/Order/tie-rule-2-${TEST_SUFFIX}`;
+      const invoiceId = `inv-ruleid-tie-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/ruleid-tie-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "createdAt", "updatedAt"
         )
-        VALUES 
-          (${invoiceId1}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId1},
-           '#TIE-RULE-1', 10000.00, 5000.00, 'open',
-           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}),
-          (${invoiceId2}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId2},
-           '#TIE-RULE-2', 10000.00, 5000.00, 'open',
-           ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow})
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#RULEID-TIE', 10000.00, 5000.00, 'open',
+          ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}
+        )
       `;
 
-      // Each invoice gets a delayed log with a different rule
-      // invoiceId1 with rule2, invoiceId2 with rule1
-      // This tests that invoiceId sorts before ruleId
+      // Insert in REVERSE ruleId order (rule2, then rule1) to ensure physical/insertion
+      // order is opposite of ruleId ASC. Both rules have offsetDays=0.
+      // TEST_RULE_ID_1 = 'rule-catchup-1-...' < TEST_RULE_ID_2 = 'rule-catchup-2-...'
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId1}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId2}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
       `;
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
       await sql`SELECT public.s18_enqueue_reminders()`;
+
+      // Check that Part 2 did NOT skip either (since both have same offsetDays = max)
+      const logs = await sql<{ ruleId: string; status: string }[]>`
+        SELECT "ruleId", status FROM "ReminderLog"
+        WHERE "invoiceId" = ${invoiceId}
+        ORDER BY "ruleId" ASC
+      `;
+      
+      // Both should still be delayed (not skipped by Part 2)
+      expect(logs.length).toBe(2);
+      expect(logs[0].ruleId).toBe(TEST_RULE_ID_1);
+      expect(logs[1].ruleId).toBe(TEST_RULE_ID_2);
 
       const messages = await sql<{ invoiceId: string; ruleId: string }[]>`
         SELECT message->>'invoiceId' AS "invoiceId", message->>'ruleId' AS "ruleId"
         FROM pgmq.q_s6_sync
         WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
           AND message->>'topic' = 'REMINDER_CATCHUP'
+          AND message->>'invoiceId' = ${invoiceId}
         ORDER BY msg_id ASC
       `;
 
+      // Both rules should be enqueued (same offsetDays, both survive Part 2)
+      // and ordered by ruleId ASC despite reverse insertion order
       expect(messages.length).toBe(2);
-      // Same date, same amount -> invoiceId ASC: inv-tie-rule-1 < inv-tie-rule-2
-      expect(messages[0].invoiceId).toBe(invoiceId1);
-      expect(messages[1].invoiceId).toBe(invoiceId2);
+      expect(messages[0].ruleId).toBe(TEST_RULE_ID_1);  // rule-catchup-1 < rule-catchup-2
+      expect(messages[1].ruleId).toBe(TEST_RULE_ID_2);
 
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     });
