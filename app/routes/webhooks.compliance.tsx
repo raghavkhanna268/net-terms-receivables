@@ -207,11 +207,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (shopRecord) {
         const customerGid = `gid://shopify/Customer/${typedPayload.customer.id}`;
         const counts = await redactCustomer(sql, shopRecord.id, customerGid);
+        const aliasRows = counts.payerAliasesDeleted;
         safeLog("info", "compliance_customer_redacted", {
           shopId: shopRecord.id,
           taggedCustomersDeletedCount: counts.taggedCustomersDeleted,
           draftOrdersDeletedCount: counts.draftOrdersDeleted,
           dataRequestsDeletedCount: counts.dataRequestsDeleted,
+          aliasRowsDeletedCount: aliasRows,
           accountAnonymizedCount: counts.buyerAccountAnonymized ? 1 : 0,
           paymentsRedactedCount: counts.paymentsRedacted,
         });
