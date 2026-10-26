@@ -31,6 +31,7 @@ import {
   type CreditStatusSource,
 } from "./credit-status.server";
 import { safeLog } from "~/lib/log.server";
+import { isShopCurrencySupported } from "~/lib/shop-currency.server";
 
 /**
  * Result of a credit status recompute.
@@ -269,7 +270,7 @@ export async function enqueueCreditStatusRecompute(
   sql: Sql,
   shopDomain: string,
   buyerAccountId: string,
-  source: "invoice_change" | "daily_sweep" | "manual",
+  source: "invoice_change" | "daily_sweep" | "manual" | "draft_change",
 ): Promise<void> {
   // Deterministic dedupe key: account ID + date (for daily sweep deduplication)
   // For event-driven, use a unique key per event
@@ -330,4 +331,49 @@ export async function enqueueRecomputeForInvoice(
     invoice.buyerAccountId,
     "invoice_change",
   );
+}
+
+/**
+ * Flag buyer accounts for credit-status recompute after a draft-order change.
+ *
+ * Used by the draft order webhook and bulk paths after committing draft writes.
+ * Debounced: skips accounts that already have an unread CREDIT_STATUS_RECOMPUTE message.
+ * INR-guarded: non-INR shops trigger nothing. Null ids are ignored.
+ * Never throws: an enqueue failure must not fail the draft write.
+ *
+ * @param sql - Database connection
+ * @param shopDomain - Shop domain (e.g., "store.myshopify.com")
+ * @param accountIds - Buyer account IDs to flag (null/undefined values ignored)
+ * @returns Number of accounts actually enqueued
+ */
+export async function flagAccountsForRecompute(
+  sql: Sql,
+  shopDomain: string,
+  accountIds: Iterable<string | null | undefined>,
+): Promise<number> {
+  const ids = [...new Set([...accountIds].filter((x): x is string => !!x))];
+  if (ids.length === 0) return 0;
+
+  const [shop] = await sql<{ currency: string | null }[]>`
+    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  if (!shop || !isShopCurrencySupported(shop.currency)) return 0;
+
+  const queued = await sql<{ id: string }[]>`
+    SELECT DISTINCT message->>'buyerAccountId' AS id
+    FROM pgmq.q_s6_sync
+    WHERE message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+      AND message->>'shop' = ${shopDomain}
+      AND message->>'buyerAccountId' IN ${sql(ids)}
+      AND read_ct = 0
+  `;
+  const skip = new Set(queued.map((r) => r.id));
+
+  let sent = 0;
+  for (const id of ids) {
+    if (skip.has(id)) continue;
+    await enqueueCreditStatusRecompute(sql, shopDomain, id, "draft_change");
+    sent++;
+  }
+  return sent;
 }
