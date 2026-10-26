@@ -107,6 +107,7 @@ const DB_TEST_PATTERNS = [
   "app/services/sync/__tests__/customer.test.ts",
   "app/services/sync/__tests__/order.test.ts",
   "app/services/sync/__tests__/draft-order.test.ts",
+  "app/services/sync/__tests__/draft-order-bulk-db.test.ts",
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
@@ -136,6 +137,9 @@ const DB_TEST_PATTERNS = [
 
   // Reviewer demo DB tests
   "tests/integration/review-csv-matcher-db.test.ts",
+
+  // Confirm-reimport pin DB tests
+  "tests/integration/confirm-reimport-pin-db.test.ts",
 ];
 
 export default defineConfig({
