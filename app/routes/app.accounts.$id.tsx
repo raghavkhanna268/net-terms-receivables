@@ -27,7 +27,7 @@ import { data } from "react-router";
 import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { isAccountActive, isGatingEnforced } from "~/services/gating.server";
+import { isAccountActive, isGatingEnforced, getUsageStats } from "~/services/gating.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import {
   getBuyerOptOutStatus,
@@ -45,9 +45,13 @@ import {
   formatPaiseAmount,
   buildOrderAdminUrl,
 } from "~/lib/aging";
-import { buildAccountOverLimitBannerState } from "~/lib/over-limit-banner";
+import { buildAccountOverLimitBannerState, buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import type { HoldReasonCode } from "~/lib/metafields-contract";
 import { getSyncErrorInfo, type SyncErrorInfo } from "~/lib/sync-error-info";
+import { safeLog, toErrorCode } from "~/lib/log.server";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
+import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -66,6 +70,8 @@ const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
 type SyncState = "pending_retry" | "needs_attention" | "synced";
 
 interface LoaderData {
+  notSupported?: boolean;
+  shopCurrency?: string;
   account: {
     id: string;
     name: string;
@@ -75,7 +81,7 @@ interface LoaderData {
     defaultTermsSource: "explicit" | "tag" | null;
     isGated: boolean;
   } | null;
-  upgradeUrl: string;
+  upgradeUrl: string | null;
   creditStatus: {
     creditLimitAmount: number | null;
     creditLimitPaise: string | null;
@@ -126,6 +132,7 @@ interface LoaderData {
     optOutAt: string | null;
     optOutSource: "merchant" | "link" | null;
   } | null;
+  newAccountsPausedBanner: NewAccountsPausedBannerState;
   error: string | null;
 }
 
@@ -146,9 +153,14 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const shopDomain = session.shop;
   const accountId = params.id;
 
-  const storeHandle = shopDomain.replace(".myshopify.com", "");
-  const appHandle = process.env.APP_HANDLE ?? "net-terms-receivables";
-  const upgradeUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
+  const upgradeUrl = (() => {
+    const handle = getAppHandle();
+    if (handle === null) {
+      safeLog("warn", "plan_url_app_handle_missing", {});
+      return null;
+    }
+    return buildPlanSelectionUrl(shopDomain, handle);
+  })();
 
   if (!accountId) {
     return {
@@ -159,12 +171,18 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
       error: "Account ID is required",
     } satisfies LoaderData;
   }
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
@@ -176,7 +194,35 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
       error: "Shop not found",
+    } satisfies LoaderData;
+  }
+
+  // #292: Check currency gate - if not supported, return minimal payload with no amounts
+  if (!isCurrencyGateOpen(shop.currency)) {
+    return {
+      notSupported: true,
+      shopCurrency: getEffectiveCurrency(shop.currency),
+      account: null,
+      creditStatus: null,
+      companyTotals: null,
+      invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: false,
+      reminderOptOut: null,
+      upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
+      error: null,
     } satisfies LoaderData;
   }
 
@@ -210,6 +256,12 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      newAccountsPausedBanner: {
+        show: false,
+        heading: "",
+        bodyText: "",
+        upgradeUrl: null,
+      },
       error: "Account not found",
     } satisfies LoaderData;
   }
@@ -336,14 +388,40 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     recordId: accountId,
   });
 
+  const gatingEnforced = isGatingEnforced();
+
+  // Only call getUsageStats when gating is enforced (fail-soft on error)
+  let newAccountsPausedBanner: NewAccountsPausedBannerState = {
+    show: false,
+    heading: "",
+    bodyText: "",
+    upgradeUrl: null,
+  };
+
+  if (gatingEnforced) {
+    try {
+      const usage = await getUsageStats(sql, shop.id);
+      newAccountsPausedBanner = buildNewAccountsPausedBannerState(
+        usage.companies.current,
+        usage.companies.limit,
+        gatingEnforced,
+        upgradeUrl
+      );
+    } catch (err) {
+      safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
+      // Fail soft: no banner on error
+    }
+  }
+
   return {
     account,
     creditStatus,
     companyTotals,
     invoices,
-    gatingEnforced: isGatingEnforced(),
+    gatingEnforced,
     reminderOptOut,
     upgradeUrl,
+    newAccountsPausedBanner,
     error: null,
   } satisfies LoaderData;
 };
@@ -359,12 +437,17 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     return { success: false, error: "Account ID is required" } satisfies ActionData;
   }
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
     return { success: false, error: "Shop not found" } satisfies ActionData;
+  }
+
+  // #292: Check currency gate - reject all money edits for non-supported shops
+  if (!isCurrencyGateOpen(shop.currency)) {
+    return { success: false, error: "Currency not supported" } satisfies ActionData;
   }
 
   const [accountRow] = await sql<{ id: string; gatedAt: Date | null }[]>`
@@ -396,7 +479,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
           success: false,
           upgradeRequired: true,
           code: "plan_limit_account_gated",
-          error: "This account is over your plan limit. Upgrade to edit credit limits.",
+          error: "This account was added after you reached your plan limit. Upgrade your plan to manage credit limits for this account.",
         } satisfies ActionData,
         { status: 403 }
       );
@@ -578,7 +661,8 @@ function InvoiceTable({
 }
 
 export default function AccountPage() {
-  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, error } = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, newAccountsPausedBanner, error } = loaderData;
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -590,6 +674,20 @@ export default function AccountPage() {
   useEffect(() => {
     setNoLimitChecked(serverNoLimit);
   }, [serverNoLimit]);
+
+  // #292: When currency not supported, show only the banner
+  if (loaderData.notSupported) {
+    return (
+      <s-page heading="Account">
+        <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
 
   if (error || !account) {
     return (
@@ -608,6 +706,23 @@ export default function AccountPage() {
   return (
     <s-page heading={account.name}>
       <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
+
+      {/* T4: New accounts paused banner */}
+      {newAccountsPausedBanner.show && (
+        <s-section>
+          <s-banner tone="warning" heading={newAccountsPausedBanner.heading}>
+            {newAccountsPausedBanner.bodyText}
+            {newAccountsPausedBanner.upgradeUrl && (
+              <>
+                {" "}
+                <a href={newAccountsPausedBanner.upgradeUrl} target="_top">
+                  Upgrade your plan
+                </a>
+              </>
+            )}
+          </s-banner>
+        </s-section>
+      )}
 
       {actionData?.success && actionData.action === "updateCredit" && (
         <s-section>
@@ -648,9 +763,11 @@ export default function AccountPage() {
                   {bannerState.bodyText}
                   {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
                 </s-text>
-                <s-button href={upgradeUrl} target="_top" variant="secondary">
-                  Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="secondary">
+                    Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-banner>
           </s-section>
@@ -878,9 +995,11 @@ export default function AccountPage() {
                   Credit limit and account detail editing requires an upgrade. Holds still
                   work on all plans.
                 </s-text>
-                <s-button href={upgradeUrl} target="_top" variant="secondary">
-                  Upgrade
-                </s-button>
+                {upgradeUrl && (
+                  <s-button href={upgradeUrl} target="_top" variant="secondary">
+                    Upgrade
+                  </s-button>
+                )}
               </s-stack>
             </s-banner>
             <Form method="post">

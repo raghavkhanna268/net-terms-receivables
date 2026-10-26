@@ -23,6 +23,39 @@ import {
   syncCreditStatusMetafield,
 } from "../credit-status.server";
 
+/**
+ * Races a promise against a timer and rejects with a clear error message if the
+ * timer fires first. Clears the timer once the promise settles to avoid leaks.
+ */
+function withSignalTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+describe("withSignalTimeout helper", () => {
+  it("rejects with the message when the promise never resolves", async () => {
+    vi.useFakeTimers();
+    try {
+      const neverResolves = new Promise<void>(() => {});
+      const testMessage = "test timeout message";
+      const bounded = withSignalTimeout(neverResolves, 100, testMessage);
+
+      vi.advanceTimersByTime(100);
+
+      await expect(bounded).rejects.toThrow(testMessage);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -394,11 +427,16 @@ describeWithDb("syncVersion race condition (real functions)", () => {
     let resolveA: (value: unknown) => void;
     const deferredA = new Promise((resolve) => { resolveA = resolve; });
 
+    // Promise that resolves when call A's metafield write starts (transaction committed)
+    let signalCallAStarted: () => void;
+    const callAStartedPromise = new Promise<void>((resolve) => { signalCallAStarted = resolve; });
+
     let callCount = 0;
     mockShopifyGraphQLRequest.mockImplementation(() => {
       callCount++;
       if (callCount === 1) {
-        // Call A - deferred
+        // Call A - signal transaction committed, then defer
+        signalCallAStarted();
         return deferredA;
       }
       // Call B - immediate success
@@ -414,8 +452,8 @@ describeWithDb("syncVersion race condition (real functions)", () => {
       manualHold: false,
     });
 
-    // Wait a tick for A's transaction to complete
-    await new Promise(r => setTimeout(r, 50));
+    // Wait for A's transaction to commit (signaled when mock is called)
+    await withSignalTimeout(callAStartedPromise, 5000, 'callA never reached shopifyGraphQLRequest');
 
     // Get A's syncVersion
     const [afterA] = await sql<{ syncVersion: number }[]>`
@@ -464,11 +502,16 @@ describeWithDb("syncVersion race condition (real functions)", () => {
     let resolveA: (value: unknown) => void;
     const deferredA = new Promise((resolve) => { resolveA = resolve; });
 
+    // Promise that resolves when call A's metafield write starts (transaction committed)
+    let signalCallAStarted: () => void;
+    const callAStartedPromise = new Promise<void>((resolve) => { signalCallAStarted = resolve; });
+
     let callCount = 0;
     mockShopifyGraphQLRequest.mockImplementation(() => {
       callCount++;
       if (callCount === 1) {
-        // Call A - deferred
+        // Call A - signal transaction committed, then defer
+        signalCallAStarted();
         return deferredA;
       }
       // Call B - fails
@@ -484,8 +527,8 @@ describeWithDb("syncVersion race condition (real functions)", () => {
       manualHold: false,
     });
 
-    // Wait for A's transaction
-    await new Promise(r => setTimeout(r, 50));
+    // Wait for A's transaction to commit (signaled when mock is called)
+    await withSignalTimeout(callAStartedPromise, 5000, 'callA never reached shopifyGraphQLRequest');
 
     // Call B runs but metafield fails → syncPending stays true
     const resultB = await updateCreditStatus(sql, TEST_ACCOUNT_ID, {

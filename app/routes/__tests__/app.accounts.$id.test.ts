@@ -25,6 +25,10 @@ vi.mock("~/lib/request-context.server", () => ({
 vi.mock("~/services/gating.server", () => ({
   isAccountActive: vi.fn().mockReturnValue(true),
   isGatingEnforced: vi.fn().mockReturnValue(false),
+  getUsageStats: vi.fn().mockResolvedValue({
+    companies: { current: 5, limit: 25 },
+    importsThisMonth: { current: 0, limit: -1 },
+  }),
 }));
 
 vi.mock("~/services/credit-status.server", () => ({
@@ -131,8 +135,8 @@ describe("app.accounts.$id loader syncState", () => {
     mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
       const query = strings.join("?");
 
-      if (query.includes("SELECT id FROM \"Shop\"")) {
-        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
       }
 
       if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
@@ -322,8 +326,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"")) {
@@ -478,8 +482,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"")) {
@@ -523,8 +527,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"")) {
@@ -562,8 +566,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("FROM \"BuyerAccount\"") && !query.includes("reminderOptOutAt")) {
@@ -660,8 +664,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
@@ -700,8 +704,8 @@ describe("app.accounts.$id loader syncState", () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
         const query = strings.join("?");
 
-        if (query.includes("SELECT id FROM \"Shop\"")) {
-          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
         }
 
         if (query.includes("SELECT") && query.includes("FROM \"BuyerAccount\"") && query.includes("WHERE id =")) {
@@ -743,6 +747,16 @@ describe("app.accounts.$id loader syncState", () => {
   });
 
   describe("upgradeUrl in loader", () => {
+    const originalAppHandle = process.env.APP_HANDLE;
+
+    beforeEach(() => {
+      process.env.APP_HANDLE = "net-terms-receivables-1";
+    });
+
+    afterEach(() => {
+      process.env.APP_HANDLE = originalAppHandle;
+    });
+
     it("returns upgradeUrl in loader data", async () => {
       setupBaseMocks({ syncPending: false });
 
@@ -762,6 +776,56 @@ describe("app.accounts.$id loader syncState", () => {
       const result = await loader(createLoaderArgs());
 
       expect(result.upgradeUrl).toContain("test-shop");
+    });
+  });
+
+  describe("newAccountsPausedBanner gating behavior", () => {
+    it("does not call getUsageStats when gating flag is off", async () => {
+      const { getUsageStats } = await import("~/services/gating.server");
+      (getUsageStats as ReturnType<typeof vi.fn>).mockClear();
+      mockIsGatingEnforced.mockReturnValue(false);
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      // getUsageStats should NOT have been called when flag is off
+      expect(getUsageStats).not.toHaveBeenCalled();
+      // Banner should not show
+      expect(result.newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("loader resolves with no banner when gating flag is on but getUsageStats rejects", async () => {
+      const { getUsageStats } = await import("~/services/gating.server");
+      mockIsGatingEnforced.mockReturnValue(true);
+      (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Database error"));
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      // Loader should resolve despite getUsageStats error (fail-soft)
+      expect(result.error).toBeNull();
+      // Banner should not show when getUsageStats fails
+      expect(result.newAccountsPausedBanner?.show).toBe(false);
+    });
+
+    it("shows banner when gating flag is on and usage is at limit", async () => {
+      const { getUsageStats } = await import("~/services/gating.server");
+      mockIsGatingEnforced.mockReturnValue(true);
+      // At limit: current=25, limit=25
+      (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
+        companies: { current: 25, limit: 25 },
+        importsThisMonth: { current: 0, limit: -1 },
+      });
+      setupBaseMocks({ syncPending: false });
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs());
+
+      // Banner should show when at limit
+      expect(result.newAccountsPausedBanner?.show).toBe(true);
+      expect(result.newAccountsPausedBanner?.heading).toBeDefined();
     });
   });
 });
@@ -848,8 +912,8 @@ describe("app.accounts.$id action gated credit edit", () => {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
 
-      if (query.includes("SELECT id FROM \"Shop\"")) {
-        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      if (query.includes("SELECT") && query.includes("FROM \"Shop\"") && query.includes("WHERE domain")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR" }]);
       }
 
       if (query.includes("SELECT id, gated_at") && query.includes("FROM \"BuyerAccount\"")) {

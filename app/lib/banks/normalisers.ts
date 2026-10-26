@@ -109,7 +109,7 @@ function parseComponents(dayStr: string, monthStr: string, yearStr: string): str
   const month = parseInt(monthStr, 10);
   let year = parseInt(yearStr, 10);
 
-  // Handle 2-digit year (assume 2000s for 00-99)
+  // Handle 2-digit year: 00-49 → 2000-2049, 50-99 → 1950-1999
   if (year < 100) {
     year = year < 50 ? 2000 + year : 1900 + year;
   }
@@ -288,4 +288,17 @@ export function formatPaiseToDisplay(paise: number): string {
   }
 
   return `₹${groups.reverse().join("")}.${decimal}`;
+}
+
+/**
+ * Normalize ICICI reference number.
+ * Trims whitespace only; does not uppercase since refNo feeds the dedupe hash.
+ * 
+ * @param refNo Raw reference number from ICICI statement
+ * @returns Trimmed reference or undefined if empty
+ */
+export function normalizeIciciRef(refNo: string | undefined): string | undefined {
+  if (!refNo) return undefined;
+  const trimmed = refNo.trim();
+  return trimmed || undefined;
 }

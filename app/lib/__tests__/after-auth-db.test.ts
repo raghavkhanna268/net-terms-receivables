@@ -52,7 +52,7 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
       expect(existingBefore).toBeUndefined();
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN, TEST_TIMEZONE);
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN, TEST_TIMEZONE, "INR");
 
       const [shop] = await sql<{ id: string; domain: string; timezone: string; uninstalledAt: Date | null }[]>`
         SELECT id, domain, timezone, "uninstalledAt"
@@ -78,7 +78,7 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
       expect(beforeReinstall.uninstalledAt).not.toBeNull();
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_2, TEST_TIMEZONE);
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_2, TEST_TIMEZONE, "INR");
 
       const [afterReinstall] = await sql<{ uninstalledAt: Date | null; timezone: string }[]>`
         SELECT "uninstalledAt", timezone FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN_2}
@@ -92,8 +92,8 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
     it("calling upsertShopOnAuth twice results in one row", async () => {
       const { upsertShopOnAuth } = await import("../after-auth.server");
       
-      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_3, TEST_TIMEZONE);
-      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_3, "Asia/Kolkata");
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_3, TEST_TIMEZONE, "INR");
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_3, "Asia/Kolkata", "INR");
 
       const rows = await sql<{ id: string }[]>`
         SELECT id FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN_3}
@@ -113,14 +113,14 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
     it("re-auth with failed tz query preserves existing timezone", async () => {
       const { upsertShopOnAuth } = await import("../after-auth.server");
       
-      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_TZ, "America/New_York");
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_TZ, "America/New_York", "INR");
 
       const [before] = await sql<{ timezone: string }[]>`
         SELECT timezone FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN_TZ}
       `;
       expect(before.timezone).toBe("America/New_York");
 
-      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_TZ, null);
+      await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN_TZ, null, "INR");
 
       const [after] = await sql<{ timezone: string }[]>`
         SELECT timezone FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN_TZ}
@@ -132,7 +132,7 @@ describeWithDb("after-auth Shop row upsert (DB)", () => {
       const { upsertShopOnAuth } = await import("../after-auth.server");
       const FRESH_SHOP = `fresh-tz-fail-${TEST_SUFFIX}.myshopify.com`;
       
-      await upsertShopOnAuth(sql, FRESH_SHOP, null);
+      await upsertShopOnAuth(sql, FRESH_SHOP, null, "INR");
 
       const [shop] = await sql<{ timezone: string }[]>`
         SELECT timezone FROM "Shop" WHERE domain = ${FRESH_SHOP}
@@ -449,7 +449,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(before.uninstalledAt).not.toBeNull();
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "INR");
 
       const [after] = await sql<{
         onboarding_dismissed_at: Date | null;
@@ -473,7 +473,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       expect(existingBefore).toBeUndefined();
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "INR");
 
       const [shop] = await sql<{
         onboarding_dismissed_at: Date | null;
@@ -562,7 +562,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
       `;
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, "Europe/London");
+      await upsertShopOnAuth(sql, TEST_SHOP, "Europe/London", "INR");
 
       const [after] = await sql<{
         onboarding_dismissed_at: Date | null;
@@ -600,7 +600,7 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
     vi.resetModules();
   });
 
-  it("runAfterAuth clears uninstalledAt and preserves other columns when shop is cached", async () => {
+  it("runAfterAuth clears uninstalledAt, preserves plan columns, writes XXX on failed currency read (fail-closed, G4)", async () => {
     const TEST_SHOP = `cached-runafterauth-${TEST_SUFFIX}.myshopify.com`;
 
     await sql`
@@ -616,11 +616,10 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
 
     const [beforeSetup] = await sql<{
       timezone: string;
-      currency: string;
       plan_key: string;
       defaultTermsDays: number | null;
     }[]>`
-      SELECT timezone, currency, plan_key, "defaultTermsDays"
+      SELECT timezone, plan_key, "defaultTermsDays"
       FROM "Shop" WHERE domain = ${TEST_SHOP}
     `;
 
@@ -687,7 +686,7 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
 
     expect(afterReinstall.uninstalledAt).toBeNull();
     expect(afterReinstall.timezone).toBe(beforeSetup.timezone);
-    expect(afterReinstall.currency).toBe(beforeSetup.currency);
+    expect(afterReinstall.currency).toBe("XXX");
     expect(afterReinstall.plan_key).toBe(beforeSetup.plan_key);
     expect(afterReinstall.defaultTermsDays).toBe(beforeSetup.defaultTermsDays);
   });
@@ -703,7 +702,7 @@ describeWithDb("Shop-dependent services after fresh install (DB)", () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
     
     const { upsertShopOnAuth } = await import("../after-auth.server");
-    await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN, "America/New_York");
+    await upsertShopOnAuth(sql, TEST_SHOP_DOMAIN, "America/New_York", "INR");
     
     const [shop] = await sql<{ id: string }[]>`
       SELECT id FROM "Shop" WHERE domain = ${TEST_SHOP_DOMAIN}
@@ -770,6 +769,7 @@ describeWithDb("Shop-dependent services after fresh install (DB)", () => {
         "COMPANY_LOCATIONS_CREATE",
         location,
         `webhook-company-${TEST_SUFFIX}`,
+        {}
       );
       
       expect(result.success).toBe(true);
@@ -1259,7 +1259,7 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
       expect(beforeReinstall.metafieldSyncErrorAt).not.toBeNull();
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "INR");
 
       const [afterReinstall] = await sql<{
         metafieldSyncErrorCode: string | null;
@@ -1297,7 +1297,7 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
       `;
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP, "America/Los_Angeles");
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/Los_Angeles", "INR");
 
       const [afterReauth] = await sql<{
         metafieldSyncErrorCode: string | null;
@@ -1336,7 +1336,7 @@ describeWithDb("upsertShopOnAuth clears metafield sync errors on reinstall (DB)"
       `;
 
       const { upsertShopOnAuth } = await import("../after-auth.server");
-      await upsertShopOnAuth(sql, TEST_SHOP_NEW, "America/Los_Angeles");
+      await upsertShopOnAuth(sql, TEST_SHOP_NEW, "America/Los_Angeles", "INR");
 
       const [existingAccount] = await sql<{
         metafieldSyncErrorCode: string | null;
@@ -1694,5 +1694,336 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
       expect(account.metafieldSyncErrorCode).toBe("access_denied");
       expect(account.metafieldSyncErrorAt?.getTime()).toBe(errorDate.getTime());
     });
+  });
+});
+
+/**
+ * #292: Currency handling tests for INR-only support.
+ * 
+ * Tests verify:
+ * 1. USD stores 'USD' (successful read stores actual currency)
+ * 2. Failed read stores 'XXX' on fresh install
+ * 3. Existing currency is preserved on conflict when new value is 'XXX'
+ */
+describeWithDb("#292: currency handling in upsertShopOnAuth (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-292currency";
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
+  });
+
+  describe("successful currency read stores actual currency", () => {
+    it("upsertShopOnAuth stores 'USD' when currency is USD", async () => {
+      const TEST_SHOP = `usd-shop-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "USD");
+
+      const [shop] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(shop.currency).toBe("USD");
+    });
+
+    it("upsertShopOnAuth stores 'INR' when currency is INR", async () => {
+      const TEST_SHOP = `inr-shop-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Asia/Kolkata", "INR");
+
+      const [shop] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(shop.currency).toBe("INR");
+    });
+
+    it("upsertShopOnAuth stores 'GBP' when currency is GBP", async () => {
+      const TEST_SHOP = `gbp-shop-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Europe/London", "GBP");
+
+      const [shop] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(shop.currency).toBe("GBP");
+    });
+  });
+
+  describe("failed currency read stores 'XXX' on fresh install", () => {
+    it("upsertShopOnAuth stores 'XXX' when currency query fails on fresh install", async () => {
+      const TEST_SHOP = `xxx-fresh-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "XXX");
+
+      const [shop] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(shop.currency).toBe("XXX");
+    });
+  });
+
+  describe("fail-closed: 'XXX' currency written on failed read (G4)", () => {
+    it("re-auth with 'XXX' overwrites existing 'USD' currency (fail-closed)", async () => {
+      const TEST_SHOP = `failclosed-usd-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "USD");
+
+      const [before] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(before.currency).toBe("USD");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "XXX");
+
+      const [after] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(after.currency).toBe("XXX");
+    });
+
+    it("re-auth with 'XXX' overwrites existing 'INR' currency (fail-closed)", async () => {
+      const TEST_SHOP = `failclosed-inr-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Asia/Kolkata", "INR");
+
+      const [before] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(before.currency).toBe("INR");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Asia/Kolkata", "XXX");
+
+      const [after] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(after.currency).toBe("XXX");
+    });
+
+    it("re-auth with valid currency updates existing currency", async () => {
+      const TEST_SHOP = `update-currency-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "USD");
+
+      const [before] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(before.currency).toBe("USD");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Europe/London", "GBP");
+
+      const [after] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(after.currency).toBe("GBP");
+    });
+  });
+
+  describe("reinstall currency handling", () => {
+    it("reinstall with 'XXX' overwrites existing currency (fail-closed, G4)", async () => {
+      const TEST_SHOP = `reinstall-xxx-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Asia/Kolkata", "INR");
+
+      await sql`
+        UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE domain = ${TEST_SHOP}
+      `;
+
+      const [beforeReinstall] = await sql<{ currency: string; uninstalledAt: Date | null }[]>`
+        SELECT currency, "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(beforeReinstall.currency).toBe("INR");
+      expect(beforeReinstall.uninstalledAt).not.toBeNull();
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Asia/Kolkata", "XXX");
+
+      const [afterReinstall] = await sql<{ currency: string; uninstalledAt: Date | null }[]>`
+        SELECT currency, "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(afterReinstall.currency).toBe("XXX");
+      expect(afterReinstall.uninstalledAt).toBeNull();
+    });
+
+    it("reinstall with valid currency updates existing currency", async () => {
+      const TEST_SHOP = `reinstall-update-${TEST_SUFFIX}.myshopify.com`;
+      const { upsertShopOnAuth } = await import("../after-auth.server");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "Asia/Kolkata", "INR");
+
+      await sql`
+        UPDATE "Shop" SET "uninstalledAt" = NOW() WHERE domain = ${TEST_SHOP}
+      `;
+
+      const [beforeReinstall] = await sql<{ currency: string }[]>`
+        SELECT currency FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(beforeReinstall.currency).toBe("INR");
+
+      await upsertShopOnAuth(sql, TEST_SHOP, "America/New_York", "USD");
+
+      const [afterReinstall] = await sql<{ currency: string; uninstalledAt: Date | null }[]>`
+        SELECT currency, "uninstalledAt" FROM "Shop" WHERE domain = ${TEST_SHOP}
+      `;
+      expect(afterReinstall.currency).toBe("USD");
+      expect(afterReinstall.uninstalledAt).toBeNull();
+    });
+  });
+});
+
+/**
+ * #292: Currency flip safety tests.
+ *
+ * Tests verify that reinstall/re-auth of a USD shop with financial rows
+ * does NOT relabel historical amounts as rupees.
+ *
+ * Uses the shared guard to decide whether to block the flip, then passes
+ * the effective currency to upsertShopOnAuth (same as syncShopInfo does).
+ */
+describeWithDb("after-auth currency flip safety (#292)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = `test-${Date.now().toString(36)}-cfs`;
+
+  const SHOP_WITH_INVOICE = `shop-invoice-${TEST_SUFFIX}`;
+  const SHOP_EMPTY = `shop-empty-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shops with USD currency (use example.com to satisfy logging allowlist)
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES
+        (${SHOP_WITH_INVOICE}, ${SHOP_WITH_INVOICE + ".example.com"}, 'USD', NOW(), NOW()),
+        (${SHOP_EMPTY}, ${SHOP_EMPTY + ".example.com"}, 'USD', NOW(), NOW())
+    `;
+
+    // Create a BuyerAccount for shop with invoice (TAGGED_CUSTOMER kind)
+    const BUYER_ID = `buyer-${TEST_SUFFIX}`;
+    const CUSTOMER_ID = `gid://shopify/Customer/test-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, "createdAt", "updatedAt")
+      VALUES (${BUYER_ID}, ${SHOP_WITH_INVOICE}, 'TAGGED_CUSTOMER', ${CUSTOMER_ID}, 'Test Buyer', NOW(), NOW())
+    `;
+
+    // Create an Invoice for SHOP_WITH_INVOICE (must have orderId per Invoice_order_xor_draft constraint)
+    const ORDER_ID = `gid://shopify/Order/test-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "createdAt", "updatedAt")
+      VALUES (${`inv-${TEST_SUFFIX}`}, ${SHOP_WITH_INVOICE}, ${BUYER_ID}, ${ORDER_ID}, '#1001', 1000, 1000, NOW(), NOW(), NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    // Clean up test data
+    await sql`DELETE FROM "Invoice" WHERE id = ${`inv-${TEST_SUFFIX}`}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE id = ${`buyer-${TEST_SUFFIX}`}`;
+    await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_WITH_INVOICE}, ${SHOP_EMPTY})`;
+    await sql.end();
+  });
+
+  it("USD shop with financial rows: re-auth with INR does NOT update currency (blocked)", async () => {
+    const { upsertShopOnAuth } = await import("../after-auth.server");
+    const { hasFinancialRows, decideShopCurrencyUpdate } = await import("../shop-currency-guard.server");
+
+    // Verify the shop has financial rows
+    const hasRows = await hasFinancialRows(sql, SHOP_WITH_INVOICE);
+    expect(hasRows).toBe(true);
+
+    // Verify the guard blocks the flip
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "INR",
+      hasFinancialRows: hasRows,
+    });
+    expect(decision.blocked).toBe(true);
+    expect(decision.effectiveCurrency).toBe("USD");
+
+    // Simulate re-auth: call upsertShopOnAuth with the EFFECTIVE currency (USD, not INR)
+    // In real code, syncShopInfo applies the guard before calling upsertShopOnAuth
+    await upsertShopOnAuth(
+      sql,
+      SHOP_WITH_INVOICE + ".example.com",
+      "Asia/Kolkata",
+      decision.effectiveCurrency,
+    );
+
+    // Verify currency is still USD
+    const [shop] = await sql<{ currency: string }[]>`
+      SELECT currency FROM "Shop" WHERE id = ${SHOP_WITH_INVOICE}
+    `;
+    expect(shop.currency).toBe("USD");
+  });
+
+  it("USD shop with zero financial rows: re-auth with INR updates currency (allowed)", async () => {
+    const { upsertShopOnAuth } = await import("../after-auth.server");
+    const { hasFinancialRows, decideShopCurrencyUpdate } = await import("../shop-currency-guard.server");
+
+    // Verify the shop has no financial rows
+    const hasRows = await hasFinancialRows(sql, SHOP_EMPTY);
+    expect(hasRows).toBe(false);
+
+    // Verify the guard allows the flip
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "INR",
+      hasFinancialRows: hasRows,
+    });
+    expect(decision.blocked).toBe(false);
+    expect(decision.effectiveCurrency).toBe("INR");
+
+    // Simulate re-auth: call upsertShopOnAuth with the live currency (INR)
+    await upsertShopOnAuth(
+      sql,
+      SHOP_EMPTY + ".example.com",
+      "Asia/Kolkata",
+      decision.effectiveCurrency,
+    );
+
+    // Verify currency is now INR
+    const [shop] = await sql<{ currency: string }[]>`
+      SELECT currency FROM "Shop" WHERE id = ${SHOP_EMPTY}
+    `;
+    expect(shop.currency).toBe("INR");
+  });
+
+  it("XXX stored + INR live + financial rows: blocked (fail-closed)", async () => {
+    const { hasFinancialRows, decideShopCurrencyUpdate } = await import("../shop-currency-guard.server");
+
+    // Set currency to XXX to simulate failed query sentinel
+    await sql`
+      UPDATE "Shop" SET currency = 'XXX' WHERE id = ${SHOP_WITH_INVOICE}
+    `;
+
+    // Verify the guard blocks the flip (fail-closed behavior)
+    const hasRows = await hasFinancialRows(sql, SHOP_WITH_INVOICE);
+    expect(hasRows).toBe(true);
+
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "XXX",
+      liveCurrency: "INR",
+      hasFinancialRows: hasRows,
+    });
+    expect(decision.blocked).toBe(true);
+    expect(decision.effectiveCurrency).toBe("XXX");
+
+    // Restore currency to USD for other tests
+    await sql`
+      UPDATE "Shop" SET currency = 'USD' WHERE id = ${SHOP_WITH_INVOICE}
+    `;
   });
 });

@@ -74,6 +74,15 @@ import {
   getSeedDbSummary,
   createSeedDbWriteTracker,
 } from "./lib/seed-summary";
+import {
+  HELD_FIXTURE_ID_PREFIX,
+  HELD_FIXTURE_MAX,
+  HELD_FIXTURE_METAFIELDS_QUERY,
+  HELD_FIXTURE_METAFIELDS_SET_MUTATION,
+  reseedHeldFixtureCurrency,
+  type HeldFixtureRow,
+  type OwnerMetafield,
+} from "./lib/held-fixture-currency";
 
 // -- Types --
 
@@ -285,6 +294,65 @@ export const COMPANY_SEEDS = [
   { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
 ] as const;
 
+/**
+ * Reviewer demo company seed data.
+ *
+ * FOR THE THROWAWAY INR DEMO STORE ONLY - never the main dev store.
+ *
+ * This company "Test Buyer Co" matches the payer text in the synthetic
+ * reviewer CSV (tests/fixtures/banks/synthetic/hdfc-review-synthetic.csv).
+ * The orders created have specific amounts that match the CSV payment amounts
+ * for testing the matching flow.
+ *
+ * This is NOT included in COMPANY_SEEDS to avoid modifying the existing
+ * 5-company test data. It's seeded separately via seedReviewerDemoCompany().
+ *
+ * All data is FICTIONAL - no real company names, domains, or identifiers.
+ */
+export const REVIEWER_DEMO_COMPANY_SEED = {
+  key: "company-reviewer-demo",
+  name: "Test Buyer Co",
+  city: "Bengaluru",
+  contact: {
+    firstName: "Demo",
+    lastName: "Reviewer",
+    email: "demo.reviewer@test-buyer.example",
+  },
+} as const;
+
+/**
+ * Reviewer demo order seeds.
+ *
+ * FOR THE THROWAWAY INR DEMO STORE ONLY - never the main dev store.
+ * Enabled via --reviewer-demo flag or SEED_REVIEWER_DEMO=1 env var.
+ *
+ * These orders have specific amounts matching the synthetic reviewer CSV:
+ * - Order #1001: ₹10,000 - exact match for CSV row 1 (NEFT, ₹10,000)
+ * - Order #1002: ₹5,000 - exact match for CSV row 2, partial for row 3
+ *
+ * Order names are set explicitly via OrderCreateOrderInput.name:
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/input-objects/OrderCreateOrderInput
+ * "name: The name of the order. Can also be set by the API to be any string value."
+ */
+export const REVIEWER_DEMO_ORDERS = [
+  {
+    orderKey: "reviewer-demo-1001",
+    orderName: "#1001",
+    amountInr: 10000,
+    productTitle: "Reviewer Demo Product A",
+    daysAgo: 5,
+    locationTermsDays: 30,
+  },
+  {
+    orderKey: "reviewer-demo-1002",
+    orderName: "#1002",
+    amountInr: 5000,
+    productTitle: "Reviewer Demo Product B",
+    daysAgo: 5,
+    locationTermsDays: 30,
+  },
+] as const;
+
 // B2B order distribution - each company gets orders from different locations (different terms)
 // daysAgo creates backdated orders via processedAt, some will be overdue
 // locationTermsDays determines which location (and thus which payment terms) to use
@@ -336,6 +404,7 @@ export interface SeedState {
   reset: boolean;
   resetApply: boolean;
   reportDuplicates: boolean;
+  reviewerDemo: boolean;
   currencyCode: string;
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
@@ -1739,7 +1808,7 @@ async function setMainContact(
 async function continueWithExistingCompany(
   state: SeedState,
   company: CompanyNode,
-  seed: (typeof COMPANY_SEEDS)[number],
+  seed: CompanySeed,
   externalId: string
 ): Promise<CompanyData | null> {
   const contactRoles = await fetchCompanyContactRoles(state, company.id);
@@ -1962,9 +2031,21 @@ export function buildCompanyCreateInputWithoutContact(
   };
 }
 
+/** Shape of a company seed (COMPANY_SEEDS or REVIEWER_DEMO_COMPANY_SEED) */
+export interface CompanySeed {
+  key: string;
+  name: string;
+  city: string;
+  contact: {
+    firstName: string;
+    lastName: string;
+    email: string;
+  };
+}
+
 export async function createCompanyWithLocations(
   state: SeedState,
-  seed: (typeof COMPANY_SEEDS)[number],
+  seed: CompanySeed,
   externalId: string
 ): Promise<CompanyData | null> {
   const firstLoc = LOCATION_TERMS[0];
@@ -3297,6 +3378,7 @@ export function buildB2BOrderInput(
     processedAt: string;
     currencyCode: string;
     city?: string;
+    name?: string;
   }
 ): { order: Record<string, unknown>; options: Record<string, unknown> } {
   const city = options.city ?? DEFAULT_ORDER_CITY;
@@ -3305,6 +3387,7 @@ export function buildB2BOrderInput(
     order: {
       tags: [SEED_TAG, options.orderKey],
       companyLocationId: options.companyLocationId,
+      ...(options.name && { name: options.name }),
       customer: { toAssociate: { id: options.customerId } },
       currency: options.currencyCode,
       financialStatus: "PENDING",
@@ -3372,6 +3455,7 @@ export async function createOrder(
     amount: number;
     processedAt: string;
     expectedTermsDays: number;
+    name?: string;
   }
 ): Promise<{ id: string; name: string } | null> {
   const variables = buildB2BOrderInput({
@@ -3382,6 +3466,7 @@ export async function createOrder(
     amount: options.amount,
     processedAt: options.processedAt,
     currencyCode: state.currencyCode,
+    name: options.name,
   });
 
   // Retry loop with exponential backoff for throttle errors
@@ -3455,6 +3540,160 @@ export async function createOrder(
 
   // Should not reach here, but safety return
   return null;
+}
+
+// -- Reviewer Demo Seeding --
+
+/**
+ * Seed the reviewer demo company and orders.
+ *
+ * FOR THE THROWAWAY INR DEMO STORE ONLY - never the main dev store.
+ *
+ * This creates a company "Test Buyer Co" with specific orders that match
+ * the synthetic reviewer CSV (hdfc-review-synthetic.csv). The orders have
+ * specific amounts and names (#1001, #1002) to test the matching flow.
+ *
+ * This function is:
+ * - ADDITIVE: Does not modify the existing 5 COMPANY_SEEDS companies
+ * - IDEMPOTENT: Re-running creates no duplicates (uses externalId)
+ *
+ * The company and orders match the fixture data in:
+ * - tests/fixtures/reviewer-demo.ts
+ */
+export async function seedReviewerDemoCompany(state: SeedState): Promise<void> {
+  console.log("\n🎬 Seeding reviewer demo company...");
+  console.log("   (FOR THROWAWAY INR DEMO STORE ONLY - not main dev store)");
+
+  const seed = REVIEWER_DEMO_COMPANY_SEED;
+  const externalId = `${SEED_PREFIX}${seed.key}`;
+
+  // Check if company already exists
+  const existing = await findCompanyByExternalId(state, externalId);
+  
+  if (existing) {
+    console.log(`  ✅ Reviewer demo company already exists: ${existing.id}`);
+    
+    // Store in state for order creation
+    const contactRoles = await fetchCompanyContactRoles(state, existing.id);
+    const locations = new Map<number, string>();
+    for (const edge of existing.locations.edges) {
+      for (const loc of LOCATION_TERMS) {
+        const locName = edge.node.name;
+        if (locName.includes(loc.suffix)) {
+          locations.set(loc.dueInDays, edge.node.id);
+        }
+      }
+    }
+    
+    state.companies.set(seed.key, {
+      id: existing.id,
+      contactId: existing.contacts.edges[0]?.node.id ?? "",
+      contactCustomerId: existing.contacts.edges[0]?.node.customer.id ?? "",
+      locations,
+      contactRoles,
+    });
+    state.unchangedCount.companies++;
+  } else if (state.dryRun) {
+    console.log(`  [dry-run] Would create reviewer demo company (${externalId})`);
+    state.createdCount.companies++;
+    return;
+  } else {
+    // Create the company
+    const companyData = await createCompanyWithLocations(state, seed, externalId);
+    if (!companyData) {
+      state.failedCount.companies++;
+      state.errors.push(`Failed to create reviewer demo company: ${externalId}`);
+      return;
+    }
+    state.companies.set(seed.key, companyData);
+    console.log(`  ✅ Created reviewer demo company: ${companyData.id}`);
+  }
+
+  // Seed the reviewer demo orders
+  await seedReviewerDemoOrders(state);
+}
+
+/**
+ * Seed the specific orders for the reviewer demo.
+ * These have specific amounts matching the synthetic reviewer CSV.
+ * Order names are assigned by Shopify and logged for verification.
+ */
+async function seedReviewerDemoOrders(state: SeedState): Promise<void> {
+  console.log("\n📝 Seeding reviewer demo orders...");
+  console.log("   (Order names are Shopify-assigned; logged below for reference)");
+
+  const companyData = state.companies.get(REVIEWER_DEMO_COMPANY_SEED.key);
+  if (!companyData) {
+    console.log("  ⚠️  Skipping: reviewer demo company not found in state");
+    return;
+  }
+
+  for (const orderSpec of REVIEWER_DEMO_ORDERS) {
+    // Use SEED_PREFIX (like regular orders) so findOrderByTag matches correctly
+    // buildB2BOrderInput creates tags: [SEED_TAG, orderKey], so the full key
+    // must be passed for the lookup to find the second tag element
+    const orderKey = `${SEED_PREFIX}${orderSpec.orderKey}`;
+    
+    // Check if order already exists (idempotency)
+    const existingOrder = await findOrderByTag(state, orderKey);
+    if (existingOrder) {
+      console.log(`  ✅ Order ${orderSpec.orderKey} already exists`);
+      state.unchangedCount.orders++;
+      continue;
+    }
+
+    const locationId = companyData.locations.get(orderSpec.locationTermsDays);
+    if (!locationId) {
+      console.log(`  ⚠️  Skipping ${orderSpec.orderKey}: no Net-${orderSpec.locationTermsDays} location`);
+      state.skippedCount.orders++;
+      continue;
+    }
+
+    const processedAt = new Date();
+    processedAt.setDate(processedAt.getDate() - orderSpec.daysAgo);
+
+    if (state.dryRun) {
+      console.log(
+        `  [dry-run] Would create reviewer demo order ${orderSpec.orderName}: ` +
+        formatCurrency(orderSpec.amountInr, state.currencyCode)
+      );
+      state.createdCount.orders++;
+      continue;
+    }
+
+    // Create the order with explicit name via OrderCreateOrderInput.name
+    const order = await createOrder(state, {
+      orderKey: orderKey,
+      companyLocationId: locationId,
+      customerId: companyData.contactCustomerId,
+      productTitle: orderSpec.productTitle,
+      amount: orderSpec.amountInr,
+      processedAt: processedAt.toISOString(),
+      expectedTermsDays: orderSpec.locationTermsDays,
+      name: orderSpec.orderName,
+    });
+
+    if (!order) {
+      state.failedCount.orders++;
+      state.errors.push(`Failed to create reviewer demo order ${orderSpec.orderName}`);
+      continue;
+    }
+
+    // Verify API accepted the requested order name
+    const nameMatches = order.name === orderSpec.orderName;
+    if (!nameMatches) {
+      state.failedCount.orders++;
+      state.errors.push(`Order name mismatch for ${orderSpec.orderKey}: expected ${orderSpec.orderName}, nameMatches=${nameMatches}`);
+      continue;
+    }
+
+    console.log(
+      `  ✅ Created reviewer demo order ${orderSpec.orderKey}: ` +
+      `nameMatches=${nameMatches}, ` +
+      formatCurrency(orderSpec.amountInr, state.currencyCode)
+    );
+    state.createdCount.orders++;
+  }
 }
 
 // -- Database Seeding --
@@ -3673,14 +3912,107 @@ export function printDatabaseSeedSQL(state: SeedState): void {
 
 // -- Main --
 
-function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean } {
+/**
+ * Check if the reviewer demo seed is enabled.
+ * Exported for testing. Used by parseArgs().
+ *
+ * @param argv - Command line arguments (e.g., process.argv.slice(2))
+ * @param env - Environment variables (e.g., process.env)
+ */
+export function isReviewerDemoEnabled(argv: string[], env: Record<string, string | undefined>): boolean {
+  if (argv.includes("--reviewer-demo")) return true;
+  if (env.SEED_REVIEWER_DEMO === "1") return true;
+  if (env.SEED_REVIEWER_DEMO === "0") return false;
+  return false;
+}
+
+function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean; reseedHeldCurrencyMode: boolean; reviewerDemo: boolean } {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
     reset: args.includes("--reset"),
     resetApply: args.includes("--apply"),
     reportDuplicatesMode: args.includes("--report-duplicates"),
+    reseedHeldCurrencyMode: args.includes("--reseed-held-currency"),
+    reviewerDemo: isReviewerDemoEnabled(args, process.env),
   };
+}
+
+/**
+ * --reseed-held-currency: update the existing credit_status metafield on the held
+ * seed fixtures to the shop currency (INR) in place. DB access is READ ONLY; the
+ * only writes are metafieldsSet on those fixtures' owners. Counts/enums only.
+ */
+export async function runReseedHeldCurrency(state: SeedState): Promise<boolean> {
+  console.log("\n🔒 Re-seeding held fixtures' credit_status currency...");
+  if (!state.databaseUrl) {
+    console.error("  ❌ held_fixture_currency: refused (reason=no_database)");
+    return false;
+  }
+  const sql = postgres(state.databaseUrl, { max: 1 });
+  try {
+    const result = await reseedHeldFixtureCurrency({
+      shopCurrency: state.currencyCode,
+      dryRun: state.dryRun,
+      loadHeldFixtures: async () =>
+        sql.begin("READ ONLY", async (tx) => {
+          const rows = await tx<HeldFixtureRow[]>`
+            SELECT ba.id, ba."companyLocationId", ba."customerId"
+            FROM "BuyerAccount" ba
+            JOIN "Shop" s ON s.id = ba."shopId"
+            WHERE s.domain = ${state.shop}
+              AND ba.id LIKE ${HELD_FIXTURE_ID_PREFIX + "%"}
+              AND (ba."holdState" = 'HELD' OR ba."manualHold" = true)
+            ORDER BY ba.id
+            LIMIT ${HELD_FIXTURE_MAX + 1}
+          `;
+          return [...rows];
+        }),
+      readMetafields: async (ownerIds) => {
+        const res = await graphql<{ nodes: Array<{ id?: string; metafield?: OwnerMetafield | null } | null> }>(
+          state,
+          HELD_FIXTURE_METAFIELDS_QUERY,
+          { ids: ownerIds }
+        );
+        if (res.errors && res.errors.length > 0) {
+          throw new Error("held_fixture_read_failed");
+        }
+        const map = new Map<string, OwnerMetafield | null>();
+        for (const node of res.data?.nodes ?? []) {
+          if (node && typeof node.id === "string") map.set(node.id, node.metafield ?? null);
+        }
+        return map;
+      },
+      writeMetafield: async (ownerId, value, compareDigest) => {
+        const res = await graphql<{ metafieldsSet: { userErrors: Array<{ field: string[] | null; code: string | null }> } }>(
+          state,
+          HELD_FIXTURE_METAFIELDS_SET_MUTATION,
+          {
+            metafields: [
+              { ownerId, namespace: "$app", key: "credit_status", type: "json", value, compareDigest },
+            ],
+          },
+          { isMutation: true, mutationName: "metafieldsSet" }
+        );
+        if (res.errors && res.errors.length > 0) return false;
+        const userErrors = res.data?.metafieldsSet?.userErrors ?? [];
+        if (userErrors.length > 0) {
+          const codes = userErrors.map((e) => (e.code && /^[A-Z_]{1,40}$/.test(e.code) ? e.code : "OTHER"));
+          console.error(`  ❌ metafieldsSet userErrors: count=${userErrors.length} codes=[${codes.join(",")}]`);
+          return false;
+        }
+        return true;
+      },
+    });
+    if (!result.ok) {
+      console.error(`  ❌ held_fixture_currency: failed (reason=${result.reason})`);
+      return false;
+    }
+    console.log("  ✅ held_fixture_currency: ok");
+    return true;
+  } finally {
+    await sql.end();
+  }
 }
 
 function validateEnv(): { shop: string; token: string; databaseUrl: string | null } | null {
@@ -3727,7 +4059,7 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset, resetApply, reportDuplicatesMode } = parseArgs();
+  const { dryRun, reset, resetApply, reportDuplicatesMode, reseedHeldCurrencyMode, reviewerDemo } = parseArgs();
   const env = validateEnv();
 
   if (!env) {
@@ -3742,6 +4074,7 @@ export async function main(): Promise<void> {
     reset,
     resetApply,
     reportDuplicates: reportDuplicatesMode,
+    reviewerDemo,
     currencyCode: "",
     companies: new Map(),
     paymentTermsTemplates: [],
@@ -3762,10 +4095,14 @@ export async function main(): Promise<void> {
 
   console.log(`\nShop: [configured]`);
   const modeStr = reportDuplicatesMode ? "REPORT DUPLICATES (read-only)" 
+    : reseedHeldCurrencyMode ? (dryRun ? "RESEED HELD CURRENCY (dry-run)" : "RESEED HELD CURRENCY")
     : dryRun ? "DRY RUN (read-only lookups, no mutations)" 
     : reset ? (resetApply ? "RESET + APPLY (will delete)" : "RESET (dry-run, use --apply to delete)") 
     : "SEED";
   console.log(`Mode: ${modeStr}`);
+  if (reviewerDemo) {
+    console.log(`Reviewer Demo: ENABLED (--reviewer-demo or SEED_REVIEWER_DEMO=1)`);
+  }
   console.log(`Database: ${env.databaseUrl ? "Connected" : "Not configured (will print SQL)"}`);
 
   // Preflight checks
@@ -3793,6 +4130,12 @@ export async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // Held fixtures currency re-seed (in-place metafield update only, then exit)
+  if (reseedHeldCurrencyMode) {
+    const ok = await runReseedHeldCurrency(state);
+    process.exit(ok ? 0 : 1);
+  }
+
   // Reset if requested
   if (reset) {
     const resetOk = await resetSeedData(state);
@@ -3813,6 +4156,11 @@ export async function main(): Promise<void> {
   
   // Seed orders for tagged (non-B2B) customers
   await seedTaggedCustomerOrders(state);
+
+  // Seed reviewer demo company and orders (opt-in via --reviewer-demo or SEED_REVIEWER_DEMO=1)
+  if (state.reviewerDemo) {
+    await seedReviewerDemoCompany(state);
+  }
 
   // Seed database for S9 inference
   await seedDatabase(state);

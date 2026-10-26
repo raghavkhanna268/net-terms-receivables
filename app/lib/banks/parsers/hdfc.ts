@@ -317,11 +317,14 @@ function extractHdfcRow(
         : String(valueDateCell)
       : undefined;
 
+  // Keep raw ref (trimmed only) for dedupe hash stability
+  const rawRef = row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined;
+
   return {
     dateRaw: dateRaw instanceof Date ? dateRaw : dateStr,
     valueDateRaw,
     narration,
-    refNo: row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined,
+    refNo: rawRef || undefined,
     debitRaw: row[columns.withdrawalCol] ? String(row[columns.withdrawalCol]) : undefined,
     creditRaw: row[columns.depositCol] ? String(row[columns.depositCol]) : undefined,
     balanceRaw: row[columns.balanceCol] ? String(row[columns.balanceCol]) : undefined,
