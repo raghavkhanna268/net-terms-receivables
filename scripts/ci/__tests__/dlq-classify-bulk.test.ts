@@ -119,6 +119,6 @@ describe("dlq-classify-bulk.sql", () => {
   it("is a choice option of prod-readonly-query.yml with no new inputs", () => {
     expect(wf).toMatch(/^\s+- dlq-classify-bulk$/m);
     const inputs = [...wf.matchAll(/^ {6}([a-z_]+):$/gm)].map((m) => m[1]);
-    expect(inputs).toEqual(["query", "msg_ids", "since", "location_id"]);
+    expect(inputs).toEqual(["query", "msg_ids", "since", "location_id", "shop_idx"]);
   });
 });

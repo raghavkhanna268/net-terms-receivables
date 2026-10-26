@@ -343,17 +343,17 @@ function computeRegistrationStatus(
 ): RegistrationStatus {
   return {
     validation: {
-      name: "Validation Function",
+      name: "Checkout credit check",
       status: validationError ? "error" : validation ? "ok" : "missing",
       errorCode: validationError ?? undefined,
     },
     paymentCustomization: {
-      name: "Payment Customization",
+      name: "Hide net terms at checkout",
       status: paymentCustomizationError ? "error" : paymentCustomization ? "ok" : "missing",
       errorCode: paymentCustomizationError ?? undefined,
     },
     metafieldDefinitions: {
-      name: "Metafield Definitions",
+      name: "Store data fields",
       status: metafieldStatus.status,
       errorCode: metafieldStatus.errorCode,
     },
@@ -590,19 +590,19 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         paymentCustomization: RegistrationItem;
         metafieldDefinitions: RegistrationItem;
       } = {
-        validation: { name: "Validation Function", status: currentStatus.validation.status },
-        paymentCustomization: { name: "Payment Customization", status: currentStatus.paymentCustomization.status },
-        metafieldDefinitions: { name: "Metafield Definitions", status: currentStatus.metafieldDefinitions.status },
+        validation: { name: "Checkout credit check", status: currentStatus.validation.status },
+        paymentCustomization: { name: "Hide net terms at checkout", status: currentStatus.paymentCustomization.status },
+        metafieldDefinitions: { name: "Store data fields", status: currentStatus.metafieldDefinitions.status },
       };
 
       if (currentStatus.validation.status !== "ok") {
         try {
           await ensureValidation(admin);
-          results.validation = { name: "Validation Function", status: "ok" };
+          results.validation = { name: "Checkout credit check", status: "ok" };
           safeLog("info", "onboarding.retry_validation_success", { shopHash: hash });
         } catch (e) {
           results.validation = {
-            name: "Validation Function",
+            name: "Checkout credit check",
             status: "error",
             errorCode: toErrorCode(e),
           };
@@ -613,11 +613,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       if (currentStatus.paymentCustomization.status !== "ok") {
         try {
           await ensurePaymentCustomization(admin);
-          results.paymentCustomization = { name: "Payment Customization", status: "ok" };
+          results.paymentCustomization = { name: "Hide net terms at checkout", status: "ok" };
           safeLog("info", "onboarding.retry_payment_customization_success", { shopHash: hash });
         } catch (e) {
           results.paymentCustomization = {
-            name: "Payment Customization",
+            name: "Hide net terms at checkout",
             status: "error",
             errorCode: toErrorCode(e),
           };
@@ -628,11 +628,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       if (currentStatus.metafieldDefinitions.status !== "ok") {
         try {
           await ensureMetafieldDefinitions(admin);
-          results.metafieldDefinitions = { name: "Metafield Definitions", status: "ok" };
+          results.metafieldDefinitions = { name: "Store data fields", status: "ok" };
           safeLog("info", "onboarding.retry_metafield_definitions_success", { shopHash: hash });
         } catch (e) {
           results.metafieldDefinitions = {
-            name: "Metafield Definitions",
+            name: "Store data fields",
             status: "error",
             errorCode: toErrorCode(e),
           };
@@ -700,9 +700,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         shopHash: hash,
         reason: result.reason,
       });
+      const syncReasonCopy: Record<string, string> = {
+        already_queued: "A sync is already running. Refresh the page to check progress.",
+        in_progress: "A sync is already running. Refresh the page to check progress.",
+        unsupported_currency: "Initial sync is available only for stores that use INR.",
+      };
+      const errorMessage = syncReasonCopy[result.reason ?? ""] ?? "Sync could not be started. Try again or contact support.";
       return {
         success: false,
-        error: `Sync ${result.reason?.replace("_", " ")}`,
+        error: errorMessage,
         action: "start_sync",
       };
     }
@@ -1046,7 +1052,7 @@ export default function OnboardingPage() {
         <s-section>
           <s-banner tone="info" heading="Done">
             {actionData.action === "dismissed"
-              ? "Setup guide dismissed. You can reopen it from the help menu."
+              ? "Setup guide dismissed. You can reopen it from the Setup Guide in the app menu."
               : "Setup guide reopened."}
           </s-banner>
         </s-section>
@@ -1105,7 +1111,7 @@ export default function OnboardingPage() {
       </s-section>
 
       {currentRegistrationStatus && (
-        <s-section heading="App Registration &amp; Metafield Definitions">
+        <s-section heading="Checkout connection">
           <RegistrationStatusSection
             status={currentRegistrationStatus}
             isRetrying={isRetrying}

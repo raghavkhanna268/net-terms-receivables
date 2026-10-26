@@ -9,6 +9,8 @@
 #     BEGIN TRANSACTION READ ONLY ... ROLLBACK inside each script
 #   - Scripts print only ids, enums, booleans, timestamps and counts (no PII)
 #   - msg_ids input is validated as a comma-separated list of integers
+#   - shop_idx is a choice (1|2|reviewer), never a domain; the domains come
+#     only from secrets (E2E_SHOP, ALLOWED_DEV_STORE), validated then masked
 
 name: Prod Read-only Query
 
@@ -25,6 +27,7 @@ on:
           - g3-noninr-is-dev-store
           - g3-shop-config-currency-counts
           - hold-audit-s12
+          - initial-sync-timing
           - offline-session-preflight
           - pgmq-archive-age
           - post-drain-aggregates
@@ -48,6 +51,15 @@ on:
         required: false
         default: "0"
         type: string
+      shop_idx:
+        description: "Shop for initial-sync-timing: 1 = E2E_SHOP, 2 = ALLOWED_DEV_STORE, reviewer = the single other installed shop (fails closed unless exactly one)"
+        required: false
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - reviewer
 
 permissions:
   contents: read
@@ -68,6 +80,7 @@ jobs:
           MSG_IDS: ${{ inputs.msg_ids }}
           SINCE: ${{ inputs.since }}
           LOCATION_ID: ${{ inputs.location_id }}
+          SHOP_IDX: ${{ inputs.shop_idx }}
         run: |
           set -euo pipefail
           if [[ ! "$MSG_IDS" =~ ^[0-9]+(,[0-9]+){0,49}$ ]]; then
@@ -80,6 +93,10 @@ jobs:
           fi
           if [[ ! "$LOCATION_ID" =~ ^[0-9]{1,20}$ ]]; then
             echo "::error::location_id must be numeric"
+            exit 1
+          fi
+          if [[ ! "$SHOP_IDX" =~ ^(1|2|reviewer)$ ]]; then
+            echo "::error::shop_idx must be 1, 2 or reviewer"
             exit 1
           fi
 
@@ -95,9 +112,15 @@ jobs:
           MSG_IDS: ${{ inputs.msg_ids }}
           SINCE: ${{ inputs.since }}
           LOCATION_ID: ${{ inputs.location_id }}
+          SHOP_IDX: ${{ inputs.shop_idx }}
           # Secret, so the env header prints ***. Used only as the psql
-          # variable :allowed (g3-noninr-is-dev-store); never printed.
+          # variable :allowed (g3-noninr-is-dev-store and the shop_kind
+          # label 'main'); never printed.
           ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          # Secret, used only as the psql variable :e2e (shop_kind label
+          # 'e2e', scripts/ci/shop-labels.ts; initial-sync-timing shop_idx 1
+          # and the reviewer exclusion); never printed.
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
           PGOPTIONS: "-c default_transaction_read_only=on"
         run: |
           set -euo pipefail
@@ -110,9 +133,40 @@ jobs:
               echo "::add-mask::$ALLOWED"
             fi
           fi
+          E2E="${E2E_SHOP:-}"
+          if [ -n "$E2E" ]; then
+            # Validate before masking so a multi-line value cannot slip past ::add-mask::.
+            if [[ ! "$E2E" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              E2E=""
+            else
+              echo "::add-mask::$E2E"
+            fi
+          fi
+          # Shop identity labels (shop_kind main / e2e / other_N) need both
+          # secrets, valid and different. Fail closed rather than print
+          # 'unknown' for every shop. List = SHOP_LABEL_SCRIPTS in
+          # scripts/ci/shop-labels.ts.
+          # shop-labels-guard:start
+          case "$QUERY_NAME" in
+            offline-session-preflight|post-drain-aggregates|s12-hold-coverage|s18-reminder-rule-dupes|s18-reminders-due-7d)
+              if [ -z "$ALLOWED" ] || [ -z "$E2E" ] || [ "$ALLOWED" = "$E2E" ]; then
+                echo "::error::ALLOWED_DEV_STORE and E2E_SHOP secrets must both be set, valid and different (required for shop_kind labels by $QUERY_NAME)"
+                exit 1
+              fi
+              ;;
+          esac
+          # shop-labels-guard:end
           if [ "$QUERY_NAME" = "g3-noninr-is-dev-store" ] && [ -z "$ALLOWED" ]; then
             echo "::error::ALLOWED_DEV_STORE secret is unset or invalid (required by g3-noninr-is-dev-store)"
             exit 1
+          fi
+          if [ "$QUERY_NAME" = "initial-sync-timing" ]; then
+            # Both domains are needed: shop_idx 1/2 select them and reviewer
+            # excludes them. Fail closed if either is missing or they coincide.
+            if [ -z "$E2E" ] || [ -z "$ALLOWED" ] || [ "$E2E" = "$ALLOWED" ]; then
+              echo "::error::E2E_SHOP and ALLOWED_DEV_STORE secrets must both be set, valid and different (required by initial-sync-timing)"
+              exit 1
+            fi
           fi
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL_MIGRATIONS secret not set"
@@ -128,4 +182,4 @@ jobs:
             sudo apt-get install -y -qq postgresql-client
           fi
           source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
-          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${ALLOWED}" -v "msg_ids=${MSG_IDS}" -v "since=${SINCE}" -v "location_id=${LOCATION_ID}" -f "$FILE" "$DATABASE_URL"
+          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${ALLOWED}" -v "e2e=${E2E}" -v "shop_idx=${SHOP_IDX}" -v "msg_ids=${MSG_IDS}" -v "since=${SINCE}" -v "location_id=${LOCATION_ID}" -f "$FILE" "$DATABASE_URL"

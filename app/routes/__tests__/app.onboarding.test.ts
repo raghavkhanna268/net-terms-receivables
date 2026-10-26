@@ -1681,7 +1681,7 @@ describe("S23-04: initial sync", () => {
       expect(result).not.toBeInstanceOf(Response);
       const data = result as { success: boolean; error: string };
       expect(data.success).toBe(false);
-      expect(data.error).toContain("already queued");
+      expect(data.error).toBe("A sync is already running. Refresh the page to check progress.");
       expect(enqueueCount).toBe(0);
     });
 
@@ -1808,6 +1808,260 @@ describe("S23-04: initial sync", () => {
 
       consoleInfoSpy.mockRestore();
     });
+
+    it("in_progress status returns user-friendly message without raw code", async () => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([{ reconcile_stage: "companies", completed_at: null, failure_count: 0 }]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      }));
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; error: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Sync already in progress or complete");
+      expect(data.error).not.toContain("in_progress");
+    });
+
+    it("unsupported_currency reason returns user-friendly message without raw code", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("SELECT currency FROM")) {
+          return Promise.resolve([{ currency: "USD" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; error: string; action: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Sync not available for non-INR stores");
+      expect(data.error).not.toContain("unsupported_currency");
+    });
+  });
+});
+
+describe("sync reason code map: real action paths", () => {
+  const TEST_SHOP = "test-reason-map.myshopify.com";
+  const TEST_SHOP_ID = "shop-reason-map";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("already_queued reason returns mapped message without raw code", async () => {
+    vi.doMock("~/lib/initial-sync.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/lib/initial-sync.server")>();
+      return {
+        ...actual,
+        getInitialSyncState: vi.fn().mockResolvedValue({ status: "not_started" }),
+        enqueueInitialSync: vi.fn().mockResolvedValue({ enqueued: false, reason: "already_queued" }),
+      };
+    });
+
+    const { getRequestSql } = await import("~/lib/request-context.server");
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      if (query.includes("SELECT currency FROM")) {
+        return Promise.resolve([{ currency: "INR" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { action } = await import("../app.onboarding");
+
+    const formData = new FormData();
+    formData.set("_action", "start_sync");
+
+    const result = await action({
+      request: new Request("https://example.com/app/onboarding", {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as never);
+
+    expect(result).not.toBeInstanceOf(Response);
+    const data = result as { success: boolean; error: string };
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("A sync is already running. Refresh the page to check progress.");
+    expect(data.error).not.toContain("already_queued");
+  });
+
+  it("in_progress reason returns mapped message without raw code", async () => {
+    vi.doMock("~/lib/initial-sync.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/lib/initial-sync.server")>();
+      return {
+        ...actual,
+        getInitialSyncState: vi.fn().mockResolvedValue({ status: "not_started" }),
+        enqueueInitialSync: vi.fn().mockResolvedValue({ enqueued: false, reason: "in_progress" }),
+      };
+    });
+
+    const { getRequestSql } = await import("~/lib/request-context.server");
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      if (query.includes("SELECT currency FROM")) {
+        return Promise.resolve([{ currency: "INR" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { action } = await import("../app.onboarding");
+
+    const formData = new FormData();
+    formData.set("_action", "start_sync");
+
+    const result = await action({
+      request: new Request("https://example.com/app/onboarding", {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as never);
+
+    expect(result).not.toBeInstanceOf(Response);
+    const data = result as { success: boolean; error: string };
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("A sync is already running. Refresh the page to check progress.");
+    expect(data.error).not.toContain("in_progress");
+  });
+
+  it("unknown reason returns fallback message without raw code", async () => {
+    vi.doMock("~/lib/initial-sync.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/lib/initial-sync.server")>();
+      return {
+        ...actual,
+        getInitialSyncState: vi.fn().mockResolvedValue({ status: "not_started" }),
+        enqueueInitialSync: vi.fn().mockResolvedValue({ enqueued: false, reason: "weird_new_code" }),
+      };
+    });
+
+    const { getRequestSql } = await import("~/lib/request-context.server");
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      if (query.includes("SELECT currency FROM")) {
+        return Promise.resolve([{ currency: "INR" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { action } = await import("../app.onboarding");
+
+    const formData = new FormData();
+    formData.set("_action", "start_sync");
+
+    const result = await action({
+      request: new Request("https://example.com/app/onboarding", {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as never);
+
+    expect(result).not.toBeInstanceOf(Response);
+    const data = result as { success: boolean; error: string };
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("Sync could not be started. Try again or contact support.");
+    expect(data.error).not.toContain("weird_new_code");
   });
 });
 
@@ -1881,9 +2135,9 @@ describe("P6: error logging uses safeLog JSON (no raw errors)", () => {
     const { action } = await import("../app.onboarding");
 
     const currentStatus = {
-      validation: { name: "Validation Function", status: "missing" },
-      paymentCustomization: { name: "Payment Customization", status: "ok" },
-      metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+      validation: { name: "Checkout credit check", status: "missing" },
+      paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+      metafieldDefinitions: { name: "Store data fields", status: "ok" },
     };
 
     const formData = new FormData();
@@ -1940,13 +2194,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
@@ -1983,14 +2234,8 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
-        return Promise.resolve([{ count: "0" }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
       return Promise.resolve([]);
     });
@@ -2029,13 +2274,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: false }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
@@ -2975,9 +3217,9 @@ describe("Button loading state isolation", () => {
             dismissedAt: null,
           },
           registrationStatus: {
-            validation: { name: "Validation Function", status: "missing" },
-            paymentCustomization: { name: "Payment Customization", status: "ok" },
-            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+            validation: { name: "Checkout credit check", status: "missing" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
           },
           initialSyncState: { status: "not_started" },
           newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
@@ -3023,9 +3265,9 @@ describe("Button loading state isolation", () => {
             dismissedAt: null,
           },
           registrationStatus: {
-            validation: { name: "Validation Function", status: "missing" },
-            paymentCustomization: { name: "Payment Customization", status: "ok" },
-            metafieldDefinitions: { name: "Metafield Definitions", status: "ok" },
+            validation: { name: "Checkout credit check", status: "missing" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
           },
           initialSyncState: { status: "not_started" },
           newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
@@ -3134,5 +3376,139 @@ describe("Merchant-facing copy", () => {
     expect(html).toContain("Contact support");
     expect(html).toContain("setup assistance and troubleshooting");
     expect(html).not.toContain("documentation in this repository");
+  });
+});
+
+describe("copy polish: headings and messages", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders 'Checkout connection' heading for registration section", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "ok" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain('heading="Checkout connection"');
+    expect(html).not.toContain("App Registration");
+    expect(html).not.toContain("Metafield Definitions");
+  });
+
+  it("renders 'Setup Guide in the app menu' in dismissed message", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "ok" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => ({ success: true, action: "dismissed" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Setup Guide in the app menu");
+    expect(html).not.toContain("help menu");
+  });
+
+  it("renders new registration item labels", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "ok" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "missing" },
+            metafieldDefinitions: { name: "Store data fields", status: "error" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Checkout credit check");
+    expect(html).toContain("Hide net terms at checkout");
+    expect(html).toContain("Store data fields");
+    expect(html).not.toContain("Validation Function");
+    expect(html).not.toContain("Payment Customization");
+    expect(html).not.toContain("Metafield Definitions");
   });
 });
