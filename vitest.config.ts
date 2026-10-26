@@ -137,6 +137,9 @@ const DB_TEST_PATTERNS = [
 
   // Reviewer demo DB tests
   "tests/integration/review-csv-matcher-db.test.ts",
+
+  // Confirm-reimport pin DB tests
+  "tests/integration/confirm-reimport-pin-db.test.ts",
 ];
 
 export default defineConfig({
