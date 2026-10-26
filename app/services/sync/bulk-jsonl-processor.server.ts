@@ -1238,32 +1238,22 @@ export async function processBulkOperation(
   const currentChunkSize = freshProgress.chunkSize;
   const currentFailureCount = freshProgress.failureCount;
 
-  // Check failure count - if already at max, this goes to DLQ
-  if (currentFailureCount >= MAX_FAILURE_COUNT) {
-    return {
-      success: false,
-      action: "skipped",
-      error: BULK_ERROR_CODES.MAX_FAILURES,
-      errorCode: BULK_ERROR_CODES.MAX_FAILURES,
-      status: "error",
-      errorType: "permanent",
-    };
-  }
-
-  // Get result URL from Shopify
+  // Get result URL from Shopify BEFORE checking max-failures:
+  // A COMPLETED empty result should complete even at failure_count >= 5.
   const statusResult = await getBulkOperationStatus(shop, bulkOperationId);
 
-  // S25: Handle empty results (COMPLETED with url null and objectCount 0)
+  // S25: Handle empty results (COMPLETED with url null/undefined and objectCount 0)
   // Per Shopify docs: COMPLETED with url=null and objectCount=0 is a valid empty result
   // @see https://shopify.dev/docs/apps/build/apis/graphql-admin/bulk-operations/queries
   // "If the query produced no results, then the `url` field will return `null`."
   // Note: objectCount is UnsignedInt64 serialized as STRING in Shopify's JSON response
   // @see https://shopify.dev/docs/api/admin-graphql/latest/scalars/unsignedint64
+  // Note: Shopify may omit `url` entirely (undefined) rather than send null.
   if (statusResult.success && statusResult.data) {
     const { status, url, objectCount, partialDataUrl } = statusResult.data;
     const parsedObjectCount = objectCount != null ? Number(objectCount) : null;
     
-    if (status === "COMPLETED" && url === null && parsedObjectCount === 0) {
+    if (status === "COMPLETED" && url == null && !partialDataUrl && objectCount != null && parsedObjectCount === 0) {
       // Empty result - complete the operation with 0 lines processed
       // R1: Pass leaseToken for owner-checked completion
       const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
@@ -1300,9 +1290,28 @@ export async function processBulkOperation(
         chainToOrders: nextStage === "orders",
       };
     }
+  }
 
-    // S25: partialDataUrl set or objectCount > 0 with no url is a permanent error
-    if (status === "COMPLETED" && url === null && (partialDataUrl || (parsedObjectCount != null && parsedObjectCount > 0))) {
+  // Check failure count AFTER empty-result check:
+  // A COMPLETED empty result completes even at failure_count >= 5.
+  // Apply the gate here for non-empty paths and status-fetch failures.
+  if (currentFailureCount >= MAX_FAILURE_COUNT) {
+    return {
+      success: false,
+      action: "skipped",
+      error: BULK_ERROR_CODES.MAX_FAILURES,
+      errorCode: BULK_ERROR_CODES.MAX_FAILURES,
+      status: "error",
+      errorType: "permanent",
+    };
+  }
+
+  // S25: partialDataUrl set or objectCount > 0 with no url is a permanent error
+  // This check runs after max-failures gate.
+  if (statusResult.success && statusResult.data) {
+    const { status, url, objectCount, partialDataUrl } = statusResult.data;
+    const parsedObjectCount = objectCount != null ? Number(objectCount) : null;
+    if (status === "COMPLETED" && url == null && (partialDataUrl || (parsedObjectCount != null && parsedObjectCount > 0))) {
       return {
         success: false,
         action: "skipped",
