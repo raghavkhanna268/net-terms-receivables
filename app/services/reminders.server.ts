@@ -49,6 +49,72 @@ import {
   isAllowlistEnforced,
 } from "./recipient-allowlist.server";
 import { sendViaResend } from "./resend-client.server";
+import { shopifyGraphQLQueue } from "./shopify-client.server";
+
+/**
+ * Merchant info fetched from Admin GraphQL for Reply-To and email footer.
+ * Cached per-run to avoid repeated API calls.
+ */
+export interface MerchantInfo {
+  /** Shop display name (shop.name from Admin API) */
+  name: string | null;
+  /** Shop contact email (shop.contactEmail from Admin API) */
+  contactEmail: string | null;
+}
+
+/**
+ * Simple email validation regex for Reply-To.
+ * Only validates basic structure - the actual validation is done by Resend.
+ */
+export function isValidEmail(email: string | null | undefined): boolean {
+  if (!email || typeof email !== "string") return false;
+  const trimmed = email.trim();
+  if (trimmed.length === 0) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+}
+
+/**
+ * GraphQL query to fetch merchant info (name and contactEmail).
+ * These fields require no special scopes beyond basic app access.
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/objects/Shop
+ */
+const MERCHANT_INFO_QUERY = `
+  query MerchantInfo {
+    shop {
+      name
+      contactEmail
+    }
+  }
+`;
+
+/**
+ * Fetch merchant info from Admin GraphQL API.
+ * Returns null values on failure (fail-open for the send path).
+ *
+ * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
+ * @returns MerchantInfo with name and contactEmail, or null values on failure
+ */
+export async function fetchMerchantInfo(shopDomain: string): Promise<MerchantInfo> {
+  const result: MerchantInfo = { name: null, contactEmail: null };
+
+  try {
+    const response = await shopifyGraphQLQueue<{
+      shop?: { name?: string; contactEmail?: string };
+    }>(shopDomain, MERCHANT_INFO_QUERY);
+
+    if (!response.success || !response.data?.shop) {
+      return result;
+    }
+
+    const shop = response.data.shop;
+    result.name = shop.name && shop.name.trim().length > 0 ? shop.name.trim() : null;
+    result.contactEmail = isValidEmail(shop.contactEmail) ? shop.contactEmail!.trim() : null;
+
+    return result;
+  } catch {
+    return result;
+  }
+}
 
 /**
  * Check if plan gating enforcement is enabled.
@@ -770,7 +836,7 @@ export async function sendPaymentReminder(
   offsetDays: number,
   timezone: string,
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
-  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
+  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot; merchantInfoCache?: Map<string, MerchantInfo> } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1008,6 +1074,18 @@ export async function sendPaymentReminder(
   // before the Resend call succeeds, the row stays 'sent', nothing retries it,
   // so that stage's reminder is lost; the next enabled stage still sends normally.
   try {
+    // Fetch merchant info for Reply-To and footer (cached per-run per-shop)
+    const cache = deps.merchantInfoCache ?? new Map<string, MerchantInfo>();
+    let merchantInfo = cache.get(shopId);
+    if (merchantInfo === undefined) {
+      merchantInfo = await fetchMerchantInfo(invoice.shopDomain);
+      cache.set(shopId, merchantInfo);
+    }
+
+    // Determine Reply-To and display name for footer
+    const replyTo = merchantInfo.contactEmail ?? undefined;
+    const storeDisplayName = merchantInfo.name ?? invoice.shopName;
+
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
       buyerName: invoice.buyerName ?? "Customer",
@@ -1015,6 +1093,8 @@ export async function sendPaymentReminder(
       dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
       merchantName: invoice.shopName,
       reminderType: getReminderLabel(offsetDays),
+      storeDisplayName,
+      hasReplyTo: !!replyTo,
     });
 
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
@@ -1051,6 +1131,7 @@ export async function sendPaymentReminder(
         html: emailHtml,
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
+        replyTo,
       },
       {
         RESEND_API_KEY: resendKey,
@@ -1151,7 +1232,8 @@ export async function sendCatchupReminder(
   _logId: string,
   offsetDays: number,
   timezone: string,
-  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {}
+  env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
+  deps: { merchantInfoCache?: Map<string, MerchantInfo> } = {}
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1487,6 +1569,18 @@ export async function sendCatchupReminder(
   // before the Resend call succeeds, the row stays 'sent', nothing retries it,
   // so that stage's reminder is lost; the next enabled stage still sends normally.
   try {
+    // Fetch merchant info for Reply-To and footer (cached per-run per-shop)
+    const cache = deps.merchantInfoCache ?? new Map<string, MerchantInfo>();
+    let merchantInfo = cache.get(shopId);
+    if (merchantInfo === undefined) {
+      merchantInfo = await fetchMerchantInfo(invoice.shopDomain);
+      cache.set(shopId, merchantInfo);
+    }
+
+    // Determine Reply-To and display name for footer
+    const replyTo = merchantInfo.contactEmail ?? undefined;
+    const storeDisplayName = merchantInfo.name ?? invoice.shopName;
+
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
       buyerName: invoice.buyerName ?? "Customer",
@@ -1494,6 +1588,8 @@ export async function sendCatchupReminder(
       dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
       merchantName: invoice.shopName,
       reminderType: getReminderLabel(offsetDays),
+      storeDisplayName,
+      hasReplyTo: !!replyTo,
     });
 
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
@@ -1535,6 +1631,7 @@ export async function sendCatchupReminder(
         html: emailHtml,
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
+        replyTo,
       },
       {
         RESEND_API_KEY: resendKey,
