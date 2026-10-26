@@ -54,7 +54,6 @@ interface TriggerInfo {
   trigger_name: string;
   function_name: string;
   prosrc: string;
-  event_manipulation: string;
 }
 
 interface ColumnInfo {
@@ -81,15 +80,10 @@ function parseNewAssignments(prosrc: string): Array<{ column: string; quoted: bo
   }
 
   // Match NEW.unquotedCol = (case-insensitive, lowercased)
-  // Exclude already-matched quoted identifiers
+  // The pattern [a-z_] excludes quotes, so no overlap with quoted matches
   const unquotedRegex = /NEW\.([a-z_][a-z0-9_]*)\s*[:=]/gi;
   while ((match = unquotedRegex.exec(prosrc)) !== null) {
-    // Check if this position was already matched as quoted
-    const pos = match.index;
-    const beforeChar = prosrc[pos + 4]; // Character after "NEW."
-    if (beforeChar !== '"') {
-      assignments.push({ column: match[1].toLowerCase(), quoted: false });
-    }
+    assignments.push({ column: match[1].toLowerCase(), quoted: false });
   }
 
   return assignments;
@@ -114,12 +108,7 @@ describeWithDb("Schema Trigger Guard", () => {
           c.relname AS table_name,
           t.tgname AS trigger_name,
           p.proname AS function_name,
-          p.prosrc,
-          CASE
-            WHEN t.tgtype & 4 > 0 THEN 'INSERT'
-            WHEN t.tgtype & 16 > 0 THEN 'UPDATE'
-            ELSE 'OTHER'
-          END AS event_manipulation
+          p.prosrc
         FROM pg_trigger t
         JOIN pg_class c ON t.tgrelid = c.oid
         JOIN pg_namespace n ON c.relnamespace = n.oid
@@ -209,36 +198,33 @@ describeWithDb("Schema Trigger Guard", () => {
     const TEST_SHOP_ID = `shop-${TEST_SUFFIX}`;
     const TEST_SHOP_DOMAIN = `test-trigger-guard-${TEST_SUFFIX}.myshopify.com`;
 
-    it("Shop: INSERT + UPDATE succeeds and updatedAt advances", async () => {
-      await sql.begin(async (tx) => {
-        const now = new Date();
+    it("Shop: INSERT + UPDATE succeeds and updatedAt strictly advances", async () => {
+      // Use a fixed past timestamp to ensure the trigger must update it
+      const fixedPast = new Date("2000-01-01T00:00:00Z");
 
-        // INSERT
+      await sql.begin(async (tx) => {
+        // INSERT with explicit fixed past updatedAt
         await tx`
           INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
-          VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', ${now}, ${now})
+          VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', ${fixedPast}, ${fixedPast})
         `;
 
-        // Get initial updatedAt
+        // Get initial updatedAt (should be the fixed past value)
         const [before] = await tx<{ updatedAt: Date }[]>`
           SELECT "updatedAt" FROM "Shop" WHERE id = ${TEST_SHOP_ID}
         `;
-        expect(before.updatedAt).toBeDefined();
+        expect(before.updatedAt.getTime()).toBe(fixedPast.getTime());
 
-        // Small delay to ensure timestamp changes
-        await new Promise((r) => setTimeout(r, 10));
-
-        // UPDATE (trigger should fire)
+        // UPDATE (trigger should fire and set updatedAt to current time)
         await tx`
           UPDATE "Shop" SET currency = 'USD' WHERE id = ${TEST_SHOP_ID}
         `;
 
-        // Verify updatedAt advanced (or at least is not null and >= before)
+        // Verify updatedAt is STRICTLY greater than before (no-op trigger would fail this)
         const [after] = await tx<{ updatedAt: Date }[]>`
           SELECT "updatedAt" FROM "Shop" WHERE id = ${TEST_SHOP_ID}
         `;
-        expect(after.updatedAt).toBeDefined();
-        expect(after.updatedAt.getTime()).toBeGreaterThanOrEqual(before.updatedAt.getTime());
+        expect(after.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime());
 
         // Rollback the transaction
         throw new Error("ROLLBACK");
@@ -308,6 +294,27 @@ describeWithDb("Schema Trigger Guard", () => {
         expect.fail(
           `Expected triggers not found in database:\n${missing.join("\n")}\n\n` +
             `Remove them from EXPECTED_TRIGGERS if they were intentionally deleted`
+        );
+      }
+
+      // Verify each EXPECTED_TRIGGERS[].fn matches the actual function_name
+      const actualMap = new Map(
+        actualTriggers.map((t) => [`${t.table_name}|${t.trigger_name}`, t.function_name])
+      );
+      const fnMismatches: string[] = [];
+      for (const expected of EXPECTED_TRIGGERS) {
+        const key = `${expected.table}|${expected.trigger}`;
+        const actualFn = actualMap.get(key);
+        if (actualFn && actualFn !== expected.fn) {
+          fnMismatches.push(
+            `  ${expected.table}.${expected.trigger}: expected fn="${expected.fn}", actual="${actualFn}"`
+          );
+        }
+      }
+      if (fnMismatches.length > 0) {
+        expect.fail(
+          `EXPECTED_TRIGGERS function names don't match actual:\n${fnMismatches.join("\n")}\n\n` +
+            `Update the fn field in EXPECTED_TRIGGERS`
         );
       }
     });
