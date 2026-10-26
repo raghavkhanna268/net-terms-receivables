@@ -8,6 +8,8 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
  * 1. Onboarding loader recovers USD to INR (banner gone, shop_config re-pushed)
  * 2. It detects an INR shop that switched to USD (banner shown)
  * 3. start_sync is blocked for a non-INR shop and allowed after recovery
+ * 4. Currency flip is blocked when shop has financial rows (Invoice, Payment, s8_draft_orders)
+ * 5. The flipBlocked banner is shown on onboarding when blocked
  */
 
 const createMockSqlFn = () =>
@@ -96,7 +98,7 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
     vi.restoreAllMocks();
   });
 
-  function setupSqlMock(storedCurrency: string) {
+  function setupSqlMock(storedCurrency: string, opts?: { hasFinancialRows?: boolean }) {
     mockSql.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       sqlCalls.push({ query, values });
@@ -110,6 +112,14 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
       }
       if (query.includes("SELECT currency") && query.includes("Shop")) {
         return Promise.resolve([{ currency: storedCurrency }]);
+      }
+      // For hasFinancialRows check - returns shopId for secondary lookup
+      if (query.includes("SELECT id FROM") && query.includes("Shop") && query.includes("domain")) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      // For hasFinancialRows EXISTS query
+      if (query.includes("SELECT EXISTS") && (query.includes("Invoice") || query.includes("Payment") || query.includes("s8_draft_orders"))) {
+        return Promise.resolve([{ has_rows: opts?.hasFinancialRows ?? false }]);
       }
       if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
         return Promise.resolve([{ count: "0" }]);
@@ -177,14 +187,15 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
     });
   }
 
-  it("G1.1: USD shop switches to INR → recovers, banner gone, shop_config re-pushed", async () => {
-    setupSqlMock("USD");
+  it("G1.1: USD shop switches to INR (no financial rows) → recovers, banner gone, shop_config re-pushed", async () => {
+    setupSqlMock("USD", { hasFinancialRows: false });
     setupGraphqlMock("INR");
 
     const { loader } = await import("../app.onboarding");
     const result = await loader(createLoaderArgs());
 
     expect(result.currencySupported).toBe(true);
+    expect(result.currencyFlipBlocked).toBe(false);
 
     const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
     expect(updateCalls.length).toBeGreaterThan(0);
@@ -218,9 +229,32 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
     const result = await loader(createLoaderArgs());
 
     expect(result.currencySupported).toBe(false);
+    expect(result.currencyFlipBlocked).toBe(false);
 
     const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
     expect(updateCalls.length).toBe(0);
+  });
+
+  it("G1.8: USD shop switches to INR with financial rows → blocked, flipBlocked=true", async () => {
+    setupSqlMock("USD", { hasFinancialRows: true });
+    setupGraphqlMock("INR");
+
+    const { loader } = await import("../app.onboarding");
+    const result = await loader(createLoaderArgs());
+
+    // Currency flip should be blocked
+    expect(result.currencyFlipBlocked).toBe(true);
+    expect(result.currencySupported).toBe(false);
+
+    // No DB update should occur (flip blocked)
+    const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+    expect(updateCalls.length).toBe(0);
+
+    // No metafield push (flip blocked)
+    const metafieldCalls = mockGraphql.mock.calls.filter((c) =>
+      c[0].includes("WriteShopConfig") || c[0].includes("metafieldsSet")
+    );
+    expect(metafieldCalls.length).toBe(0);
   });
 });
 
