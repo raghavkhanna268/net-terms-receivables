@@ -436,6 +436,11 @@ export function wrapWithSentry<E extends SentryEnv>(
         enhanceFetchErrorMessages: false,
         beforeSend,
         beforeSendTransaction,
+        // @sentry/core 11.8.0 defaults traceLifecycle to "stream", which ignores
+        // beforeSendTransaction (so transaction PII scrubbing would be skipped if
+        // tracing is enabled) and logs a console warning on every client init.
+        // "static" keeps beforeSendTransaction in effect.
+        traceLifecycle: "static",
       };
     },
     handler
