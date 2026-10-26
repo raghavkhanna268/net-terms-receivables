@@ -231,7 +231,7 @@ describe("Reconcile Route (M5)", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { confirmMatch } = await import("~/services/matcher.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-action-test" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-action-test", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const actionError = new Error(
@@ -275,7 +275,7 @@ describe("Reconcile Route (M5)", () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { applyMatch } = await import("~/services/apply.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-utr-test" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-utr-test", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const errorWithSensitiveData = new Error(
@@ -312,7 +312,7 @@ describe("Reconcile Route (M5)", () => {
     it("logs hostile intent as 'other' (toSafeIntent)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const consoleWarnSpy = vi
@@ -356,7 +356,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-human-error" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-human-error", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -392,7 +392,7 @@ describe("Reconcile Route (M5)", () => {
       const { unmatchMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-human-readable" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-human-readable", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (unmatchMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -426,7 +426,7 @@ describe("Reconcile Route (M5)", () => {
       const { unmatchMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-code-only" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-code-only", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (unmatchMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -460,7 +460,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-free-text" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-free-text", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -496,7 +496,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-digits" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-digits", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -530,7 +530,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-prefixed" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-prefixed", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       (applyMatch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -577,7 +577,7 @@ describe("Reconcile Route (M5)", () => {
 
         const freshMockSql = vi.fn();
         freshMockSql.mockResolvedValueOnce([
-          { id: `shop-reconcile-msg-${humanMessage.slice(0, 10)}` },
+          { id: `shop-reconcile-msg-${humanMessage.slice(0, 10)}`, currency: "INR" },
         ]);
         (freshGetRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(
           freshMockSql
@@ -615,7 +615,7 @@ describe("Reconcile Route (M5)", () => {
       const { applyMatch } = await import("~/services/apply.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-domain-test" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-domain-test", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       const errorWithDomain = "Error for test-store.myshopify.com";
