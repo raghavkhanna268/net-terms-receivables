@@ -1,0 +1,144 @@
+# Prod credit-status metafield backfill: APPLY (enqueue only), reviewer-gated
+#
+# Runs scripts/credit-status-metafield-backfill.ts --apply [--shop N]. The script
+# selects BuyerAccounts with metafieldSyncedAt IS NULL and, for each, sends one
+# CREDIT_STATUS_RECOMPUTE message to the s6_sync pgmq queue (dedupe key
+# credit_backfill:<id>:<date>). The drain later recomputes and syncs metafields.
+#
+# SAFETY:
+#   - Manual trigger only (workflow_dispatch), main branch only, this repo only
+#   - Runs in the protected `shopify-release` environment: a required reviewer
+#     (raghavkhanna268) must approve every run before any step executes
+#   - Typed confirmation: input `confirm` must be exactly ENQUEUE
+#   - Never deletes and never writes Shopify: no Shopify credentials are provided,
+#     and a static guard fails the run if the script contains DELETE/TRUNCATE/DROP/
+#     UPDATE/INSERT, GraphQL/Admin API calls, fetch(), or any pgmq call other than send
+#   - argv is built from validated inputs only: exactly --apply, optionally --shop <int>
+#   - seed_only defaults to true and FAILS CLOSED: the script cannot yet filter by
+#     id prefix ('seed-account-'), so a seed-only run is refused until it can
+#   - Output is allowlisted line by line (fixed headings and integer counts only);
+#     anything else prints as <redacted line>. No ids, domains or names are printed.
+
+name: Prod Credit-status Backfill (APPLY, enqueue only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type ENQUEUE to confirm sending CREDIT_STATUS_RECOMPUTE messages"
+        required: true
+        type: string
+      seed_only:
+        description: "Limit to seed fixtures (id prefix 'seed-account-'). Not supported by the script yet: true refuses to run"
+        required: true
+        default: true
+        type: boolean
+      shop_index:
+        description: "Optional shop index (1-based, from the dry-run output). Empty = all shops"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-credit-status-backfill
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Credit-status metafield backfill (enqueue only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: shopify-release
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'raghavkhanna268/net-terms-receivables'
+    steps:
+      - name: Validate inputs
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          SEED_ONLY: ${{ inputs.seed_only }}
+          SHOP_INDEX: ${{ inputs.shop_index }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "ENQUEUE" ]; then
+            echo "::error::confirm must be exactly ENQUEUE"
+            exit 1
+          fi
+          if [ "$SEED_ONLY" = "true" ]; then
+            echo "::error::seed_only=true is not supported: credit-status-metafield-backfill.ts has no id-prefix filter yet. Nothing was enqueued."
+            exit 1
+          fi
+          if [ -n "$SHOP_INDEX" ] && [[ ! "$SHOP_INDEX" =~ ^[1-9][0-9]{0,3}$ ]]; then
+            echo "::error::shop_index must be empty or a positive integer"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Static guard (enqueue-only script)
+        run: |
+          set -euo pipefail
+          F=scripts/credit-status-metafield-backfill.ts
+          if grep -nEi '\b(delete|truncate|drop|update|insert)\b|metafieldsSet|graphql|admin/api|fetch\(' "$F" >/dev/null; then
+            echo "::error::$F contains a write/delete/Shopify call; refusing to run"
+            exit 1
+          fi
+          if grep -oE 'pgmq\.[a-z_]+' "$F" | grep -vqx 'pgmq.send'; then
+            echo "::error::$F uses a pgmq function other than send; refusing to run"
+            exit 1
+          fi
+          if ! grep -q "topic: \"CREDIT_STATUS_RECOMPUTE\"" "$F"; then
+            echo "::error::$F no longer enqueues CREDIT_STATUS_RECOMPUTE; refusing to run"
+            exit 1
+          fi
+          echo "static guard: OK"
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Enqueue (allowlisted output)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          SHOP_INDEX: ${{ inputs.shop_index }}
+        run: |
+          set -euo pipefail
+          unset SHOPIFY_API_KEY SHOPIFY_API_SECRET SHOPIFY_APP_AUTOMATION_TOKEN SHOPIFY_ADMIN_TOKEN || true
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+          ARGS=(--apply)
+          if [ -n "$SHOP_INDEX" ]; then ARGS+=(--shop "$SHOP_INDEX"); fi
+          if [ "${ARGS[0]}" != "--apply" ] || { [ "${#ARGS[@]}" -ne 1 ] && [ "${#ARGS[@]}" -ne 3 ]; }; then
+            echo "::error::unexpected argv"
+            exit 1
+          fi
+          set +e
+          npx tsx scripts/credit-status-metafield-backfill.ts "${ARGS[@]}" > "$RUNNER_TEMP/bf.out" 2>&1
+          RC=$?
+          set -e
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^[=-]*$ ]] \
+              || [[ "$line" =~ ^(Credit\ Status\ Metafield\ Backfill\ Script|Mode:\ APPLY\ \(enqueuing\ messages\)|Fetching\ candidates\.\.\.|Enqueuing\ CREDIT_STATUS_RECOMPUTE\ messages\.\.\.|SUMMARY|No\ candidates\ found\.|Messages\ enqueued\ successfully\.|The\ drain\ will\ process\ them\ and\ sync\ metafields\ via\ recomputeCreditStatus\.|ERROR:\ Some\ enqueues\ failed\.\ Exiting\ with\ error\.)$ ]] \
+              || [[ "$line" =~ ^Shop\ filter:\ index\ [0-9]+$ ]] \
+              || [[ "$line" =~ ^Found\ [0-9]+\ candidate\(s\)\ to\ enqueue\.$ ]] \
+              || [[ "$line" =~ ^(Enqueued|Failed):\ [0-9]+$ ]] \
+              || [[ "$line" =~ ^Failed\ to\ enqueue:\ shop\ index\ \(internal\),\ account\ index\ [0-9]+$ ]]; then
+              echo "$line"
+            else
+              echo "<redacted line>"
+            fi
+          done < "$RUNNER_TEMP/bf.out"
+          rm -f "$RUNNER_TEMP/bf.out"
+          echo "script_exit_code=$RC"
+          exit "$RC"
