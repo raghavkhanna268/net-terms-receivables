@@ -41,6 +41,11 @@ on:
 permissions:
   contents: read
 
+# Never cancel a running seed: queue overlapping dispatches instead.
+concurrency:
+  group: seed-dev-store
+  cancel-in-progress: false
+
 jobs:
   seed:
     name: Seed dev store

@@ -758,10 +758,10 @@ describe("prod-diagnostics second-shop E2E mode", () => {
       expect(lines).toEqual([
         "e2e_admin=ok",
         "e2e_currency_is_inr=true",
-        "e2e_webhooks_expected=20",
+        "e2e_webhooks_expected=21",
         "e2e_webhooks_shop_specific_rows=3",
         "e2e_webhooks_present=1",
-        "e2e_webhooks_missing=19",
+        "e2e_webhooks_missing=20",
         "e2e_webhooks_extra=2",
         "e2e_webhooks_match=false",
         "e2e_validation_count=2",

@@ -132,7 +132,7 @@ if scratch(lambda d: edit(os.path.join(d, ".github/workflows/shopify-app-release
 if scratch(lambda d: edit(os.path.join(d, "package.json"), '"@shopify/cli": "4.9.4"', '"@shopify/cli": "^4.9.4"')) == 0:
     fails.append("unpinned CLI devDependency not failed")
 
-# 13. S24: Adding read_locations (a 9th scope outside the approved 8) fails.
+# 13. S24: Adding read_locations (a 10th scope outside the approved 9) fails.
 def add_read_locations(d):
     """Add read_locations to both files sequentially."""
     inject_toml_scope(os.path.join(d, "shopify.app.toml"), "read_locations")

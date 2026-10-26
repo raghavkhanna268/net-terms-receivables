@@ -98,13 +98,25 @@ WITH deleted_locations AS (
   FROM s6_processed_webhooks w
   WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
   UNION
+  -- webhook_receipts has no resource column (PK shop, webhook_id; see
+  -- prisma/migrations/20261025010000_s20_webhook_receipts). The resource gid travels in the
+  -- s6_sync message (SyncMessage.resourceGid, app/lib/pgmq.server.ts), so join the edge
+  -- receipt to its message on (shop, webhookId), as redriven-webhook-receipts.sql does.
   SELECT DISTINCT
     CASE
-      WHEN wr.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN wr.resource_gid
-      ELSE 'gid://shopify/CompanyLocation/' || wr.resource_gid
+      WHEN m.message->>'resourceGid' LIKE 'gid://shopify/CompanyLocation/%' THEN m.message->>'resourceGid'
+      ELSE 'gid://shopify/CompanyLocation/' || (m.message->>'resourceGid')
     END AS company_location_gid
   FROM webhook_receipts wr
+  JOIN (
+    SELECT message FROM pgmq.a_s6_sync
+    UNION ALL
+    SELECT message FROM pgmq.q_s6_sync
+    UNION ALL
+    SELECT message FROM s6_dead_letter
+  ) m ON m.message->>'shop' = wr.shop AND m.message->>'webhookId' = wr.webhook_id
   WHERE wr.topic = 'COMPANY_LOCATIONS_DELETE'
+    AND COALESCE(m.message->>'resourceGid', '') <> ''
 )
 SELECT ba."holdState", ba."manualHold", ba.bypass, ba."syncPending",
        (ba.gated_at IS NOT NULL) AS gated,
