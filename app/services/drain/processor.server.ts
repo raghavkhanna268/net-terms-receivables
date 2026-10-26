@@ -1363,6 +1363,7 @@ async function processSyncQueue(
     noHandler: 0,
     timedOut: false,
     elapsedMs: 0,
+    passesRun: 0,
     errors: [],
   };
 

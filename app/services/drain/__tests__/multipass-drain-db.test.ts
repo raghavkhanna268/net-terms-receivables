@@ -617,7 +617,7 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
       const [send1] = await sqlRef<[{ send: string }]>`
         SELECT pgmq.send(${S6_QUEUES.BULK}, ${sqlRef.json(bulkMessage1)}) as send
       `;
-      const msg1Id = send1.send;
+      const _msg1Id = send1.send;
 
       // Then enqueue a "continuation" - same bulkOpId, different webhookId
       const bulkMessage2: BulkMessage = {
