@@ -771,7 +771,7 @@ export default function Index() {
   // #292: When currency not supported, show only the banner
   if ("notSupported" in loaderData && loaderData.notSupported) {
     return (
-      <s-page heading="Net Terms Receivables">
+      <s-page heading="Termwise: Net Terms & Credit">
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
@@ -798,7 +798,7 @@ export default function Index() {
   const closeInvoiceListUrl = `?sortBy=${sortBy}&sortOrder=${sortOrder}&page=${pagination.page}`;
 
   return (
-    <s-page heading="Net Terms Receivables">
+    <s-page heading="Termwise: Net Terms & Credit">
       {/* #292: Currency Not Supported Banner */}
       {!currencySupported && (
         <s-section>

@@ -961,13 +961,13 @@ export default function OnboardingPage() {
       {state.isComplete && (
         <s-section>
           <s-banner tone="success" heading="Setup Complete">
-            You&apos;ve completed all setup steps. Your store is ready to use Net
-            Terms Receivables!
+            You&apos;ve completed all setup steps. Your store is ready to use
+            Termwise!
           </s-banner>
         </s-section>
       )}
 
-      <s-section heading="Get Started with Net Terms">
+      <s-section heading="Get Started with Termwise">
         <s-stack gap="base">
           <s-paragraph>
             Complete these steps to set up net terms management for your store.

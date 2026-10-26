@@ -19,7 +19,7 @@ interface AdminGraphqlClient {
 }
 
 const PAYMENT_CUSTOMIZATION_FUNCTION_HANDLE = "hide-terms-payment";
-const PAYMENT_CUSTOMIZATION_TITLE = "Net Terms Payment Hide";
+const PAYMENT_CUSTOMIZATION_TITLE = "Termwise Payment Hide";
 
 interface PaymentCustomizationNode {
   id: string;

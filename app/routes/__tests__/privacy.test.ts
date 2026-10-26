@@ -100,7 +100,7 @@ describe("/privacy route", () => {
     expect(html).toContain("<!DOCTYPE html>");
     expect(html).toContain('<html lang="en">');
     expect(html).toContain(
-      "<title>Privacy Policy — Net Terms Receivables</title>"
+      "<title>Privacy Policy — Termwise: Net Terms & Credit</title>"
     );
     expect(html).toContain("</body>");
     expect(html).toContain("</html>");

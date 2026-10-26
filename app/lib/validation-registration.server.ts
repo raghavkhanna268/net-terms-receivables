@@ -22,7 +22,7 @@ interface AdminGraphqlClient {
 }
 
 const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
-const VALIDATION_TITLE = "Net Terms Credit Check";
+const VALIDATION_TITLE = "Termwise Credit Check";
 
 interface ValidationNode {
   id: string;
