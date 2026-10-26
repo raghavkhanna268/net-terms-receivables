@@ -168,14 +168,19 @@ interface ClearUninstalledResult {
  * all BuyerAccount rows for the shop, allowing the resync sweep to retry accounts
  * that had permanent sync failures before uninstall.
  *
+ * #294: Also sets metafieldSyncedAt = NULL and syncPending = true for all
+ * BuyerAccount rows in the reinstalled shop. This ensures the daily resync
+ * sweep (Part 3) re-pushes the credit_status metafield, since Shopify wipes
+ * app-owned metafield values on uninstall.
+ *
  * #293: Also closes all open s6_bulk_operations rows (all origins: reconcile,
  * manual, webhook) so getInitialSyncState returns not_started and the merchant
  * can start a fresh sync. Closed rows carry closed_reason='reinstall_reset'.
  *
- * IMPORTANT: Only touches uninstalledAt, onboarding_dismissed_at on Shop,
- * metafieldSyncErrorCode/metafieldSyncErrorAt on BuyerAccount, and
- * closed_at/closed_reason on s6_bulk_operations.
- * Never touches plan, gating, credit, timezone, or any other column.
+ * IMPORTANT: Only touches uninstalledAt, onboarding_dismissed_at on Shop;
+ * metafieldSyncErrorCode, metafieldSyncErrorAt, metafieldSyncedAt, syncPending
+ * on BuyerAccount; and closed_at/closed_reason on s6_bulk_operations.
+ * Never touches plan, gating, credit, timezone, syncVersion, or any other column.
  *
  * @param sql - postgres.js SQL client
  * @param shop - The shop domain
@@ -192,9 +197,15 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
       ),
       cleared_accounts AS (
         UPDATE "BuyerAccount"
-        SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
+        SET "metafieldSyncErrorCode" = NULL,
+            "metafieldSyncErrorAt" = NULL,
+            "metafieldSyncedAt" = NULL,
+            "syncPending" = true
         WHERE "shopId" IN (SELECT id FROM reinstalled_shop)
-          AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
+          AND ("metafieldSyncErrorCode" IS NOT NULL
+               OR "metafieldSyncErrorAt" IS NOT NULL
+               OR "metafieldSyncedAt" IS NOT NULL
+               OR "syncPending" = false)
       ),
       closed_ops AS (
         UPDATE s6_bulk_operations
@@ -483,6 +494,10 @@ export function _isShopSetupInFlight(shop: string): boolean {
  * BuyerAccount rows for the shop when uninstalledAt was set (reinstall only).
  * This is atomic with the Shop update to ensure the reinstall signal isn't lost.
  *
+ * #294: Also sets metafieldSyncedAt = NULL and syncPending = true for all
+ * BuyerAccount rows when uninstalledAt was set (reinstall only), so the daily
+ * resync sweep re-pushes credit_status metafields wiped by Shopify on uninstall.
+ *
  * #293: Also closes all open s6_bulk_operations rows when uninstalledAt was set
  * (reinstall only), so getInitialSyncState returns not_started for a fresh sync.
  *
@@ -529,9 +544,15 @@ export async function upsertShopOnAuth(
     ),
     cleared_accounts AS (
       UPDATE "BuyerAccount"
-      SET "metafieldSyncErrorCode" = NULL, "metafieldSyncErrorAt" = NULL
+      SET "metafieldSyncErrorCode" = NULL,
+          "metafieldSyncErrorAt" = NULL,
+          "metafieldSyncedAt" = NULL,
+          "syncPending" = true
       WHERE "shopId" IN (SELECT id FROM old_state WHERE was_uninstalled)
-        AND ("metafieldSyncErrorCode" IS NOT NULL OR "metafieldSyncErrorAt" IS NOT NULL)
+        AND ("metafieldSyncErrorCode" IS NOT NULL
+             OR "metafieldSyncErrorAt" IS NOT NULL
+             OR "metafieldSyncedAt" IS NOT NULL
+             OR "syncPending" = false)
     ),
     closed_ops AS (
       UPDATE s6_bulk_operations
