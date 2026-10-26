@@ -1769,6 +1769,109 @@ describe("S23-04: initial sync", () => {
 
       consoleInfoSpy.mockRestore();
     });
+
+    it("in_progress status returns user-friendly message without raw code", async () => {
+      mockSql.mockImplementation(wrapWithCurrencyCheck((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM")) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("s6_bulk_operations") && query.includes("origin")) {
+          return Promise.resolve([{ reconcile_stage: "companies", completed_at: null, failure_count: 0 }]);
+        }
+        if (query.includes("s6_dead_letter")) {
+          return Promise.resolve([{ count: "0" }]);
+        }
+        return Promise.resolve([]);
+      }));
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; error: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Sync already in progress or complete");
+      expect(data.error).not.toContain("in_progress");
+    });
+
+    it("unsupported_currency reason returns user-friendly message without raw code", async () => {
+      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+          return Promise.resolve([{ id: TEST_SHOP_ID }]);
+        }
+        if (query.includes("SELECT currency FROM")) {
+          return Promise.resolve([{ currency: "USD" }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const { action } = await import("../app.onboarding");
+
+      const formData = new FormData();
+      formData.set("_action", "start_sync");
+
+      const result = await action({
+        request: new Request("https://example.com/app/onboarding", {
+          method: "POST",
+          body: formData,
+        }),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+              }),
+            },
+          },
+        },
+        params: {},
+      } as never);
+
+      expect(result).not.toBeInstanceOf(Response);
+      const data = result as { success: boolean; error: string; action: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe("Sync not available for non-INR stores");
+      expect(data.error).not.toContain("unsupported_currency");
+    });
+  });
+});
+
+describe("sync reason code copy: no raw codes in error messages", () => {
+  it("all mapped reason codes produce user-friendly messages", () => {
+    const reasonMap: Record<string, string> = {
+      already_queued: "A sync is already running. Refresh the page to check progress.",
+      in_progress: "A sync is already running. Refresh the page to check progress.",
+      unsupported_currency: "Initial sync is available only for stores that use INR.",
+    };
+    const fallback = "Sync could not be started. Try again or contact support.";
+
+    for (const [reason, expectedMessage] of Object.entries(reasonMap)) {
+      expect(expectedMessage).not.toContain(reason);
+      expect(expectedMessage.length).toBeGreaterThan(10);
+    }
+    expect(fallback).not.toContain("unknown");
+    expect(fallback.length).toBeGreaterThan(10);
   });
 });
 
@@ -3095,5 +3198,139 @@ describe("Merchant-facing copy", () => {
     expect(html).toContain("Contact support");
     expect(html).toContain("setup assistance and troubleshooting");
     expect(html).not.toContain("documentation in this repository");
+  });
+});
+
+describe("copy polish: headings and messages", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders 'Checkout connection' heading for registration section", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "ok" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain('heading="Checkout connection"');
+    expect(html).not.toContain("App Registration");
+    expect(html).not.toContain("Metafield Definitions");
+  });
+
+  it("renders 'Setup Guide in the app menu' in dismissed message", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "ok" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => ({ success: true, action: "dismissed" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Setup Guide in the app menu");
+    expect(html).not.toContain("help menu");
+  });
+
+  it("renders new registration item labels", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "ok" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "missing" },
+            metafieldDefinitions: { name: "Store data fields", status: "error" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Checkout credit check");
+    expect(html).toContain("Hide net terms at checkout");
+    expect(html).toContain("Store data fields");
+    expect(html).not.toContain("Validation Function");
+    expect(html).not.toContain("Payment Customization");
+    expect(html).not.toContain("Metafield Definitions");
   });
 });

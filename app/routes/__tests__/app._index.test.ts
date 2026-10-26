@@ -1244,4 +1244,32 @@ describe("BuyerLedgerTable render tests (T1)", () => {
     expect(html).toContain("No outstanding invoices");
     expect(html).toContain("All your buyers have paid their invoices");
   });
+
+  it("renders 'Credit check paused' badge for BYPASS hold_state (not 'Bypass')", async () => {
+    const bypassRow = {
+      buyer_account_id: "acct-bypass",
+      buyer_name: "Bypass Test Corp",
+      currency: "INR",
+      outstanding_paise: "1000000",
+      overdue_paise: "0",
+      credit_limit_paise: "5000000",
+      oldest_overdue_days: null,
+      hold_state: "BYPASS" as const,
+      is_gated: false,
+    };
+    const { BuyerLedgerTable } = await import("../app._index");
+    const html = renderToString(
+      createElement(BuyerLedgerTable, {
+        ...baseTableProps,
+        rows: [bypassRow],
+        totalCount: 1,
+        gatingEnforced: false,
+      })
+    );
+
+    expect(html).toContain("Bypass Test Corp");
+    expect(html).toContain("Credit check paused");
+    expect(html).not.toContain(">Bypass<");
+    expect(html).toContain('tone="info"');
+  });
 });
