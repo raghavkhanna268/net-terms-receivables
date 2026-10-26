@@ -96,7 +96,9 @@ async function checkNoSessionForUninstalledShop(
   `;
 
   if (!shop || shop.uninstalledAt !== null) {
-    // Shop is missing or uninstalled—relabel to shop_not_found for DLQ sanitization.
+    // Shop is missing or uninstalled—relabel to shop_not_found.
+    // For COMPANIES_* and COMPANY_LOCATIONS_*: returned directly → goes to DLQ with sanitization.
+    // For ORDERS_*: caller converts to success:true → ACKed immediately (no DLQ).
     // Omit `retryable` because shop_not_found is non-retryable by definition and the
     // drain uses errorCode (not retryable flag) to decide sanitization eligibility.
     return {
