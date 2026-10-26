@@ -31,6 +31,7 @@ on:
           - redriven-webhook-receipts
           - s12-hold-coverage
           - s18-reminder-rule-dupes
+          - s18-reminders-due-7d
           - s22-retention-purge-preview
       msg_ids:
         description: "Comma-separated pgmq msg_ids (e.g. 162,163); used by canary-orders-backstop and redriven-webhook-receipts"

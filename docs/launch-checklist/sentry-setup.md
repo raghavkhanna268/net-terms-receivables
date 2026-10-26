@@ -131,13 +131,13 @@ When quota is exhausted, new events are dropped until the next billing cycle. To
 
 ## Checklist Summary
 
-- [ ] Create Sentry account (sign up at sentry.io)
-- [ ] Create organization (choose US or EU data region)
-- [ ] Create project (JavaScript platform, match Worker name)
-- [ ] Locate DSN in project settings
-- [ ] Submit DSN via DevOps secure secret-request card (never paste in chat)
-- [ ] DevOps stores DSN as `wrangler secret SENTRY_DSN`
-- [ ] (Optional) Create Organization Auth Token for source maps
-- [ ] (Optional) DevOps stores auth token as GitHub Actions secret `SENTRY_AUTH_TOKEN`
-- [ ] Verify `sendDefaultPii: false` in SDK config
-- [ ] Enable data scrubbing in Sentry dashboard for email/phone patterns
+- [x] Create Sentry account (sign up at sentry.io) (#390)
+- [x] Create organization (choose US or EU data region) (#390)
+- [x] Create project (JavaScript platform, match Worker name) (#390)
+- [x] Locate DSN in project settings (#390)
+- [x] Submit DSN via DevOps secure secret-request card (never paste in chat) (#390)
+- [x] DevOps stores DSN as `wrangler secret SENTRY_DSN` (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST)
+- [ ] (Optional) Create Organization Auth Token for source maps — Why open: in open PR #323
+- [ ] (Optional) DevOps stores auth token as GitHub Actions secret `SENTRY_AUTH_TOKEN` — Why open: in open PR #323
+- [x] Restrictive SDK data collection: `dataCollection: RESTRICTIVE_DATA_COLLECTION` (replaces `sendDefaultPii` in @sentry/core 11.8) in `app/lib/sentry.ts`
+- [ ] Enable data scrubbing in Sentry dashboard for email/phone patterns — Why open: Sentry dashboard setting, not verifiable from the repo; in-code scrubbing is via beforeSend/beforeSendTransaction in `app/lib/sentry.ts`
