@@ -8,6 +8,22 @@ import {
 } from "../company-location.server";
 import type { ShopifyCompanyLocation } from "../types";
 
+// Mock admin client for M8/M9 tests
+vi.mock("../../drain/admin-client.server", () => ({
+  adminGraphQL: vi.fn(),
+  getCompanyLocationQuery: vi.fn().mockReturnValue("query CompanyLocationById"),
+  getCompanyLocationQueryWithoutContact: vi.fn().mockReturnValue("query CompanyLocationById"),
+  BULK_OPERATION_STATUS_QUERY: "query BulkOperationStatus",
+}));
+
+// Mock request context for bulk operation tests
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
+  getRequestSql: vi.fn(() => ({})),
+  getRequestWaitUntil: vi.fn(() => () => {}),
+  requestContext: { getStore: vi.fn() },
+}));
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -1564,4 +1580,298 @@ describeWithDb("CompanyLocation Sync", () => {
       expect(account.name).toBe("Undefined Snapshot Update");
     });
   });
+
+  describe("T5: processor triggeredAt wiring (M9)", () => {
+    it("processor passes triggeredAt to webhook handler - stale webhook does NOT restore", async () => {
+      vi.resetModules();
+
+      const locationId = `gid://shopify/CompanyLocation/m9-stale-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/m9-stale-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-25T10:00:00Z");
+      const staleTriggeredAt = new Date("2026-10-20T10:00:00Z"); // 5 days BEFORE delete
+
+      // Create deleted account
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'M9 Stale Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      // Mock adminGraphQL to return the location
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      vi.mocked(adminGraphQL).mockResolvedValueOnce({
+        success: true,
+        data: {
+          node: {
+            id: locationId,
+            name: "M9 Location",
+            company: { id: companyId },
+          },
+        },
+        retryable: false,
+      });
+
+      // Get the handler through the registry and call it with a message
+      const { getSyncHandler } = await import("../../drain/processor.server");
+      const handler = getSyncHandler("COMPANY_LOCATIONS_UPDATE");
+      expect(handler).toBeDefined();
+
+      const message = {
+        topic: "COMPANY_LOCATIONS_UPDATE" as const,
+        shop: TEST_SHOP_DOMAIN,
+        resourceGid: locationId,
+        webhookId: `wh-m9-stale-${TEST_SUFFIX}`,
+        triggeredAt: staleTriggeredAt.toISOString(),
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(sql, message);
+      expect(result.success).toBe(true);
+
+      // Verify locationDeletedAt was NOT cleared (stale webhook)
+      const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+        SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.locationDeletedAt).not.toBeNull();
+      expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+    });
+
+    it("processor passes triggeredAt to webhook handler - newer webhook DOES restore", async () => {
+      vi.resetModules();
+
+      const locationId = `gid://shopify/CompanyLocation/m9-newer-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/m9-newer-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-20T10:00:00Z");
+      const newerTriggeredAt = new Date("2026-10-25T10:00:00Z"); // 5 days AFTER delete
+
+      // Create deleted account
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'M9 Newer Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      // Mock adminGraphQL to return the location
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      vi.mocked(adminGraphQL).mockResolvedValueOnce({
+        success: true,
+        data: {
+          node: {
+            id: locationId,
+            name: "M9 Location Restored",
+            company: { id: companyId },
+          },
+        },
+        retryable: false,
+      });
+
+      const { getSyncHandler } = await import("../../drain/processor.server");
+      const handler = getSyncHandler("COMPANY_LOCATIONS_UPDATE");
+
+      const message = {
+        topic: "COMPANY_LOCATIONS_UPDATE" as const,
+        shop: TEST_SHOP_DOMAIN,
+        resourceGid: locationId,
+        webhookId: `wh-m9-newer-${TEST_SUFFIX}`,
+        triggeredAt: newerTriggeredAt.toISOString(),
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await handler!(sql, message);
+      expect(result.success).toBe(true);
+
+      // Verify locationDeletedAt WAS cleared (newer webhook)
+      const [account] = await sql<{ locationDeletedAt: Date | null; name: string }[]>`
+        SELECT "locationDeletedAt", name FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+      `;
+      expect(account.locationDeletedAt).toBeNull();
+      expect(account.name).toBe("M9 Location Restored");
+    });
+  });
+
+  describe("T5: bulk operation snapshotAt wiring (M8)", () => {
+    it("processBulkOperation passes snapshotAt - stale bulk does NOT restore", async () => {
+      vi.resetModules();
+
+      const locationId = `gid://shopify/CompanyLocation/m8-stale-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/m8-stale-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-25T10:00:00Z");
+      const staleBulkCreatedAt = new Date("2026-10-20T10:00:00Z"); // 5 days BEFORE delete
+      const bulkOpId = `gid://shopify/BulkOperation/m8-stale-${TEST_SUFFIX}`;
+
+      // Create deleted account
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'M8 Stale Bulk Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      // Register the bulk operation
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies', NOW())
+      `;
+
+      // Mock getBulkOperationStatus to return createdAt older than delete
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      vi.mocked(adminGraphQL).mockResolvedValueOnce({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            url: "https://storage.shopify.com/test-bulk.jsonl",
+            createdAt: staleBulkCreatedAt.toISOString(),
+            objectCount: "2",
+          },
+        },
+        retryable: false,
+      });
+
+      // JSONL format: flat lines with __parentId for nesting
+      const companyLine = JSON.stringify({ id: companyId, name: "M8 Company" });
+      const locationLine = JSON.stringify({
+        id: locationId,
+        name: "M8 Stale Bulk Location",
+        __parentId: companyId,
+      });
+      const jsonl = companyLine + "\n" + locationLine;
+
+      // Mock global fetch for JSONL
+      const originalFetch = global.fetch;
+      global.fetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        status: 206,
+        headers: new Headers({
+          "content-range": `bytes 0-${jsonl.length - 1}/${jsonl.length}`,
+        }),
+        arrayBuffer: async () => new TextEncoder().encode(jsonl + "\n").buffer,
+      });
+
+      try {
+        const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+
+        const message = {
+          topic: "BULK_OPERATIONS_FINISH" as const,
+          shop: TEST_SHOP_DOMAIN,
+          webhookId: `wh-m8-stale-${TEST_SUFFIX}`,
+          bulkOperationId: bulkOpId,
+          bulkType: "companies" as const,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        const result = await processBulkOperation(sql, message);
+        expect(result.success).toBe(true);
+
+        // Verify locationDeletedAt was NOT cleared (stale bulk)
+        const [account] = await sql<{ locationDeletedAt: Date | null }[]>`
+          SELECT "locationDeletedAt" FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+        `;
+        expect(account.locationDeletedAt).not.toBeNull();
+        expect(account.locationDeletedAt!.getTime()).toBe(deleteTime.getTime());
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("processBulkOperation passes snapshotAt - newer bulk DOES restore", async () => {
+      vi.resetModules();
+
+      const locationId = `gid://shopify/CompanyLocation/m8-newer-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/m8-newer-co-${TEST_SUFFIX}`;
+      const deleteTime = new Date("2026-10-20T10:00:00Z");
+      const newerBulkCreatedAt = new Date("2026-10-25T10:00:00Z"); // 5 days AFTER delete
+      const bulkOpId = `gid://shopify/BulkOperation/m8-newer-${TEST_SUFFIX}`;
+
+      // Create deleted account
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name, "locationDeletedAt",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${TEST_SHOP_ID}, 'COMPANY', ${companyId}, ${locationId}, 'M8 Newer Bulk Test',
+          ${deleteTime}, NOW(), NOW()
+        )
+      `;
+
+      // Register the bulk operation
+      await sql`
+        INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at)
+        VALUES (${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'companies', 'reconcile', 'companies', NOW())
+      `;
+
+      // Mock getBulkOperationStatus to return createdAt newer than delete
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      vi.mocked(adminGraphQL).mockResolvedValueOnce({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            url: "https://storage.shopify.com/test-bulk-newer.jsonl",
+            createdAt: newerBulkCreatedAt.toISOString(),
+            objectCount: "2",
+          },
+        },
+        retryable: false,
+      });
+
+      // JSONL format: flat lines with __parentId for nesting
+      const companyLine = JSON.stringify({ id: companyId, name: "M8 Company Newer" });
+      const locationLine = JSON.stringify({
+        id: locationId,
+        name: "M8 Newer Bulk Location",
+        __parentId: companyId,
+      });
+      const jsonl = companyLine + "\n" + locationLine;
+
+      const originalFetch = global.fetch;
+      global.fetch = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        status: 206,
+        headers: new Headers({
+          "content-range": `bytes 0-${jsonl.length - 1}/${jsonl.length}`,
+        }),
+        arrayBuffer: async () => new TextEncoder().encode(jsonl + "\n").buffer,
+      });
+
+      try {
+        const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+
+        const message = {
+          topic: "BULK_OPERATIONS_FINISH" as const,
+          shop: TEST_SHOP_DOMAIN,
+          webhookId: `wh-m8-newer-${TEST_SUFFIX}`,
+          bulkOperationId: bulkOpId,
+          bulkType: "companies" as const,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        const result = await processBulkOperation(sql, message);
+        expect(result.success).toBe(true);
+
+        // Verify locationDeletedAt WAS cleared (newer bulk)
+        const [account] = await sql<{ locationDeletedAt: Date | null; name: string }[]>`
+          SELECT "locationDeletedAt", name FROM "BuyerAccount" WHERE "companyLocationId" = ${locationId}
+        `;
+        expect(account.locationDeletedAt).toBeNull();
+        expect(account.name).toBe("M8 Newer Bulk Location");
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+  });
+
 });
