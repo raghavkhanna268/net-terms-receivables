@@ -1529,8 +1529,8 @@ jobs:
             '{exists: $exists, enabled: $enabled, blockOnFailure: $block_on_failure, repo_input_query_has_credit_status: $repo_input_query_has_credit_status, deployed_input_query_has_credit_status: $deployed_input_query_has_credit_status, input_query_null: $input_query_null, input_query_length: $input_query_length, iq_has_credit_status: $iq_has_credit_status, iq_has_dollar_app: $iq_has_dollar_app, iq_has_app_prefix: $iq_has_app_prefix, iq_has_metafield: $iq_has_metafield}'
 
           # Cross-check via shopifyFunctions(apiType: cart_checkout_validation), read-only.
-          # Prints a count, function ids and per-function booleans/integers only; never
-          # titles or query text. has_credit_status is "unknown" when inputQuery is null.
+          # Prints a count, ordinal indices and per-function booleans/integers only; never
+          # GIDs, titles or query text. has_credit_status is "unknown" when inputQuery is null.
           # Soft-fails (warning) so it can't break the step.
           echo ""
           echo "S12 shopifyFunctions cross-check (read-only):"
@@ -1548,6 +1548,8 @@ jobs:
             echo "::warning::shopifyFunctions cross-check returned GraphQL errors"
             jq '{cross_check: "error", error_codes: [.errors[] | .extensions.code // "UNKNOWN"]}' "$FN_RESPONSE"
           else
+            # Public-output safe: print only ordinal index and booleans/integers.
+            # Never print function IDs (Shopify GIDs).
             jq --arg ns_re '(\$app|app--[0-9]+)' '
               [.data.shopifyFunctions.nodes[]?] as $fns
               | ("namespace\\s*:\\s*\"" + $ns_re + "\"") as $ns
@@ -1555,18 +1557,19 @@ jobs:
               | ("metafield\\s*\\([^)]*(" + $ns + "[^)]*" + $key + "|" + $key + "[^)]*" + $ns + ")") as $re
               | {cross_check: "ok",
                  function_count: ($fns | length),
-                 functions: [$fns[] | {
-                   id: .id,
-                   handle_is_credit_check_validation: (.handle == "credit-check-validation"),
-                   input_query_null: ((.inputQuery | type) != "string"),
-                   input_query_length: (.inputQuery | if type == "string" then length else 0 end),
-                   has_credit_status: (.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else "unknown" end)
+                 functions: [$fns | to_entries | .[] | {
+                   function_idx: (.key + 1),
+                   handle_is_credit_check_validation: (.value.handle == "credit-check-validation"),
+                   input_query_null: ((.value.inputQuery | type) != "string"),
+                   input_query_length: (.value.inputQuery | if type == "string" then length else 0 end),
+                   has_credit_status: (.value.inputQuery | if type == "string" then (gsub("\n"; " ") | test($re)) else "unknown" end)
                  }]}' "$FN_RESPONSE"
           fi
           rm -f "$FN_RESPONSE"
 
-          # S12 checkout fixtures (read-only). Prints ids, enums, booleans and the
-          # whitelisted credit_status fields only. Never names, emails, phones or addresses.
+          # S12 checkout fixtures (read-only). Prints ordinal indices, enums, booleans
+          # and whitelisted credit_status fields only. Never GIDs, names, emails, phones
+          # or addresses.
           if [ "$CHECKOUT_FIXTURES" = "true" ]; then
             echo ""
             echo "=== S12 checkout fixtures (read-only) ==="
@@ -1584,12 +1587,14 @@ jobs:
               echo "::error::GraphQL errors: $(jq -r '[.errors[] | .extensions.code // "UNKNOWN"] | join(", ")' "$HTTP_RESPONSE")"
               exit 1
             fi
+            # Public-output safe: print only exists/enabled/blockOnFailure booleans and
+            # function_handle_match boolean. Never print GIDs (validation_id, function_id, app_id).
             echo "active_validation (credit-check-validation):"
-            jq -c '.data.validations.nodes[] | select(.shopifyFunction.handle == "credit-check-validation")
-              | {validation_id: .id, enabled, blockOnFailure,
-                 function_id: .shopifyFunction.id, function_handle: .shopifyFunction.handle,
-                 function_api_type: .shopifyFunction.apiType, function_api_version: .shopifyFunction.apiVersion,
-                 app_id: .shopifyFunction.app.id, app_handle: .shopifyFunction.app.handle}' "$HTTP_RESPONSE"
+            jq -c '[.data.validations.nodes[] | select(.shopifyFunction.handle == "credit-check-validation")] as $v
+              | {exists: ($v | length > 0),
+                 enabled: (if ($v | length) > 0 then $v[0].enabled else null end),
+                 blockOnFailure: (if ($v | length) > 0 then $v[0].blockOnFailure else null end),
+                 function_handle_match: (if ($v | length) > 0 then ($v[0].shopifyFunction.handle == "credit-check-validation") else null end)}' "$HTTP_RESPONSE"
             echo "app_version: not exposed by the Admin API (see the release workflow output / Dev Dashboard)"
 
             FX_SHOP_ID=$(psql -v ON_ERROR_STOP=1 -v shop="$SHOP_DOMAIN" -t -A "$DATABASE_URL" <<'EOSQL'
@@ -1631,13 +1636,17 @@ jobs:
                                       else ((.exposurePaise | tonumber) > (.limitPaise | tonumber)) end),
                          updatedAt}) end)}]
                   | from_entries' "$HTTP_RESPONSE")
-                # QA 2 audit: internal DB ids (cuids like buyer_account_id) are allowed.
-                # Shopify GIDs (company_id, company_location_id, customer_id) are removed.
+                # Public-output safe: print only ordinal index, enums, booleans.
+                # Never print buyer_account_id (could embed GID), company_id,
+                # company_location_id, customer_id, or any Shopify GID.
                 echo "fixtures (one per line):"
-                printf '%s\n' "$FIXTURES" | jq -c --argjson mf "$MF_MAP" '
-                  . as $a | ($a.company_location_id // $a.customer_id) as $owner
-                  | {buyer_account_id, kind,
-                     hold_state, manual_hold, bypass, manual_hold_reason_code, overdue,
+                printf '%s\n' "$FIXTURES" | jq -s -c --argjson mf "$MF_MAP" '
+                  to_entries | .[] | . as $e | $e.value as $a
+                  | ($a.company_location_id // $a.customer_id) as $owner
+                  | {fixture_idx: ($e.key + 1), kind: $a.kind,
+                     hold_state: $a.hold_state, manual_hold: $a.manual_hold,
+                     bypass: $a.bypass, manual_hold_reason_code: $a.manual_hold_reason_code,
+                     overdue: $a.overdue,
                      owner_found: ($owner != null and ($mf | has($owner))),
                      credit_status: (if $owner == null then null else $mf[$owner] end)}'
                 printf '%s\n' "$FIXTURES" | jq -s -c --argjson mf "$MF_MAP" '
