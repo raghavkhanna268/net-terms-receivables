@@ -34,6 +34,8 @@ import { insertBankImportRows } from "../../app/services/bank-import.server.js";
 import { assertNoQueueLeftovers } from "../helpers/queue-leftovers.js";
 import * as logModule from "../../app/lib/log.server.js";
 
+// Mock enqueueRecomputeForInvoice (a collaborator, not the code under test).
+// Note: This means assertNoQueueLeftovers cannot catch recompute queue issues in this file.
 vi.mock("../../app/services/credit-status-recompute.server", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
