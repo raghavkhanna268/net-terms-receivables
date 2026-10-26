@@ -37,6 +37,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/drain/__tests__/processor-backstop-db.test.ts
  * - app/services/drain/__tests__/reconcile-manual-key-db.test.ts
  * - app/services/drain/__tests__/dlq-sanitize-db.test.ts
+ * - app/services/drain/__tests__/currency-guard-followups-db.test.ts
  *
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
@@ -93,6 +94,8 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/reconcile-manual-key-db.test.ts",
   "app/services/drain/__tests__/dlq-sanitize-db.test.ts",
   "app/services/drain/__tests__/bulk-op-recovery-db.test.ts",
+  "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
+  "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
@@ -114,6 +117,7 @@ const DB_TEST_PATTERNS = [
 
   // Lib DB tests
   "app/lib/__tests__/after-auth-db.test.ts",
+  "app/lib/__tests__/after-auth-syncshopinfo-db.test.ts",
   "app/lib/__tests__/aging-reconcile.test.ts",
   "app/lib/__tests__/initial-sync-db.test.ts",
   "app/lib/__tests__/offline-token.test.ts",

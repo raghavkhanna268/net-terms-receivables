@@ -109,11 +109,13 @@ export async function processOrderWebhook(
   // #292: Per-order currency guard - skip orders with missing or non-INR currency
   // Orders created before the shop switched to INR should not be stored as INR amounts
   // Orders without currency code are also skipped (fail-closed)
+  // G5: Always call markWebhookProcessed so skipped webhooks aren't retried/dead-lettered
   const orderCurrency = order.totalPriceSet?.shopMoney?.currencyCode;
   if (!orderCurrency || orderCurrency !== SUPPORTED_SHOP_CURRENCY) {
     // Log count-only with shopHash (no PII)
     const hash = await shopHash(shopDomain);
     safeLog("info", "drain_skip_non_inr_order", { shopHash: hash, count: 1 });
+    await markWebhookProcessed(sql, webhookId, topic, order.id, shopDomain);
     return {
       success: true,
       action: "skipped",
