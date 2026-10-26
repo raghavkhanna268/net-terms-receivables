@@ -6,7 +6,7 @@ name: Shopify App Release (dev store)
 # policy). The CLI token is an ENVIRONMENT secret of `shopify-release` only.
 #
 # Guards run before any token is exposed:
-#   - scope guard: shopify.app.toml scopes == wrangler.jsonc SCOPES == approved 8
+#   - scope guard: shopify.app.toml scopes == wrangler.jsonc SCOPES == approved 9
 #   - config guard: client_id pinned; no other shopify.app.*.toml (dev store config only)
 #   - PII guard: no extension input query requests customer email/phone/name/address
 #   - extension guard: repo extensions == scripts/ci/expected-extensions.txt (deploy would
