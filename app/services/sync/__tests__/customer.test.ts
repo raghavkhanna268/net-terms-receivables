@@ -810,6 +810,58 @@ describeWithDb("Customer Sync", () => {
     });
   });
 
+  describe("processCustomerWebhook tag normalization", () => {
+    it("padded/mixed-case/nbsp tag matches its rule via webhook", async () => {
+      const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-padded`;
+      const customer: ShopifyCustomer = {
+        id: customerId,
+        tags: [" NET-TERMS ", "  WhOlEsAlE  ", "tag\u00A0with\u00A0nbsp"],
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_CREATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-padded`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+      expect(result.entityId).toBeDefined();
+
+      const [account] = await sql<
+        { defaultTermsDays: number | null; defaultTermsSource: string | null }[]
+      >`
+        SELECT "defaultTermsDays", "defaultTermsSource"
+        FROM "BuyerAccount"
+        WHERE "customerId" = ${customerId}
+      `;
+      expect(account.defaultTermsDays).toBe(30);
+      expect(account.defaultTermsSource).toBe("tag");
+    });
+
+    it("blank tag does not match any rule via webhook", async () => {
+      const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-blank`;
+      const customer: ShopifyCustomer = {
+        id: customerId,
+        tags: ["", "   ", "\t"],
+      };
+
+      const result = await processCustomerWebhook(
+        sql,
+        TEST_SHOP_DOMAIN,
+        "CUSTOMERS_CREATE",
+        customer,
+        `wh-cust-${TEST_SUFFIX}-blank`
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("skipped");
+      expect(result.skipReason).toContain("Tag removed");
+    });
+  });
+
   describe("PII mode handling", () => {
     it("'fetched' mode writes values as-is including null (clears email)", async () => {
       const customerId = `gid://shopify/Customer/cust-${TEST_SUFFIX}-fetched`;

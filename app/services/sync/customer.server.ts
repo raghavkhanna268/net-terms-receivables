@@ -42,6 +42,7 @@ import { decideNewAccountGate, isGatingEnforced } from "../gating.server";
 import { getPlanByShopId } from "../plan.server";
 import { planLimit } from "~/lib/entitlements";
 import { safeLog, shopHash } from "~/lib/log.server";
+import { normalizeTag } from "~/lib/tag-normalizer";
 
 /**
  * PII write mode for customer sync.
@@ -126,10 +127,7 @@ export async function processCustomerWebhook(
 
   // Check if customer has any matching tag
   const customerTags = customer.tags ?? [];
-  const matchingRule = tagRules.find((rule) =>
-    customerTags.some((tag) => tag.toLowerCase() === rule.tag.toLowerCase())
-  );
-
+  const matchingRule = findMatchingTagRule(customerTags, tagRules);
   const hasTag = !!matchingRule;
 
   // Should-fix #5: Don't store tags for customers that match no rule
@@ -699,9 +697,18 @@ export function findMatchingTagRule(
   customerTags: string[],
   tagRules: Array<{ tag: string; defaultTermsDays: number }>
 ): { tag: string; defaultTermsDays: number } | undefined {
-  return tagRules.find((rule) =>
-    customerTags.some((tag) => tag.toLowerCase() === rule.tag.toLowerCase())
-  );
+  // Normalize customer tags and skip empty ones
+  const normalizedTags = customerTags
+    .map((t) => normalizeTag(t))
+    .filter((t) => t !== "");
+
+  if (normalizedTags.length === 0) return undefined;
+
+  // Find first matching rule (skip rules with empty normalized tag)
+  return tagRules.find((rule) => {
+    const normalizedRuleTag = normalizeTag(rule.tag);
+    return normalizedRuleTag !== "" && normalizedTags.includes(normalizedRuleTag);
+  });
 }
 
 /**

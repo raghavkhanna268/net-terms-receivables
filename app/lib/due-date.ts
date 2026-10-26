@@ -1,3 +1,5 @@
+import { normalizeTag } from "./tag-normalizer";
+
 /**
  * Due Date Inference Logic for Net Terms Receivables
  *
@@ -545,15 +547,16 @@ function tryTagRules(
     return null;
   }
 
-  // Normalize customer tags: lowercase and trim
-  const normalizedCustomerTags = input.customerTags.map((t) =>
-    t.toLowerCase().trim()
-  );
+  // Normalize customer tags and skip empty ones
+  const normalizedCustomerTags = input.customerTags
+    .map((t) => normalizeTag(t))
+    .filter((t) => t !== "");
 
-  // Find all matching rules
-  const matchingRules = validRules.filter((rule) =>
-    normalizedCustomerTags.includes(rule.tag.toLowerCase().trim())
-  );
+  // Find all matching rules (skip rules with empty normalized tag)
+  const matchingRules = validRules.filter((rule) => {
+    const normalizedRuleTag = normalizeTag(rule.tag);
+    return normalizedRuleTag !== "" && normalizedCustomerTags.includes(normalizedRuleTag);
+  });
 
   if (matchingRules.length === 0) {
     return null;

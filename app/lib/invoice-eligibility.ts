@@ -28,6 +28,7 @@ import {
   type InferDueDateResult,
   type TagRule,
 } from "./due-date";
+import { normalizeTag } from "./tag-normalizer";
 
 /**
  * Financial statuses that qualify an order for Invoice creation.
@@ -349,17 +350,24 @@ async function findCustomerAccount(
 /**
  * Check if a tag rule matches any customer tags.
  */
-function findMatchingTagRule(
+export function findMatchingTagRule(
   customerTags: string[],
   tagRules: TagRule[]
 ): TagRule | undefined {
   if (customerTags.length === 0 || tagRules.length === 0) return undefined;
 
-  const normalizedTags = customerTags.map((t) => t.toLowerCase().trim());
+  // Normalize customer tags and skip empty ones
+  const normalizedTags = customerTags
+    .map((t) => normalizeTag(t))
+    .filter((t) => t !== "");
 
-  return tagRules.find((rule) =>
-    normalizedTags.includes(rule.tag.toLowerCase().trim())
-  );
+  if (normalizedTags.length === 0) return undefined;
+
+  // Find first matching rule (skip rules with empty normalized tag)
+  return tagRules.find((rule) => {
+    const normalizedRuleTag = normalizeTag(rule.tag);
+    return normalizedRuleTag !== "" && normalizedTags.includes(normalizedRuleTag);
+  });
 }
 
 /**
