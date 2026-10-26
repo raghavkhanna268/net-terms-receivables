@@ -22,7 +22,7 @@ import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.s
  * OPTIMIZATION: Uses lightweight verifyWebhook() instead of authenticate.webhook()
  * to avoid unnecessary session lookups. Saves ~5-10ms DB round-trip per webhook.
  *
- * Protected Customer Data (Level 2 + Name + Email, confirmed 2026-10-23):
+ * Protected Customer Data (Level 2: Name + Email):
  * - Webhook payloads contain PII, but we only extract the GID here
  * - The sync processor fetches: id, tags, email, displayName (when CUSTOMER_PII_FIELDS=1)
  * - Phone and addresses are NEVER fetched or stored
