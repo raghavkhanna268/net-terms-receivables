@@ -1708,6 +1708,9 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       const invoiceId = `inv-multi-rule-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/multi-rule-${TEST_SUFFIX}`;
 
+      // Invoice due 9 days ago:
+      // - Rule 1 (offsetDays=0): reminder_date = -9 + 0 = 9 days ago (outside D+3)
+      // - Rule 2 (offsetDays=7): reminder_date = -9 + 7 = 2 days ago (D+2, in window)
       await sql`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
@@ -1716,7 +1719,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#MULTI-RULE', 10000.00, 5000.00, 'open',
-          ${dates.daysAgo(10)}, ${dates.daysAgo(5)}, ${dates.dbNow}, ${dates.dbNow}
+          ${dates.daysAgo(14)}, ${dates.daysAgo(9)}, ${dates.dbNow}, ${dates.dbNow}
         )
       `;
 
@@ -1725,7 +1728,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
         VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(5)}),
+          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_1}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(9)}),
           (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_RULE_ID_2}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
       `;
 
@@ -1750,7 +1753,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       `;
 
       // Exactly one message: the later stage (rule 2) within the D+1..D+3 window
-      // Invoice due 5 days ago + rule 2's offsetDays=7 = reminder date 2 days ago = D+2
+      // Invoice due 9 days ago + rule 2's offsetDays=7 = reminder date 2 days ago = D+2
       expect(messages.length).toBe(1);
       expect(messages[0].ruleId).toBe(TEST_RULE_ID_2);
 
