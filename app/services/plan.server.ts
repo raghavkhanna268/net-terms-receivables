@@ -223,7 +223,6 @@ async function setCachedPlan(
       subscription_name = ${subscriptionName},
       is_test = ${isTest},
       plan_cached_at = NOW(),
-      plan_pending_handle = NULL,
       "updatedAt" = NOW()
     WHERE id = ${shopId}
   `;

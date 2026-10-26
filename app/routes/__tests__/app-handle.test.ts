@@ -156,9 +156,6 @@ describe("app._index upgradeUrl behavior", () => {
       if (query.includes("SELECT id, currency, timezone FROM")) {
         return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
       }
-      if (query.includes("SELECT id, currency, timezone FROM")) {
-        return Promise.resolve([{ id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" }]);
-      }
       if (query.includes("onboarding_dismissed_at")) {
         return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
       }

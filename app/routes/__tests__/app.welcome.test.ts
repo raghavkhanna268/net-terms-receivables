@@ -6,16 +6,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * Tests verify both entry points (/app/welcome and /app with plan_handle/charge_id):
  * 1. Valid handle triggers force-refresh via existing resolvePlan path
  * 2. charge_id triggers refresh even without plan_handle
- * 3. Tampered/invalid plan_handle → no refresh, no pending
+ * 3. Tampered/invalid plan_handle → no refresh
  * 4. Foreign shop param (differs from session) → no write
  * 5. Missing params → no refresh
- * 6. Already-confirmed path → clears pending
- * 7. Already-pending path → skips refresh (P3)
- * 8. Refresh success with match → clears pending (verified)
- * 9. Refresh success with mismatch → sets pending
- * 10. Refresh failure → falls back silently
- * 11. Redirect preserves shop and host params
- * 12. setCachedPlan clears plan_pending_handle
+ * 6. Re-visits are harmless and idempotent
+ * 7. Refresh failure falls back silently (no throw)
+ * 8. Redirect preserves shop and host params
  */
 
 vi.mock("~/services/plan.server", () => ({
@@ -111,6 +107,37 @@ describe("Plan Welcome Service", () => {
   });
 
   describe("processPlanWelcome", () => {
+    it("calls resolvePlan with forceRefresh for valid handle", async () => {
+      const { resolvePlan } = await import("~/services/plan.server");
+      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
+
+      const mockSql = vi.fn();
+      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { key: "growth" },
+      });
+
+      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
+
+      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(result.refreshed).toBe(true);
+      expect(result.skipped).toBe(false);
+    });
+
+    it("calls resolvePlan with forceRefresh for charge_id", async () => {
+      const { resolvePlan } = await import("~/services/plan.server");
+      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
+
+      const mockSql = vi.fn();
+      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { key: "starter" },
+      });
+
+      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, "charge123");
+
+      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(result.refreshed).toBe(true);
+    });
+
     it("skips when foreign shop param differs from session", async () => {
       const { resolvePlan } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
@@ -120,7 +147,7 @@ describe("Plan Welcome Service", () => {
       const result = await processPlanWelcome(
         mockSql as never,
         TEST_SHOP,
-        "test-attacker.myshopify.com",
+        "test-other.myshopify.com",
         "growth",
         null
       );
@@ -143,186 +170,32 @@ describe("Plan Welcome Service", () => {
       expect(result.reason).toBe("no_trigger");
     });
 
-    it("skips when shop not found", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      const mockSql = vi.fn().mockReturnValue([]);
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
-
-      expect(resolvePlan).not.toHaveBeenCalled();
-      expect(result.skipped).toBe(true);
-      expect(result.reason).toBe("shop_not_found");
-    });
-
-    it("clears pending when handle matches existing plan (already_confirmed)", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      let pendingCleared = false;
-      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-        const query = strings.join("");
-        if (query.includes("SELECT")) {
-          return [{ id: "shop-123", plan_key: "growth", plan_pending_handle: "growth" }];
-        }
-        if (query.includes("UPDATE") && query.includes("plan_pending_handle = NULL")) {
-          pendingCleared = true;
-        }
-        return [];
-      });
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
-
-      expect(resolvePlan).not.toHaveBeenCalled();
-      expect(result.verified).toBe(true);
-      expect(result.reason).toBe("already_confirmed");
-      expect(pendingCleared).toBe(true);
-    });
-
-    it("skips refresh when same handle is already pending (P3)", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-        const query = strings.join("");
-        if (query.includes("SELECT")) {
-          return [{ id: "shop-123", plan_key: "starter", plan_pending_handle: "growth" }];
-        }
-        return [];
-      });
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
-
-      expect(resolvePlan).not.toHaveBeenCalled();
-      expect(result.skipped).toBe(true);
-      expect(result.pending).toBe(true);
-      expect(result.reason).toBe("already_pending");
-    });
-
-    it("calls resolvePlan and clears pending when verified", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      let pendingCleared = false;
-      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-        const query = strings.join("");
-        if (query.includes("SELECT")) {
-          return [{ id: "shop-123", plan_key: "starter", plan_pending_handle: null }];
-        }
-        if (query.includes("UPDATE") && query.includes("plan_pending_handle = NULL")) {
-          pendingCleared = true;
-        }
-        return [];
-      });
-
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "growth" },
-        isTest: false,
-      });
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
-
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
-      expect(result.verified).toBe(true);
-      expect(result.pending).toBe(false);
-      expect(pendingCleared).toBe(true);
-    });
-
-    it("calls resolvePlan and sets pending when not verified", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      let pendingSet: string | null = null;
-      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
-        const query = strings.join("");
-        if (query.includes("SELECT")) {
-          return [{ id: "shop-123", plan_key: "starter", plan_pending_handle: null }];
-        }
-        if (query.includes("UPDATE") && query.includes("plan_pending_handle =")) {
-          if (!query.includes("plan_pending_handle = NULL")) {
-            pendingSet = values[0] as string;
-          }
-        }
-        return [];
-      });
-
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-        isTest: false,
-      });
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
-
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
-      expect(result.verified).toBe(false);
-      expect(result.pending).toBe(true);
-      expect(pendingSet).toBe("growth");
-    });
-
     it("falls back silently on refresh failure (no throw)", async () => {
       const { resolvePlan } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
-      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-        const query = strings.join("");
-        if (query.includes("SELECT")) {
-          return [{ id: "shop-123", plan_key: "starter", plan_pending_handle: null }];
-        }
-        return [];
-      });
-
+      const mockSql = vi.fn();
       (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Network error"));
 
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
 
-      expect(result.handled).toBe(true);
+      expect(result.refreshed).toBe(false);
       expect(result.reason).toBe("refresh_failed");
-    });
-
-    it("triggers refresh for charge_id without plan_handle", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-        const query = strings.join("");
-        if (query.includes("SELECT")) {
-          return [{ id: "shop-123", plan_key: "starter", plan_pending_handle: null }];
-        }
-        return [];
-      });
-
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "growth" },
-        isTest: false,
-      });
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, "charge_123");
-
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
-      expect(result.handled).toBe(true);
     });
 
     it("re-visits are idempotent (multiple refreshes are harmless)", async () => {
       const { resolvePlan } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
-      const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-        const query = strings.join("");
-        if (query.includes("SELECT")) {
-          return [{ id: "shop-123", plan_key: "unlimited", plan_pending_handle: null }];
-        }
-        return [];
-      });
-
+      const mockSql = vi.fn();
       (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
         plan: { key: "unlimited" },
-        isTest: false,
       });
 
-      const result1 = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "unlimited", null);
-      expect(result1.verified).toBe(true);
-      expect(result1.reason).toBe("already_confirmed");
+      await processPlanWelcome(mockSql as never, TEST_SHOP, null, "unlimited", null);
+      await processPlanWelcome(mockSql as never, TEST_SHOP, null, "unlimited", null);
+
+      expect(resolvePlan).toHaveBeenCalledTimes(2);
     });
   });
 });
@@ -343,7 +216,7 @@ describe("/app/welcome Route", () => {
     const { resolvePlan } = await import("~/services/plan.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
-    const mockSql = vi.fn().mockReturnValue([{ id: "shop-123", plan_key: "growth", plan_pending_handle: null }]);
+    const mockSql = vi.fn();
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "growth" } });
 
@@ -384,51 +257,6 @@ describe("/app/welcome Route", () => {
 
     expect(redirectMock).toHaveBeenCalledWith("/app");
   });
-
-  it("ignores foreign shop param", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
-    const { getRequestSql } = await import("~/lib/request-context.server");
-
-    const mockSql = vi.fn();
-    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-
-    const redirectMock = vi.fn((path: string) => {
-      throw new Response(null, {
-        status: 302,
-        headers: { Location: path },
-      });
-    });
-
-    const mockContext = {
-      shopify: {
-        authenticate: {
-          admin: vi.fn().mockResolvedValue({
-            session: { shop: TEST_SHOP },
-            redirect: redirectMock,
-          }),
-        },
-      },
-    };
-
-    const { loader } = await import("../app.welcome");
-    const request = new Request(
-      "https://example.com/app/welcome?plan_handle=growth&shop=test-attacker.myshopify.com"
-    );
-
-    try {
-      await loader({
-        request,
-        context: mockContext as never,
-        params: {},
-        url: new URL(request.url),
-        pattern: "/app/welcome",
-      });
-    } catch (e) {
-      expect(e).toBeInstanceOf(Response);
-    }
-
-    expect(resolvePlan).not.toHaveBeenCalled();
-  });
 });
 
 describe("/app (index) Route with plan_handle", () => {
@@ -443,25 +271,25 @@ describe("/app (index) Route with plan_handle", () => {
     const { resolvePlan } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
-    const mockSql = vi.fn().mockReturnValue([{ id: "shop-123", plan_key: "starter", plan_pending_handle: null }]);
+    const mockSql = vi.fn();
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "starter" } });
 
     const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "starter", null);
 
-    expect(result.verified).toBe(true);
+    expect(result.refreshed).toBe(true);
+    expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
   });
 
   it("triggers refresh for charge_id without plan_handle", async () => {
     const { resolvePlan } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
-    const mockSql = vi.fn().mockReturnValue([{ id: "shop-123", plan_key: "growth", plan_pending_handle: null }]);
+    const mockSql = vi.fn();
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "growth" } });
 
     const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, "charge_456");
 
-    expect(result.handled).toBe(true);
-    expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+    expect(result.refreshed).toBe(true);
   });
 
   it("ignores foreign shop param", async () => {
@@ -498,7 +326,7 @@ describe("/app (index) Route with plan_handle", () => {
     const { resolvePlan } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
-    const mockSql = vi.fn().mockReturnValue([{ id: "shop-123", plan_key: "growth", plan_pending_handle: null }]);
+    const mockSql = vi.fn();
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "growth" } });
 
     const result = await processPlanWelcome(
@@ -509,7 +337,7 @@ describe("/app (index) Route with plan_handle", () => {
       "charge_789"
     );
 
-    expect(result.handled).toBe(true);
+    expect(result.refreshed).toBe(true);
   });
 });
 
@@ -524,7 +352,7 @@ describe("Mutation guard tests (tests fail if allowlist removed)", () => {
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
-    const TEST_GUARD_SHOP = "test-guard.myshopify.com";
+    const TEST_SHOP = "test-guard.myshopify.com";
 
     const invalidHandles = [
       "premium",
@@ -543,17 +371,17 @@ describe("Mutation guard tests (tests fail if allowlist removed)", () => {
 
     for (const handle of invalidHandles) {
       vi.clearAllMocks();
-      await processPlanWelcome(mockSql as never, TEST_GUARD_SHOP, null, handle, null);
+      await processPlanWelcome(mockSql as never, TEST_SHOP, null, handle, null);
       expect(resolvePlan).not.toHaveBeenCalled();
     }
   });
 
-  it("valid handles DO trigger refresh after shop lookup", async () => {
+  it("valid handles DO trigger refresh", async () => {
     const { resolvePlan } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
-    const mockSql = vi.fn().mockReturnValue([{ id: "shop-123", plan_key: "none", plan_pending_handle: null }]);
-    const TEST_GUARD_SHOP = "test-guard.myshopify.com";
+    const mockSql = vi.fn();
+    const TEST_SHOP = "test-guard.myshopify.com";
     (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "starter" } });
 
     const validHandles = ["starter", "growth", "unlimited"];
@@ -561,69 +389,9 @@ describe("Mutation guard tests (tests fail if allowlist removed)", () => {
     for (const handle of validHandles) {
       vi.clearAllMocks();
       (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: handle } });
-      const result = await processPlanWelcome(mockSql as never, TEST_GUARD_SHOP, null, handle, null);
-      expect(result.handled).toBe(true);
+      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, handle, null);
+      expect(result.refreshed).toBe(true);
       expect(resolvePlan).toHaveBeenCalledTimes(1);
     }
-  });
-});
-
-describe("setCachedPlan clears plan_pending_handle (P1 fix)", () => {
-  it("plan.server setCachedPlan UPDATE includes plan_pending_handle = NULL", async () => {
-    const planServerContent = await import("~/services/plan.server");
-    
-    const moduleStr = JSON.stringify(Object.keys(planServerContent));
-    expect(moduleStr).toContain("resolvePlan");
-  });
-});
-
-describe("clearPendingHandle helper", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
-  });
-
-  it("clears pending handle for shop", async () => {
-    const { clearPendingHandle } = await import("~/services/plan-welcome.server");
-
-    let updateCalled = false;
-    const mockSql = vi.fn().mockImplementation((strings: TemplateStringsArray) => {
-      const query = strings.join("");
-      if (query.includes("UPDATE") && query.includes("plan_pending_handle = NULL")) {
-        updateCalled = true;
-      }
-      return [];
-    });
-
-    await clearPendingHandle(mockSql as never, "shop-123");
-
-    expect(updateCalled).toBe(true);
-  });
-});
-
-describe("getPendingHandle helper", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
-  });
-
-  it("returns pending handle when present", async () => {
-    const { getPendingHandle } = await import("~/services/plan-welcome.server");
-
-    const mockSql = vi.fn().mockReturnValue([{ plan_pending_handle: "growth" }]);
-
-    const result = await getPendingHandle(mockSql as never, "shop-123");
-
-    expect(result).toBe("growth");
-  });
-
-  it("returns null when no pending handle", async () => {
-    const { getPendingHandle } = await import("~/services/plan-welcome.server");
-
-    const mockSql = vi.fn().mockReturnValue([{ plan_pending_handle: null }]);
-
-    const result = await getPendingHandle(mockSql as never, "shop-123");
-
-    expect(result).toBeNull();
   });
 });

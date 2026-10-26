@@ -64,20 +64,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   const storeHandle = shopDomain.replace(".myshopify.com", "");
 
-  let pendingHandle: string | null = null;
-  if (shop) {
-    try {
-      const [planInfo] = await sql<{ plan_pending_handle: string | null }[]>`
-        SELECT plan_pending_handle FROM "Shop" WHERE id = ${shop.id}
-      `;
-      pendingHandle = planInfo?.plan_pending_handle ?? null;
-    } catch {
-      // plan_pending_handle column may not exist yet (pre-migration)
-    }
-  }
-  const resolvedPlanKey = planData?.plan.key ?? "none";
-  const showPendingBanner = pendingHandle !== null && pendingHandle !== resolvedPlanKey;
-
   return {
     storeHandle,
     shopDomain,
@@ -88,7 +74,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
           isTest: planData.isTest,
         }
       : null,
-    pendingHandle: showPendingBanner ? pendingHandle : null,
     usage,
     gatedCount,
     gatingEnforced,
@@ -158,7 +143,6 @@ export function UsageDisplay({
 export default function PlanPage() {
   const {
     plan,
-    pendingHandle,
     usage,
     gatedCount,
     gatingEnforced,
@@ -200,17 +184,6 @@ export default function PlanPage() {
                 </a>
               </>
             )}
-          </s-banner>
-        </s-section>
-      )}
-
-      {/* Pending plan banner - shows when plan change is being confirmed */}
-      {pendingHandle && (
-        <s-section>
-          <s-banner tone="info" heading="Plan Change Pending">
-            <s-text>
-              Your plan change is being confirmed with Shopify. This page will update automatically.
-            </s-text>
           </s-banner>
         </s-section>
       )}
