@@ -1079,9 +1079,17 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
     expect(other.iq_has_credit_status).toBe(false);
   });
 
-  it("null inputQuery reports credit_status as \"unknown\", not false", () => {
-    const nul = status(null).s;
-    expect(nul).toMatchObject({ input_query_null: true, input_query_length: 0, deployed_input_query_has_credit_status: "unknown" });
+  it("null inputQuery reports credit_status as \"unknown\" and check as unavailable_api_null (not a failure)", () => {
+    const { stdout, s: nul } = status(null);
+    expect(nul).toMatchObject({
+      input_query_null: true,
+      input_query_length: 0,
+      deployed_input_query_has_credit_status: "unknown",
+      deployed_input_query_check: "unavailable_api_null",
+    });
+    expect(stdout).toContain("deployed_input_query_check=unavailable_api_null");
+    expect(stdout).not.toContain("::error::");
+    expect(stdout).not.toContain("::warning::");
   });
 
   it("empty-string inputQuery is non-null (length 0) and reports a definite false", () => {
@@ -1089,16 +1097,26 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
     expect(empty).toMatchObject({ input_query_null: false, input_query_length: 0, deployed_input_query_has_credit_status: false });
   });
 
-  it("non-null inputQuery always reports a boolean credit_status", () => {
-    expect(status(MULTILINE_DOLLAR_APP).s.deployed_input_query_has_credit_status).toBe(true);
-    expect(status("query { cart { lines { id } } }").s.deployed_input_query_has_credit_status).toBe(false);
+  it("non-null inputQuery with credit_status reports has_credit_status check", () => {
+    const { stdout, s } = status(MULTILINE_DOLLAR_APP);
+    expect(s.deployed_input_query_has_credit_status).toBe(true);
+    expect(s.deployed_input_query_check).toBe("has_credit_status");
+    expect(stdout).toContain("deployed_input_query_check=has_credit_status");
   });
 
-  it("missing inputQuery key and missing validation node both read as null => unknown", () => {
+  it("non-null inputQuery without credit_status reports missing_credit_status check", () => {
+    const { stdout, s } = status("query { cart { lines { id } } }");
+    expect(s.deployed_input_query_has_credit_status).toBe(false);
+    expect(s.deployed_input_query_check).toBe("missing_credit_status");
+    expect(stdout).toContain("deployed_input_query_check=missing_credit_status");
+  });
+
+  it("missing inputQuery key and missing validation node both read as null => unavailable_api_null", () => {
     expect(status(undefined, false).s).toMatchObject({
       input_query_null: true,
       input_query_length: 0,
       deployed_input_query_has_credit_status: "unknown",
+      deployed_input_query_check: "unavailable_api_null",
     });
     const { json } = runSnippet(run, STATUS_START, CROSS_START, {
       HTTP_RESPONSE_JSON: JSON.stringify({ data: { validations: { nodes: [] } } }),
@@ -1109,14 +1127,16 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
       input_query_length: 0,
       iq_has_metafield: false,
       deployed_input_query_has_credit_status: "unknown",
+      deployed_input_query_check: "unavailable_api_null",
     });
   });
 
-  it("status prints only booleans and integers under a fixed key set", () => {
+  it("status prints only booleans, integers and fixed enums under a fixed key set", () => {
     const { s } = status(MULTILINE_DOLLAR_APP);
     expect(Object.keys(s).sort()).toEqual(
       [
         "blockOnFailure",
+        "deployed_input_query_check",
         "deployed_input_query_has_credit_status",
         "enabled",
         "exists",
@@ -1131,13 +1151,15 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
     );
     for (const [k, v] of Object.entries(s)) {
       if (k === "input_query_length") expect(Number.isInteger(v)).toBe(true);
+      else if (k === "deployed_input_query_check") expect(v).toBe("has_credit_status");
       else expect(typeof v).toBe("boolean");
     }
-    // Null case: the only non-boolean allowed is the fixed enum "unknown".
+    // Null case: the only non-booleans allowed are the fixed enums.
     const nul = status(null).s;
     for (const [k, v] of Object.entries(nul)) {
       if (k === "input_query_length") expect(v).toBe(0);
       else if (k === "deployed_input_query_has_credit_status") expect(v).toBe("unknown");
+      else if (k === "deployed_input_query_check") expect(v).toBe("unavailable_api_null");
       else expect(typeof v).toBe("boolean");
     }
   });
@@ -1172,8 +1194,9 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
             input_query_null: false,
             input_query_length: [...MULTILINE_APP_PREFIX].length,
             has_credit_status: true,
+            input_query_check: "has_credit_status",
           },
-          { function_idx: 2, handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown" },
+          { function_idx: 2, handle_is_credit_check_validation: false, input_query_null: true, input_query_length: 0, has_credit_status: "unknown", input_query_check: "unavailable_api_null" },
         ],
       });
       expect(stdout).not.toContain(SENTINEL);
@@ -1182,7 +1205,7 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
       expect(stdout).not.toContain("fn-2");
     });
 
-    it("per-function has_credit_status: null => \"unknown\", empty string and non-matching => false", () => {
+    it("per-function has_credit_status and input_query_check: null => unavailable_api_null, empty/non-matching => missing_credit_status", () => {
       const { stdout, json } = cross({
         data: {
           shopifyFunctions: {
@@ -1197,12 +1220,12 @@ describe("S12 Validation deployed inputQuery metrics (no text)", () => {
         },
       });
       const fns = (json[0] as { functions: Array<Record<string, unknown>> }).functions;
-      expect(fns.map((f) => [f.function_idx, f.input_query_null, f.has_credit_status])).toEqual([
-        [1, true, "unknown"],
-        [2, true, "unknown"],
-        [3, false, false],
-        [4, false, false],
-        [5, false, true],
+      expect(fns.map((f) => [f.function_idx, f.input_query_null, f.has_credit_status, f.input_query_check])).toEqual([
+        [1, true, "unknown", "unavailable_api_null"],
+        [2, true, "unknown", "unavailable_api_null"],
+        [3, false, false, "missing_credit_status"],
+        [4, false, false, "missing_credit_status"],
+        [5, false, true, "has_credit_status"],
       ]);
       expect(stdout).not.toContain(SENTINEL);
       expect(stdout).not.toContain("buyerIdentity");
@@ -1282,6 +1305,144 @@ describe("Active subscriptions probe (counts/booleans only)", () => {
     expect(g).toContain("active_subscriptions=error error_codes=ACCESS_DENIED");
     expect(g).not.toContain(SENTINEL);
     expect(probe("not json")).toContain("active_subscriptions=error parse_failed");
+  });
+});
+
+describe("Allowed dev store Admin checks", () => {
+  let step: WorkflowStep | undefined;
+  let run: string;
+  let workflowText: string;
+
+  beforeAll(() => {
+    workflowText = readFileSync(WORKFLOW_PATH, "utf-8");
+    const workflow = parseYaml(workflowText) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    step = steps.find((s) => s.id === "allowed_admin");
+    run = step?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  it("uses secrets.ALLOWED_DEV_STORE, never vars.ALLOWED_DEV_STORE (public log leak)", () => {
+    expect(workflowText).not.toContain("vars.ALLOWED_DEV_STORE");
+    expect(step?.env?.ALLOWED_DEV_STORE).toBe("${{ secrets.ALLOWED_DEV_STORE }}");
+  });
+
+  it("validates domain format and masks immediately", () => {
+    expect(run).toContain("myshopify.com");
+    expect(run).toContain("::add-mask::$ALLOWED_DEV_STORE");
+    expect(run).toContain("invalid_domain_format");
+  });
+
+  it("compares shop via shell string compare using SHOP_DOMAIN from GITHUB_ENV (already masked)", () => {
+    expect(run).toContain("shop_matches_allowed=");
+    expect(run).toContain("SHOP_MATCHES");
+    expect(run).toContain("SHOP_DOMAIN");
+    expect(run).toContain("ALLOWED_DEV_STORE");
+    expect(run).toContain('[ "${SHOP_DOMAIN:-}" = "$ALLOWED_DEV_STORE" ]');
+    expect(step?.env?.SHOP_DOMAIN).toBeUndefined();
+    expect(run).not.toContain("steps.shop");
+    expect(run).not.toMatch(/echo.*\$SHOP_DOMAIN/);
+  });
+
+  it("skips with skipped_shop_mismatch when shop doesn't match allowed dev store", () => {
+    expect(run).toContain("allowed_admin=skipped_shop_mismatch");
+    expect(run).toContain('if [ "$SHOP_MATCHES" != "true" ]');
+  });
+
+  it("skips with skipped_token_expired when token expired and refresh didn't succeed", () => {
+    expect(run).toContain("allowed_admin=skipped_token_expired");
+    expect(run).toContain("TOKEN_EXPIRED");
+    expect(run).toContain("REFRESH_SUCCESS");
+    expect(step?.env?.TOKEN_EXPIRED).toBe("${{ steps.session.outputs.token_expired }}");
+    expect(step?.env?.REFRESH_SUCCESS).toBe("${{ steps.refresh.outputs.refresh_success }}");
+  });
+
+  it("is read-only and skips gracefully on missing config", () => {
+    expect(step?.env?.PGOPTIONS).toContain("default_transaction_read_only=on");
+    expect(run).toContain("allowed_admin=skipped_no_allowed_dev_store");
+    expect(run).toContain("allowed_admin=skipped_no_offline_session");
+    expect(run).toContain("allowed_admin=skipped_no_db");
+  });
+
+  it("queries paymentCustomizations and webhookSubscriptions", () => {
+    expect(run).toContain("paymentCustomizations(first: 50)");
+    expect(run).toContain("webhookSubscriptions(first: 100)");
+  });
+
+  it("outputs hide-terms-payment as booleans only", () => {
+    expect(run).toContain("hide_terms_payment_present=");
+    expect(run).toContain("hide_terms_payment_enabled=");
+    expect(run).toContain('select(.shopifyFunction.handle == "hide-terms-payment")');
+  });
+
+  it("outputs webhook diff as counts and topic enums only, never URLs", () => {
+    expect(run).toContain("webhook_expected_count=");
+    expect(run).toContain("webhook_present_count=");
+    expect(run).toContain("webhook_missing_count=");
+    expect(run).toContain("webhook_extra_count=");
+    expect(run).toContain("webhook_missing_topics=");
+    expect(run).toContain("webhook_extra_topics=");
+    expect(run).not.toContain(".endpoint");
+    expect(run).not.toContain(".callbackUrl");
+  });
+
+  it("uses psql -X to ignore .psqlrc", () => {
+    expect(run).toMatch(/psql\s+-X/);
+  });
+});
+
+describe("Cron sweep diagnostics", () => {
+  let step: WorkflowStep | undefined;
+  let run: string;
+
+  beforeAll(() => {
+    const workflow = parseYaml(readFileSync(WORKFLOW_PATH, "utf-8")) as Workflow;
+    const steps = Object.values(workflow.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    step = steps.find((s) => s.id === "cron_sweep");
+    run = step?.run ?? "";
+    expect(run).not.toBe("");
+  });
+
+  it("is read-only", () => {
+    expect(step?.env?.PGOPTIONS).toContain("default_transaction_read_only=on");
+  });
+
+  it("looks up credit_status_daily_sweep by jobname, not id", () => {
+    expect(run).toContain("credit_status_daily_sweep");
+    expect(run).toContain("j.jobname = 'credit_status_daily_sweep'");
+    expect(run).not.toMatch(/jobid\s*=\s*\d+/);
+  });
+
+  it("outputs cron job last run as timestamp, status enum and duration", () => {
+    expect(run).toContain("start_time AT TIME ZONE 'UTC'");
+    expect(run).toContain("jrd.status");
+    expect(run).toContain("duration_sec");
+    expect(run).toContain("start_time_utc");
+  });
+
+  it("outputs sweep effect counts (syncPending, holds applied/released)", () => {
+    expect(run).toContain("sync_pending_current");
+    expect(run).toContain("holds_applied_since_sweep");
+    expect(run).toContain("holds_released_since_sweep");
+    expect(run).toContain("credit_status.hold_applied");
+    expect(run).toContain("credit_status.hold_released");
+  });
+
+  it("skips gracefully when cron schema or job_run_details is missing", () => {
+    expect(run).toContain("cron_sweep=skipped_no_cron_schema");
+    expect(run).toContain("cron_sweep=skipped_no_job_run_details");
+    expect(run).toContain("cron_sweep=skipped_no_db");
+  });
+
+  it("never prints shop domains, buyer ids, or free text", () => {
+    expect(run).not.toContain(".domain");
+    expect(run).not.toContain("buyerAccountId");
+    expect(run).not.toContain(".command");
+    expect(run).not.toContain("return_message");
+  });
+
+  it("uses psql -X to ignore .psqlrc", () => {
+    expect(run).toMatch(/psql\s+-X/);
   });
 });
 

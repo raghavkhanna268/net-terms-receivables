@@ -228,6 +228,12 @@ describe("Reconcile", () => {
       expect(isReconcileMessage({ topic: "RECONCILE_ORDERS" })).toBe(true);
     });
 
+    it("returns true for RECONCILE_DRAFT_ORDERS topic", async () => {
+      const { isReconcileMessage } = await import("../reconcile.server");
+
+      expect(isReconcileMessage({ topic: "RECONCILE_DRAFT_ORDERS" })).toBe(true);
+    });
+
     it("returns false for other topics", async () => {
       const { isReconcileMessage } = await import("../reconcile.server");
 

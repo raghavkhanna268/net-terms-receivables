@@ -118,6 +118,7 @@ const VALIDATION_UPDATE_MUTATION = `#graphql
       userErrors {
         field
         message
+        code
       }
     }
   }
@@ -133,10 +134,11 @@ interface ValidationUpdateResult {
       userErrors?: Array<{
         field?: string[];
         message: string;
+        code?: string;
       }>;
     };
   };
-  errors?: Array<{ message: string }>;
+  errors?: Array<{ message: string; extensions?: { code?: string } }>;
 }
 
 export type TitleUpdateOutcome = "updated" | "skipped" | "failed";
@@ -164,10 +166,10 @@ async function tryUpdateTitle(
     const updateData = (await updateResult.json()) as ValidationUpdateResult;
 
     if (updateData.errors?.length) {
-      errCode = toErrorCode({ message: updateData.errors[0].message });
+      errCode = toErrorCode({ code: updateData.errors[0].extensions?.code });
     } else if (updateData.data?.validationUpdate?.userErrors?.length) {
       errCode = toErrorCode({
-        message: updateData.data.validationUpdate.userErrors[0].message,
+        code: updateData.data.validationUpdate.userErrors[0].code,
       });
     } else if (updateData.data?.validationUpdate?.validation) {
       return { outcome: "updated" };

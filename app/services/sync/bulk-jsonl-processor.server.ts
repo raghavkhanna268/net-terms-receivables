@@ -29,9 +29,11 @@ import {
   parseCompanyBulkJsonl,
   parseOrderBulkJsonl,
   parseCustomerBulkJsonl,
+  parseDraftOrderBulkJsonl,
   bulkLocationToShopifyLocation,
   bulkOrderToShopifyOrder,
   bulkCustomerToShopifyCustomer,
+  bulkDraftOrderToShopifyDraftOrder,
 } from "./bulk-parser.server";
 import {
   mapCompanyLocationToBuyerAccount,
@@ -43,6 +45,7 @@ import {
   type InvoiceData,
 } from "./order.server";
 import { processBulkCustomer, type CustomerPiiMode } from "./customer.server";
+import { processBulkDraftOrder, bulkUpsertDraftOrders } from "./draft-order.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 import {
   checkOrderEligibility,
@@ -119,20 +122,22 @@ export type ErrorType = "retryable" | "permanent";
 
 /**
  * Get the next reconcile stage after the current one completes.
- * Sequence: companies → customers → orders (→ draft_orders in PR-B)
+ * Sequence: companies → customers → orders → draft_orders
  *
  * @param currentStage - The stage that just completed
  * @returns The next stage to enqueue, or undefined if this is the final stage
  */
 export function getNextStage(
   currentStage: string | null
-): "customers" | "orders" | undefined {
+): "customers" | "orders" | "draft_orders" | undefined {
   switch (currentStage) {
     case "companies":
       return "customers";
     case "customers":
       return "orders";
     case "orders":
+      return "draft_orders";
+    case "draft_orders":
       return undefined;
     default:
       return undefined;
@@ -162,7 +167,7 @@ export interface BulkProcessResult extends SyncResult {
   /** Processing status: 'complete', 'progress', or 'error' */
   status?: "complete" | "progress" | "error";
   /** Next stage to enqueue after this one completes (for reconcile chaining) */
-  nextStage?: "customers" | "orders";
+  nextStage?: "customers" | "orders" | "draft_orders";
   /** @deprecated Use nextStage instead. Kept for compatibility. */
   chainToOrders?: boolean;
   /** Error classification for retry logic (only set when status='error') */
@@ -849,6 +854,56 @@ async function processCustomerLines(
 
 
 /**
+ * Process a batch of JSONL lines for draft orders (S8 PR-B).
+ *
+ * Only processes draft orders with payment terms and INR currency. Others are skipped.
+ * Resolves buyer accounts from purchasingEntity or customer reference.
+ */
+export async function processDraftOrderLines(
+  sql: Sql,
+  shop: string,
+  lines: string[]
+): Promise<number> {
+  const jsonl = lines.join("\n");
+  const { draftOrders, errors } = parseDraftOrderBulkJsonl(jsonl);
+
+  if (errors.length > 0) {
+    console.warn(
+      `[bulk-jsonl] ${errors.length} parse errors in draft_orders batch`
+    );
+  }
+
+  const mappedOrders = [];
+  let skippedNonInrCount = 0;
+
+  for (const draftOrder of draftOrders) {
+    const shopifyDraftOrder = bulkDraftOrderToShopifyDraftOrder(draftOrder);
+
+    // #292: Track non-INR/missing-currency skips for logging (same as webhook path)
+    const currency = shopifyDraftOrder.totalPriceSet?.shopMoney?.currencyCode;
+    if (!currency || currency !== SUPPORTED_SHOP_CURRENCY) {
+      skippedNonInrCount++;
+      continue;
+    }
+
+    const mapped = await processBulkDraftOrder(sql, shop, shopifyDraftOrder);
+    if (mapped) {
+      mappedOrders.push(mapped);
+    }
+  }
+
+  // Log skipped non-INR drafts using existing log code (count-only, no PII)
+  if (skippedNonInrCount > 0) {
+    const hash = await shopHash(shop);
+    safeLog("info", "drain_skip_non_inr_draft_order", { shopHash: hash, count: skippedNonInrCount });
+  }
+
+  const upserted = await bulkUpsertDraftOrders(sql, mappedOrders);
+  return upserted;
+}
+
+
+/**
  * Load bulk operation progress from database.
  * @param shop - Optional shop filter for post-lease re-read (prevents cross-shop collision)
  */
@@ -1133,6 +1188,8 @@ async function processLines(
       return await processOrderLines(sql, shopId, shop, lines);
     case "customers":
       return await processCustomerLines(sql, shop, lines);
+    case "draft_orders":
+      return await processDraftOrderLines(sql, shop, lines);
     default:
       console.warn(`[bulk-jsonl] Unknown bulk type: ${bulkType}`);
       return 0;
@@ -1321,7 +1378,7 @@ export async function processBulkOperation(
       });
 
       // Only chain to next stage if this caller won the completion claim
-      let nextStage: "customers" | "orders" | undefined;
+      let nextStage: "customers" | "orders" | "draft_orders" | undefined;
       if (claimed) {
         const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
         nextStage =
@@ -1482,7 +1539,7 @@ export async function processBulkOperation(
     });
 
     // Only chain to next stage if this caller won the completion claim
-    let nextStage: "customers" | "orders" | undefined;
+    let nextStage: "customers" | "orders" | "draft_orders" | undefined;
     if (claimed) {
       const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
       nextStage =
@@ -1657,7 +1714,7 @@ export async function processBulkOperation(
     });
 
     // Only chain to next stage if this caller won the completion claim
-    let nextStage: "customers" | "orders" | undefined;
+    let nextStage: "customers" | "orders" | "draft_orders" | undefined;
     if (claimed) {
       const metadata = await getBulkOperationMetadata(sql, bulkOperationId);
       nextStage =

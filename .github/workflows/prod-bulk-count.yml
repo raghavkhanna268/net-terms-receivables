@@ -1,0 +1,286 @@
+# Prod bulk count (read-only, counts only)
+#
+# Runs ONE committed Admin GraphQL bulk query against the ALLOWED_DEV_STORE
+# shop and prints integer counts / enums / booleans only.
+#
+# SAFETY:
+#   - Manual trigger only (workflow_dispatch), runs only from main
+#   - The query is chosen from a fixed choice list of COMMITTED files; there is
+#     no free-text query or shop input
+#   - Before anything else, scripts/ci/bulk-count/guard_query.py checks the
+#     committed file is exactly the fixed bulkOperationRunQuery wrapper around
+#     a read query whose only top-level field is the expected connection
+#     (else: bulk_count=refused code=QUERY_NOT_READONLY). bulkOperationRunQuery
+#     itself only accepts query documents. The only other Admin calls are two
+#     read queries (currentBulkOperation, node).
+#   - DB access is read-only (PGOPTIONS default_transaction_read_only=on) and
+#     only selects counts plus the offline token/expiry
+#   - Never refreshes the offline token: an expired token prints
+#     bulk_count=skipped_token_expired and exits 0
+#   - Shop domain, token and the result URL are masked and never printed;
+#     the JSONL result is downloaded to a temp file, reduced to counts with a
+#     committed jq filter, then deleted. No artifacts.
+#
+# Reconcile collision guards (see PR for the schedule audit):
+#   - pg_cron s10b_nightly_reconcile runs at 02:00 UTC daily (07:30 IST) and
+#     chains companies -> customers -> orders -> draft_orders bulk ops; this
+#     workflow refuses from 01:45 to 03:30 UTC (code=RECONCILE_WINDOW).
+#   - Reconcile can also start outside that window (install initial sync,
+#     manual enqueue), so it also refuses if the shop has an unfinished
+#     s6_bulk_operations row or a queued RECONCILE_* message
+#     (code=RECONCILE_IN_FLIGHT), and if Shopify reports a QUERY bulk op in
+#     CREATED/RUNNING/CANCELING (code=BULK_OP_IN_PROGRESS).
+#   - The Workers */5 cron only drains queues; it does not start reconcile.
+#
+# Required secrets: DATABASE_URL_MIGRATIONS, ALLOWED_DEV_STORE
+
+name: Prod Bulk Count
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Committed bulk query to run (counts only)"
+        required: true
+        default: s8-draft-orders
+        type: choice
+        options:
+          - s8-draft-orders
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-bulk-count
+  cancel-in-progress: false
+
+jobs:
+  bulk-count:
+    name: Run committed bulk query (counts only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Bulk count
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Secret, so the env header prints ***.
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+          QUERY_NAME: ${{ inputs.query }}
+        run: |
+          set -euo pipefail
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr
+
+          enum_or_unknown() {
+            if [[ "${1:-}" =~ ^[A-Z_]{1,40}$ ]]; then echo "$1"; else echo "UNKNOWN"; fi
+          }
+
+          # --- 0. Resolve the committed query (fixed map, no free text) ---
+          case "$QUERY_NAME" in
+            s8-draft-orders)
+              QUERY_FILE=scripts/readonly/bulk/s8-draft-orders.graphql
+              EXPECTED_FIELD=draftOrders
+              COUNT_JQ=scripts/ci/bulk-count/s8-draft-orders.jq
+              ;;
+            *)
+              echo "bulk_count=refused code=UNKNOWN_QUERY"
+              exit 1
+              ;;
+          esac
+          echo "query_name=$QUERY_NAME"
+
+          # --- 1. Read-only guard on the committed query file ---
+          if ! python3 scripts/ci/bulk-count/guard_query.py "$QUERY_FILE" "$EXPECTED_FIELD"; then
+            echo "bulk_count=refused code=QUERY_NOT_READONLY"
+            exit 1
+          fi
+          echo "query_guard=pass"
+
+          # --- 2. Reconcile cron window (02:00 UTC nightly reconcile) ---
+          NOW_HHMM=$((10#$(date -u +%H%M)))
+          if [ "$NOW_HHMM" -ge 145 ] && [ "$NOW_HHMM" -lt 330 ]; then
+            echo "bulk_count=refused code=RECONCILE_WINDOW"
+            exit 0
+          fi
+          echo "reconcile_window=outside"
+
+          # --- 3. Shop = ALLOWED_DEV_STORE, must be installed (count only) ---
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "bulk_count=refused code=DATABASE_URL_MISSING"
+            exit 1
+          fi
+          if [ -z "${ALLOWED_DEV_STORE:-}" ] || [[ ! "$ALLOWED_DEV_STORE" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+            echo "bulk_count=refused code=ALLOWED_DEV_STORE_INVALID"
+            exit 1
+          fi
+          echo "::add-mask::$ALLOWED_DEV_STORE"
+          SHOP="$ALLOWED_DEV_STORE"
+          INSTALLED=$(psql -X -v ON_ERROR_STOP=1 -t -A -v shop="$SHOP" "$DATABASE_URL" <<'EOSQL'
+          SELECT COUNT(*) FROM "Shop" WHERE domain = :'shop' AND "uninstalledAt" IS NULL;
+          EOSQL
+          )
+          if [ "$INSTALLED" != "1" ]; then
+            echo "allowed_dev_store_installed=false"
+            echo "bulk_count=refused code=SHOP_NOT_INSTALLED"
+            exit 1
+          fi
+          echo "allowed_dev_store_installed=true"
+
+          # --- 4. No reconcile in flight for this shop (counts only) ---
+          INFLIGHT=$(psql -X -v ON_ERROR_STOP=1 -t -A -F '|' -v shop="$SHOP" "$DATABASE_URL" <<'EOSQL'
+          SELECT
+            (SELECT COUNT(*) FROM s6_bulk_operations
+              WHERE shop = :'shop' AND completed_at IS NULL AND failure_count < 5
+                AND started_at > NOW() - INTERVAL '24 hours'),
+            (SELECT COUNT(*) FROM pgmq.q_s6_sync
+              WHERE message->>'shop' = :'shop' AND message->>'topic' LIKE 'RECONCILE\_%');
+          EOSQL
+          )
+          INFLIGHT_ROWS=$(echo "$INFLIGHT" | cut -d'|' -f1)
+          QUEUED_RECONCILE=$(echo "$INFLIGHT" | cut -d'|' -f2)
+          [[ "$INFLIGHT_ROWS" =~ ^[0-9]+$ ]] || INFLIGHT_ROWS=unknown
+          [[ "$QUEUED_RECONCILE" =~ ^[0-9]+$ ]] || QUEUED_RECONCILE=unknown
+          echo "inflight_bulk_rows=$INFLIGHT_ROWS"
+          echo "queued_reconcile_messages=$QUEUED_RECONCILE"
+          if [ "$INFLIGHT_ROWS" != "0" ] || [ "$QUEUED_RECONCILE" != "0" ]; then
+            echo "bulk_count=refused code=RECONCILE_IN_FLIGHT"
+            exit 0
+          fi
+
+          # --- 5. Offline token (read-only; never refreshed) ---
+          EXPIRES_RAW=$(psql -X -v ON_ERROR_STOP=1 -t -A -v shop="$SHOP" "$DATABASE_URL" <<'EOSQL'
+          SELECT COALESCE((expires AT TIME ZONE 'UTC')::text, '')
+          FROM "Session" WHERE shop = :'shop' AND "isOnline" = false LIMIT 1;
+          EOSQL
+          )
+          if [ -n "$EXPIRES_RAW" ]; then
+            EXPIRES_EPOCH=$(date -u -d "$EXPIRES_RAW" +%s 2>/dev/null || echo 0)
+            if [ "$EXPIRES_EPOCH" -le "$(date -u +%s)" ]; then
+              echo "bulk_count=skipped_token_expired"
+              exit 0
+            fi
+          fi
+          ACCESS_TOKEN=$(psql -X -v ON_ERROR_STOP=1 -t -A -v shop="$SHOP" "$DATABASE_URL" <<'EOSQL'
+          SELECT "accessToken" FROM "Session" WHERE shop = :'shop' AND "isOnline" = false LIMIT 1;
+          EOSQL
+          )
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "bulk_count=refused code=NO_OFFLINE_SESSION"
+            exit 1
+          fi
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          WORK=$(mktemp -d)
+          trap 'rm -rf "$WORK"' EXIT
+          CURL_CONFIG="$WORK/curl.cfg"
+          ( umask 077; printf 'header = "Content-Type: application/json"\nheader = "X-Shopify-Access-Token: %s"\n' "$ACCESS_TOKEN" > "$CURL_CONFIG" )
+          unset ACCESS_TOKEN
+          ENDPOINT="https://${SHOP}/admin/api/2026-10/graphql.json"
+
+          gql() {  # $1 = request JSON file; prints HTTP status, body in $WORK/resp.json
+            curl -sS -o "$WORK/resp.json" -w '%{http_code}' -X POST \
+              --config "$CURL_CONFIG" --data-binary "@$1" "$ENDPOINT" 2>/dev/null || true
+          }
+
+          # --- 6. currentBulkOperation(type: QUERY) must not be active ---
+          jq -n '{query: "query { currentBulkOperation(type: QUERY) { status } }"}' > "$WORK/req-current.json"
+          HTTP=$(gql "$WORK/req-current.json")
+          if [ "$HTTP" != "200" ]; then
+            echo "current_bulk_http_status=$HTTP"
+            echo "bulk_count=refused code=CURRENT_BULK_HTTP"
+            exit 1
+          fi
+          CUR=$(jq -r '.data.currentBulkOperation.status // "NONE"' "$WORK/resp.json" 2>/dev/null || echo UNKNOWN)
+          CUR=$(enum_or_unknown "$CUR")
+          echo "current_bulk_status=$CUR"
+          case "$CUR" in
+            CREATED|RUNNING|CANCELING|UNKNOWN)
+              echo "bulk_count=refused code=BULK_OP_IN_PROGRESS"
+              exit 0
+              ;;
+          esac
+
+          # --- 7. Submit the committed bulkOperationRunQuery document ---
+          jq -n --rawfile q "$QUERY_FILE" '{query: $q}' > "$WORK/req-submit.json"
+          HTTP=$(gql "$WORK/req-submit.json")
+          echo "submit_http_status=$HTTP"
+          # none on success; sanitized code enums (UNKNOWN if uncoded) on error.
+          GQL_ERR=$(jq -r -f scripts/ci/bulk-count/graphql-error-codes.jq "$WORK/resp.json" 2>/dev/null || echo PARSE_FAILED)
+          [[ "$GQL_ERR" =~ ^[A-Z_]{1,40}(,[A-Z_]{1,40})*$|^none$ ]] || GQL_ERR=PARSE_FAILED
+          echo "graphql_error_codes=$GQL_ERR"
+          UE_COUNT=$(jq -r '(.data.bulkOperationRunQuery.userErrors // []) | length' "$WORK/resp.json" 2>/dev/null || echo 0)
+          [[ "$UE_COUNT" =~ ^[0-9]+$ ]] || UE_COUNT=0
+          if [ "$UE_COUNT" -gt 0 ]; then echo "userErrors_present=true"; else echo "userErrors_present=false"; fi
+          echo "userErrors_count=$UE_COUNT"
+          # The committed document selects userErrors { field message } only (no
+          # code), and message is free text, so only the count is printed.
+          OP_ID=$(jq -r '.data.bulkOperationRunQuery.bulkOperation.id // empty' "$WORK/resp.json" 2>/dev/null || true)
+          if [ "$HTTP" != "200" ] || [ -z "$OP_ID" ] || [[ ! "$OP_ID" =~ ^gid://shopify/BulkOperation/[0-9]+$ ]]; then
+            echo "bulk_count=failed code=SUBMIT_FAILED"
+            exit 1
+          fi
+          echo "::add-mask::$OP_ID"
+          echo "bulk_submitted=true"
+
+          # --- 8. Poll node(id) every 10s until terminal ---
+          jq -n --arg id "$OP_ID" '{query: "query($id: ID!) { node(id: $id) { ... on BulkOperation { status errorCode url } } }", variables: {id: $id}}' > "$WORK/req-poll.json"
+          STATUS=UNKNOWN
+          ERR_CODE=""
+          URL=""
+          for _ in $(seq 1 75); do
+            sleep 10
+            HTTP=$(gql "$WORK/req-poll.json")
+            [ "$HTTP" = "200" ] || continue
+            STATUS=$(enum_or_unknown "$(jq -r '.data.node.status // empty' "$WORK/resp.json" 2>/dev/null || true)")
+            case "$STATUS" in
+              COMPLETED|FAILED|CANCELED|EXPIRED)
+                ERR_CODE=$(jq -r '.data.node.errorCode // empty' "$WORK/resp.json" 2>/dev/null || true)
+                URL=$(jq -r '.data.node.url // empty' "$WORK/resp.json" 2>/dev/null || true)
+                break
+                ;;
+            esac
+          done
+          echo "final_status=$STATUS"
+          if [ -n "$ERR_CODE" ]; then echo "error_code=$(enum_or_unknown "$ERR_CODE")"; else echo "error_code=none"; fi
+          case "$STATUS" in
+            COMPLETED|FAILED|CANCELED|EXPIRED) ;;
+            *) echo "bulk_count=failed code=POLL_TIMEOUT"; exit 1 ;;
+          esac
+          if [ "$STATUS" != "COMPLETED" ]; then
+            echo "bulk_count=failed code=BULK_NOT_COMPLETED"
+            exit 1
+          fi
+
+          # --- 9. Download JSONL to a temp file, count with committed jq, delete ---
+          JSONL="$WORK/result.jsonl"
+          if [ -z "$URL" ]; then
+            # Completed with zero objects: Shopify returns no url.
+            : > "$JSONL"
+          else
+            echo "::add-mask::$URL"
+            if ! curl -sS -f -o "$JSONL" "$URL" 2>/dev/null; then
+              echo "bulk_count=failed code=DOWNLOAD_FAILED"
+              exit 1
+            fi
+          fi
+          unset URL
+          if ! COUNTS=$(jq -n -r -f "$COUNT_JQ" < "$JSONL" 2>/dev/null); then
+            rm -f "$JSONL"
+            echo "bulk_count=failed code=JSONL_PARSE"
+            exit 1
+          fi
+          rm -f "$JSONL"
+          # Print only name=<int> lines.
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^(draft_order_lines|with_purchasing_company|customer_only|neither)=[0-9]+$ ]]; then
+              echo "$line"
+            fi
+          done <<< "$COUNTS"
+          echo "bulk_count=done"
