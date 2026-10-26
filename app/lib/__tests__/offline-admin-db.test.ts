@@ -420,6 +420,62 @@ describeWithDb("getOfflineAdminContext (DB-backed)", () => {
       expect(session.needsReauth).toBe(true);
     });
 
+    /**
+     * Deterministic concurrent winner test at getOfflineAdminContext level.
+     * Simulates another process having already refreshed by writing winner state
+     * to DB before fetch returns 401.
+     */
+    it("401 invalid_request with concurrent winner uses winner's token and does NOT set needsReauth", async () => {
+      const oneHourFromNow = new Date(Date.now() + 60 * 60 * 1000);
+      // Create session with expired token
+      await createTestSession({
+        accessToken: "shpat_expired",
+        expiresInMs: -60 * 1000,
+      });
+
+      // Mock fetch: simulate concurrent winner by updating DB, then return 401
+      global.fetch = vi.fn(async () => {
+        fetchCallCount++;
+        // Simulate concurrent winner: another process already refreshed
+        await sql`
+          UPDATE "Session"
+          SET "accessToken" = 'shpat_winner_token',
+              expires = ${oneHourFromNow.toISOString()}::timestamptz AT TIME ZONE 'UTC',
+              "refreshToken" = 'shprt_new_refresh_token',
+              "needsReauth" = false
+          WHERE id = ${TEST_SESSION_ID}
+        `;
+
+        return new Response(
+          JSON.stringify({
+            error: "invalid_request",
+            error_description: "This request requires an active refresh_token",
+          }),
+          { status: 401 }
+        );
+      });
+
+      const { getOfflineAdminContext } = await import("../offline-admin.server");
+
+      const result = await getOfflineAdminContext(
+        sql,
+        TEST_SHOP,
+        TEST_CLIENT_ID,
+        TEST_CLIENT_SECRET
+      );
+
+      // Should succeed - winner's token used after detecting concurrent refresh
+      expect(result.success).toBe(true);
+      expect(result.admin).toBeDefined();
+
+      // needsReauth must NOT be set
+      const [session] = await sql<{ accessToken: string; needsReauth: boolean }[]>`
+        SELECT "accessToken", "needsReauth" FROM "Session" WHERE id = ${TEST_SESSION_ID}
+      `;
+      expect(session.accessToken).toBe("shpat_winner_token");
+      expect(session.needsReauth).toBe(false);
+    });
+
     it("5xx errors (503) are retryable and do NOT set needsReauth", async () => {
       // Create session with expired token
       await createTestSession({
