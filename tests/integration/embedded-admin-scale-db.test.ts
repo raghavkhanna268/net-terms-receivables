@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
-import { sqlOptions } from "~/lib/db-light.server";
+import { sqlOptions } from "../../app/lib/db-light.server.js";
 import {
   FULL_SIZE,
   generateAllData,
@@ -36,7 +36,7 @@ const SMALL_SIZE: Omit<SeedConfig, "shopId" | "shopDomain"> = {
 };
 
 // Mock ONLY Shopify Admin API and billing callers - DB services use real seeded data
-vi.mock("~/services/plan.server", () => ({
+vi.mock("../../app/services/plan.server.js", () => ({
   // Justification: resolvePlan calls Shopify Billing API (activeSubscriptions query)
   resolvePlan: vi.fn().mockResolvedValue({
     plan: { key: "growth" },
@@ -45,17 +45,17 @@ vi.mock("~/services/plan.server", () => ({
   }),
 }));
 
-vi.mock("~/services/shop-currency-recovery.server", () => ({
+vi.mock("../../app/services/shop-currency-recovery.server.js", () => ({
   // Justification: checkAndRecoverCurrency calls Shopify Admin API (shop query)
   checkAndRecoverCurrency: vi.fn().mockResolvedValue({ currency: "INR", flipBlocked: false }),
 }));
 
-vi.mock("~/services/plan-welcome.server", () => ({
+vi.mock("../../app/services/plan-welcome.server.js", () => ({
   // Justification: processPlanWelcome calls Shopify Billing API
   processPlanWelcome: vi.fn().mockResolvedValue({ refreshed: false, skipped: true }),
 }));
 
-vi.mock("~/lib/currency-gate.server", () => ({
+vi.mock("../../app/lib/currency-gate.server.js", () => ({
   // Justification: config-based gate, not DB
   isCurrencyGateOpen: vi.fn().mockReturnValue(true),
   getEffectiveCurrency: vi.fn().mockReturnValue("INR"),
@@ -405,12 +405,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app._index");
+      const { loader } = await import("../../app/routes/app._index.js");
 
       // Seed SMALL (5 buyers visible on page 1)
       const smallData = generateAllData(smallConfig);
@@ -455,12 +455,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("buyer ledger returns exactly 20 rows when data exceeds page size", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app._index");
+      const { loader } = await import("../../app/routes/app._index.js");
       const fullData = generateAllData(fullConfig);
       await seedData(fullConfig, fullData);
 
@@ -496,12 +496,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app.accounts.$id");
+      const { loader } = await import("../../app/routes/app.accounts.$id.js");
 
       // Seed SMALL
       const smallData = generateAllData(smallConfig);
@@ -545,12 +545,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("invoices are capped at 10 rows for buyer with >10 invoices", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app.accounts.$id");
+      const { loader } = await import("../../app/routes/app.accounts.$id.js");
 
       // Seed a buyer with many invoices
       await seedShop();
@@ -618,12 +618,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app.reconcile");
+      const { loader } = await import("../../app/routes/app.reconcile.js");
 
       // Seed SMALL
       const smallData = generateAllData(smallConfig);
@@ -665,12 +665,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("matches are paginated at exactly 20 rows", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app.reconcile");
+      const { loader } = await import("../../app/routes/app.reconcile.js");
       const fullData = generateAllData(fullConfig);
       await seedData(fullConfig, fullData);
 
@@ -701,12 +701,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app.imports");
+      const { loader } = await import("../../app/routes/app.imports.js");
 
       // Seed SMALL
       const smallData = generateAllData(smallConfig);
@@ -757,12 +757,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
     it("query count is constant at SMALL and FULL size (N+1 detection)", async () => {
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => spy.sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { loader } = await import("~/routes/app.data-requests");
+      const { loader } = await import("../../app/routes/app.data-requests.js");
 
       // Seed SMALL with data requests
       const smallData = generateAllData(smallConfig);
@@ -846,7 +846,7 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
       const csvBuffer = new TextEncoder().encode(csvContent).buffer;
 
       // Time REAL HDFC parsing
-      const { parseBankStatement } = await import("~/lib/banks");
+      const { parseBankStatement } = await import("../../app/lib/banks/index.js");
 
       const parseStart = performance.now();
       const parseResult = await parseBankStatement(csvBuffer, { fileName: "hdfc-test.csv" });
@@ -862,12 +862,12 @@ describeWithDb("embedded-admin scale and N+1 tests (DB)", () => {
 
       // Time REAL matcher
       vi.resetModules();
-      vi.doMock("~/lib/request-context.server", () => ({
+      vi.doMock("../../app/lib/request-context.server.js", () => ({
         getRequestSql: () => sql,
         getRequestWaitUntil: () => undefined,
       }));
 
-      const { runMatcher } = await import("~/services/matcher.server");
+      const { runMatcher } = await import("../../app/services/matcher.server.js");
 
       const matchStart = performance.now();
       const matchResult = await runMatcher(sql, TEST_SHOP_ID, { limit: 10 });
