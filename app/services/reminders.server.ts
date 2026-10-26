@@ -52,6 +52,167 @@ import { sendViaResend } from "./resend-client.server";
 import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 
 /**
+ * Merchant info fetched from Admin GraphQL for Reply-To and email footer.
+ * Cached in a module-level TTL cache per isolate (10 min success, 60s failure).
+ */
+export interface MerchantInfo {
+  /** Shop display name (shop.name from Admin API) */
+  name: string | null;
+  /** Shop contact email (shop.contactEmail from Admin API) */
+  contactEmail: string | null;
+}
+
+/**
+ * Cache entry with timestamp for TTL eviction.
+ */
+interface MerchantInfoCacheEntry {
+  info: MerchantInfo;
+  fetchedAt: number;
+  isFailure: boolean;
+}
+
+/**
+ * Module-level cache for merchant info.
+ * Keyed by shopId, bounded to MAX_CACHE_SIZE entries.
+ * Entries have TTL_MS (success) or FAILURE_TTL_MS (failure) expiry.
+ */
+const merchantInfoCache = new Map<string, MerchantInfoCacheEntry>();
+
+/** Cache TTL for successful fetches (10 minutes) */
+const TTL_MS = 10 * 60 * 1000;
+
+/** Cache TTL for failures (60 seconds) */
+const FAILURE_TTL_MS = 60 * 1000;
+
+/** Maximum cache entries (oldest evicted when exceeded) */
+const MAX_CACHE_SIZE = 500;
+
+/**
+ * Reset the merchant info cache (test-only).
+ * @internal
+ */
+export function _resetMerchantInfoCacheForTests(): void {
+  merchantInfoCache.clear();
+}
+
+/**
+ * Get current cache size (test-only).
+ * @internal
+ */
+export function _getMerchantInfoCacheSizeForTests(): number {
+  return merchantInfoCache.size;
+}
+
+/**
+ * Simple email validation regex for Reply-To.
+ * Only validates basic structure - the actual validation is done by Resend.
+ */
+export function isValidEmail(email: string | null | undefined): boolean {
+  if (!email || typeof email !== "string") return false;
+  const trimmed = email.trim();
+  if (trimmed.length === 0) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+}
+
+/**
+ * GraphQL query to fetch merchant info (name and contactEmail).
+ * These fields require no special scopes beyond basic app access.
+ * @see https://shopify.dev/docs/api/admin-graphql/2026-10/objects/Shop
+ */
+const MERCHANT_INFO_QUERY = `
+  query MerchantInfo {
+    shop {
+      name
+      contactEmail
+    }
+  }
+`;
+
+/**
+ * Evict expired entries and enforce size limit.
+ */
+function evictStaleEntries(): void {
+  const now = Date.now();
+  
+  for (const [key, entry] of merchantInfoCache) {
+    const ttl = entry.isFailure ? FAILURE_TTL_MS : TTL_MS;
+    if (now - entry.fetchedAt > ttl) {
+      merchantInfoCache.delete(key);
+    }
+  }
+  
+  while (merchantInfoCache.size > MAX_CACHE_SIZE) {
+    const oldestKey = merchantInfoCache.keys().next().value;
+    if (oldestKey) {
+      merchantInfoCache.delete(oldestKey);
+    }
+  }
+}
+
+/**
+ * Fetch merchant info from Admin GraphQL API.
+ * Uses module-level cache with TTL (10min success, 60s failure).
+ * Returns null values on failure (fail-open for the send path).
+ *
+ * @param shopId - Shop ID for cache key
+ * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
+ * @returns MerchantInfo with name and contactEmail, or null values on failure
+ */
+export async function fetchMerchantInfo(
+  shopId: string,
+  shopDomain: string
+): Promise<MerchantInfo> {
+  evictStaleEntries();
+  
+  const cached = merchantInfoCache.get(shopId);
+  if (cached) {
+    const ttl = cached.isFailure ? FAILURE_TTL_MS : TTL_MS;
+    if (Date.now() - cached.fetchedAt <= ttl) {
+      return cached.info;
+    }
+    merchantInfoCache.delete(shopId);
+  }
+  
+  const result: MerchantInfo = { name: null, contactEmail: null };
+
+  try {
+    // Dynamic import: static import broke app.settings.reminders.test.ts via transitive imports.
+    const { shopifyGraphQLQueue } = await import("./shopify-client.server");
+    
+    const response = await shopifyGraphQLQueue<{
+      shop?: { name?: string; contactEmail?: string };
+    }>(shopDomain, MERCHANT_INFO_QUERY);
+
+    if (!response.success || !response.data?.shop) {
+      merchantInfoCache.set(shopId, {
+        info: result,
+        fetchedAt: Date.now(),
+        isFailure: true,
+      });
+      return result;
+    }
+
+    const shop = response.data.shop;
+    result.name = shop.name && shop.name.trim().length > 0 ? shop.name.trim() : null;
+    result.contactEmail = isValidEmail(shop.contactEmail) ? shop.contactEmail!.trim() : null;
+
+    merchantInfoCache.set(shopId, {
+      info: result,
+      fetchedAt: Date.now(),
+      isFailure: false,
+    });
+    return result;
+  } catch {
+    merchantInfoCache.set(shopId, {
+      info: result,
+      fetchedAt: Date.now(),
+      isFailure: true,
+    });
+    return result;
+  }
+}
+
+/**
  * Check if plan gating enforcement is enabled.
  * Reads PLAN_GATING_ENFORCED from environment variable.
  * 
@@ -975,6 +1136,11 @@ export async function sendPaymentReminder(
     };
   }
 
+  // Fetch merchant info for Reply-To and footer BEFORE claiming slot
+  // Uses module-level in-memory cache with 10min TTL (per isolate)
+  // Fail-open: on failure, replyTo is omitted and handle label is used
+  const merchantInfo = await fetchMerchantInfo(shopId, invoice.shopDomain);
+
   // Phase A: Short transaction to claim slot with per-invoice lock
   // This ensures at most one reminder per invoice per day
   const claimResult = await sql.begin(async (tx) => {
@@ -1032,6 +1198,10 @@ export async function sendPaymentReminder(
   // before the Resend call succeeds, the row stays 'sent', nothing retries it,
   // so that stage's reminder is lost; the next enabled stage still sends normally.
   try {
+    // Determine Reply-To and display name for footer (merchantInfo fetched before Phase A)
+    const replyTo = merchantInfo.contactEmail ?? undefined;
+    const storeDisplayName = merchantInfo.name ?? invoice.shopName;
+
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
       buyerName: invoice.buyerName ?? "Customer",
@@ -1039,6 +1209,8 @@ export async function sendPaymentReminder(
       dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
       merchantName: invoice.shopName,
       reminderType: getReminderLabel(offsetDays),
+      storeDisplayName,
+      hasReplyTo: !!replyTo,
     });
 
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
@@ -1075,6 +1247,7 @@ export async function sendPaymentReminder(
         html: emailHtml,
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
+        replyTo,
       },
       {
         RESEND_API_KEY: resendKey,
@@ -1456,6 +1629,11 @@ export async function sendCatchupReminder(
     };
   }
 
+  // Fetch merchant info for Reply-To and footer BEFORE claiming slot
+  // Uses module-level in-memory cache with 10min TTL (per isolate)
+  // Fail-open: on failure, replyTo is omitted and handle label is used
+  const merchantInfo = await fetchMerchantInfo(shopId, invoice.shopDomain);
+
   // Phase A: Claim under per-invoice lock (same-day check + claim in one tx)
   // This prevents a same-day new-stage send and catch-up from both going out.
   // On send failure, we revert the claim.
@@ -1527,6 +1705,10 @@ export async function sendCatchupReminder(
   // before the Resend call succeeds, the row stays 'sent', nothing retries it,
   // so that stage's reminder is lost; the next enabled stage still sends normally.
   try {
+    // Determine Reply-To and display name for footer (merchantInfo fetched before Phase A)
+    const replyTo = merchantInfo.contactEmail ?? undefined;
+    const storeDisplayName = merchantInfo.name ?? invoice.shopName;
+
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
       buyerName: invoice.buyerName ?? "Customer",
@@ -1534,6 +1716,8 @@ export async function sendCatchupReminder(
       dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
       merchantName: invoice.shopName,
       reminderType: getReminderLabel(offsetDays),
+      storeDisplayName,
+      hasReplyTo: !!replyTo,
     });
 
     const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
@@ -1575,6 +1759,7 @@ export async function sendCatchupReminder(
         html: emailHtml,
         headers: unsubscribeHeaders ?? undefined,
         idempotencyKey,
+        replyTo,
       },
       {
         RESEND_API_KEY: resendKey,
