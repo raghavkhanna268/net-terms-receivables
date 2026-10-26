@@ -321,6 +321,25 @@ describe("webhooks.shop.update", () => {
       expect(updateCalls.length).toBeGreaterThan(0);
       expect(updateCalls.some((c) => c.values.includes("INR"))).toBe(true);
     });
+
+    it("XXX to INR blocked when shop has financial rows", async () => {
+      setupShopInDb("XXX", true);
+      setupAdminApiResponse("INR");
+
+      const { action } = await import("../webhooks.shop.update");
+      const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");
+      const args = createActionArgs(request);
+
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      await args._waitUntil.mock.calls[0][0];
+
+      expect(mockWriteShopConfigMetafield).not.toHaveBeenCalled();
+
+      const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+      expect(updateCalls.length).toBe(0);
+    });
   });
 
   describe("fail-closed behavior", () => {
