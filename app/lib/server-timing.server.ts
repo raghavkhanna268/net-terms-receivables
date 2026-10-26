@@ -239,6 +239,30 @@ export class ServerTiming {
       // Timing must never throw
     }
   }
+
+  /**
+   * Log only the specified phases with safeLog.
+   * Used for deferred phases that complete after the initial response.
+   * Only logs phases that have completed timing.
+   */
+  logPhases(phaseNames: string[]): void {
+    try {
+      for (const phase of phaseNames) {
+        const entry = this.phases.get(phase);
+        if (entry?.end !== undefined) {
+          const stage: PhaseStage = (this.cold ? `${phase}_cold` : phase) as PhaseStage;
+          const durationMs = Math.round(entry.end - entry.start);
+          safeLog("info", "app_home_timing", {
+            route: "app_home",
+            stage,
+            durationMs,
+          });
+        }
+      }
+    } catch {
+      // Timing must never throw
+    }
+  }
 }
 
 /**
