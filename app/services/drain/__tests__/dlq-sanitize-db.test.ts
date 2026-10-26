@@ -551,7 +551,6 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       });
 
     const webhookId = `wh-graphql-${testContext.suffix}`;
-    const shopId = `shop-graphql-${testContext.suffix}`;
     const message = {
       shop: testContext.missingShopDomain,
       topic: "COMPANY_LOCATIONS_UPDATE",
@@ -560,11 +559,13 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       enqueuedAt: new Date().toISOString(),
     };
 
-    // Create a Shop row so that moveToDeadLetter sees the shop as existing and NOT uninstalled.
+    // Clear uninstalledAt so moveToDeadLetter sees the shop as existing and NOT uninstalled.
     // This ensures non-shop errors keep the full message - only shop-gone scenarios sanitize.
+    // The Shop row was already created by beforeEach with uninstalledAt set; we update it here.
     await sqlRef`
-      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
-      VALUES (${shopId}, ${testContext.missingShopDomain}, 'INR', NOW(), NOW())
+      UPDATE "Shop"
+      SET "uninstalledAt" = NULL
+      WHERE domain = ${testContext.missingShopDomain}
     `;
 
     try {
@@ -586,8 +587,13 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       expect(dlqRow!.message.shop).toBe(testContext.missingShopDomain);
       expect(dlqRow!.error).toContain("graphql_schema_error");
     } finally {
-      // Clean up the Shop row
-      await sqlRef`DELETE FROM "Shop" WHERE id = ${shopId}`;
+      // Restore the uninstalledAt for afterEach cleanup consistency
+      const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      await sqlRef`
+        UPDATE "Shop"
+        SET "uninstalledAt" = ${uninstalledAt}
+        WHERE domain = ${testContext.missingShopDomain}
+      `;
     }
   });
 
