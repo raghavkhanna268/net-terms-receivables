@@ -3,11 +3,14 @@
  *
  * Comprehensive real-path tests for the payment-reminder and email-sending
  * system covering the reminders service, Resend email sender, queue/drain
- * handlers, and safeLog/Sentry/AuditEvent security.
+ * handlers, and safeLog/Sentry security.
  *
  * These tests call the REAL code paths with I/O mocked at the edge:
  * - Resend API (fetch stub)
  * - Sentry (captureException spy)
+ *
+ * Note: The send path does not write AuditEvent rows; these tests verify
+ * ReminderLog persistence and safeLog/Sentry redaction only.
  *
  * DB tests use the repo's existing describeWithDb/TEST_DATABASE_URL pattern.
  */
@@ -93,10 +96,6 @@ function createMockSql() {
       return mockResults.get("settings") ?? [];
     }
 
-    if (query.includes("sentToday")) {
-      return mockResults.get("sent_today") ?? [{ sentToday: false }];
-    }
-
     if (query.includes("FROM \"ReminderLog\"") && query.includes("status")) {
       return mockResults.get("log_status") ?? [{ status: "delayed" }];
     }
@@ -173,10 +172,10 @@ describe("Critical Path: Reminder Sending Gates", () => {
 
   const validEnv = {
     RESEND_API_KEY: FAKE_RESEND_KEY,
-    RESEND_FROM: "reminders@test-example.com",
+    RESEND_FROM: "reminders@example.com",
     REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake-abc123",
-    SHOPIFY_APP_URL: "https://app.test-example.com",
-    RESEND_TEST_RECIPIENTS: "buyer@test-example.com",
+    SHOPIFY_APP_URL: "https://test-app.example.com",
+    RESEND_TEST_RECIPIENTS: "buyer@example.com",
   };
 
   beforeEach(() => {
@@ -209,7 +208,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Crit Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Crit Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -300,7 +299,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -317,7 +316,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
         "rule-crit-123",
         0,
         "Asia/Kolkata",
-        { ...validEnv, RESEND_TEST_RECIPIENTS: "buyer@test-example.com" }
+        { ...validEnv, RESEND_TEST_RECIPIENTS: "buyer@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -333,7 +332,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "notallowed@blocked-domain.example.com", displayName: "Blocked Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "notallowed@example.com", displayName: "Blocked Buyer" }]);
 
       const result = await sendPaymentReminder(
         mockSql,
@@ -342,7 +341,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
         "rule-crit-123",
         0,
         "Asia/Kolkata",
-        { ...validEnv, RESEND_TEST_RECIPIENTS: "allowed@test-example.com" }
+        { ...validEnv, RESEND_TEST_RECIPIENTS: "allowed@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -363,7 +362,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
 
       const result = await sendPaymentReminder(
         mockSql,
@@ -389,7 +388,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "BUYER@TEST-EXAMPLE.COM", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "BUYER@EXAMPLE.COM", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -406,7 +405,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
         "rule-crit-123",
         0,
         "Asia/Kolkata",
-        { ...validEnv, RESEND_TEST_RECIPIENTS: "buyer@test-example.com" }
+        { ...validEnv, RESEND_TEST_RECIPIENTS: "buyer@example.com" }
       );
 
       expect(result.success).toBe(true);
@@ -423,7 +422,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", []);
 
       const result = await sendPaymentReminder(
@@ -450,7 +449,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("sent_today", [{ sentToday: true }]);
 
       const result = await sendPaymentReminder(
@@ -478,7 +477,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice({ status: "paid" })]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
 
       const result = await sendPaymentReminder(
         mockSql,
@@ -504,7 +503,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice({ status: "cancelled" })]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
 
       const result = await sendPaymentReminder(
         mockSql,
@@ -530,7 +529,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice({ outstanding: "0.00" })]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
 
       const result = await sendPaymentReminder(
         mockSql,
@@ -550,111 +549,104 @@ describe("Critical Path: Reminder Sending Gates", () => {
   });
 
   describe("Case 5: Stage selection at boundaries with IST timezone", () => {
-    it("isReminderDueToday returns true on exact reminder day (offsetDays=-3, dueAt=Oct 27 → reminder on Oct 24)", async () => {
-      const { isReminderDueToday } = await import("../reminders.server");
+    it("isReminderDueToday returns true on exact reminder day (Oct 24 IST)", async () => {
+      vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
       const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromObject(
-        { year: 2026, month: 10, day: 24, hour: 12 },
-        { zone: "Asia/Kolkata" }
-      );
+      const mockNow = DateTime.fromISO("2026-10-24T06:30:00Z").setZone("Asia/Kolkata");
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { isReminderDueToday } = await import("../reminders.server");
 
       const dueDate = new Date("2026-10-27T00:00:00+05:30");
       expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(true);
     });
 
-    it("isReminderDueToday returns false one day before reminder day", async () => {
-      const { isReminderDueToday } = await import("../reminders.server");
+    it("isReminderDueToday returns false one day before reminder day (Oct 23 IST)", async () => {
+      vi.setSystemTime(new Date("2026-10-23T06:30:00Z"));
       const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromObject(
-        { year: 2026, month: 10, day: 23, hour: 12 },
-        { zone: "Asia/Kolkata" }
-      );
+      const mockNow = DateTime.fromISO("2026-10-23T06:30:00Z").setZone("Asia/Kolkata");
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { isReminderDueToday } = await import("../reminders.server");
 
       const dueDate = new Date("2026-10-27T00:00:00+05:30");
       expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(false);
     });
 
-    it("isReminderDueToday returns false one day after reminder day", async () => {
-      const { isReminderDueToday } = await import("../reminders.server");
+    it("isReminderDueToday returns false one day after reminder day (Oct 25 IST)", async () => {
+      vi.setSystemTime(new Date("2026-10-25T06:30:00Z"));
       const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromObject(
-        { year: 2026, month: 10, day: 25, hour: 12 },
-        { zone: "Asia/Kolkata" }
-      );
+      const mockNow = DateTime.fromISO("2026-10-25T06:30:00Z").setZone("Asia/Kolkata");
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { isReminderDueToday } = await import("../reminders.server");
 
       const dueDate = new Date("2026-10-27T00:00:00+05:30");
       expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(false);
     });
 
-    it("handles due today (offsetDays=0) correctly", async () => {
-      const { isReminderDueToday } = await import("../reminders.server");
+    it("handles due today (offsetDays=0) correctly on Oct 30 IST", async () => {
+      vi.setSystemTime(new Date("2026-10-30T06:30:00Z"));
       const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromObject(
-        { year: 2026, month: 10, day: 30, hour: 12 },
-        { zone: "Asia/Kolkata" }
-      );
+      const mockNow = DateTime.fromISO("2026-10-30T06:30:00Z").setZone("Asia/Kolkata");
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { isReminderDueToday } = await import("../reminders.server");
 
       const dueDate = new Date("2026-10-30T00:00:00+05:30");
       expect(isReminderDueToday(dueDate, 0, "Asia/Kolkata")).toBe(true);
     });
 
-    it("handles overdue (offsetDays=+7) correctly", async () => {
-      const { isReminderDueToday } = await import("../reminders.server");
+    it("handles overdue (offsetDays=+7) correctly on Nov 6 IST", async () => {
+      vi.setSystemTime(new Date("2026-11-06T06:30:00Z"));
       const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromObject(
-        { year: 2026, month: 11, day: 6, hour: 12 },
-        { zone: "Asia/Kolkata" }
-      );
+      const mockNow = DateTime.fromISO("2026-11-06T06:30:00Z").setZone("Asia/Kolkata");
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { isReminderDueToday } = await import("../reminders.server");
 
       const dueDate = new Date("2026-10-30T00:00:00+05:30");
       expect(isReminderDueToday(dueDate, 7, "Asia/Kolkata")).toBe(true);
     });
 
-    it("handles IST midnight boundary (23:59 UTC Oct 23 = 05:29 IST Oct 24)", async () => {
-      const { isReminderDueToday } = await import("../reminders.server");
+    it("returns false at 2026-10-23T18:29:59Z (23:59:59 IST Oct 23)", async () => {
+      vi.setSystemTime(new Date("2026-10-23T18:29:59Z"));
       const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromISO("2026-10-23T23:59:00Z").setZone("Asia/Kolkata");
+      const mockNow = DateTime.fromISO("2026-10-23T18:29:59Z").setZone("Asia/Kolkata");
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
-      const dueDate = new Date("2026-10-27T00:00:00+05:30");
-      expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(true);
-    });
-
-    it("handles just after IST midnight", async () => {
       const { isReminderDueToday } = await import("../reminders.server");
-      const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromISO("2026-10-23T18:31:00Z").setZone("Asia/Kolkata");
-      vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
-
-      const dueDate = new Date("2026-10-27T00:00:00+05:30");
-      expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(true);
-    });
-
-    it("handles just before IST midnight", async () => {
-      const { isReminderDueToday } = await import("../reminders.server");
-      const { DateTime } = await import("luxon");
-
-      const mockNow = DateTime.fromISO("2026-10-23T18:29:00Z").setZone("Asia/Kolkata");
-      vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
       const dueDate = new Date("2026-10-27T00:00:00+05:30");
       expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(false);
     });
+
+    it("returns true at 2026-10-23T18:30:00Z (00:00:00 IST Oct 24)", async () => {
+      vi.setSystemTime(new Date("2026-10-23T18:30:00Z"));
+      const { DateTime } = await import("luxon");
+      const mockNow = DateTime.fromISO("2026-10-23T18:30:00Z").setZone("Asia/Kolkata");
+      vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { isReminderDueToday } = await import("../reminders.server");
+
+      const dueDate = new Date("2026-10-27T00:00:00+05:30");
+      expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(true);
+    });
+
+    it("returns true at 2026-10-23T23:59:00Z (05:29:00 IST Oct 24)", async () => {
+      vi.setSystemTime(new Date("2026-10-23T23:59:00Z"));
+      const { DateTime } = await import("luxon");
+      const mockNow = DateTime.fromISO("2026-10-23T23:59:00Z").setZone("Asia/Kolkata");
+      vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
+
+      const { isReminderDueToday } = await import("../reminders.server");
+
+      const dueDate = new Date("2026-10-27T00:00:00+05:30");
+      expect(isReminderDueToday(dueDate, -3, "Asia/Kolkata")).toBe(true);
+    });
   });
 
-  describe("Case 6: API key and email bodies never reach safeLog/Sentry/AuditEvent", () => {
+  describe("Case 6: API key and email bodies never reach safeLog/Sentry", () => {
     it("Resend API key is NEVER logged via safeLog", async () => {
       const { DateTime } = await import("luxon");
       const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
@@ -663,7 +655,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -699,7 +691,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
 
       const { sendPaymentReminder } = await import("../reminders.server");
-      const SECRET_EMAIL = "secretbuyer@private-company.example.com";
+      const SECRET_EMAIL = "someone@example.com";
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
       mockSql.setMockResult("customer", [{ email: SECRET_EMAIL, displayName: "Secret Buyer" }]);
@@ -711,7 +703,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
         "rule-crit-123",
         0,
         "Asia/Kolkata",
-        { ...validEnv, RESEND_TEST_RECIPIENTS: "other@test-example.com" }
+        { ...validEnv, RESEND_TEST_RECIPIENTS: "other@example.com" }
       );
 
       expect(result.action).toBe("skipped");
@@ -723,8 +715,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       ].join("\n");
 
       expect(allLogs).not.toContain(SECRET_EMAIL);
-      expect(allLogs).not.toContain("secretbuyer");
-      expect(allLogs).not.toContain("private-company");
+      expect(allLogs).not.toContain("someone@");
     });
 
     it("Sentry captureException is never called with API key or email body", async () => {
@@ -736,7 +727,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -758,7 +749,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
         .join("\n");
 
       expect(sentryCallArgs).not.toContain(FAKE_RESEND_KEY);
-      expect(sentryCallArgs).not.toContain("buyer@test-example.com");
+      expect(sentryCallArgs).not.toContain("buyer@example.com");
     });
   });
 
@@ -771,7 +762,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -801,7 +792,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -839,7 +830,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -873,7 +864,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -899,7 +890,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       expect(result.errorCode).toBe("resend_server_error");
     });
 
-    it("retry after failure does not produce duplicate send (slot already released)", async () => {
+    it("500 failure releases slot and cap, retry succeeds, third call is skipped", async () => {
       const { DateTime } = await import("luxon");
       const mockNow = DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
       vi.spyOn(DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof DateTime.now>);
@@ -907,7 +898,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
       const { sendPaymentReminder } = await import("../reminders.server");
 
       mockSql.setMockResult("invoice", [getMockInvoice()]);
-      mockSql.setMockResult("customer", [{ email: "buyer@test-example.com", displayName: "Test Buyer" }]);
+      mockSql.setMockResult("customer", [{ email: "buyer@example.com", displayName: "Test Buyer" }]);
       mockSql.setMockResult("claim_slot", [{ id: "new-log-id" }]);
       mockSql.setMockResult("global_counts", { dailyCount: 0, monthlyTotal: 0 });
       mockSql.setMockResult("global_increment", [{ dailyCount: 1 }]);
@@ -931,6 +922,12 @@ describe("Critical Path: Reminder Sending Gates", () => {
       expect(result1.success).toBe(false);
       expect(result1.retryable).toBe(true);
 
+      const sqlCallsAfterFailure = mockSql.getAllCalls();
+      const slotReleaseCalls = sqlCallsAfterFailure.filter((q: string) => q.includes("DELETE FROM \"ReminderLog\""));
+      expect(slotReleaseCalls.length).toBeGreaterThan(0);
+      const capReleaseCalls = sqlCallsAfterFailure.filter((q: string) => q.includes("GREATEST(0, daily_count - 1)"));
+      expect(capReleaseCalls.length).toBeGreaterThan(0);
+
       mockSql.setMockResult("claim_slot", [{ id: "retry-log-id" }]);
 
       mockFetch.mockResolvedValueOnce({
@@ -950,6 +947,23 @@ describe("Critical Path: Reminder Sending Gates", () => {
 
       expect(result2.success).toBe(true);
       expect(result2.action).toBe("sent");
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+
+      mockSql.setMockResult("claim_slot", []);
+
+      const result3 = await sendPaymentReminder(
+        mockSql,
+        "shop-crit-123",
+        "inv-crit-123",
+        "rule-crit-123",
+        0,
+        "Asia/Kolkata",
+        validEnv
+      );
+
+      expect(result3.success).toBe(true);
+      expect(result3.action).toBe("skipped");
+      expect(result3.skipReason).toContain("already sent");
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
   });
@@ -1017,8 +1031,8 @@ describe("Critical Path: Resend Client", () => {
 
     const result = await sendViaResend(
       {
-        from: "test@test-example.com",
-        to: ["buyer@test-example.com"],
+        from: "test@example.com",
+        to: ["buyer@example.com"],
         subject: "Test",
         html: "<p>Test</p>",
       },
@@ -1043,15 +1057,15 @@ describe("Critical Path: Resend Client", () => {
 
     await sendViaResend(
       {
-        from: "test@test-example.com",
-        to: ["buyer@test-example.com"],
+        from: "test@example.com",
+        to: ["buyer@example.com"],
         subject: "Test",
         html: "<p>Test</p>",
         idempotencyKey: "test-idem-key-123",
       },
       {
         RESEND_API_KEY: FAKE_RESEND_KEY,
-        RESEND_TEST_RECIPIENTS: "buyer@test-example.com",
+        RESEND_TEST_RECIPIENTS: "buyer@example.com",
       }
     );
 
@@ -1065,14 +1079,14 @@ describe("Critical Path: Resend Client", () => {
 
     const result = await sendViaResend(
       {
-        from: "test@test-example.com",
-        to: ["notallowed@blocked.example.com"],
+        from: "test@example.com",
+        to: ["notallowed@example.com"],
         subject: "Test",
         html: "<p>Test</p>",
       },
       {
         RESEND_API_KEY: FAKE_RESEND_KEY,
-        RESEND_TEST_RECIPIENTS: "allowed@test-example.com",
+        RESEND_TEST_RECIPIENTS: "allowed@example.com",
       }
     );
 
@@ -1092,20 +1106,20 @@ describe("Critical Path: safeLog redaction", () => {
   it("redacts email addresses from log output", async () => {
     const { redactString } = await import("~/lib/log.server");
 
-    const input = "Error for buyer@secret-domain.com: failed";
+    const input = "Error for someone@example.com: failed";
     const redacted = redactString(input);
 
-    expect(redacted).not.toContain("buyer@secret-domain.com");
+    expect(redacted).not.toContain("someone@example.com");
     expect(redacted).toContain("<redacted>");
   });
 
   it("redacts shop domains from log output", async () => {
     const { redactString } = await import("~/lib/log.server");
 
-    const input = "Shop test-shop.myshopify.com failed";
+    const input = "Shop test-redact.myshopify.com failed";
     const redacted = redactString(input);
 
-    expect(redacted).not.toContain("test-shop.myshopify.com");
+    expect(redacted).not.toContain("test-redact.myshopify.com");
     expect(redacted).toContain("<redacted>");
   });
 
@@ -1129,14 +1143,15 @@ describe("Critical Path: safeLog redaction", () => {
   });
 });
 
-describeWithDb("Critical Path: DB-backed idempotency tests", () => {
+describeWithDb("Critical Path: DB-backed tests", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-critpath";
-  const TEST_SHOP_ID = `shop-critpath-${TEST_SUFFIX}`;
-  const TEST_SHOP_DOMAIN = `test-critpath-${TEST_SUFFIX}.myshopify.com`;
-  const TEST_ACCOUNT_ID = `acc-critpath-${TEST_SUFFIX}`;
-  const TEST_CUSTOMER_ID = `cust-critpath-${TEST_SUFFIX}`;
-  const TEST_RULE_ID = `rule-critpath-${TEST_SUFFIX}`;
+  const TEST_SUFFIX = Date.now().toString(36) + "-critdb";
+  const TEST_SHOP_ID = `shop-critdb-${TEST_SUFFIX}`;
+  const TEST_SHOP_DOMAIN = `test-critdb-${TEST_SUFFIX}.myshopify.com`;
+  const TEST_ACCOUNT_ID = `acc-critdb-${TEST_SUFFIX}`;
+  const TEST_CUSTOMER_ID = `cust-critdb-${TEST_SUFFIX}`;
+  const TEST_RULE_ID = `rule-critdb-${TEST_SUFFIX}`;
+  const TEST_EMAIL = "critdb-buyer@example.com";
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -1155,14 +1170,14 @@ describeWithDb("Critical Path: DB-backed idempotency tests", () => {
       VALUES (
         ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER',
         NULL, NULL, ${TEST_CUSTOMER_ID},
-        'CritPath Test Account', 100000.00, 'OK', false, false, 30, 'explicit',
+        'CritDB Test Account', 100000.00, 'OK', false, false, 30, 'explicit',
         false, 1, NOW(), NOW()
       )
     `;
 
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
-      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, 'critpath-buyer@test-example.com', 'CritPath Test Buyer', NOW())
+      VALUES (${TEST_SHOP_ID}, ${TEST_CUSTOMER_ID}, ${TEST_EMAIL}, 'CritDB Test Buyer', NOW())
       ON CONFLICT (shop_id, customer_id) DO NOTHING
     `;
 
@@ -1170,14 +1185,22 @@ describeWithDb("Critical Path: DB-backed idempotency tests", () => {
       INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
       VALUES (${TEST_RULE_ID}, ${TEST_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
     `;
+
+    await sql`
+      INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+      VALUES (${TEST_SHOP_ID}, true, NOW(), NOW())
+      ON CONFLICT (shop_id) DO UPDATE SET enabled = true, updated_at = NOW()
+    `;
   });
 
   afterAll(async () => {
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sql`DELETE FROM s18_global_sends WHERE send_key = 'global'`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
 
     await sql.end();
@@ -1282,10 +1305,14 @@ describeWithDb("Critical Path: DB-backed idempotency tests", () => {
     expect(claim2).toBe(true);
   });
 
-  it("AuditEvent does not contain Resend API key or buyer email in data column", async () => {
-    const invoiceId = `inv-audit-${TEST_SUFFIX}`;
-    const orderId = `ord-audit-${TEST_SUFFIX}`;
-    const testEmail = "audit-buyer@test-example.com";
+  it("real sendPaymentReminder twice for same invoice: fetch once, second skipped", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const invoiceId = `inv-idem-${TEST_SUFFIX}`;
+    const orderId = `ord-idem-${TEST_SUFFIX}`;
 
     await sql`
       INSERT INTO "Invoice" (
@@ -1294,36 +1321,198 @@ describeWithDb("Critical Path: DB-backed idempotency tests", () => {
       )
       VALUES (
         ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-        '#AUDIT-1', 10000.00, 10000.00, 'open',
-        NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+        '#IDEM-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '5 days', ${new Date("2026-10-24T00:00:00+05:30")}, NOW(), NOW()
       )
     `;
+
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "resend-idem-123" }),
+    });
+
+    const validEnv = {
+      RESEND_API_KEY: FAKE_RESEND_KEY,
+      RESEND_FROM: "reminders@example.com",
+      REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+      SHOPIFY_APP_URL: "https://test-app.example.com",
+      RESEND_TEST_RECIPIENTS: TEST_EMAIL,
+    };
+
+    const result1 = await sendPaymentReminder(
+      sql,
+      TEST_SHOP_ID,
+      invoiceId,
+      TEST_RULE_ID,
+      0,
+      "Asia/Kolkata",
+      validEnv
+    );
+
+    expect(result1.success).toBe(true);
+    expect(result1.action).toBe("sent");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    const result2 = await sendPaymentReminder(
+      sql,
+      TEST_SHOP_ID,
+      invoiceId,
+      TEST_RULE_ID,
+      0,
+      "Asia/Kolkata",
+      validEnv
+    );
+
+    expect(result2.success).toBe(true);
+    expect(result2.action).toBe("skipped");
+    expect(result2.skipReason).toContain("already sent");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
+  });
+
+  it("500 then retry: ReminderLog released after failure, 1 sent row after success", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const invoiceId = `inv-500retry-${TEST_SUFFIX}`;
+    const orderId = `ord-500retry-${TEST_SUFFIX}`;
 
     await sql`
-      INSERT INTO "AuditEvent" (id, "shopId", actor, type, data, at)
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
       VALUES (
-        gen_random_uuid(),
-        ${TEST_SHOP_ID},
-        'system',
-        'reminder.sent',
-        ${sql.json({ invoiceId, ruleId: TEST_RULE_ID, stage: 0 })},
-        NOW()
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#500RETRY-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '5 days', ${new Date("2026-10-24T00:00:00+05:30")}, NOW(), NOW()
       )
     `;
 
-    const events = await sql<{ data: Record<string, unknown> }[]>`
-      SELECT data FROM "AuditEvent"
-      WHERE "shopId" = ${TEST_SHOP_ID} AND type = 'reminder.sent'
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => "Server Error",
+    });
+
+    const validEnv = {
+      RESEND_API_KEY: FAKE_RESEND_KEY,
+      RESEND_FROM: "reminders@example.com",
+      REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+      SHOPIFY_APP_URL: "https://test-app.example.com",
+      RESEND_TEST_RECIPIENTS: TEST_EMAIL,
+    };
+
+    const result1 = await sendPaymentReminder(
+      sql,
+      TEST_SHOP_ID,
+      invoiceId,
+      TEST_RULE_ID,
+      0,
+      "Asia/Kolkata",
+      validEnv
+    );
+
+    expect(result1.success).toBe(false);
+    expect(result1.retryable).toBe(true);
+
+    const logsAfterFailure = await sql<{ id: string; status: string }[]>`
+      SELECT id, status FROM "ReminderLog"
+      WHERE "shopId" = ${TEST_SHOP_ID} AND "ruleId" = ${TEST_RULE_ID} AND "invoiceId" = ${invoiceId}
+    `;
+    expect(logsAfterFailure.length).toBe(0);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "resend-500retry-123" }),
+    });
+
+    const result2 = await sendPaymentReminder(
+      sql,
+      TEST_SHOP_ID,
+      invoiceId,
+      TEST_RULE_ID,
+      0,
+      "Asia/Kolkata",
+      validEnv
+    );
+
+    expect(result2.success).toBe(true);
+    expect(result2.action).toBe("sent");
+
+    const logsAfterSuccess = await sql<{ id: string; status: string }[]>`
+      SELECT id, status FROM "ReminderLog"
+      WHERE "shopId" = ${TEST_SHOP_ID} AND "ruleId" = ${TEST_RULE_ID} AND "invoiceId" = ${invoiceId}
+    `;
+    expect(logsAfterSuccess.length).toBe(1);
+    expect(logsAfterSuccess[0].status).toBe("sent");
+
+    vi.useRealTimers();
+  });
+
+  it("ReminderLog after send does not contain API key, email, or subject", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
+
+    const { sendPaymentReminder } = await import("../reminders.server");
+
+    const invoiceId = `inv-logcheck-${TEST_SUFFIX}`;
+    const orderId = `ord-logcheck-${TEST_SUFFIX}`;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+        '#LOGCHECK-1', 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '5 days', ${new Date("2026-10-24T00:00:00+05:30")}, NOW(), NOW()
+      )
     `;
 
-    expect(events.length).toBe(1);
-    const eventData = JSON.stringify(events[0].data);
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "resend-logcheck-123" }),
+    });
 
-    expect(eventData).not.toContain(FAKE_RESEND_KEY);
-    expect(eventData).not.toContain("re_test_");
-    expect(eventData).not.toContain(testEmail);
-    expect(eventData).not.toContain("@test-example.com");
+    const validEnv = {
+      RESEND_API_KEY: FAKE_RESEND_KEY,
+      RESEND_FROM: "reminders@example.com",
+      REMINDER_UNSUBSCRIBE_SECRET: "test-secret",
+      SHOPIFY_APP_URL: "https://test-app.example.com",
+      RESEND_TEST_RECIPIENTS: TEST_EMAIL,
+    };
 
-    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}`;
+    await sendPaymentReminder(
+      sql,
+      TEST_SHOP_ID,
+      invoiceId,
+      TEST_RULE_ID,
+      0,
+      "Asia/Kolkata",
+      validEnv
+    );
+
+    const logs = await sql<{ id: string; status: string }[]>`
+      SELECT * FROM "ReminderLog"
+      WHERE "shopId" = ${TEST_SHOP_ID} AND "ruleId" = ${TEST_RULE_ID} AND "invoiceId" = ${invoiceId}
+    `;
+    expect(logs.length).toBe(1);
+
+    const logRow = JSON.stringify(logs[0]);
+    expect(logRow).not.toContain(FAKE_RESEND_KEY);
+    expect(logRow).not.toContain("re_test_");
+    expect(logRow).not.toContain(TEST_EMAIL);
+    expect(logRow).not.toContain("@example.com");
+    expect(logRow).not.toContain("Payment due");
+
+    vi.useRealTimers();
   });
 });
