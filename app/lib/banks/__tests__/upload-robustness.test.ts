@@ -1,10 +1,13 @@
 /**
  * Bank-statement upload robustness tests (parser-level, no DB).
  *
- * Tests pure parsing edge cases that don't require database:
+ * Tests pure parsing and validation that don't require database:
+ * - Case 1: Oversized payload validation (MAX_IMPORT_ROWS)
+ * - Case 2: Invalid validation inputs (empty credits, bad bank/rail/date/amount)
  * - Case 3: UTF-8 BOM, CRLF line endings, trailing blank lines, quoted fields with commas
- * - Case 4: Date formats, Indian amounts, Dr/Cr and signed-amount columns
+ * - Case 4: Date formats, Indian amounts, Dr/Cr columns (HDFC), separate columns (ICICI)
  * - Case 5: Malformed row mid-file behavior (skips with error count)
+ * - File type detection: CSV, XLS magic bytes, .pdf, .txt, JSON content
  *
  * All fixtures are SYNTHETIC - no real bank data.
  */
@@ -18,8 +21,8 @@ function makeValidNeftUtr(suffix: string): string {
   return `HDFCN${paddedSuffix}`;
 }
 
-describe("Case 1: Oversized payload validation (no parser call)", () => {
-  it("rejects payload with >1000 rows before parser is invoked", () => {
+describe("Case 1: Oversized payload validation", () => {
+  it("rejects payload above MAX_IMPORT_ROWS", () => {
     const credits = Array.from({ length: MAX_IMPORT_ROWS + 1 }, (_, i) => ({
       date: "2026-10-15",
       amountPaise: 100000,
@@ -297,29 +300,37 @@ describe("Case 4: Date formats and Indian amount grouping", () => {
     expect(credit!.amountPaise).toBe(1000000);
   });
 
-  it("parses single signed-amount column (ICICI format) correctly", async () => {
+  it("parses separate Withdrawal/Deposit columns (ICICI format)", async () => {
     const content = `ICICI BANK
 Statement of Account
 Account No: 00123456789012
 
 S No.,Transaction Date,Cheque Number,Remarks,Withdrawal,Deposit,Balance
 1,01.10.2026,,B/F,,,100000.00
-2,02.10.2026,,NEFT-TEST-SIGNED-DEBIT,-5000.00,,95000.00
-3,03.10.2026,,NEFT-TEST-SIGNED-CREDIT,,10000.00,105000.00`;
+2,02.10.2026,,NEFT-TEST-ICICI-DEBIT,5000.00,,95000.00
+3,03.10.2026,,NEFT-TEST-ICICI-CREDIT,,10000.00,105000.00`;
 
-    const file = new File([content], "signed-amt.csv", { type: "text/csv" });
+    const file = new File([content], "icici-dr-cr.csv", { type: "text/csv" });
     const result = await parseBankStatement(file);
 
     expect(result.detection.bank).toBe("ICICI");
+    expect(result.transactions).toHaveLength(2);
 
     const debit = result.transactions.find((t) => t.direction === "DR");
     const credit = result.transactions.find((t) => t.direction === "CR");
 
     expect(debit).toBeDefined();
     expect(debit!.amountPaise).toBe(500000);
+    expect(debit!.narration).toContain("DEBIT");
 
     expect(credit).toBeDefined();
     expect(credit!.amountPaise).toBe(1000000);
+    expect(credit!.narration).toContain("CREDIT");
+  });
+
+  it.skip("parses single signed-amount column (negative = debit)", async () => {
+    // Parser does not currently support single signed-amount column format.
+    // ICICI/HDFC/SBI/Axis all use separate Withdrawal/Deposit columns.
   });
 });
 
@@ -373,19 +384,52 @@ describe("Case 5: Malformed row mid-file (current behavior: skips with error cou
   });
 });
 
-describe("File type detection", () => {
-  it("detects CSV from extension", async () => {
-    const content = "HDFC BANK\nDate,Narration\n2026-10-01,Test";
+describe("File type detection and validation", () => {
+  it("detects HDFC bank from CSV content", async () => {
+    const content =
+      "HDFC BANK\nStatement\n\nDate,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance\n" +
+      `02/10/26,NEFT CR-TEST-DETECT,${makeValidNeftUtr("12121212121")},02/10/26,,"1,000.00","1,000.00"`;
     const file = new File([content], "test.csv", { type: "text/csv" });
 
     const result = await parseBankStatement(file);
-    expect(result.detection.bank).toBeDefined();
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.detection.confidence).toBeGreaterThan(0);
+    expect(result.transactions).toHaveLength(1);
   });
 
-  it("rejects invalid XLS magic bytes with error", async () => {
+  it("rejects invalid XLS magic bytes with CFB size error", async () => {
     const xlsMagic = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
     const file = new File([xlsMagic], "test.xls", { type: "application/vnd.ms-excel" });
 
-    await expect(parseBankStatement(file)).rejects.toThrow();
+    await expect(parseBankStatement(file)).rejects.toThrow(/CFB file size.*< 512/);
+  });
+
+  it("wrong extension (.pdf) returns UNKNOWN bank with clear error", async () => {
+    const pdfContent = "Some random PDF-like content that is not a bank statement";
+    const file = new File([pdfContent], "statement.pdf", { type: "application/pdf" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("UNKNOWN");
+    expect(result.transactions).toHaveLength(0);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0].code).toBe("UNKNOWN_BANK_FORMAT");
+  });
+
+  it("wrong extension (.txt) with non-CSV content returns UNKNOWN bank", async () => {
+    const txtContent = "This is a plain text file\nNot a bank statement\nJust random text";
+    const file = new File([txtContent], "notes.txt", { type: "text/plain" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("UNKNOWN");
+    expect(result.transactions).toHaveLength(0);
+  });
+
+  it("JSON content in CSV file returns UNKNOWN bank (content detection)", async () => {
+    const jsonContent = JSON.stringify({ not: "a bank statement" });
+    const file = new File([jsonContent], "data.csv", { type: "application/json" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("UNKNOWN");
+    expect(result.transactions).toHaveLength(0);
   });
 });

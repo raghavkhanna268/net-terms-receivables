@@ -2,10 +2,11 @@
  * Bank-statement upload robustness DB tests (requires Postgres).
  *
  * Tests that require real database interaction:
- * - Case 2: Invalid inputs through action path → 0 DB rows
+ * - Case 2: Invalid action inputs → 0 DB rows (empty credits, bad bank/rail/date, negative amount)
  * - Case 6: Concurrent upload deduplication (Promise.all of two real calls)
  *
- * Pure parser tests (cases 3, 4, 5) are in app/lib/banks/__tests__/upload-robustness.test.ts.
+ * Pure parser tests (cases 1, 3, 4, 5, file type detection) are in:
+ *   app/lib/banks/__tests__/upload-robustness.test.ts
  *
  * All fixtures are SYNTHETIC - no real bank data.
  * Uses test-* shop names, example.com emails, made-up narrations and UTR-like refs.
@@ -18,8 +19,7 @@
  * - Dedupe key generation
  *
  * This file adds tests NOT in PR #474:
- * - Case 2: Wrong extension, wrong MIME giving clear errors (parser-level validation)
- * - Case 2: Empty/invalid payload through action → 0 DB rows
+ * - Case 2: Invalid action payloads → 400 status and 0 DB rows
  * - Case 6: Concurrent upload deduplication via Promise.all
  */
 
@@ -28,7 +28,6 @@ import postgres from "postgres";
 import { sqlOptions } from "../../app/lib/db-light.server.js";
 import { assertNoQueueLeftovers } from "../helpers/queue-leftovers.js";
 import { action as importAction } from "../../app/routes/app.imports.js";
-import { parseBankStatement } from "../../app/lib/banks/index.js";
 import { requestContext } from "../../app/lib/request-context.server.js";
 import { insertBankImportRows } from "../../app/services/bank-import.server.js";
 
@@ -167,37 +166,6 @@ describeWithDb("Bank Upload Robustness DB Tests", () => {
     createdShopIds.push(shop.id);
     return { shopId: shop.id, shopDomain: domain };
   }
-
-  describe("Case 2: File type validation (parser-level)", () => {
-    it("wrong extension (.pdf) returns UNKNOWN bank with clear error", async () => {
-      const pdfContent = "Some random PDF-like content that is not a bank statement";
-      const file = new File([pdfContent], "statement.pdf", { type: "application/pdf" });
-      const result = await parseBankStatement(file);
-
-      expect(result.detection.bank).toBe("UNKNOWN");
-      expect(result.transactions).toHaveLength(0);
-      expect(result.errors.length).toBeGreaterThan(0);
-      expect(result.errors[0].code).toBe("UNKNOWN_BANK_FORMAT");
-    });
-
-    it("wrong extension (.txt) with non-CSV content returns UNKNOWN bank", async () => {
-      const txtContent = "This is a plain text file\nNot a bank statement\nJust random text";
-      const file = new File([txtContent], "notes.txt", { type: "text/plain" });
-      const result = await parseBankStatement(file);
-
-      expect(result.detection.bank).toBe("UNKNOWN");
-      expect(result.transactions).toHaveLength(0);
-    });
-
-    it("wrong MIME type (application/json) returns UNKNOWN bank", async () => {
-      const jsonContent = JSON.stringify({ not: "a bank statement" });
-      const file = new File([jsonContent], "data.csv", { type: "application/json" });
-      const result = await parseBankStatement(file);
-
-      expect(result.detection.bank).toBe("UNKNOWN");
-      expect(result.transactions).toHaveLength(0);
-    });
-  });
 
   describe("Case 2: Invalid action inputs with 0 DB rows", () => {
     afterEach(async () => {
