@@ -18,31 +18,15 @@ const OLD_NAME_PATTERNS = [
   /Net Terms Receivables/gi,
 ];
 
-const SLOT_FILES = new Set([
-  "log.server.ts",
-  "log.server.tsx",
-  "compliance.server.ts",
-  "reminders.server.ts",
-  "reconcile.server.ts",
-  "after-auth.ts",
-  "after-auth.server.ts",
-  "apply.server.ts",
-  "drain.ts",
-  "drain.server.ts",
-  "plan.server.ts",
-  "request-context.server.ts",
-  "sentry.ts",
-]);
-
-const SLOT_PATHS = [
-  // app/lib/banks is a slot directory
+const SKIP_PATHS = [
+  // app/lib/banks is a slot directory (code comments only, no UI strings)
   "app/lib/banks",
   // ci workflows
   ".github/workflows",
   "scripts/ci",
   // generated files (Prisma, etc.)
   "app/generated",
-  // tests for slot files
+  // tests for slot files (they test the slot file's actual behavior)
   "app/services/compliance/__tests__",
 ];
 
@@ -67,17 +51,55 @@ const ALLOWLIST_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /`net-terms-receivables(-1)?`/, reason: "Handle in backticks" },
 ];
 
-function isSlotFile(filePath: string): boolean {
-  const fileName = path.basename(filePath);
-  if (SLOT_FILES.has(fileName)) {
-    return true;
-  }
-  for (const slotPath of SLOT_PATHS) {
-    if (filePath.includes(slotPath)) {
+/**
+ * Exact file:line allowlist for slot file strings pending follow-up.
+ * Each entry specifies an exact file path and line number to skip.
+ * These are strings in slot files that will be renamed in a separate PR.
+ */
+const PENDING_FOLLOWUP_ALLOWLIST: Array<{
+  file: string;
+  line: number;
+  reason: string;
+}> = [
+  // pending follow-up: remove after Developer PR merges (compliance.server.ts owner)
+  {
+    file: "app/services/compliance/compliance.server.ts",
+    line: 972,
+    reason: "pending follow-up: remove after Developer PR merges",
+  },
+  // pending follow-up: remove after Developer PR merges (compliance.server.ts owner)
+  {
+    file: "app/services/compliance/compliance.server.ts",
+    line: 976,
+    reason: "pending follow-up: remove after Developer PR merges",
+  },
+  // pending follow-up: remove after Developer PR merges (compliance.server.ts owner)
+  {
+    file: "app/services/compliance/compliance.server.ts",
+    line: 985,
+    reason: "pending follow-up: remove after Developer PR merges",
+  },
+  // pending follow-up: remove after Developer PR merges (compliance.server.ts owner)
+  {
+    file: "app/services/compliance/compliance.server.ts",
+    line: 998,
+    reason: "pending follow-up: remove after Developer PR merges",
+  },
+];
+
+function isInSkipPath(filePath: string): boolean {
+  for (const skipPath of SKIP_PATHS) {
+    if (filePath.includes(skipPath)) {
       return true;
     }
   }
   return false;
+}
+
+function isPendingFollowup(filePath: string, lineNumber: number): boolean {
+  return PENDING_FOLLOWUP_ALLOWLIST.some(
+    (entry) => filePath === entry.file && lineNumber === entry.line
+  );
 }
 
 function isAllowlisted(line: string): boolean {
@@ -147,7 +169,7 @@ describe("App Name Guard", () => {
     for (const filePath of files) {
       const relativePath = path.relative(process.cwd(), filePath);
 
-      if (isSlotFile(relativePath)) {
+      if (isInSkipPath(relativePath)) {
         continue;
       }
 
@@ -155,6 +177,7 @@ describe("App Name Guard", () => {
       const lines = content.split("\n");
 
       for (let i = 0; i < lines.length; i++) {
+        const lineNumber = i + 1;
         const line = lines[i];
 
         if (isInComment(line)) {
@@ -165,13 +188,17 @@ describe("App Name Guard", () => {
           continue;
         }
 
+        if (isPendingFollowup(relativePath, lineNumber)) {
+          continue;
+        }
+
         for (const pattern of OLD_NAME_PATTERNS) {
           pattern.lastIndex = 0;
           const match = pattern.exec(line);
           if (match && isInStringLiteral(line, match)) {
             violations.push({
               file: relativePath,
-              line: i + 1,
+              line: lineNumber,
               text: line.trim().slice(0, 100),
             });
           }
@@ -201,7 +228,7 @@ describe("App Name Guard", () => {
     for (const filePath of files) {
       const relativePath = path.relative(process.cwd(), filePath);
 
-      if (isSlotFile(relativePath)) {
+      if (isInSkipPath(relativePath)) {
         continue;
       }
 
@@ -209,9 +236,14 @@ describe("App Name Guard", () => {
       const lines = content.split("\n");
 
       for (let i = 0; i < lines.length; i++) {
+        const lineNumber = i + 1;
         const line = lines[i];
 
         if (isInComment(line)) {
+          continue;
+        }
+
+        if (isPendingFollowup(relativePath, lineNumber)) {
           continue;
         }
 
@@ -221,7 +253,7 @@ describe("App Name Guard", () => {
           if (match && isInStringLiteral(line, match)) {
             violations.push({
               file: relativePath,
-              line: i + 1,
+              line: lineNumber,
               text: line.trim().slice(0, 100),
             });
           }
