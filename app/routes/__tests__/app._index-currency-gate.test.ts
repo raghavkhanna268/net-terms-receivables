@@ -59,7 +59,10 @@ vi.mock("~/lib/aging-queries.server", () => ({
 
 vi.mock("~/services/shop-currency-recovery.server", () => ({
   checkAndRecoverCurrency: vi.fn().mockImplementation(
-    (_sql, _domain, storedCurrency) => Promise.resolve(storedCurrency)
+    (_sql, _domain, storedCurrency) => Promise.resolve({
+      currency: storedCurrency,
+      flipBlocked: false,
+    })
   ),
 }));
 

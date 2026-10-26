@@ -24,7 +24,7 @@ import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
-import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
@@ -241,9 +241,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   timing.endPhase("shop_lookup");
 
   // #292: Re-read currency for non-INR shops to enable recovery when shop changes to INR
-  const shopCurrency = shop
-    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin)
-    : NO_CURRENCY_SENTINEL;
+  // Pass shop.id to avoid re-querying the shop row
+  // Defensive: handle null/undefined result with fail-closed defaults
+  const currencyResult = shop
+    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
+    : null;
+  const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
+  const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
   // #292: Check currency gate BEFORE money queries - if not supported, return minimal payload with no amounts
   const currencySupported = isCurrencyGateOpen(shopCurrency);
@@ -263,6 +267,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       storeHandle: notSupportedStoreHandle,
       shopCurrency: getEffectiveCurrency(shopCurrency),
       currencySupported: false,
+      currencyFlipBlocked,
       plan: null,
       usage: { companies: { current: 0, limit: 0 }, importsThisMonth: { current: 0, limit: -1 } },
       upgradeUrl: null,
@@ -409,6 +414,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     storeHandle,
     shopCurrency,
     currencySupported: true as const,
+    currencyFlipBlocked,
     plan: planData
       ? {
           key: resolvePlanKey(planData.plan.key),
@@ -749,7 +755,6 @@ function BuyerInvoiceList({
 }
 
 export default function Index() {
-  const loaderData = useLoaderData<typeof loader>();
   const {
     plan,
     usage,
@@ -766,16 +771,25 @@ export default function Index() {
     error,
     newAccountsPausedBanner,
     currencySupported,
-  } = loaderData;
+    currencyFlipBlocked,
+  } = useLoaderData<typeof loader>();
 
-  // #292: When currency not supported, show only the banner
-  if ("notSupported" in loaderData && loaderData.notSupported) {
+  // #292: When currency not supported, show the appropriate banner
+  // If flip was blocked, show the flip blocked banner; otherwise show the not supported banner
+  if (!currencySupported) {
     return (
       <s-page heading="Net Terms Receivables">
         <s-section>
-          <s-banner tone="critical" heading="Currency Not Supported">
-            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
-          </s-banner>
+          {currencyFlipBlocked ? (
+            <s-banner tone="critical" heading="Currency Conversion Not Available">
+              {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
+              Please <s-link href={SUPPORT_EMAIL_MAILTO}>contact support</s-link> for assistance.
+            </s-banner>
+          ) : (
+            <s-banner tone="critical" heading="Currency Not Supported">
+              {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+            </s-banner>
+          )}
         </s-section>
       </s-page>
     );
@@ -799,15 +813,6 @@ export default function Index() {
 
   return (
     <s-page heading="Net Terms Receivables">
-      {/* #292: Currency Not Supported Banner */}
-      {!currencySupported && (
-        <s-section>
-          <s-banner tone="critical" heading="Currency Not Supported">
-            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
-          </s-banner>
-        </s-section>
-      )}
-
       {/* T4: New accounts paused banner */}
       {newAccountsPausedBanner.show && (
         <s-section>
