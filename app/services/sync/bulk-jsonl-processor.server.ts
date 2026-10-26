@@ -45,7 +45,9 @@ import {
   type InvoiceData,
 } from "./order.server";
 import { processBulkCustomer, type CustomerPiiMode } from "./customer.server";
-import { processBulkDraftOrder, bulkUpsertDraftOrders } from "./draft-order.server";
+import { processBulkDraftOrder, bulkUpsertDraftOrders, getAccountsWithDraftExposure } from "./draft-order.server";
+import { flagAccountsForRecompute } from "~/services/credit-status-recompute.server";
+import { captureExceptionWithTags } from "~/lib/sentry";
 import { getRequestEnv } from "~/lib/request-context.server";
 import {
   checkOrderEligibility,
@@ -858,11 +860,18 @@ async function processCustomerLines(
  *
  * Only processes draft orders with payment terms and INR currency. Others are skipped.
  * Resolves buyer accounts from purchasingEntity or customer reference.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shop - Shop domain
+ * @param lines - JSONL lines to process
+ * @param origin - Bulk operation origin: 'reconcile' for nightly, 'initial' for initial sync
+ * @returns Number of draft orders upserted
  */
 export async function processDraftOrderLines(
   sql: Sql,
   shop: string,
-  lines: string[]
+  lines: string[],
+  origin?: string
 ): Promise<number> {
   const jsonl = lines.join("\n");
   const { draftOrders, errors } = parseDraftOrderBulkJsonl(jsonl);
@@ -898,8 +907,19 @@ export async function processDraftOrderLines(
     safeLog("info", "drain_skip_non_inr_draft_order", { shopHash: hash, count: skippedNonInrCount });
   }
 
-  const upserted = await bulkUpsertDraftOrders(sql, mappedOrders);
-  return upserted;
+  const { count, affectedAccountIds } = await bulkUpsertDraftOrders(sql, mappedOrders);
+
+  // D4: For reconcile, flag per batch (with dedupe within batch and queue-level debounce)
+  // D6: For initial sync, don't flag per batch - flag at the END of import
+  if (origin === "reconcile" && affectedAccountIds.size > 0) {
+    try {
+      await flagAccountsForRecompute(sql, shop, affectedAccountIds);
+    } catch (err) {
+      captureExceptionWithTags(err, {});
+    }
+  }
+
+  return count;
 }
 
 
@@ -1170,13 +1190,15 @@ export async function markNextStageEnqueued(
 
 /**
  * Process lines based on bulk type.
+ * @param origin - Bulk operation origin: 'reconcile' for nightly, 'initial' for initial sync
  */
 async function processLines(
   sql: Sql,
   shop: string,
   shopId: string,
   bulkType: string,
-  lines: string[]
+  lines: string[],
+  origin?: string
 ): Promise<number> {
   // Get Worker env for PII flag (used by companies and customers)
   const env = getRequestEnv() ?? {};
@@ -1189,7 +1211,7 @@ async function processLines(
     case "customers":
       return await processCustomerLines(sql, shop, lines);
     case "draft_orders":
-      return await processDraftOrderLines(sql, shop, lines);
+      return await processDraftOrderLines(sql, shop, lines, origin);
     default:
       console.warn(`[bulk-jsonl] Unknown bulk type: ${bulkType}`);
       return 0;
@@ -1334,32 +1356,26 @@ export async function processBulkOperation(
   const currentChunkSize = freshProgress.chunkSize;
   const currentFailureCount = freshProgress.failureCount;
 
-  // Check failure count - if already at max, this goes to DLQ
-  if (currentFailureCount >= MAX_FAILURE_COUNT) {
-    return {
-      success: false,
-      action: "skipped",
-      error: BULK_ERROR_CODES.MAX_FAILURES,
-      errorCode: BULK_ERROR_CODES.MAX_FAILURES,
-      status: "error",
-      errorType: "permanent",
-    };
-  }
+  // Get operation metadata for origin (used by draft_orders flagging)
+  const operationMetadata = await getBulkOperationMetadata(sql, bulkOperationId);
+  const origin = operationMetadata?.origin;
 
-  // Get result URL from Shopify
+  // Get result URL from Shopify BEFORE checking max-failures:
+  // A COMPLETED empty result should complete even at failure_count >= 5.
   const statusResult = await getBulkOperationStatus(shop, bulkOperationId);
 
-  // S25: Handle empty results (COMPLETED with url null and objectCount 0)
+  // S25: Handle empty results (COMPLETED with url null/undefined and objectCount 0)
   // Per Shopify docs: COMPLETED with url=null and objectCount=0 is a valid empty result
   // @see https://shopify.dev/docs/apps/build/apis/graphql-admin/bulk-operations/queries
   // "If the query produced no results, then the `url` field will return `null`."
   // Note: objectCount is UnsignedInt64 serialized as STRING in Shopify's JSON response
   // @see https://shopify.dev/docs/api/admin-graphql/latest/scalars/unsignedint64
+  // Note: Shopify may omit `url` entirely (undefined) rather than send null.
   if (statusResult.success && statusResult.data) {
     const { status, url, objectCount, partialDataUrl } = statusResult.data;
     const parsedObjectCount = objectCount != null ? Number(objectCount) : null;
     
-    if (status === "COMPLETED" && url === null && parsedObjectCount === 0) {
+    if (status === "COMPLETED" && url == null && !partialDataUrl && objectCount != null && parsedObjectCount === 0) {
       // Empty result - complete the operation with 0 lines processed
       // R1: Pass leaseToken for owner-checked completion
       const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
@@ -1396,9 +1412,28 @@ export async function processBulkOperation(
         chainToOrders: nextStage === "orders",
       };
     }
+  }
 
-    // S25: partialDataUrl set or objectCount > 0 with no url is a permanent error
-    if (status === "COMPLETED" && url === null && (partialDataUrl || (parsedObjectCount != null && parsedObjectCount > 0))) {
+  // Check failure count AFTER empty-result check:
+  // A COMPLETED empty result completes even at failure_count >= 5.
+  // Apply the gate here for non-empty paths and status-fetch failures.
+  if (currentFailureCount >= MAX_FAILURE_COUNT) {
+    return {
+      success: false,
+      action: "skipped",
+      error: BULK_ERROR_CODES.MAX_FAILURES,
+      errorCode: BULK_ERROR_CODES.MAX_FAILURES,
+      status: "error",
+      errorType: "permanent",
+    };
+  }
+
+  // S25: partialDataUrl set or objectCount > 0 with no url is a permanent error
+  // This check runs after max-failures gate.
+  if (statusResult.success && statusResult.data) {
+    const { status, url, objectCount, partialDataUrl } = statusResult.data;
+    const parsedObjectCount = objectCount != null ? Number(objectCount) : null;
+    if (status === "COMPLETED" && url == null && (partialDataUrl || (parsedObjectCount != null && parsedObjectCount > 0))) {
       // S25-QA2: Mark op terminal to prevent nightly DLQ loop
       await markBulkOperationTerminal(sql, bulkOperationId, shop, leaseToken);
       return {
@@ -1659,7 +1694,8 @@ export async function processBulkOperation(
         shop,
         shopId,
         bulkType,
-        linesToProcess
+        linesToProcess,
+        origin
       );
     } catch {
       // Increment failure count on processing error (owner-checked)
@@ -1712,6 +1748,19 @@ export async function processBulkOperation(
       lineCount: linesToProcess.length,
       upsertedCount: totalUpserted,
     });
+
+    // D6: For initial sync draft_orders completion, flag all accounts with draft exposure
+    // (reconcile flags per batch in processDraftOrderLines)
+    if (claimed && bulkType === "draft_orders" && origin !== "reconcile") {
+      try {
+        const accountsWithDrafts = await getAccountsWithDraftExposure(sql, shop);
+        if (accountsWithDrafts.size > 0) {
+          await flagAccountsForRecompute(sql, shop, accountsWithDrafts);
+        }
+      } catch (err) {
+        captureExceptionWithTags(err, {});
+      }
+    }
 
     // Only chain to next stage if this caller won the completion claim
     let nextStage: "customers" | "orders" | "draft_orders" | undefined;
