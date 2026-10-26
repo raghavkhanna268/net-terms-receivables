@@ -142,8 +142,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         ),
       ];
 
-      const count = await bulkUpsertDraftOrders(sql, draftOrders);
-      expect(count).toBe(2);
+      const result = await bulkUpsertDraftOrders(sql, draftOrders);
+      expect(result.count).toBe(2);
 
       const rows = await sql`
         SELECT draft_order_id, status, total FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}
@@ -169,8 +169,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         ),
       ];
 
-      const count = await bulkUpsertDraftOrders(sql, draftOrders);
-      expect(count).toBe(1);
+      const result = await bulkUpsertDraftOrders(sql, draftOrders);
+      expect(result.count).toBe(1);
 
       const [row] = await sql`
         SELECT status, total FROM s8_draft_orders
@@ -211,8 +211,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         TEST_ACCOUNT_ID
       );
 
-      const count = await bulkUpsertDraftOrders(sql, [updated]);
-      expect(count).toBe(1);
+      const result = await bulkUpsertDraftOrders(sql, [updated]);
+      expect(result.count).toBe(1);
 
       const rows = await sql`SELECT total FROM s8_draft_orders WHERE draft_order_id = ${draftOrderId}`;
       expect(rows).toHaveLength(1);
@@ -250,8 +250,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
         TEST_ACCOUNT_ID
       );
 
-      const count = await bulkUpsertDraftOrders(sql, [updated]);
-      expect(count).toBe(1);
+      const result = await bulkUpsertDraftOrders(sql, [updated]);
+      expect(result.count).toBe(1);
 
       const rows = await sql`SELECT total, status FROM s8_draft_orders WHERE draft_order_id = ${draftOrderId}`;
       expect(rows).toHaveLength(1);
@@ -392,8 +392,8 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
 
       expect(mappedOrders).toHaveLength(2);
 
-      const count = await bulkUpsertDraftOrders(sql, mappedOrders);
-      expect(count).toBe(2);
+      const result = await bulkUpsertDraftOrders(sql, mappedOrders);
+      expect(result.count).toBe(2);
 
       const rows = await sql`
         SELECT draft_order_id, name, status, total FROM s8_draft_orders
@@ -1139,14 +1139,17 @@ describeWithDb("S8 PR-B draft_orders bulk reconcile (DB-backed)", () => {
 
     it("getAccountsWithDraftExposure returns accounts with open/invoice_sent drafts", async () => {
       // Create drafts with various statuses
+      const draftIdOpen = `draft-exp-open-${BULK_423_SUFFIX}`;
+      const draftIdSent = `draft-exp-sent-${BULK_423_SUFFIX}`;
+      const draftIdCompleted = `draft-exp-completed-${BULK_423_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
           has_payment_terms, status, created_at
         ) VALUES
-        (${BULK_SHOP_ID}, 'draft-exp-open-${BULK_423_SUFFIX}', ${BULK_ACCOUNT_A}, '#EXP-OPEN', '1000.00', true, 'open', NOW()),
-        (${BULK_SHOP_ID}, 'draft-exp-sent-${BULK_423_SUFFIX}', ${BULK_ACCOUNT_A}, '#EXP-SENT', '2000.00', true, 'invoice_sent', NOW()),
-        (${BULK_SHOP_ID}, 'draft-exp-completed-${BULK_423_SUFFIX}', ${BULK_ACCOUNT_B}, '#EXP-COMPLETED', '3000.00', true, 'completed', NOW())
+        (${BULK_SHOP_ID}, ${draftIdOpen}, ${BULK_ACCOUNT_A}, '#EXP-OPEN', '1000.00', true, 'open', NOW()),
+        (${BULK_SHOP_ID}, ${draftIdSent}, ${BULK_ACCOUNT_A}, '#EXP-SENT', '2000.00', true, 'invoice_sent', NOW()),
+        (${BULK_SHOP_ID}, ${draftIdCompleted}, ${BULK_ACCOUNT_B}, '#EXP-COMPLETED', '3000.00', true, 'completed', NOW())
       `;
 
       const accounts = await getAccountsWithDraftExposure(sql, BULK_SHOP_DOMAIN);

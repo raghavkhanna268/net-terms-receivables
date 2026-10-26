@@ -466,9 +466,9 @@ describeWithDb("Draft Order Sync", () => {
         ),
       ];
 
-      const count = await bulkUpsertDraftOrders(sql, draftOrders);
+      const result = await bulkUpsertDraftOrders(sql, draftOrders);
 
-      expect(count).toBe(2);
+      expect(result.count).toBe(2);
 
       const inserted = await sql`
         SELECT * FROM s8_draft_orders
@@ -478,8 +478,8 @@ describeWithDb("Draft Order Sync", () => {
     });
 
     it("handles empty array", async () => {
-      const count = await bulkUpsertDraftOrders(sql, []);
-      expect(count).toBe(0);
+      const result = await bulkUpsertDraftOrders(sql, []);
+      expect(result.count).toBe(0);
     });
   });
 
