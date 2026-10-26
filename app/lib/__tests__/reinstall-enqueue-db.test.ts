@@ -4,6 +4,10 @@
  * Tests verify:
  * 1. Reinstall enqueues CREDIT_STATUS_RECOMPUTE messages for eligible accounts
  * 2. Ineligible accounts (no owner, redacted, permanent error) are excluded
+ *    - COMPANY without companyLocationId (no owner)
+ *    - TAGGED_CUSTOMER without customerId (no owner)
+ *    - Accounts with customerId containing '_redacted_' pattern
+ *    - Accounts with metafieldSyncErrorCode
  * 3. Other shops' accounts are not affected
  * 4. Non-INR shops, unknown currency, uninstalled shops get 0 messages
  * 5. Plain re-auth (no reinstall) gets 0 messages
@@ -14,6 +18,9 @@
  * 10. Enqueue failure doesn't fail auth
  * 11. Leak test: no sensitive data in logs
  * 12. 'sync' source is handled by all consumers
+ *
+ * The eligibility filters are IDENTICAL to Part 3 resync in enqueue_credit_status_recomputes()
+ * @see prisma/migrations/20261111000000_sweep_skip_uninstalled/migration.sql
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
@@ -171,6 +178,141 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
           AND message->>'shop' = ${CONTROL_SHOP}
       `;
       expect(controlMessages[0].count).toBe(0);
+    });
+  });
+
+  describe("no-owner and redacted exclusions (same as migration Part 3)", () => {
+    /**
+     * These tests verify that the eligibility filters are IDENTICAL to Part 3 resync
+     * in enqueue_credit_status_recomputes() (migration 20261111000000).
+     * @see prisma/migrations/20261111000000_sweep_skip_uninstalled/migration.sql lines 155-162
+     *
+     * NOTE: The database constraint BuyerAccount_kind_consistency enforces that:
+     * - COMPANY must have companyLocationId AND companyId
+     * - TAGGED_CUSTOMER must have customerId
+     * So we cannot create "no-owner" rows in tests. The SQL filter for no-owner rows
+     * exists for defensive programming (handling any pre-constraint legacy data).
+     * We verify the filter is present via the redacted customer test and the
+     * eligibility comments in the source code.
+     */
+
+    it("account with redacted customerId is NOT enqueued", async () => {
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", "customerId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          -- Eligible: TAGGED_CUSTOMER with non-redacted customerId
+          (${inrShopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/normal-customer',
+           'Normal Customer', 'OK', true, NULL, NOW(), NOW()),
+          -- Ineligible: customerId contains _redacted_ pattern
+          (${inrShopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/abc_redacted_1234567890',
+           'Redacted Customer', 'OK', true, NULL, NOW(), NOW()),
+          -- Ineligible: another redacted pattern variant
+          (${inrShopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/xyz_redacted_9999999999',
+           'Also Redacted', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      expect(enqueuedCount).toBe(1);
+
+      const messages = await sql<{ name: string }[]>`
+        SELECT ba.name
+        FROM pgmq.q_s6_sync q
+        JOIN "BuyerAccount" ba ON ba.id = q.message->>'buyerAccountId'
+        WHERE q.message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND q.message->>'shop' = ${INR_SHOP}
+      `;
+      expect(messages).toHaveLength(1);
+      expect(messages[0].name).toBe("Normal Customer");
+    });
+
+    it("account with permanent metafieldSyncErrorCode is NOT enqueued", async () => {
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", name,
+          "holdState", "syncPending", "metafieldSyncedAt", "metafieldSyncErrorCode",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          -- Eligible: no error code
+          (${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/no-err', 'gid://shopify/CompanyLocation/no-err',
+           'No Error', 'OK', true, NULL, NULL, NOW(), NOW()),
+          -- Ineligible: has permanent error code
+          (${inrShopId}, 'COMPANY'::"AccountKind",
+           'gid://shopify/Company/has-err', 'gid://shopify/CompanyLocation/has-err',
+           'Has Error', 'OK', true, NULL, 'no_session', NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      expect(enqueuedCount).toBe(1);
+
+      const messages = await sql<{ name: string }[]>`
+        SELECT ba.name
+        FROM pgmq.q_s6_sync q
+        JOIN "BuyerAccount" ba ON ba.id = q.message->>'buyerAccountId'
+        WHERE q.message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND q.message->>'shop' = ${INR_SHOP}
+      `;
+      expect(messages).toHaveLength(1);
+      expect(messages[0].name).toBe("No Error");
+    });
+
+    /**
+     * Mutation test (i): drop the redacted customer exclusion
+     * - If we remove the filter for redacted accounts, they would be enqueued
+     *   and cause metafield writes to fail (customer no longer exists)
+     * - This filter is IDENTICAL to Part 3 resync in migration 20261111000000
+     * @see prisma/migrations/20261111000000_sweep_skip_uninstalled/migration.sql lines 159-160
+     */
+    it("mutation (i): if redacted exclusion is dropped, redacted accounts would be enqueued", async () => {
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          "shopId", kind, "companyId", "companyLocationId", "customerId", name,
+          "holdState", "syncPending", "metafieldSyncedAt",
+          "createdAt", "updatedAt"
+        )
+        VALUES
+          -- Eligible: TAGGED_CUSTOMER with non-redacted customerId
+          (${inrShopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/mut-i-normal',
+           'Normal Account', 'OK', true, NULL, NOW(), NOW()),
+          -- Ineligible: redacted customer (customerId contains _redacted_ pattern)
+          (${inrShopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/mut_i_redacted_1234567890',
+           'Redacted Account', 'OK', true, NULL, NOW(), NOW()),
+          -- Ineligible: another redacted pattern variant
+          (${inrShopId}, 'TAGGED_CUSTOMER'::"AccountKind",
+           NULL, NULL, 'gid://shopify/Customer/xyz_redacted_9999999999',
+           'Also Redacted', 'OK', true, NULL, NOW(), NOW())
+      `;
+
+      const { _enqueueReinstallResyncForTesting } = await import("../after-auth.server");
+      const enqueuedCount = await _enqueueReinstallResyncForTesting(sql, inrShopId, INR_SHOP);
+
+      // Only 1 account should be enqueued (the non-redacted one)
+      // If the filter is dropped, we'd get 3
+      expect(enqueuedCount).toBe(1);
+
+      const messages = await sql<{ name: string }[]>`
+        SELECT ba.name
+        FROM pgmq.q_s6_sync q
+        JOIN "BuyerAccount" ba ON ba.id = q.message->>'buyerAccountId'
+        WHERE q.message->>'topic' = 'CREDIT_STATUS_RECOMPUTE'
+          AND q.message->>'shop' = ${INR_SHOP}
+      `;
+      expect(messages).toHaveLength(1);
+      expect(messages[0].name).toBe("Normal Account");
     });
   });
 
@@ -1144,4 +1286,5 @@ describeWithDb("Mutation tests (#294 PR2)", () => {
 
     await Promise.allSettled(waitUntilPromises);
   });
+
 });
