@@ -855,8 +855,6 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
   });
 
   it("dry run sends no customerUpdate request", async () => {
-    const legacyEmail = LEGACY_SEED_EMAILS["company-1"];
-    let customerUpdateCalled = false;
     let anyFetchCalled = false;
 
     state.dryRun = true;
@@ -868,7 +866,6 @@ describe("migrateCustomerEmails integration with mocked fetch", () => {
 
     await migrateCustomerEmails(state);
 
-    expect(customerUpdateCalled).toBe(false);
     expect(anyFetchCalled).toBe(false);
     expect(state.updatedCount.customers).toBe(0);
   });
