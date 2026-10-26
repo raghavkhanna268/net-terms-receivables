@@ -350,7 +350,7 @@ async function findCustomerAccount(
 /**
  * Check if a tag rule matches any customer tags.
  */
-function findMatchingTagRule(
+export function findMatchingTagRule(
   customerTags: string[],
   tagRules: TagRule[]
 ): TagRule | undefined {

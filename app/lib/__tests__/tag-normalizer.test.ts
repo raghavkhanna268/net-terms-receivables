@@ -6,18 +6,9 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { normalizeTag, tagsMatch } from "../tag-normalizer";
+import { normalizeTag } from "../tag-normalizer";
 import { findMatchingTagRule as customerFindMatchingTagRule } from "~/services/sync/customer.server";
-import type { TagRule } from "../due-date";
-
-function invoiceEligibilityFindMatchingTagRule(
-  customerTags: string[],
-  tagRules: TagRule[]
-): TagRule | undefined {
-  if (customerTags.length === 0 || tagRules.length === 0) return undefined;
-  const normalizedTags = customerTags.map((t) => normalizeTag(t));
-  return tagRules.find((rule) => normalizedTags.includes(normalizeTag(rule.tag)));
-}
+import { findMatchingTagRule as invoiceFindMatchingTagRule } from "../invoice-eligibility";
 
 describe("normalizeTag", () => {
   describe("leading/trailing whitespace", () => {
@@ -111,151 +102,114 @@ describe("normalizeTag", () => {
   });
 });
 
-describe("tagsMatch", () => {
-  it("matches identical tags", () => {
-    expect(tagsMatch("wholesale", "wholesale")).toBe(true);
-  });
-
-  it("matches with different case", () => {
-    expect(tagsMatch("wholesale", "WHOLESALE")).toBe(true);
-    expect(tagsMatch("Wholesale", "wholesale")).toBe(true);
-  });
-
-  it("matches with leading/trailing spaces", () => {
-    expect(tagsMatch(" wholesale ", "wholesale")).toBe(true);
-    expect(tagsMatch("wholesale", " wholesale ")).toBe(true);
-  });
-
-  it("matches with internal whitespace variation", () => {
-    expect(tagsMatch("whole sale", "whole  sale")).toBe(true);
-    expect(tagsMatch("whole\tsale", "whole sale")).toBe(true);
-  });
-
-  it("does not match different tags", () => {
-    expect(tagsMatch("wholesale", "retail")).toBe(false);
-  });
-
-  it("does not match empty strings", () => {
-    expect(tagsMatch("", "wholesale")).toBe(false);
-    expect(tagsMatch("wholesale", "")).toBe(false);
-    expect(tagsMatch("", "")).toBe(false);
-  });
-
-  it("does not match whitespace-only strings", () => {
-    expect(tagsMatch("   ", "wholesale")).toBe(false);
-    expect(tagsMatch("wholesale", "   ")).toBe(false);
-    expect(tagsMatch("   ", "   ")).toBe(false);
-  });
-});
-
 describe("Tag-rule matching parity", () => {
   const testCases: Array<{
     name: string;
     customerTags: string[];
     ruleTag: string;
-    expectedMatch: boolean;
+    expectedTag: string | null;
   }> = [
     {
       name: "exact match",
       customerTags: ["wholesale"],
       ruleTag: "wholesale",
-      expectedMatch: true,
+      expectedTag: "wholesale",
     },
     {
       name: "leading/trailing spaces on customer tag",
       customerTags: [" wholesale "],
       ruleTag: "wholesale",
-      expectedMatch: true,
+      expectedTag: "wholesale",
     },
     {
       name: "leading/trailing spaces on rule tag",
       customerTags: ["wholesale"],
       ruleTag: " wholesale ",
-      expectedMatch: true,
+      expectedTag: " wholesale ",
     },
     {
       name: "case difference - customer uppercase",
       customerTags: ["WHOLESALE"],
       ruleTag: "wholesale",
-      expectedMatch: true,
+      expectedTag: "wholesale",
     },
     {
       name: "case difference - rule uppercase",
       customerTags: ["wholesale"],
       ruleTag: "WHOLESALE",
-      expectedMatch: true,
+      expectedTag: "WHOLESALE",
     },
     {
       name: "mixed case",
       customerTags: ["WholeSale"],
       ruleTag: "wholesale",
-      expectedMatch: true,
+      expectedTag: "wholesale",
     },
     {
       name: "internal double space on customer tag",
       customerTags: ["whole  sale"],
       ruleTag: "whole sale",
-      expectedMatch: true,
+      expectedTag: "whole sale",
     },
     {
       name: "internal double space on rule tag",
       customerTags: ["whole sale"],
       ruleTag: "whole  sale",
-      expectedMatch: true,
+      expectedTag: "whole  sale",
     },
     {
       name: "tab in customer tag",
       customerTags: ["VIP\t"],
       ruleTag: "VIP",
-      expectedMatch: true,
+      expectedTag: "VIP",
     },
     {
       name: "tab in rule tag",
       customerTags: ["VIP"],
       ruleTag: "VIP\t",
-      expectedMatch: true,
+      expectedTag: "VIP\t",
     },
     {
       name: "multiple internal whitespace variations",
       customerTags: ["gold   tier"],
       ruleTag: "gold tier",
-      expectedMatch: true,
+      expectedTag: "gold tier",
     },
     {
       name: "no match - different tags",
       customerTags: ["retail"],
       ruleTag: "wholesale",
-      expectedMatch: false,
+      expectedTag: null,
     },
     {
       name: "no match - empty customer tags",
       customerTags: [],
       ruleTag: "wholesale",
-      expectedMatch: false,
+      expectedTag: null,
     },
     {
       name: "no match - whitespace-only customer tag does not match real tag",
       customerTags: ["   "],
       ruleTag: "wholesale",
-      expectedMatch: false,
+      expectedTag: null,
     },
     {
       name: "multiple customer tags - one matches",
       customerTags: ["retail", "wholesale", "vip"],
       ruleTag: "wholesale",
-      expectedMatch: true,
+      expectedTag: "wholesale",
     },
     {
       name: "multiple customer tags - none match",
       customerTags: ["retail", "basic", "new"],
       ruleTag: "wholesale",
-      expectedMatch: false,
+      expectedTag: null,
     },
     {
       name: "complex: spaces, case, multiple tags",
       customerTags: [" RETAIL ", "  WholeSale  "],
       ruleTag: "wholesale",
-      expectedMatch: true,
+      expectedTag: "wholesale",
     },
   ];
 
@@ -264,12 +218,7 @@ describe("Tag-rule matching parity", () => {
       it(tc.name, () => {
         const rules = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
         const result = customerFindMatchingTagRule(tc.customerTags, rules);
-        if (tc.expectedMatch) {
-          expect(result).toBeDefined();
-          expect(result?.tag).toBe(tc.ruleTag);
-        } else {
-          expect(result).toBeUndefined();
-        }
+        expect(result?.tag ?? null).toBe(tc.expectedTag);
       });
     }
   });
@@ -277,14 +226,9 @@ describe("Tag-rule matching parity", () => {
   describe("invoice-eligibility.ts findMatchingTagRule", () => {
     for (const tc of testCases) {
       it(tc.name, () => {
-        const rules: TagRule[] = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
-        const result = invoiceEligibilityFindMatchingTagRule(tc.customerTags, rules);
-        if (tc.expectedMatch) {
-          expect(result).toBeDefined();
-          expect(result?.tag).toBe(tc.ruleTag);
-        } else {
-          expect(result).toBeUndefined();
-        }
+        const rules = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
+        const result = invoiceFindMatchingTagRule(tc.customerTags, rules);
+        expect(result?.tag ?? null).toBe(tc.expectedTag);
       });
     }
   });
@@ -292,17 +236,13 @@ describe("Tag-rule matching parity", () => {
   describe("Both matchers produce identical results", () => {
     for (const tc of testCases) {
       it(`parity: ${tc.name}`, () => {
-        const rulesForCustomer = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
-        const rulesForInvoice: TagRule[] = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
+        const rules = [{ tag: tc.ruleTag, defaultTermsDays: 30 }];
 
-        const customerResult = customerFindMatchingTagRule(tc.customerTags, rulesForCustomer);
-        const invoiceResult = invoiceEligibilityFindMatchingTagRule(tc.customerTags, rulesForInvoice);
+        const customerResult = customerFindMatchingTagRule(tc.customerTags, rules);
+        const invoiceResult = invoiceFindMatchingTagRule(tc.customerTags, rules);
 
-        const customerMatched = customerResult !== undefined;
-        const invoiceMatched = invoiceResult !== undefined;
-
-        expect(customerMatched).toBe(invoiceMatched);
-        expect(customerMatched).toBe(tc.expectedMatch);
+        expect(customerResult?.tag ?? null).toBe(invoiceResult?.tag ?? null);
+        expect(customerResult?.tag ?? null).toBe(tc.expectedTag);
       });
     }
   });
@@ -318,28 +258,23 @@ describe("Tag-rule matching parity", () => {
     });
 
     it("invoice-eligibility.ts returns first matching rule", () => {
-      const rules: TagRule[] = [
+      const rules = [
         { tag: "wholesale", defaultTermsDays: 30 },
         { tag: "wholesale", defaultTermsDays: 60 },
       ];
-      const result = invoiceEligibilityFindMatchingTagRule(["wholesale"], rules);
+      const result = invoiceFindMatchingTagRule(["wholesale"], rules);
       expect(result?.defaultTermsDays).toBe(30);
     });
 
     it("first matching rule wins with multiple possible matches", () => {
-      const customerRules = [
-        { tag: "gold-tier", defaultTermsDays: 45 },
-        { tag: "wholesale", defaultTermsDays: 30 },
-        { tag: "vip", defaultTermsDays: 60 },
-      ];
-      const invoiceRules: TagRule[] = [
+      const rules = [
         { tag: "gold-tier", defaultTermsDays: 45 },
         { tag: "wholesale", defaultTermsDays: 30 },
         { tag: "vip", defaultTermsDays: 60 },
       ];
 
-      const customerResult = customerFindMatchingTagRule(["vip", "wholesale"], customerRules);
-      const invoiceResult = invoiceEligibilityFindMatchingTagRule(["vip", "wholesale"], invoiceRules);
+      const customerResult = customerFindMatchingTagRule(["vip", "wholesale"], rules);
+      const invoiceResult = invoiceFindMatchingTagRule(["vip", "wholesale"], rules);
 
       expect(customerResult?.tag).toBe("wholesale");
       expect(invoiceResult?.tag).toBe("wholesale");

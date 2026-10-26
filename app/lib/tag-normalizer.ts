@@ -29,17 +29,3 @@ export function normalizeTag(tag: string): string {
     .replace(/\s+/g, " ")
     .toLowerCase();
 }
-
-/**
- * Check if two tags match after normalization.
- *
- * @param tagA - First tag
- * @param tagB - Second tag
- * @returns true if normalized tags are equal
- */
-export function tagsMatch(tagA: string, tagB: string): boolean {
-  const normalizedA = normalizeTag(tagA);
-  const normalizedB = normalizeTag(tagB);
-  if (normalizedA === "" || normalizedB === "") return false;
-  return normalizedA === normalizedB;
-}
