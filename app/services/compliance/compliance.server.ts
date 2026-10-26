@@ -20,6 +20,7 @@ import { getAppHandle } from "~/lib/plan-url";
 import {
   parseRecipientAllowlist,
   isRecipientAllowed,
+  isAllowlistEnforced,
 } from "~/services/recipient-allowlist.server";
 
 // ============================================================================
@@ -997,8 +998,10 @@ The export will be available for 30 days.
 — Net Terms Receivables`;
 
   // Pre-launch recipient allowlist check (fail closed)
+  // When RESEND_RECIPIENT_ALLOWLIST_ENFORCED is exactly "false", skip this gate.
   const allowlist = parseRecipientAllowlist(process.env.RESEND_TEST_RECIPIENTS);
-  if (allowlist.size === 0) {
+  const enforced = isAllowlistEnforced();
+  if (enforced && allowlist.size === 0) {
     safeLog("info", "data_request_email_skipped", {
       shopHash: hash,
       requestId,
@@ -1006,7 +1009,7 @@ The export will be available for 30 days.
     });
     return { sent: false, skippedReason: "recipient_allowlist_empty" };
   }
-  if (!isRecipientAllowed(shopOwnerEmail, allowlist)) {
+  if (enforced && !isRecipientAllowed(shopOwnerEmail, allowlist)) {
     safeLog("info", "data_request_email_skipped", {
       shopHash: hash,
       requestId,

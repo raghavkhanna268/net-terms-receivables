@@ -161,4 +161,70 @@ describe("sendDataRequestNotification - allowlist", () => {
     expect(result.sent).toBe(true);
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
+
+  it("sends with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is 'false'", async () => {
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
+    vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", "false");
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "email-enforcement-123" }),
+    });
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    const result = await sendDataRequestNotification(
+      "test-enforcement-shop.myshopify.com",
+      "anyrecipient@example.com",
+      "req-enforcement-1"
+    );
+
+    expect(result.sent).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is unset", async () => {
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    const result = await sendDataRequestNotification(
+      "test-enforcement-shop.myshopify.com",
+      "anyrecipient@example.com",
+      "req-enforcement-2"
+    );
+
+    expect(result.sent).toBe(false);
+    expect(result.skippedReason).toBe("recipient_allowlist_empty");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput, ...consoleWarnOutput].join("\n");
+    expect(allLogs).toContain("recipient_allowlist_empty");
+  });
+
+  it("blocks with empty allowlist when RESEND_RECIPIENT_ALLOWLIST_ENFORCED is 'False' (wrong case)", async () => {
+    vi.stubEnv("RESEND_API_KEY", "re_test_1234");
+    vi.stubEnv("RESEND_FROM", "noreply@test-example.com");
+    vi.stubEnv("RESEND_TEST_RECIPIENTS", "");
+    vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", "False");
+
+    const { sendDataRequestNotification } = await import("../compliance.server");
+
+    const result = await sendDataRequestNotification(
+      "test-enforcement-shop.myshopify.com",
+      "anyrecipient@example.com",
+      "req-enforcement-3"
+    );
+
+    expect(result.sent).toBe(false);
+    expect(result.skippedReason).toBe("recipient_allowlist_empty");
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    const allLogs = [...consoleLogOutput, ...consoleInfoOutput, ...consoleWarnOutput].join("\n");
+    expect(allLogs).toContain("recipient_allowlist_empty");
+  });
 });
