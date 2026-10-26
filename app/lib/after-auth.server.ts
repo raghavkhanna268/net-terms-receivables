@@ -168,11 +168,14 @@ interface ClearUninstalledResult {
  * all BuyerAccount rows for the shop, allowing the resync sweep to retry accounts
  * that had permanent sync failures before uninstall.
  *
- * #294: Also sets metafieldSyncedAt = NULL and syncPending = true for all
+ * #294: Also sets metafieldSyncedAt = NULL and syncPending = true for eligible
  * BuyerAccount rows in the reinstalled shop. This makes the accounts eligible
  * for the daily resync sweep (Part 3), which re-pushes the credit_status
  * metafield. Part 3 is capped at 100 accounts per run across all shops.
  * Shopify wipes app-owned metafield values on uninstall.
+ * Exclusions (must stay in sync with enqueue_credit_status_recomputes Part 3):
+ * - No-owner rows (COMPANY without companyLocationId, TAGGED_CUSTOMER without customerId)
+ * - Redacted accounts (customerId contains '_redacted_')
  *
  * #293: Also closes all open s6_bulk_operations rows (all origins: reconcile,
  * manual, webhook) so getInitialSyncState returns not_started and the merchant
@@ -197,6 +200,8 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
         RETURNING id
       ),
       cleared_accounts AS (
+        -- #294: Reset eligible accounts for resync. Exclusions must match
+        -- enqueue_credit_status_recomputes() Part 3 in migration 20261111000000.
         UPDATE "BuyerAccount"
         SET "metafieldSyncErrorCode" = NULL,
             "metafieldSyncErrorAt" = NULL,
@@ -207,6 +212,11 @@ async function clearUninstalledAtAndMetafieldErrors(sql: Sql, shop: string): Pro
                OR "metafieldSyncErrorAt" IS NOT NULL
                OR "metafieldSyncedAt" IS NOT NULL
                OR "syncPending" = false)
+          -- Exclude no-owner rows: COMPANY must have companyLocationId, TAGGED_CUSTOMER must have customerId
+          AND NOT (kind = 'COMPANY'::"AccountKind" AND "companyLocationId" IS NULL)
+          AND NOT (kind = 'TAGGED_CUSTOMER'::"AccountKind" AND "customerId" IS NULL)
+          -- Exclude redacted accounts (customerId like 'gid://...._redacted_<timestamp>')
+          AND ("customerId" IS NULL OR "customerId" NOT LIKE '%\_redacted\_%' ESCAPE '\')
       ),
       closed_ops AS (
         UPDATE s6_bulk_operations
@@ -544,6 +554,8 @@ export async function upsertShopOnAuth(
       RETURNING id
     ),
     cleared_accounts AS (
+      -- #294: Reset eligible accounts for resync. Exclusions must match
+      -- enqueue_credit_status_recomputes() Part 3 in migration 20261111000000.
       UPDATE "BuyerAccount"
       SET "metafieldSyncErrorCode" = NULL,
           "metafieldSyncErrorAt" = NULL,
@@ -554,6 +566,11 @@ export async function upsertShopOnAuth(
              OR "metafieldSyncErrorAt" IS NOT NULL
              OR "metafieldSyncedAt" IS NOT NULL
              OR "syncPending" = false)
+        -- Exclude no-owner rows: COMPANY must have companyLocationId, TAGGED_CUSTOMER must have customerId
+        AND NOT (kind = 'COMPANY'::"AccountKind" AND "companyLocationId" IS NULL)
+        AND NOT (kind = 'TAGGED_CUSTOMER'::"AccountKind" AND "customerId" IS NULL)
+        -- Exclude redacted accounts (customerId like 'gid://...._redacted_<timestamp>')
+        AND ("customerId" IS NULL OR "customerId" NOT LIKE '%\_redacted\_%' ESCAPE '\')
     ),
     closed_ops AS (
       UPDATE s6_bulk_operations
