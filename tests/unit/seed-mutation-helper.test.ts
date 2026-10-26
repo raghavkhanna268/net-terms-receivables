@@ -4,13 +4,18 @@
  * Tests the checkMutationResult helper and computeExitCode function to ensure
  * proper failure detection and exit code behavior for GraphQL mutations.
  *
+ * Also tests the real ensureTaggedCustomer path with mocked fetch to verify
+ * that GraphQL errors propagate to failure accounting and non-zero exit code.
+ *
  * Run: npm test -- tests/unit/seed-mutation-helper.test.ts
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import {
   checkMutationResult,
   computeExitCode,
+  ensureTaggedCustomer,
+  seedTaggedCustomerOrders,
   type GraphQLResponse,
   type UserError,
   type SeedState,
@@ -328,5 +333,171 @@ describe("failure accounting scenarios", () => {
       expect(totalFailures).toBe(0);
       expect(computeExitCode(state)).toBe(0);
     });
+  });
+});
+
+describe("ensureTaggedCustomer integration with mocked fetch", () => {
+  let state: SeedState;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    state = createEmptyState();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("returns null when GraphQL returns top-level errors with data null (undefinedField)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: null,
+        errors: [
+          {
+            message: "Field 'code' doesn't exist on type 'UserError'",
+            path: ["customerCreate", "userErrors", "code"],
+            extensions: { code: "undefinedField" },
+          },
+        ],
+      }),
+    });
+
+    const result = await ensureTaggedCustomer(state, "test@example.com", 15);
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null when GraphQL returns userErrors", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
+      }),
+    }).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: {
+          customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
+      }),
+    }).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: {
+          customerCreate: {
+            customer: null,
+            userErrors: [{ field: ["email"], message: "Email is invalid" }],
+          },
+        },
+      }),
+    });
+
+    const result = await ensureTaggedCustomer(state, "invalid@example.com", 15);
+
+    expect(result).toBeNull();
+  });
+
+  it("returns customer ID on successful creation", async () => {
+    const customerId = "gid://shopify/Customer/123456";
+    
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: {
+            customers: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: {
+            customerCreate: {
+              customer: { id: customerId },
+              userErrors: [],
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: {
+            tagsAdd: {
+              node: { id: customerId },
+              userErrors: [],
+            },
+          },
+        }),
+      });
+
+    const result = await ensureTaggedCustomer(state, "test@example.com", 15);
+
+    expect(result).toBe(customerId);
+  });
+});
+
+describe("seedTaggedCustomerOrders integration with mocked fetch", () => {
+  let state: SeedState;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    state = createEmptyState();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("tracks failures and non-zero exit when all customer creations fail due to GraphQL errors", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: null,
+        errors: [
+          {
+            message: "Field 'code' doesn't exist on type 'UserError'",
+            path: ["customerCreate", "userErrors", "code"],
+            extensions: { code: "undefinedField" },
+          },
+        ],
+      }),
+    });
+
+    await seedTaggedCustomerOrders(state);
+
+    expect(state.errors.length).toBeGreaterThan(0);
+    expect(state.errors.some(e => e.includes("Failed to ensure tagged customer"))).toBe(true);
+    expect(state.failedCount.orders).toBeGreaterThan(0);
+    expect(computeExitCode(state)).toBe(1);
+  });
+});
+
+describe("seed module import safety", () => {
+  it("importing scripts/seed does not trigger main()", async () => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit called");
+    });
+
+    await expect(import("../../scripts/seed")).resolves.toBeDefined();
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+  });
+
+  it("exports main() function but does not auto-execute it", async () => {
+    const seed = await import("../../scripts/seed");
+    
+    expect(typeof seed.main).toBe("function");
+    expect(typeof seed.ensureTaggedCustomer).toBe("function");
+    expect(typeof seed.seedTaggedCustomerOrders).toBe("function");
+    expect(typeof seed.checkMutationResult).toBe("function");
+    expect(typeof seed.computeExitCode).toBe("function");
   });
 });
