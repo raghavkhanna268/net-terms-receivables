@@ -16,7 +16,7 @@
  *
  * IMPORTANT: No it.skip or describe.skip - all tests must pass.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 
@@ -1270,10 +1270,11 @@ describeWithDb("T4 account-count gating (DB)", () => {
     });
   });
 
-  describe("(i) flag-off: no transaction/lock used", () => {
+  describe("(i) flag-off: no sql.begin called (spied)", () => {
     const SHOP_ID = `shop-flagoff-notx-${TEST_SUFFIX}`;
     const SHOP_DOMAIN = `test-flagoff-notx-${TEST_SUFFIX}.myshopify.com`;
     let originalEnv: string | undefined;
+    let beginSpy: ReturnType<typeof vi.spyOn>;
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
@@ -1298,9 +1299,14 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeEach(async () => {
       vi.resetModules();
+      beginSpy = vi.spyOn(sql, "begin");
     });
 
-    it("processCompanyLocationWebhook with flag off uses no sql.begin (verified via pg_locks)", async () => {
+    afterEach(() => {
+      beginSpy.mockRestore();
+    });
+
+    it("processCompanyLocationWebhook flag-off: sql.begin not called, account ungated", async () => {
       const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
       const webhookId = `webhook-flagoff-notx-${TEST_SUFFIX}`;
       const location = {
@@ -1322,6 +1328,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("created");
+      expect(beginSpy).not.toHaveBeenCalled();
 
       const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
         SELECT gated_at FROM "BuyerAccount"
@@ -1331,7 +1338,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       expect(createdAccount.gated_at).toBeNull();
     });
 
-    it("bulkUpsertBuyerAccounts with flag off uses no sql.begin (row-by-row path)", async () => {
+    it("bulkUpsertBuyerAccounts flag-off: sql.begin not called, all accounts ungated", async () => {
+      beginSpy.mockClear();
       const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../sync/company-location.server");
 
       const newLocations = [];
@@ -1349,6 +1357,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
       const upsertCount = await bulkUpsertBuyerAccounts(sql, mappedAccounts);
       expect(upsertCount).toBe(5);
+      expect(beginSpy).not.toHaveBeenCalled();
 
       const results = await sql<{ gated_at: Date | null }[]>`
         SELECT gated_at FROM "BuyerAccount"
@@ -1359,12 +1368,45 @@ describeWithDb("T4 account-count gating (DB)", () => {
       expect(results.length).toBe(5);
       expect(results.every(r => r.gated_at === null)).toBe(true);
     });
+
+    it("processBulkCustomer flag-off: sql.begin not called, account ungated", async () => {
+      beginSpy.mockClear();
+      const TAG_RULE_ID = `tag-rule-flagoff-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+        VALUES (${TAG_RULE_ID}, ${SHOP_ID}, 'wholesale', 30, NOW(), NOW())
+        ON CONFLICT DO NOTHING
+      `;
+
+      const { processBulkCustomer } = await import("../sync/customer.server");
+
+      const customer = {
+        id: `gid://shopify/Customer/flagoff-bulk-${TEST_SUFFIX}`,
+        tags: ["wholesale"],
+        email: null,
+        displayName: null,
+      };
+
+      const result = await processBulkCustomer(sql, SHOP_DOMAIN, customer, "disabled");
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+      expect(beginSpy).not.toHaveBeenCalled();
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "customerId" = ${customer.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).toBeNull();
+    });
   });
 
-  describe("(j) unlimited plan (-1): no transaction/lock used", () => {
+  describe("(j) unlimited plan (-1): no sql.begin called (spied)", () => {
     const SHOP_ID = `shop-unlimited-notx-${TEST_SUFFIX}`;
     const SHOP_DOMAIN = `test-unlimited-notx-${TEST_SUFFIX}.myshopify.com`;
     let originalEnv: string | undefined;
+    let beginSpy: ReturnType<typeof vi.spyOn>;
 
     beforeAll(async () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
@@ -1389,9 +1431,14 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
     beforeEach(async () => {
       vi.resetModules();
+      beginSpy = vi.spyOn(sql, "begin");
     });
 
-    it("processCompanyLocationWebhook with unlimited plan uses no sql.begin", async () => {
+    afterEach(() => {
+      beginSpy.mockRestore();
+    });
+
+    it("processCompanyLocationWebhook unlimited: sql.begin not called, account ungated", async () => {
       const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
       const webhookId = `webhook-unlimited-notx-${TEST_SUFFIX}`;
       const location = {
@@ -1413,6 +1460,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
       expect(result.success).toBe(true);
       expect(result.action).toBe("created");
+      expect(beginSpy).not.toHaveBeenCalled();
 
       const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
         SELECT gated_at FROM "BuyerAccount"
@@ -1422,7 +1470,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       expect(createdAccount.gated_at).toBeNull();
     });
 
-    it("bulkUpsertBuyerAccounts with unlimited plan uses no sql.begin (row-by-row path)", async () => {
+    it("bulkUpsertBuyerAccounts unlimited: sql.begin not called, all accounts ungated", async () => {
+      beginSpy.mockClear();
       const { bulkUpsertBuyerAccounts, mapCompanyLocationToBuyerAccount } = await import("../sync/company-location.server");
 
       const newLocations = [];
@@ -1440,6 +1489,7 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
       const upsertCount = await bulkUpsertBuyerAccounts(sql, mappedAccounts);
       expect(upsertCount).toBe(30);
+      expect(beginSpy).not.toHaveBeenCalled();
 
       const results = await sql<{ gated_at: Date | null }[]>`
         SELECT gated_at FROM "BuyerAccount"
@@ -1449,6 +1499,38 @@ describeWithDb("T4 account-count gating (DB)", () => {
 
       expect(results.length).toBe(30);
       expect(results.every(r => r.gated_at === null)).toBe(true);
+    });
+
+    it("processBulkCustomer unlimited: sql.begin not called, account ungated", async () => {
+      beginSpy.mockClear();
+      const TAG_RULE_ID = `tag-rule-unlimited-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+        VALUES (${TAG_RULE_ID}, ${SHOP_ID}, 'wholesale', 30, NOW(), NOW())
+        ON CONFLICT DO NOTHING
+      `;
+
+      const { processBulkCustomer } = await import("../sync/customer.server");
+
+      const customer = {
+        id: `gid://shopify/Customer/unlimited-bulk-${TEST_SUFFIX}`,
+        tags: ["wholesale"],
+        email: null,
+        displayName: null,
+      };
+
+      const result = await processBulkCustomer(sql, SHOP_DOMAIN, customer, "disabled");
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+      expect(beginSpy).not.toHaveBeenCalled();
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "customerId" = ${customer.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).toBeNull();
     });
   });
 

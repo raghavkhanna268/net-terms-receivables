@@ -780,3 +780,31 @@ describe("UsageDisplay render tests (T1)", () => {
     expect(html).not.toContain("Near Limit");
   });
 });
+
+/**
+ * T4 Render Tests: PlanBanner with null usage (usageUnavailable).
+ */
+describe("T4 PlanBanner render with usage null", () => {
+  it("renders no usage line, no Limit Reached, no 0 / 0, no Upgrade to Add More when usage is null", async () => {
+    const { PlanBanner } = await import("~/components/UpgradePrompt");
+    const html = renderToString(
+      createElement(PlanBanner, {
+        planKey: "starter" as const,
+        planName: "Starter",
+        isTest: false,
+        companiesUsed: 0,
+        companiesLimit: -1,
+        gatingEnforced: true,
+        upgradeUrl: "https://upgrade.test",
+        usageUnavailable: true,
+      })
+    );
+
+    expect(html).not.toContain("Limit Reached");
+    expect(html).not.toContain("0 / 0");
+    expect(html).not.toContain("Upgrade to Add More");
+    expect(html).not.toContain("0 buyer accounts");
+    expect(html).not.toContain("Usage:");
+    expect(html).toContain("Starter");
+  });
+});

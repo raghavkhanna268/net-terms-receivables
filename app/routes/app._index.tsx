@@ -738,6 +738,7 @@ export default function Index() {
   const planName = plan?.name ?? PLAN_DISPLAY_NAMES.none;
   const isTest = plan?.isTest ?? false;
 
+  const usageUnavailable = usage === null;
   const companiesUsed = usage?.companies.current ?? 0;
   const companiesLimit = usage?.companies.limit ?? -1;
 
@@ -787,6 +788,7 @@ export default function Index() {
           companiesLimit={companiesLimit}
           gatingEnforced={gatingEnforced}
           upgradeUrl={upgradeUrl}
+          usageUnavailable={usageUnavailable}
         />
       </s-section>
 
