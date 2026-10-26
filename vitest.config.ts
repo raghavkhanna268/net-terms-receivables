@@ -97,6 +97,7 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/bulk-op-recovery-db.test.ts",
   "app/services/drain/__tests__/s25-exactly-once-db.test.ts",
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
+  "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",

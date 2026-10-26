@@ -71,12 +71,17 @@ import {
 /**
  * Check if a no_session error should be relabelled as shop_not_found.
  *
- * Used by COMPANIES_* and COMPANY_LOCATIONS_* CREATE/UPDATE handlers to detect
+ * Used by COMPANIES_*, COMPANY_LOCATIONS_*, and ORDERS_* handlers to detect
  * post-uninstall webhooks. When adminGraphQL fails with no_session and the Shop
- * row is missing or uninstalledAt is set, we relabel the error as shop_not_found
- * so the message can be sanitized in the DLQ.
+ * row is missing or uninstalledAt is set, we return a shop_not_found result.
  *
- * Part of #239: no-session path for COMPANIES_* and company-location CREATE/UPDATE.
+ * For COMPANIES_* and COMPANY_LOCATIONS_* CREATE/UPDATE, the caller returns
+ * the result directly (goes to DLQ with sanitization).
+ *
+ * For ORDERS_*, the caller converts this to success:true to ACK immediately
+ * without DLQ entry or recordBackstopFailure.
+ *
+ * Part of #239.
  *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain to check
@@ -508,6 +513,24 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
   }>(message.shop, ORDER_QUERY, { id: message.resourceGid });
 
   if (!result.success) {
+    // Part of #239: Check if this is a no_session error for ORDERS_* webhooks.
+    // If shop is missing or uninstalled, ACK the message immediately (no DLQ).
+    // Unlike COMPANIES_*, ORDERS_* are ACKed to avoid DLQ entry and recordBackstopFailure
+    // for post-uninstall webhooks.
+    if (result.errorCode === "no_session") {
+      const shopNotFound = await checkNoSessionForUninstalledShop(sql, message.shop);
+      if (shopNotFound) {
+        safeLog("info", "order_webhook_uninstalled_shop_acked", {
+          shopHash: await shopHash(message.shop),
+          topic: message.topic,
+        });
+        return {
+          success: true,
+          action: "skipped",
+          skipReason: "shop_not_found",
+        };
+      }
+    }
     return {
       success: false,
       action: "skipped",
