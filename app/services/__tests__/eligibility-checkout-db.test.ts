@@ -17,26 +17,26 @@ import { syncClockToDb } from "../../../tests/helpers/db-clock";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 import { findMatchingTagRule as findMatchingTagRuleSync } from "../sync/customer.server";
 
-import { recomputeCreditStatus } from "../credit-status-recompute.server";
-import { hasOverdueInvoices } from "../overdue.server";
-import type { CreditStatus } from "~/lib/metafields-contract";
-
-let lastMetafieldVariables: { metafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> } | null = null;
-
-const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async (_shop: string, query: string, variables: unknown) => {
-  if (query.includes("metafieldsSet")) {
-    lastMetafieldVariables = variables as typeof lastMetafieldVariables;
-    return {
-      success: true,
-      data: {
-        metafieldsSet: {
-          metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
-          userErrors: [],
+const { mockShopifyGraphQLRequest, mockState } = vi.hoisted(() => {
+  const mockState = {
+    lastMetafieldVariables: null as { metafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> } | null,
+  };
+  const mockShopifyGraphQLRequest = vi.fn().mockImplementation(async (_shop: string, query: string, variables: unknown) => {
+    if (query.includes("metafieldsSet")) {
+      mockState.lastMetafieldVariables = variables as typeof mockState.lastMetafieldVariables;
+      return {
+        success: true,
+        data: {
+          metafieldsSet: {
+            metafields: [{ id: "mf-1", namespace: "$app", key: "credit_status" }],
+            userErrors: [],
+          },
         },
-      },
-    };
-  }
-  return { success: true, data: {} };
+      };
+    }
+    return { success: true, data: {} };
+  });
+  return { mockShopifyGraphQLRequest, mockState };
 });
 
 vi.mock("../shopify-client.server", async (importOriginal) => {
@@ -47,6 +47,10 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
   };
 });
 
+import { recomputeCreditStatus } from "../credit-status-recompute.server";
+import { hasOverdueInvoices } from "../overdue.server";
+import type { CreditStatus } from "~/lib/metafields-contract";
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -54,8 +58,8 @@ let sql: ReturnType<typeof postgres>;
 const allShopDomains: string[] = [];
 
 function getLastMetafieldJson(): CreditStatus | null {
-  if (!lastMetafieldVariables?.metafields?.[0]?.value) return null;
-  return JSON.parse(lastMetafieldVariables.metafields[0].value) as CreditStatus;
+  if (!mockState.lastMetafieldVariables?.metafields?.[0]?.value) return null;
+  return JSON.parse(mockState.lastMetafieldVariables.metafields[0].value) as CreditStatus;
 }
 
 function lettersOnlyId(len: number): string {
@@ -141,7 +145,7 @@ describeWithDb("eligibility-checkout-db", () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       await syncClockToDb(sql);
       mockShopifyGraphQLRequest.mockClear();
-      lastMetafieldVariables = null;
+      mockState.lastMetafieldVariables = null;
 
       const { shopId, accountId, suffix, cleanup } = await setupTestShop();
 
