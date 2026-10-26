@@ -457,7 +457,7 @@ describe("#292 currency recovery on /app load", () => {
     expect(result.shopCurrency).toBe("EUR");
   });
 
-  it("C.13: XXX shop switches to INR with financial rows → allowed (XXX is unknown, not known non-INR)", async () => {
+  it("C.13: XXX shop switches to INR with financial rows → blocked (fail-closed)", async () => {
     setupSqlMock("XXX", { hasFinancialRows: true });
     setupGraphqlMock("INR");
 
@@ -465,10 +465,10 @@ describe("#292 currency recovery on /app load", () => {
     const dataResponse = await loader(createLoaderArgs());
     const result = dataResponse.data;
 
-    // XXX is treated as unknown, not known non-INR, so flip is allowed
-    expect(result.currencyFlipBlocked).toBe(false);
-    expect(result.currencySupported).toBe(true);
-    expect(result.shopCurrency).toBe("INR");
+    // #292 fail-closed: XXX with financial rows is blocked to prevent relabeling
+    expect(result.currencyFlipBlocked).toBe(true);
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("XXX");
   });
 
   it("C.14: INR shop stays INR with financial rows → no change, no block (already INR)", async () => {

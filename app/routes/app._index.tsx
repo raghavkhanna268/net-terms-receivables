@@ -240,8 +240,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   timing.endPhase("shop_lookup");
 
   // #292: Re-read currency for non-INR shops to enable recovery when shop changes to INR
+  // Pass shop.id to avoid re-querying the shop row
   const currencyResult = shop
-    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin)
+    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
     : { currency: NO_CURRENCY_SENTINEL, flipBlocked: false };
   const shopCurrency = currencyResult.currency;
   const currencyFlipBlocked = currencyResult.flipBlocked;

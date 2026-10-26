@@ -1885,3 +1885,145 @@ describeWithDb("#292: currency handling in upsertShopOnAuth (DB)", () => {
     });
   });
 });
+
+/**
+ * #292: Currency flip safety tests.
+ *
+ * Tests verify that reinstall/re-auth of a USD shop with financial rows
+ * does NOT relabel historical amounts as rupees.
+ *
+ * Uses the shared guard to decide whether to block the flip, then passes
+ * the effective currency to upsertShopOnAuth (same as syncShopInfo does).
+ */
+describeWithDb("after-auth currency flip safety (#292)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = `test-${Date.now().toString(36)}-cfs`;
+
+  const SHOP_WITH_INVOICE = `shop-invoice-${TEST_SUFFIX}`;
+  const SHOP_EMPTY = `shop-empty-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shops with USD currency (use example.com to satisfy logging allowlist)
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+      VALUES
+        (${SHOP_WITH_INVOICE}, ${SHOP_WITH_INVOICE + ".example.com"}, 'USD', NOW(), NOW()),
+        (${SHOP_EMPTY}, ${SHOP_EMPTY + ".example.com"}, 'USD', NOW(), NOW())
+    `;
+
+    // Create a BuyerAccount for shop with invoice (TAGGED_CUSTOMER kind)
+    const BUYER_ID = `buyer-${TEST_SUFFIX}`;
+    const CUSTOMER_ID = `gid://shopify/Customer/test-${TEST_SUFFIX}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", name, "createdAt", "updatedAt")
+      VALUES (${BUYER_ID}, ${SHOP_WITH_INVOICE}, 'TAGGED_CUSTOMER', ${CUSTOMER_ID}, 'Test Buyer', NOW(), NOW())
+    `;
+
+    // Create an Invoice for SHOP_WITH_INVOICE
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", name, total, outstanding, "issuedAt", "createdAt", "updatedAt")
+      VALUES (${`inv-${TEST_SUFFIX}`}, ${SHOP_WITH_INVOICE}, ${BUYER_ID}, '#1001', 1000, 1000, NOW(), NOW(), NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    // Clean up test data
+    await sql`DELETE FROM "Invoice" WHERE id = ${`inv-${TEST_SUFFIX}`}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE id = ${`buyer-${TEST_SUFFIX}`}`;
+    await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_WITH_INVOICE}, ${SHOP_EMPTY})`;
+    await sql.end();
+  });
+
+  it("USD shop with financial rows: re-auth with INR does NOT update currency (blocked)", async () => {
+    const { upsertShopOnAuth } = await import("../after-auth.server");
+    const { hasFinancialRows, decideShopCurrencyUpdate } = await import("../shop-currency-guard.server");
+
+    // Verify the shop has financial rows
+    const hasRows = await hasFinancialRows(sql, SHOP_WITH_INVOICE);
+    expect(hasRows).toBe(true);
+
+    // Verify the guard blocks the flip
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "INR",
+      hasFinancialRows: hasRows,
+    });
+    expect(decision.blocked).toBe(true);
+    expect(decision.effectiveCurrency).toBe("USD");
+
+    // Simulate re-auth: call upsertShopOnAuth with the EFFECTIVE currency (USD, not INR)
+    // In real code, syncShopInfo applies the guard before calling upsertShopOnAuth
+    await upsertShopOnAuth(
+      sql,
+      SHOP_WITH_INVOICE + ".example.com",
+      "Asia/Kolkata",
+      decision.effectiveCurrency,
+    );
+
+    // Verify currency is still USD
+    const [shop] = await sql<{ currency: string }[]>`
+      SELECT currency FROM "Shop" WHERE id = ${SHOP_WITH_INVOICE}
+    `;
+    expect(shop.currency).toBe("USD");
+  });
+
+  it("USD shop with zero financial rows: re-auth with INR updates currency (allowed)", async () => {
+    const { upsertShopOnAuth } = await import("../after-auth.server");
+    const { hasFinancialRows, decideShopCurrencyUpdate } = await import("../shop-currency-guard.server");
+
+    // Verify the shop has no financial rows
+    const hasRows = await hasFinancialRows(sql, SHOP_EMPTY);
+    expect(hasRows).toBe(false);
+
+    // Verify the guard allows the flip
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "INR",
+      hasFinancialRows: hasRows,
+    });
+    expect(decision.blocked).toBe(false);
+    expect(decision.effectiveCurrency).toBe("INR");
+
+    // Simulate re-auth: call upsertShopOnAuth with the live currency (INR)
+    await upsertShopOnAuth(
+      sql,
+      SHOP_EMPTY + ".example.com",
+      "Asia/Kolkata",
+      decision.effectiveCurrency,
+    );
+
+    // Verify currency is now INR
+    const [shop] = await sql<{ currency: string }[]>`
+      SELECT currency FROM "Shop" WHERE id = ${SHOP_EMPTY}
+    `;
+    expect(shop.currency).toBe("INR");
+  });
+
+  it("XXX stored + INR live + financial rows: blocked (fail-closed)", async () => {
+    const { hasFinancialRows, decideShopCurrencyUpdate } = await import("../shop-currency-guard.server");
+
+    // Set currency to XXX to simulate failed query sentinel
+    await sql`
+      UPDATE "Shop" SET currency = 'XXX' WHERE id = ${SHOP_WITH_INVOICE}
+    `;
+
+    // Verify the guard blocks the flip (fail-closed behavior)
+    const hasRows = await hasFinancialRows(sql, SHOP_WITH_INVOICE);
+    expect(hasRows).toBe(true);
+
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "XXX",
+      liveCurrency: "INR",
+      hasFinancialRows: hasRows,
+    });
+    expect(decision.blocked).toBe(true);
+    expect(decision.effectiveCurrency).toBe("XXX");
+
+    // Restore currency to USD for other tests
+    await sql`
+      UPDATE "Shop" SET currency = 'USD' WHERE id = ${SHOP_WITH_INVOICE}
+    `;
+  });
+});

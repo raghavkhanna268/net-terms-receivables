@@ -369,6 +369,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   }
 
   // #292 G1: Read stored currency, then recover if needed (same as /app)
+  // Pass dbData.shopId to avoid re-querying the shop row in checkAndRecoverCurrency
   const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
     SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
@@ -378,6 +379,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopDomain,
     storedCurrency,
     admin,
+    dbData.shopId,
   );
   const shopCurrency = currencyResult.currency;
   const currencyFlipBlocked = currencyResult.flipBlocked;
@@ -598,6 +600,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   if (actionType === "start_sync") {
     // #292 G1: Recover currency first, then check if supported
+    // Pass shop.id to avoid re-querying the shop row in checkAndRecoverCurrency
     const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
       SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
     `;
@@ -607,6 +610,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       shopDomain,
       storedCurrency,
       admin,
+      shop.id,
     );
     if (!isShopCurrencySupported(currencyResult.currency)) {
       return {

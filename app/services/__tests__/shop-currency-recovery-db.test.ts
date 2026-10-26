@@ -2,11 +2,10 @@
  * #292: DB integration tests for currency flip safety.
  *
  * Tests verify:
- * - USD stored + INR live + Invoice row → blocked
- * - USD stored + INR live + Payment row → blocked
- * - USD stored + INR live + s8_draft_orders row → blocked
- * - USD stored + INR live + zero rows → flips as today
- * - INR stored → unchanged
+ * - hasFinancialRows detects Invoice, Payment, s8_draft_orders rows
+ * - decideShopCurrencyUpdate blocks flip to INR when financial rows exist
+ * - Fail-closed: XXX/NULL stored + INR live + rows → blocked
+ * - Zero rows → flip allowed
  *
  * Requires a running PostgreSQL instance.
  * Run with: TEST_DATABASE_URL=postgresql://... npm test -- shop-currency-recovery-db
@@ -16,8 +15,8 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
   hasFinancialRows,
-  isKnownNonInrCurrency,
-} from "../shop-currency-recovery.server";
+  decideShopCurrencyUpdate,
+} from "~/lib/shop-currency-guard.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -114,46 +113,108 @@ describeWithDb("hasFinancialRows DB integration", () => {
   });
 });
 
-describe("isKnownNonInrCurrency", () => {
-  it("returns true for USD", () => {
-    expect(isKnownNonInrCurrency("USD")).toBe(true);
+describe("decideShopCurrencyUpdate", () => {
+  it("allows update when currencies match", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "USD",
+      hasFinancialRows: true,
+    });
+    expect(decision).toEqual({
+      allowUpdate: true,
+      effectiveCurrency: "USD",
+      blocked: false,
+    });
   });
 
-  it("returns true for EUR", () => {
-    expect(isKnownNonInrCurrency("EUR")).toBe(true);
+  it("allows switching away from INR to any currency", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "INR",
+      liveCurrency: "USD",
+      hasFinancialRows: true,
+    });
+    expect(decision).toEqual({
+      allowUpdate: true,
+      effectiveCurrency: "USD",
+      blocked: false,
+    });
   });
 
-  it("returns true for GBP", () => {
-    expect(isKnownNonInrCurrency("GBP")).toBe(true);
+  it("allows flip to INR when zero financial rows", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "INR",
+      hasFinancialRows: false,
+    });
+    expect(decision).toEqual({
+      allowUpdate: true,
+      effectiveCurrency: "INR",
+      blocked: false,
+    });
   });
 
-  it("returns false for INR (supported currency)", () => {
-    expect(isKnownNonInrCurrency("INR")).toBe(false);
+  it("blocks flip to INR when financial rows exist (USD stored)", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "INR",
+      hasFinancialRows: true,
+    });
+    expect(decision).toEqual({
+      allowUpdate: false,
+      effectiveCurrency: "USD",
+      blocked: true,
+    });
   });
 
-  it("returns false for XXX (sentinel)", () => {
-    expect(isKnownNonInrCurrency("XXX")).toBe(false);
+  it("blocks flip to INR when financial rows exist (EUR stored)", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "EUR",
+      liveCurrency: "INR",
+      hasFinancialRows: true,
+    });
+    expect(decision).toEqual({
+      allowUpdate: false,
+      effectiveCurrency: "EUR",
+      blocked: true,
+    });
   });
 
-  it("returns false for null", () => {
-    expect(isKnownNonInrCurrency(null)).toBe(false);
+  it("blocks flip to INR when financial rows exist (XXX stored) - fail closed", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "XXX",
+      liveCurrency: "INR",
+      hasFinancialRows: true,
+    });
+    expect(decision).toEqual({
+      allowUpdate: false,
+      effectiveCurrency: "XXX",
+      blocked: true,
+    });
   });
 
-  it("returns false for undefined", () => {
-    expect(isKnownNonInrCurrency(undefined)).toBe(false);
+  it("allows flip to INR from XXX when zero financial rows", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "XXX",
+      liveCurrency: "INR",
+      hasFinancialRows: false,
+    });
+    expect(decision).toEqual({
+      allowUpdate: true,
+      effectiveCurrency: "INR",
+      blocked: false,
+    });
   });
 
-  it("returns false for empty string", () => {
-    expect(isKnownNonInrCurrency("")).toBe(false);
-  });
-
-  it("returns false for lowercase codes", () => {
-    expect(isKnownNonInrCurrency("usd")).toBe(false);
-  });
-
-  it("returns false for invalid codes", () => {
-    expect(isKnownNonInrCurrency("USDD")).toBe(false);
-    expect(isKnownNonInrCurrency("U")).toBe(false);
-    expect(isKnownNonInrCurrency("123")).toBe(false);
+  it("allows non-INR to non-INR changes with financial rows", () => {
+    const decision = decideShopCurrencyUpdate({
+      storedCurrency: "USD",
+      liveCurrency: "EUR",
+      hasFinancialRows: true,
+    });
+    expect(decision).toEqual({
+      allowUpdate: true,
+      effectiveCurrency: "EUR",
+      blocked: false,
+    });
   });
 });
