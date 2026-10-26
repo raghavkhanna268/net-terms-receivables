@@ -816,3 +816,69 @@ describe("T4 PlanPage component wiring with usage null", () => {
     expect(html).toContain("10 / 25");
   });
 });
+
+/**
+ * T4 Render Tests: Over-limit banner shows even when usage is null.
+ * This verifies the banner was moved outside the {usage && ...} block.
+ */
+describe("T4 Over-limit banner renders when usage is null", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("renders over-limit banner when usage is null but gatedCount > 0", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: null,
+          gatedCount: 3,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    // Over-limit banner should show even when usage is null
+    expect(html).toContain("3 accounts over your plan limit");
+    expect(html).toContain("s-banner");
+  });
+
+  it("does not render over-limit banner when gatedCount is 0 and usage is null", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: null,
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    // No over-limit banner when gatedCount is 0
+    expect(html).not.toContain("accounts over your plan limit");
+  });
+});

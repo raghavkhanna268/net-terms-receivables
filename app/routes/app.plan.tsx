@@ -228,21 +228,24 @@ export default function PlanPage() {
                   label="Bank Imports This Month"
                   gatingEnforced={gatingEnforced}
                 />
-
-                {(() => {
-                  const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
-                  return bannerState.show && (
-                    <s-banner tone="warning" heading={bannerState.heading}>
-                      <s-text>
-                        {bannerState.bodyText}
-                        {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
-                      </s-text>
-                    </s-banner>
-                  );
-                })()}
               </s-stack>
             </s-section>
           )}
+
+          {/* Over-limit banner - shows gated accounts even when usage unavailable */}
+          {(() => {
+            const bannerState = buildOverLimitBannerState(gatedCount, gatingEnforced);
+            return bannerState.show && (
+              <s-section>
+                <s-banner tone="warning" heading={bannerState.heading}>
+                  <s-text>
+                    {bannerState.bodyText}
+                    {bannerState.enforcementNote && ` ${bannerState.enforcementNote}`}
+                  </s-text>
+                </s-banner>
+              </s-section>
+            );
+          })()}
 
           {/* Upgrade Prompt */}
           {canUpgrade && (

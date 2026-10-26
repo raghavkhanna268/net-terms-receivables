@@ -303,11 +303,12 @@ The app requests the following scopes to provide its core features.
 
 Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/access-scopes) 'How it works' section: "Any scope that writes a resource also grants read access to it, so request the write scope only when your app needs both." We request only `write_*` scopes for resources we both read and write.
 
-### Read Scopes (2)
+### Read Scopes (3)
 
 | Scope | Purpose |
 |-------|---------|
 | `read_draft_orders` | View draft orders to calculate pending credit exposure |
+| `read_all_orders` | Access orders older than 60 days for historical invoice reconciliation |
 | `read_payment_terms` | View payment terms on orders and company locations |
 
 ### Write Scopes (6)
@@ -321,4 +322,4 @@ Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/acc
 | `write_payment_customizations` | Configure payment method visibility based on account status |
 | `write_validations` | Configure checkout validation to enforce credit limits and holds |
 
-**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) requires Shopify's Protected Customer Data (PCD) approval. Level 1 access plus Name and Email fields have been approved. The email and display name fields are fetched for tagged customers.
+**Protected Customer Data:** The `write_customers` scope (which implies `read_customers`) requires Shopify's Protected Customer Data (PCD) approval. PCD Level 1 (Name, Email): requested/draft, not approved. The email and display name fields are fetched for tagged customers.

@@ -509,7 +509,7 @@ async function syncTaggedCustomerBuyerAccount(
 
         let shouldGate = false;
         if (!existingAccount) {
-          const decision = await decideNewAccountGate(tx, shopId);
+          const decision = await decideNewAccountGate(tx, shopId, limit);
           shouldGate = decision.gate;
         }
 

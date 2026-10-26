@@ -183,8 +183,12 @@ matching which still works for gated accounts.
 Enforced when creating new BuyerAccounts (only when `PLAN_GATING_ENFORCED=true`):
 
 ```typescript
+// Caller looks up limit BEFORE sql.begin() to avoid stale cache refresh inside tx
+const plan = await getPlanByShopId(sql, shopId);
+const limit = planLimit(plan, "companies");
+
 // decideNewAccountGate() inside sql.begin() takes the lock and decides gating
-const decision = await decideNewAccountGate(tx, shopId);
+const decision = await decideNewAccountGate(tx, shopId, limit);
 const shouldGate = decision.gate;
 ```
 
@@ -193,7 +197,8 @@ transactions to prevent concurrent creates from overshooting the plan limit:
 
 - Lock key: `hashtextextended('ba_limit:' || shopId, 0)`
 - Lock is taken ONLY when `PLAN_GATING_ENFORCED=true` AND limit != -1
-- `decideNewAccountGate(tx, shopId)` - called inside `sql.begin()` for single creates
+- `decideNewAccountGate(tx, shopId, limit)` - called inside `sql.begin()` for single creates
+  (caller resolves limit before the transaction to avoid cache refresh on `tx`)
 - `reactivateGatedAccounts(sql, shopId)` - uses the same lock for reactivation
 
 Paths using this pattern:
@@ -202,13 +207,16 @@ Paths using this pattern:
 - Tagged-customer webhook (`syncTaggedCustomerBuyerAccount`)
 - Bulk customer sync goes through `processBulkCustomer` → `syncTaggedCustomerBuyerAccount`
 
-**Flag-off behavior**: When `PLAN_GATING_ENFORCED` is turned off, accounts that were
-gated while it was on remain gated (`gated_at` stays set). They are simply treated
-as active for enforcement purposes (all accounts are considered active when the flag
-is off). Turning the flag back on does not re-gate them unless they exceed the limit
-at the time of a new create.
+**Flag-off behavior**: When `PLAN_GATING_ENFORCED` is turned off:
+- `decideNewAccountGate` returns `gate: false` (no new gating)
+- `reactivateGatedAccounts` **still runs** and clears `gated_at` on upgrade
+- All accounts are treated as active for enforcement purposes
 
-This ensures exactly N accounts stay ungated under any concurrency scenario.
+Turning the flag back on re-enables gating: accounts that still have `gated_at` set
+(e.g., accounts gated before an upgrade that hasn't been processed) remain gated until
+reactivated on upgrade.
+
+This ensures at most the plan's limit of accounts stay ungated under any concurrency scenario.
 
 ## Credit Holds
 
