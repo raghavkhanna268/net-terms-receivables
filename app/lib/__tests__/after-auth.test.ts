@@ -866,4 +866,142 @@ describe("after-auth", () => {
     });
   });
 
+  describe("reinstall critical path", () => {
+    it("reinstall awaits definitions-then-validation chain + payment customization + plan refresh", async () => {
+      const callOrder: string[] = [];
+      
+      mockEnsureMetafieldDefinitions.mockImplementation(async () => {
+        callOrder.push("definitions_start");
+        await new Promise(r => setTimeout(r, 10));
+        callOrder.push("definitions_end");
+        return [];
+      });
+      
+      mockEnsureValidation.mockImplementation(async () => {
+        callOrder.push("validation_start");
+        await new Promise(r => setTimeout(r, 10));
+        callOrder.push("validation_end");
+        return { id: "val-123", created: false };
+      });
+      
+      mockEnsurePaymentCustomization.mockImplementation(async () => {
+        callOrder.push("payment_start");
+        await new Promise(r => setTimeout(r, 10));
+        callOrder.push("payment_end");
+        return { id: "pc-123", created: false };
+      });
+
+      // Mock reinstall scenario: clearUninstalledAt returns shop id
+      mockSqlQuery.mockResolvedValueOnce([{ id: "shop-reinstall-uuid", closed_count: 0, deleted_claims_count: 0 }]);
+      mockSqlQuery.mockResolvedValue([]);
+      
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      await runAfterAuth(
+        "test-reinstall-order.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      // After runAfterAuth resolves, the critical path is complete
+      // Definitions should run before validation (chain)
+      const defsEnd = callOrder.indexOf("definitions_end");
+      const valStart = callOrder.indexOf("validation_start");
+      expect(defsEnd).toBeLessThan(valStart);
+      
+      // All critical steps should have completed
+      expect(callOrder).toContain("definitions_end");
+      expect(callOrder).toContain("validation_end");
+      expect(callOrder).toContain("payment_end");
+      
+      // syncShopInfo runs in background (via waitUntil)
+      expect(mockWaitUntil).toHaveBeenCalled();
+    });
+
+    it("failed registration step leaves shop retryable (not marked complete)", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      
+      mockEnsureMetafieldDefinitions.mockResolvedValue([]);
+      mockEnsureValidation.mockRejectedValue(new Error("Validation failed"));
+      mockEnsurePaymentCustomization.mockResolvedValue({ id: "pc-123", created: false });
+
+      // Mock reinstall scenario
+      mockSqlQuery.mockResolvedValueOnce([{ id: "shop-fail-uuid", closed_count: 0, deleted_claims_count: 0 }]);
+      mockSqlQuery.mockResolvedValue([]);
+      
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      await runAfterAuth(
+        "test-reinstall-fail.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      await Promise.allSettled(waitUntilPromises);
+
+      // Shop should NOT be marked complete because validation failed
+      expect(_isShopSetupComplete("test-reinstall-fail.myshopify.com")).toBe(false);
+      
+      // Error should be logged
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"validation_registration_failed"'),
+      );
+
+      consoleSpy.mockRestore();
+    });
+
+    it("latency: critical path runs chains in parallel", async () => {
+      // Track timestamps to verify parallel execution
+      const timestamps: Record<string, number> = {};
+      const startTime = Date.now();
+      
+      mockEnsureMetafieldDefinitions.mockImplementation(async () => {
+        timestamps.defs_start = Date.now() - startTime;
+        await new Promise(r => setTimeout(r, 20));
+        timestamps.defs_end = Date.now() - startTime;
+        return [];
+      });
+      
+      mockEnsureValidation.mockImplementation(async () => {
+        timestamps.val_start = Date.now() - startTime;
+        await new Promise(r => setTimeout(r, 20));
+        timestamps.val_end = Date.now() - startTime;
+        return { id: "val-123", created: false };
+      });
+      
+      mockEnsurePaymentCustomization.mockImplementation(async () => {
+        timestamps.payment_start = Date.now() - startTime;
+        await new Promise(r => setTimeout(r, 20));
+        timestamps.payment_end = Date.now() - startTime;
+        return { id: "pc-123", created: false };
+      });
+
+      // Mock reinstall scenario
+      mockSqlQuery.mockResolvedValueOnce([{ id: "shop-latency-uuid", closed_count: 0, deleted_claims_count: 0 }]);
+      mockSqlQuery.mockResolvedValue([]);
+      
+      const mockAdmin = createMockAdmin();
+      const waitUntilPromises: Promise<unknown>[] = [];
+      const mockWaitUntil = vi.fn((p) => waitUntilPromises.push(p));
+
+      await runAfterAuth(
+        "test-latency.myshopify.com",
+        mockAdmin as Parameters<typeof runAfterAuth>[1],
+        mockWaitUntil,
+      );
+
+      // Definitions→validation is sequential: defs_end should be before val_start
+      expect(timestamps.defs_end).toBeLessThanOrEqual(timestamps.val_start);
+      
+      // Payment customization runs in parallel with the definitions→validation chain
+      // So payment_start should overlap with the definitions→validation chain
+      // Payment should start before validation ends
+      expect(timestamps.payment_start).toBeLessThan(timestamps.val_end);
+    });
+  });
+
 });
