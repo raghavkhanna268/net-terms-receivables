@@ -21,7 +21,7 @@
 
 import type { Sql } from "~/lib/db-light.server";
 import { safeLog, shopHash } from "~/lib/log.server";
-import { NO_CURRENCY_SENTINEL, validateCurrencyCode } from "~/lib/shop-currency.server";
+import { NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY, validateCurrencyCode } from "~/lib/shop-currency.server";
 import { writeShopConfigMetafield } from "./shop-config.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "~/lib/shop-currency-guard.server";
 
@@ -140,26 +140,36 @@ export async function checkAndRecoverCurrency(
 
     const hash = await shopHash(shopDomain);
 
-    // #292 Currency Flip Safety: Use shared guard to decide if flip should be blocked
-    // Reuse shopId from caller if provided, otherwise query DB
-    let effectiveShopId = shopId;
-    if (!effectiveShopId) {
-      const [shopRow] = await sql<{ id: string }[]>`
-        SELECT id FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-      effectiveShopId = shopRow?.id;
-    }
+    // #292 Currency Flip Safety: Only check financial rows when flipping TO INR from non-INR.
+    // Skip the DB query for INR→INR (no change) or INR→other (allowed) or other→other (allowed).
+    // Note: there is a narrow non-atomic window between the hasFinancialRows check and the
+    // later Shop UPDATE; a first invoice landing between them could be relabeled. Acceptable
+    // for v1 given the rarity and the guard on after-auth covering reinstalls.
+    if (
+      fetchedCurrency === SUPPORTED_SHOP_CURRENCY &&
+      currentCurrency !== SUPPORTED_SHOP_CURRENCY
+    ) {
+      let effectiveShopId = shopId;
+      if (!effectiveShopId) {
+        const [shopRow] = await sql<{ id: string }[]>`
+          SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+        `;
+        effectiveShopId = shopRow?.id;
+      }
 
-    const hasRows = effectiveShopId ? await hasFinancialRows(sql, effectiveShopId) : false;
-    const guardDecision = decideShopCurrencyUpdate({
-      storedCurrency: currentCurrency,
-      liveCurrency: fetchedCurrency,
-      hasFinancialRows: hasRows,
-    });
+      if (effectiveShopId) {
+        const hasRows = await hasFinancialRows(sql, effectiveShopId);
+        const guardDecision = decideShopCurrencyUpdate({
+          storedCurrency: currentCurrency,
+          liveCurrency: fetchedCurrency,
+          hasFinancialRows: hasRows,
+        });
 
-    if (guardDecision.blocked) {
-      safeLog("info", "currency_flip_blocked", { shopHash: hash });
-      return { currency: guardDecision.effectiveCurrency, flipBlocked: true };
+        if (guardDecision.blocked) {
+          safeLog("info", "currency_flip_blocked", { shopHash: hash });
+          return { currency: guardDecision.effectiveCurrency, flipBlocked: true };
+        }
+      }
     }
 
     const shopConfigMissing = shopConfigCurrency === null;

@@ -556,3 +556,9 @@ export function evictShopFromSetupCache(shop: string): void {
  * @internal
  */
 export { clearUninstalledAtAndMetafieldErrors as _clearUninstalledAtAndMetafieldErrorsForTesting };
+
+/**
+ * Exported for testing: sync shop info (timezone, currency) with currency flip guard.
+ * @internal
+ */
+export { syncShopInfo as _syncShopInfoForTesting };

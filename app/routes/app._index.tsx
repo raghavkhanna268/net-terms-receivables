@@ -24,7 +24,7 @@ import type { Sql } from "~/lib/db-light.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
-import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
@@ -761,7 +761,8 @@ export default function Index() {
       {currencyFlipBlocked && (
         <s-section>
           <s-banner tone="critical" heading="Currency Conversion Not Available">
-            {CURRENCY_FLIP_BLOCKED_BANNER_COPY}
+            {CURRENCY_FLIP_BLOCKED_BANNER_TEXT}{" "}
+            Please <a href={SUPPORT_EMAIL_MAILTO}>contact support</a> for assistance.
           </s-banner>
         </s-section>
       )}
