@@ -54,10 +54,11 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
       globalSendsSnapshotDaily = existing.daily_count;
     }
 
-    // Create test shop (free plan by default)
+    // Create test shop (free plan, confirmed with plan_cached_at)
+    // Ruling (b): Unconfirmed shops are not gated, so we must set plan_cached_at
     await sql`
-      INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW())
+      INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_ID}, ${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW(), NOW())
     `;
 
     // Create gated buyer account

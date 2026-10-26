@@ -45,8 +45,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -258,8 +258,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -394,8 +394,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -572,8 +572,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -702,8 +702,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -917,10 +917,10 @@ describeWithDb("T4 account-count gating (DB)", () => {
       originalEnv = process.env.PLAN_GATING_ENFORCED;
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
         VALUES 
-          (${SHOP_ID_UNLIMITED}, ${SHOP_DOMAIN_UNLIMITED}, 'INR', 'Asia/Kolkata', 'unlimited', NOW(), NOW()),
-          (${SHOP_ID_OFF}, ${SHOP_DOMAIN_OFF}, 'INR', 'Asia/Kolkata', 'starter', NOW(), NOW())
+          (${SHOP_ID_UNLIMITED}, ${SHOP_DOMAIN_UNLIMITED}, 'INR', 'Asia/Kolkata', 'unlimited', '2026-01-01 00:00:00', NOW(), NOW()),
+          (${SHOP_ID_OFF}, ${SHOP_DOMAIN_OFF}, 'INR', 'Asia/Kolkata', 'starter', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -1041,8 +1041,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'starter', '2026-01-01 00:00:00', NOW(), NOW())
       `;
 
       await sql`
@@ -1214,8 +1214,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -1281,8 +1281,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -1413,8 +1413,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'unlimited', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'unlimited', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -1544,8 +1544,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'growth', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'growth', '2026-01-01 00:00:00', NOW(), NOW())
       `;
     });
 
@@ -1649,8 +1649,8 @@ describeWithDb("T4 account-count gating (DB)", () => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
 
       await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', NOW(), NOW())
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', 'none', '2026-01-01 00:00:00', NOW(), NOW())
       `;
 
       await sql`
@@ -1766,6 +1766,170 @@ describeWithDb("T4 account-count gating (DB)", () => {
       `;
       expect(createdAccount).toBeDefined();
       expect(createdAccount.gated_at).not.toBeNull();
+    });
+  });
+
+  describe("(m) Ruling (b) on real insert path: decideNewAccountGate respects confirmed status", () => {
+    const SHOP_ID_UNCONFIRMED = `shop-unconfirmed-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN_UNCONFIRMED = `test-unconfirmed-${TEST_SUFFIX}.myshopify.com`;
+    const SHOP_ID_CONFIRMED = `shop-confirmed-m-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN_CONFIRMED = `test-confirmed-m-${TEST_SUFFIX}.myshopify.com`;
+    const SHOP_ID_FLAGOFF = `shop-flagoff-m-${TEST_SUFFIX}`;
+    const SHOP_DOMAIN_FLAGOFF = `test-flagoff-m-${TEST_SUFFIX}.myshopify.com`;
+    let originalEnv: string | undefined;
+
+    beforeAll(async () => {
+      originalEnv = process.env.PLAN_GATING_ENFORCED;
+
+      // Unconfirmed shop: plan_cached_at NULL
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID_UNCONFIRMED}, ${SHOP_DOMAIN_UNCONFIRMED}, 'INR', 'Asia/Kolkata', 'none', NULL, NOW(), NOW())
+      `;
+
+      // Confirmed shop: plan_cached_at set
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID_CONFIRMED}, ${SHOP_DOMAIN_CONFIRMED}, 'INR', 'Asia/Kolkata', 'none', '2026-01-01 00:00:00', NOW(), NOW())
+      `;
+
+      // Flag-off shop: confirmed but flag is off
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, plan_cached_at, "createdAt", "updatedAt")
+        VALUES (${SHOP_ID_FLAGOFF}, ${SHOP_DOMAIN_FLAGOFF}, 'INR', 'Asia/Kolkata', 'none', '2026-01-01 00:00:00', NOW(), NOW())
+      `;
+    });
+
+    afterAll(async () => {
+      if (originalEnv === undefined) {
+        delete (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED;
+      } else {
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = originalEnv;
+      }
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%m-test%' + TEST_SUFFIX + '%'}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_ID_UNCONFIRMED}, ${SHOP_ID_CONFIRMED}, ${SHOP_ID_FLAGOFF})`;
+      await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_ID_UNCONFIRMED}, ${SHOP_ID_CONFIRMED}, ${SHOP_ID_FLAGOFF})`;
+    });
+
+    it("(a) unconfirmed shop (plan_cached_at NULL) over limit is NOT gated", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+      vi.resetModules();
+
+      const { checkCompanyLimit, isGatingEnforced } = await import("../gating.server");
+      expect(isGatingEnforced()).toBe(true);
+
+      const limitCheck = await checkCompanyLimit(sql, SHOP_ID_UNCONFIRMED);
+      expect(limitCheck.allowed).toBe(true);
+      expect(limitCheck.reason).toContain("Plan not confirmed");
+
+      const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
+      const webhookId = `webhook-m-test-unconfirmed-${TEST_SUFFIX}`;
+      const location = {
+        id: `gid://shopify/CompanyLocation/m-test-unconfirmed-${TEST_SUFFIX}`,
+        company: { id: `gid://shopify/Company/m-test-unconfirmed-${TEST_SUFFIX}` },
+        name: "Account on Unconfirmed Shop",
+        billingAddress: null,
+        buyerExperienceConfiguration: null,
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        SHOP_DOMAIN_UNCONFIRMED,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        webhookId,
+        {}
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created");
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).toBeNull();
+    });
+
+    it("(b) confirmed shop over limit IS gated", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+      vi.resetModules();
+
+      const { checkCompanyLimit, isGatingEnforced } = await import("../gating.server");
+      expect(isGatingEnforced()).toBe(true);
+
+      // Confirmed shop with none plan (limit=0) should block
+      const limitCheck = await checkCompanyLimit(sql, SHOP_ID_CONFIRMED);
+      expect(limitCheck.allowed).toBe(false);
+      expect(limitCheck.limit).toBe(0);
+
+      const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
+      const webhookId = `webhook-m-test-confirmed-${TEST_SUFFIX}`;
+      const location = {
+        id: `gid://shopify/CompanyLocation/m-test-confirmed-${TEST_SUFFIX}`,
+        company: { id: `gid://shopify/Company/m-test-confirmed-${TEST_SUFFIX}` },
+        name: "Account on Confirmed Shop",
+        billingAddress: null,
+        buyerExperienceConfiguration: null,
+      };
+
+      const result = await processCompanyLocationWebhook(
+        sql,
+        SHOP_DOMAIN_CONFIRMED,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        webhookId,
+        {}
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("gated");
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).not.toBeNull();
+    });
+
+    it("(c) with PLAN_GATING_ENFORCED=false, nothing is gated (confirmed or not)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+      vi.resetModules();
+
+      const { isGatingEnforced } = await import("../gating.server");
+      expect(isGatingEnforced()).toBe(false);
+
+      const { processCompanyLocationWebhook } = await import("../sync/company-location.server");
+      const webhookId = `webhook-m-test-flagoff-${TEST_SUFFIX}`;
+      const location = {
+        id: `gid://shopify/CompanyLocation/m-test-flagoff-${TEST_SUFFIX}`,
+        company: { id: `gid://shopify/Company/m-test-flagoff-${TEST_SUFFIX}` },
+        name: "Account with Flag Off",
+        billingAddress: null,
+        buyerExperienceConfiguration: null,
+      };
+
+      // Confirmed shop with none plan (limit=0) but flag is off
+      const result = await processCompanyLocationWebhook(
+        sql,
+        SHOP_DOMAIN_FLAGOFF,
+        "COMPANY_LOCATIONS_CREATE",
+        location,
+        webhookId,
+        {}
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("created"); // Not gated because flag is off
+
+      const [createdAccount] = await sql<{ gated_at: Date | null }[]>`
+        SELECT gated_at FROM "BuyerAccount"
+        WHERE "companyLocationId" = ${location.id}
+      `;
+      expect(createdAccount).toBeDefined();
+      expect(createdAccount.gated_at).toBeNull();
     });
   });
 });

@@ -131,6 +131,77 @@ describe("Gating Service", () => {
     });
   });
 
+  describe("Ruling (b): Unconfirmed shops are not gated", () => {
+    describe("checkCompanyLimit", () => {
+      it("allows unconfirmed shop over none limit with gating ON", async () => {
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+        vi.resetModules();
+        const { checkCompanyLimit } = await import("../gating.server");
+
+        // No plan_cached_at means unconfirmed
+        mockSql.setMockResult("shop_plan", [{
+          plan_key: "none",
+          subscription_id: null,
+          subscription_name: null,
+          is_test: false,
+          plan_cached_at: null, // Unconfirmed
+        }]);
+
+        // 100 companies would be way over none limit (0)
+        mockSql.setMockResult("active_account_count", [{ count: "100" }]);
+
+        const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
+
+        expect(result.allowed).toBe(true);
+        expect(result.reason).toContain("Plan not confirmed");
+      });
+
+      it("blocks confirmed none shop over limit with gating ON", async () => {
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+        vi.resetModules();
+        const { checkCompanyLimit } = await import("../gating.server");
+
+        // plan_cached_at set means confirmed
+        mockSql.setMockResult("shop_plan", [{
+          plan_key: "none",
+          subscription_id: null,
+          subscription_name: null,
+          is_test: false,
+          plan_cached_at: new Date(), // Confirmed
+        }]);
+
+        // 3 companies at none limit (0)
+        mockSql.setMockResult("active_account_count", [{ count: "3" }]);
+
+        const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
+
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain("Company limit reached");
+      });
+
+      it("allows everything when gating flag is false", async () => {
+        (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "false";
+        vi.resetModules();
+        const { checkCompanyLimit } = await import("../gating.server");
+
+        // Even with a confirmed shop over limit
+        mockSql.setMockResult("shop_plan", [{
+          plan_key: "none",
+          subscription_id: null,
+          subscription_name: null,
+          is_test: false,
+          plan_cached_at: new Date(), // Confirmed
+        }]);
+        mockSql.setMockResult("active_account_count", [{ count: "100" }]);
+
+        const result = await checkCompanyLimit(mockSql as unknown as Sql, TEST_SHOP_ID);
+
+        expect(result.allowed).toBe(true);
+        expect(result.reason).toContain("Gating not enforced");
+      });
+    });
+  });
+
   describe("checkCompanyLimit with gating ON", () => {
     beforeEach(() => {
       (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
@@ -419,8 +490,8 @@ describe("Gating Service", () => {
   });
 
   describe("decideNewAccountGate", () => {
-    it("does not query plans table (limit passed as parameter)", async () => {
-      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "1";
+    it("checks confirmed status via isPlanConfirmed after lock (ruling b)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
       vi.resetModules();
       const { decideNewAccountGate } = await import("../gating.server");
       
@@ -433,6 +504,10 @@ describe("Gating Service", () => {
           // Mock pg_advisory_xact_lock
           if (query.includes('pg_advisory_xact_lock')) {
             return [];
+          }
+          // Mock confirmed shop (plan_cached_at IS NOT NULL)
+          if (query.includes('plan_cached_at')) {
+            return [{ plan_key: 'starter', plan_cached_at: new Date() }];
           }
           // Mock active account count
           if (query.includes('COUNT')) {
@@ -450,16 +525,55 @@ describe("Gating Service", () => {
         10
       );
       
-      // Verify no plan lookup occurred - decideNewAccountGate should NOT query plans
-      const planQueries = sqlCalls.filter(
-        q => q.includes('plan_key') || q.includes('plan_cached_at') || q.includes('"Shop"')
-      );
-      expect(planQueries).toHaveLength(0);
+      // Verify confirmed status is checked (ruling b)
+      const confirmedQueries = sqlCalls.filter(q => q.includes('plan_cached_at'));
+      expect(confirmedQueries.length).toBeGreaterThan(0);
       
-      // Verify basic gating decision worked
+      // Verify basic gating decision worked for confirmed shop
       expect(decision.gate).toBe(false); // 5 active, limit 10, not at limit
       expect(decision.limit).toBe(10);
       expect(decision.used).toBe(5);
+    });
+
+    it("returns gate: false for unconfirmed shop without counting (ruling b)", async () => {
+      (process.env as Record<string, string>).PLAN_GATING_ENFORCED = "true";
+      vi.resetModules();
+      const { decideNewAccountGate } = await import("../gating.server");
+      
+      const sqlCalls: string[] = [];
+      const trackingTx = Object.assign(
+        vi.fn(async (strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          sqlCalls.push(query);
+          if (query.includes('pg_advisory_xact_lock')) {
+            return [];
+          }
+          // Mock unconfirmed shop (plan_cached_at IS NULL)
+          if (query.includes('plan_cached_at')) {
+            return [];
+          }
+          if (query.includes('COUNT')) {
+            return [{ count: "100" }];
+          }
+          return [];
+        }),
+        { json: vi.fn((v) => v) }
+      );
+      
+      // Limit is 0 (none plan), but shop is unconfirmed so should not gate
+      const decision = await decideNewAccountGate(
+        trackingTx as unknown as Sql,
+        TEST_SHOP_ID,
+        0
+      );
+      
+      // Unconfirmed shop is not gated (ruling b)
+      expect(decision.gate).toBe(false);
+      expect(decision.limit).toBe(-1); // Returns -1 for unconfirmed
+      
+      // Should not have called COUNT because we short-circuit on unconfirmed
+      const countQueries = sqlCalls.filter(q => q.includes('COUNT'));
+      expect(countQueries).toHaveLength(0);
     });
 
     it("returns gate: false without querying when flag is off", async () => {

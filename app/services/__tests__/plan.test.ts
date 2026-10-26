@@ -36,6 +36,7 @@ import {
   resolvePlan,
   getPlanByShopId,
   _resetInFlightRefreshesForTesting,
+  _resetPartnerCachesForTesting,
   _isRefreshInFlight,
   getPlanSource,
   AdminInstallationPlanSource,
@@ -104,10 +105,13 @@ describe("Plan Resolution Service", () => {
     mockSql = createMockSql();
     // Clear in-flight refresh map between tests
     _resetInFlightRefreshesForTesting();
+    // Clear partner caches between tests
+    _resetPartnerCachesForTesting();
   });
   
   afterEach(() => {
     vi.resetAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe("mapSubscriptionToPlanKey", () => {
@@ -1029,19 +1033,28 @@ describe("PlanSource Interface", () => {
     vi.resetAllMocks();
     mockSql = createMockSql();
     _resetInFlightRefreshesForTesting();
+    _resetPartnerCachesForTesting();
   });
 
   afterEach(() => {
     vi.resetAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe("getPlanSource selector", () => {
-    it("always returns AdminInstallationPlanSource", () => {
+    it("returns AdminInstallationPlanSource when PLAN_SOURCE is unset", () => {
       const source = getPlanSource();
       expect(source).toBeInstanceOf(AdminInstallationPlanSource);
     });
 
-    it("returns the same instance on multiple calls", () => {
+    it("returns AdminInstallationPlanSource when PLAN_SOURCE is admin_installation", () => {
+      vi.stubEnv("PLAN_SOURCE", "admin_installation");
+      const source = getPlanSource();
+      expect(source).toBeInstanceOf(AdminInstallationPlanSource);
+      vi.unstubAllEnvs();
+    });
+
+    it("returns the same AdminInstallation instance on multiple calls", () => {
       const source1 = getPlanSource();
       const source2 = getPlanSource();
       expect(source1).toBe(source2);
@@ -1196,35 +1209,32 @@ describe("PlanSource Interface", () => {
     });
   });
 
-  describe("PartnerApiPlanSource (stub)", () => {
+  describe("PartnerApiPlanSource", () => {
     it("implements PlanSource interface", () => {
       const source = _getPartnerSourceForTesting();
       expect(typeof source.resolveActivePlan).toBe("function");
       expect(typeof source.onPlanRedirect).toBe("function");
     });
 
-    it("resolveActivePlan throws Error and makes no network calls", async () => {
+    it("onPlanRedirect maps known handles to plan keys", () => {
       const source = _getPartnerSourceForTesting();
 
-      await expect(source.resolveActivePlan({
-        sql: mockSql as unknown as Sql,
-        shopDomain: TEST_SHOP,
-      })).rejects.toThrow("PartnerApiPlanSource is not configured");
-
-      expect(adminGraphQL).not.toHaveBeenCalled();
+      expect(source.onPlanRedirect("starter")).toBe("starter");
+      expect(source.onPlanRedirect("growth")).toBe("growth");
+      expect(source.onPlanRedirect("unlimited")).toBe("unlimited");
     });
 
-    it("onPlanRedirect returns null (stub behavior)", () => {
+    it("onPlanRedirect returns null for unknown handles", () => {
       const source = _getPartnerSourceForTesting();
 
-      const result = source.onPlanRedirect("growth_monthly");
-      expect(result).toBeNull();
+      expect(source.onPlanRedirect("mystery_handle")).toBeNull();
+      expect(source.onPlanRedirect("shopify-test")).toBeNull();
     });
 
     it("onPlanRedirect makes no network calls", () => {
       const source = _getPartnerSourceForTesting();
 
-      source.onPlanRedirect("any_handle");
+      source.onPlanRedirect("growth");
 
       expect(adminGraphQL).not.toHaveBeenCalled();
     });
@@ -1267,6 +1277,7 @@ describe("PlanSource Interface", () => {
       expect(result).toHaveProperty("fromCache");
       expect(result).toHaveProperty("sourceTag");
       expect(result).toHaveProperty("status");
+      expect(result).toHaveProperty("resolutionState");
     });
 
     it("sourceTag is one of the valid values", async () => {

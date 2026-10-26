@@ -44,9 +44,15 @@ import type {
   PlanSource,
   PlanResolutionContext,
   SourceResolvedPlan,
-  PlanSourceTag,
   PlanStatus,
+  ResolutionState,
 } from "./plan-source.server";
+import {
+  readPartnerConfig,
+  fetchActiveSubscription,
+  PartnerApiError,
+  type PartnerConfig,
+} from "./partner-api.server";
 
 /**
  * Cache TTL in milliseconds (~6 hours).
@@ -145,6 +151,21 @@ interface CachedPlanRow {
 }
 
 /**
+ * Shared predicate for ruling (b): determines if a cached plan row means "confirmed".
+ * A shop is confirmed when getCachedPlan returns a non-null row (plan_cached_at is set).
+ *
+ * This is the single source of truth for the "confirmed" definition, used by:
+ * - isPlanConfirmed()
+ * - getPlanWithConfirmedStatus()
+ *
+ * @param cached - The result of getCachedPlan (null means unconfirmed)
+ * @returns true if the shop has a confirmed plan
+ */
+export function isConfirmedCache(cached: CachedPlanRow | null): boolean {
+  return cached !== null;
+}
+
+/**
  * Result of plan resolution.
  */
 export interface ResolvedPlan {
@@ -153,11 +174,19 @@ export interface ResolvedPlan {
   subscriptionName: string | null;
   isTest: boolean;
   fromCache: boolean;
+  /**
+   * Internal: tracks resolution outcome for state determination.
+   * - 'active': Confirmed active subscription from fresh fetch
+   * - 'none': Confirmed no subscription from fresh fetch
+   * - 'unknown': Error, shop not found, or using cached data
+   */
+  _resolutionState?: ResolutionState;
 }
 
 /**
  * Get the cached plan for a shop.
- * Returns the cached plan with staleness flag. Returns null only if no cache exists.
+ * Returns the cached plan with staleness flag. Returns null only if no CONFIRMED cache exists.
+ * A confirmed cache means plan_cached_at is set (not the schema default 'free' row).
  * Staleness never lowers the tier - we always return the last known plan.
  */
 async function getCachedPlan(
@@ -183,15 +212,14 @@ async function getCachedPlan(
     WHERE id = ${shopId}
   `;
 
-  // No row or no plan_key means no cache exists
-  if (!row || !row.plan_key) {
+  // No row, no plan_key, or no plan_cached_at means no confirmed cache exists.
+  // A row with plan_key but no plan_cached_at is the schema default, not a confirmed plan.
+  if (!row || !row.plan_key || !row.plan_cached_at) {
     return null;
   }
 
   // Check if cache is stale (but still return it)
-  const cacheAge = row.plan_cached_at 
-    ? Date.now() - row.plan_cached_at.getTime()
-    : Infinity;
+  const cacheAge = Date.now() - row.plan_cached_at.getTime();
   const isStale = cacheAge > CACHE_TTL_MS;
 
   return {
@@ -199,7 +227,7 @@ async function getCachedPlan(
     subscriptionId: row.subscription_id,
     subscriptionName: row.subscription_name,
     isTest: row.is_test ?? false,
-    cachedAt: row.plan_cached_at ?? new Date(0),
+    cachedAt: row.plan_cached_at,
     isStale,
   };
 }
@@ -313,10 +341,14 @@ async function getShopId(sql: Sql, shopDomain: string): Promise<string | null> {
  * - Uses ctx.waitUntil via ALS to run without blocking the response
  * - Catches and reports errors to Sentry (never throws unhandled)
  * - Safe no-op when waitUntil is not available (tests, dev)
+ * - Routes through getPlanSource() so the correct source is used
+ *
+ * Note: resolveActivePlan already writes to Postgres cache on success,
+ * so no additional setCachedPlan call is needed here.
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID in database
- * @param shopDomain - Shop domain for Shopify API call
+ * @param shopDomain - Shop domain for API call
  */
 function triggerBackgroundRefresh(
   sql: Sql,
@@ -334,16 +366,13 @@ function triggerBackgroundRefresh(
 
   const refreshPromise = (async () => {
     try {
-      const fetched = await fetchPlanFromShopify(shopDomain);
-      if (fetched) {
-        await setCachedPlan(
-          sql,
-          shopId,
-          fetched.planKey,
-          fetched.subscriptionId,
-          fetched.subscriptionName,
-          fetched.isTest
-        );
+      const source = getPlanSource();
+      const result = await source.resolveActivePlan({
+        sql,
+        shopDomain,
+        forceRefresh: true,
+      });
+      if (!result.fromCache) {
         safeLog("info", "plan_background_refresh_completed", { shopId });
       }
     } catch (err) {
@@ -409,14 +438,6 @@ async function _resolveFromAdminInstallation(
   shopDomain: string,
   forceRefresh: boolean
 ): Promise<ResolvedPlan> {
-  const defaultResult: ResolvedPlan = {
-    plan: getDefaultPlan(),
-    subscriptionId: null,
-    subscriptionName: null,
-    isTest: false,
-    fromCache: false,
-  };
-
   let shopId: string | null = null;
   let cachedPlan: CachedPlanRow | null = null;
 
@@ -425,7 +446,14 @@ async function _resolveFromAdminInstallation(
 
     if (!shopId) {
       safeLog("warn", "plan_shop_not_found", {});
-      return defaultResult;
+      return {
+        plan: getDefaultPlan(),
+        subscriptionId: null,
+        subscriptionName: null,
+        isTest: false,
+        fromCache: false,
+        _resolutionState: "unknown",
+      };
     }
 
     // Always get cached plan first (for fail-to-cached behavior)
@@ -439,6 +467,7 @@ async function _resolveFromAdminInstallation(
         subscriptionName: cachedPlan.subscriptionName,
         isTest: cachedPlan.isTest,
         fromCache: true,
+        _resolutionState: cachedPlan.subscriptionId ? "active" : "unknown",
       };
     }
 
@@ -454,6 +483,7 @@ async function _resolveFromAdminInstallation(
         subscriptionName: cachedPlan.subscriptionName,
         isTest: cachedPlan.isTest,
         fromCache: true,
+        _resolutionState: cachedPlan.subscriptionId ? "active" : "unknown",
       };
     }
 
@@ -461,6 +491,7 @@ async function _resolveFromAdminInstallation(
     const fetched = await fetchPlanFromShopify(shopDomain);
 
     if (!fetched) {
+      // Fetch failed - return cached if available, otherwise unknown state
       if (cachedPlan) {
         safeLog("warn", "plan_fetch_failed_using_cache", { shopId });
         return {
@@ -469,12 +500,20 @@ async function _resolveFromAdminInstallation(
           subscriptionName: cachedPlan.subscriptionName,
           isTest: cachedPlan.isTest,
           fromCache: true,
+          _resolutionState: "unknown",
         };
       }
-      return defaultResult;
+      return {
+        plan: getDefaultPlan(),
+        subscriptionId: null,
+        subscriptionName: null,
+        isTest: false,
+        fromCache: false,
+        _resolutionState: "unknown",
+      };
     }
 
-    // Update cache
+    // Successful fetch - update cache
     await setCachedPlan(
       sql,
       shopId,
@@ -484,12 +523,16 @@ async function _resolveFromAdminInstallation(
       fetched.isTest
     );
 
+    // Determine resolution state based on fetch result
+    const resolutionState: ResolutionState = fetched.subscriptionId ? "active" : "none";
+
     return {
       plan: getPlanConfig(fetched.planKey),
       subscriptionId: fetched.subscriptionId,
       subscriptionName: fetched.subscriptionName,
       isTest: fetched.isTest,
       fromCache: false,
+      _resolutionState: resolutionState,
     };
   } catch (error) {
     safeLog("error", "plan_resolve_error", { shopId, err: toErrorCode(error) });
@@ -503,10 +546,18 @@ async function _resolveFromAdminInstallation(
         subscriptionName: cachedPlan.subscriptionName,
         isTest: cachedPlan.isTest,
         fromCache: true,
+        _resolutionState: "unknown",
       };
     }
     
-    return defaultResult;
+    return {
+      plan: getDefaultPlan(),
+      subscriptionId: null,
+      subscriptionName: null,
+      isTest: false,
+      fromCache: false,
+      _resolutionState: "unknown",
+    };
   }
 }
 
@@ -592,6 +643,72 @@ export async function getPlanByShopId(
 }
 
 /**
+ * Check if a shop has a confirmed plan (plan_cached_at is set).
+ *
+ * Used by gating to determine if plan enforcement should apply.
+ * Unconfirmed plans (no plan_cached_at) should not be gated - ruling (b).
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Internal shop ID
+ * @returns true if the shop has a confirmed plan, false otherwise
+ */
+export async function isPlanConfirmed(
+  sql: Sql,
+  shopId: string
+): Promise<boolean> {
+  const cached = await getCachedPlan(sql, shopId);
+  return isConfirmedCache(cached);
+}
+
+/**
+ * Result of getPlanWithConfirmedStatus.
+ */
+export interface PlanWithConfirmedStatus {
+  plan: PlanConfig;
+  confirmed: boolean;
+}
+
+/**
+ * Get the shop's plan and confirmed status in a single query.
+ *
+ * Use this when you need both isPlanConfirmed and getPlanByShopId
+ * to avoid two separate database queries.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Internal shop ID
+ * @returns Plan config and whether the plan is confirmed
+ */
+export async function getPlanWithConfirmedStatus(
+  sql: Sql,
+  shopId: string
+): Promise<PlanWithConfirmedStatus> {
+  const cached = await getCachedPlan(sql, shopId);
+  const confirmed = isConfirmedCache(cached);
+
+  if (!confirmed) {
+    return {
+      plan: getDefaultPlan(),
+      confirmed: false,
+    };
+  }
+
+  if (cached!.isStale && getRequestWaitUntil()) {
+    const [shopRow] = await sql<{ domain: string }[]>`
+      SELECT domain FROM "Shop" WHERE id = ${shopId}
+    `;
+
+    if (shopRow) {
+      triggerBackgroundRefresh(sql, shopId, shopRow.domain);
+    }
+  }
+
+  return {
+    plan: getPlanConfig(cached!.planKey),
+    confirmed: true,
+  };
+}
+
+/**
  * Check if a shop is on a test subscription.
  * Useful for development/testing flows.
  */
@@ -635,7 +752,8 @@ export class AdminInstallationPlanSource implements PlanSource {
       ctx.forceRefresh ?? false
     );
 
-    const status = this.mapSubscriptionStatus(resolved);
+    const status: PlanStatus = resolved.subscriptionId ? "active" : "unknown";
+    const resolutionState = resolved._resolutionState ?? "unknown";
 
     return {
       plan: resolved.plan,
@@ -644,76 +762,390 @@ export class AdminInstallationPlanSource implements PlanSource {
       subscriptionName: resolved.subscriptionName,
       isTest: resolved.isTest,
       fromCache: resolved.fromCache,
-      sourceTag: "admin_installation" as PlanSourceTag,
+      sourceTag: "admin_installation",
       status,
+      resolutionState,
     };
-  }
-
-  /**
-   * Map resolved plan to subscription status.
-   *
-   * Current logic: returns 'active' if subscriptionId exists, 'unknown' otherwise.
-   * This mirrors the existing behavior where we only track active vs no-subscription.
-   * TODO(S24-followup): Extend to map actual Shopify subscription statuses
-   * (CANCELLED, EXPIRED, FROZEN, PENDING) when Partner API source is implemented.
-   */
-  private mapSubscriptionStatus(resolved: ResolvedPlan): PlanStatus {
-    if (resolved.subscriptionId) {
-      return "active";
-    }
-    return "unknown";
   }
 }
 
 /**
- * PartnerApiPlanSource - STUB for future Shopify App Pricing integration.
+ * Isolate cache for confirmed Partner API subscriptions.
+ * Used to throttle background refreshes - only one refresh per shop per 5 minutes.
+ * Entries expire after 5 minutes.
+ */
+interface PartnerCacheEntry {
+  planKey: PlanKey;
+  subscriptionId: string | null;
+  handle: string;
+  expiresAt: number;
+}
+
+const PARTNER_CACHE_TTL_MS = 5 * 60 * 1000;
+const PARTNER_CACHE_MAX_ENTRIES = 1000;
+
+const partnerPlanCache = new Map<string, PartnerCacheEntry>();
+const shopGidMemo = new Map<string, string>();
+
+/**
+ * Query to get shop GID from Admin API.
+ */
+const SHOP_GID_QUERY = `query ShopGid { shop { id } }`;
+
+/**
+ * Evict oldest entries if cache exceeds max size.
+ */
+function evictPartnerCacheIfNeeded(): void {
+  if (partnerPlanCache.size > PARTNER_CACHE_MAX_ENTRIES) {
+    const keysToDelete = Array.from(partnerPlanCache.keys()).slice(
+      0,
+      partnerPlanCache.size - PARTNER_CACHE_MAX_ENTRIES
+    );
+    for (const key of keysToDelete) {
+      partnerPlanCache.delete(key);
+    }
+  }
+}
+
+/**
+ * PartnerApiPlanSource - Resolves plans from Shopify Partner API.
  *
- * This source is NEVER SELECTED today. It exists to define the interface
- * for future Partner API integration without touching callers.
+ * This source queries the Partner API's activeSubscription endpoint to
+ * determine the shop's current plan under Shopify App Pricing.
  *
- * Design notes for future implementation:
- * - Query Partner API's activeSubscription when cache is stale
- * - Map plan_handle (from post-checkout redirect) to internal plan keys
- * - Keep last known plan and safeLog a fixed code if Partner API unavailable
- * - Eventual retirement of APP_SUBSCRIPTIONS_UPDATE webhook requires:
- *   - QA's slot for testing
- *   - TOML change to remove webhook subscription
- *   - Blocked on Raghav's pricing decision and Partner API credentials
+ * Design:
+ * - Fresh Postgres (< 6h): return immediately, no Partner call
+ * - Stale Postgres: return immediately, schedule background refresh via waitUntil
+ * - No confirmed row: blocking fetch (new install)
+ * - forceRefresh (plan_handle redirect): blocking fetch
+ * - 5-minute isolate cache throttles background refreshes
+ * - Shop GID memoized per isolate (never changes)
+ * - Error fallback to last confirmed Postgres plan, or 'unknown' with default
+ * - Never throws from resolveActivePlan (per ruling d)
+ *
+ * Note on isTest: Partner API activeSubscription does not expose a test flag.
+ * All subscriptions are treated as production (isTest=false).
  *
  * @see https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing
- * @see https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing/migrating-to-shopify-app-pricing
  */
 export class PartnerApiPlanSource implements PlanSource {
-  /**
-   * STUB: Always returns not_configured status.
-   *
-   * This method makes NO network calls. It exists only to satisfy the
-   * PlanSource interface for future implementation.
-   *
-   * @throws Error if called (source should never be selected)
-   */
-  async resolveActivePlan(_ctx: PlanResolutionContext): Promise<SourceResolvedPlan> {
-    safeLog("error", "partner_api_source_not_configured", {});
-    throw new Error(
-      "PartnerApiPlanSource is not configured. " +
-      "This source should never be selected in the current implementation."
-    );
+  private config: PartnerConfig | null = null;
+
+  constructor() {
+    this.config = readPartnerConfig();
   }
 
   /**
-   * STUB: Map plan_handle from post-checkout redirect to internal plan key.
-   *
-   * Future implementation will:
-   * - Receive plan_handle query param from Shopify's post-checkout redirect
-   * - Map it to internal plan keys (free, starter, growth, scale)
-   * - Update the cached plan state
-   *
-   * @param _planHandle - The plan_handle from redirect (unused in stub)
-   * @returns null (stub always returns null)
+   * Resolve the active plan for a shop from Partner API.
+   * Never throws - returns 'unknown' state on error per ruling (d).
    */
-  onPlanRedirect(_planHandle: string): PlanKey | null {
-    safeLog("warn", "partner_api_redirect_not_configured", {});
-    return null;
+  async resolveActivePlan(ctx: PlanResolutionContext): Promise<SourceResolvedPlan> {
+    if (!this.config) {
+      safeLog("error", "partner_api_no_config", {});
+      return {
+        plan: getDefaultPlan(),
+        planKey: "none",
+        subscriptionId: null,
+        subscriptionName: null,
+        isTest: false,
+        fromCache: false,
+        sourceTag: "partner_api",
+        status: "unknown",
+        resolutionState: "unknown",
+      };
+    }
+
+    const shopId = await getShopId(ctx.sql, ctx.shopDomain);
+    if (!shopId) {
+      safeLog("warn", "plan_shop_not_found", {});
+      return {
+        plan: getDefaultPlan(),
+        planKey: "none",
+        subscriptionId: null,
+        subscriptionName: null,
+        isTest: false,
+        fromCache: false,
+        sourceTag: "partner_api",
+        status: "unknown",
+        resolutionState: "unknown",
+      };
+    }
+
+    const lastConfirmed = await getCachedPlan(ctx.sql, shopId);
+
+    // forceRefresh (plan_handle redirect): do blocking fetch
+    if (ctx.forceRefresh) {
+      return this.fetchAndCache(ctx, shopId, lastConfirmed);
+    }
+
+    // Check isolate cache first (5 min TTL) - throttles background refreshes
+    const cached = partnerPlanCache.get(ctx.shopDomain);
+    if (cached && cached.expiresAt > Date.now()) {
+      return {
+        plan: getPlanConfig(cached.planKey),
+        planKey: cached.planKey,
+        subscriptionId: cached.subscriptionId,
+        subscriptionName: cached.handle,
+        isTest: false,
+        fromCache: true,
+        sourceTag: "partner_api",
+        status: "active",
+        resolutionState: "active",
+      };
+    }
+
+    // Fresh Postgres (< 6h): return immediately, no Partner call
+    if (lastConfirmed && !lastConfirmed.isStale) {
+      return {
+        plan: getPlanConfig(lastConfirmed.planKey),
+        planKey: lastConfirmed.planKey,
+        subscriptionId: lastConfirmed.subscriptionId,
+        subscriptionName: lastConfirmed.subscriptionName,
+        isTest: lastConfirmed.isTest,
+        fromCache: true,
+        sourceTag: "partner_api",
+        status: lastConfirmed.subscriptionId ? "active" : "unknown",
+        resolutionState: lastConfirmed.subscriptionId ? "active" : "unknown",
+      };
+    }
+
+    // Stale Postgres: return immediately, schedule background refresh via waitUntil
+    if (lastConfirmed && lastConfirmed.isStale) {
+      this.scheduleBackgroundRefresh(ctx, shopId, lastConfirmed);
+      return {
+        plan: getPlanConfig(lastConfirmed.planKey),
+        planKey: lastConfirmed.planKey,
+        subscriptionId: lastConfirmed.subscriptionId,
+        subscriptionName: lastConfirmed.subscriptionName,
+        isTest: lastConfirmed.isTest,
+        fromCache: true,
+        sourceTag: "partner_api",
+        status: lastConfirmed.subscriptionId ? "active" : "unknown",
+        resolutionState: lastConfirmed.subscriptionId ? "active" : "unknown",
+      };
+    }
+
+    // No confirmed row: blocking fetch (new install)
+    return this.fetchAndCache(ctx, shopId, lastConfirmed);
+  }
+
+  /**
+   * Schedule a background refresh via waitUntil if available.
+   * Uses isolate cache to throttle - only one refresh per shop per 5 minutes.
+   */
+  private scheduleBackgroundRefresh(
+    ctx: PlanResolutionContext,
+    shopId: string,
+    lastConfirmed: CachedPlanRow
+  ): void {
+    const waitUntil = getRequestWaitUntil();
+    if (!waitUntil) {
+      return;
+    }
+
+    // Use isolate cache entry as throttle marker - if present, skip refresh
+    if (partnerPlanCache.has(ctx.shopDomain)) {
+      return;
+    }
+
+    // Set a temporary marker to prevent duplicate refreshes in this isolate
+    partnerPlanCache.set(ctx.shopDomain, {
+      planKey: lastConfirmed.planKey,
+      subscriptionId: lastConfirmed.subscriptionId,
+      handle: lastConfirmed.subscriptionName ?? "",
+      expiresAt: Date.now() + PARTNER_CACHE_TTL_MS,
+    });
+
+    waitUntil(
+      this.fetchAndCache(ctx, shopId, lastConfirmed)
+        .then((result) => {
+          if (!result.fromCache) {
+            safeLog("info", "partner_plan_background_refresh_completed", { shopId });
+          }
+        })
+        .catch((err) => {
+          safeLog("error", "partner_plan_background_refresh_failed", {
+            shopId,
+            err: toErrorCode(err),
+          });
+          captureExceptionWithTags(err, { shopId });
+        })
+    );
+  }
+
+  private async fetchAndCache(
+    ctx: PlanResolutionContext,
+    shopId: string,
+    lastConfirmed: CachedPlanRow | null
+  ): Promise<SourceResolvedPlan> {
+    try {
+      const shopGid = await this.getShopGid(ctx.shopDomain);
+      const sub = await fetchActiveSubscription(this.config!, shopGid);
+
+      if (sub) {
+        const handle = sub.items.find((i) => i.handle)?.handle;
+        const normalizedHandle = handle?.toLowerCase().trim();
+
+        // shopify-test is a private test plan - returns 'none' state
+        if (normalizedHandle === "shopify-test") {
+          await setCachedPlan(ctx.sql, shopId, "none", sub.legacySubscriptionId ?? null, handle ?? null, false);
+          return {
+            plan: getDefaultPlan(),
+            planKey: "none",
+            subscriptionId: sub.legacySubscriptionId ?? null,
+            subscriptionName: handle ?? null,
+            isTest: false,
+            fromCache: false,
+            sourceTag: "partner_api",
+            status: "unknown",
+            resolutionState: "none",
+          };
+        }
+
+        // Use #287's resolvePlanKey for known handles
+        const resolvedKey = resolvePlanKey(handle);
+
+        // If resolvePlanKey returns "none" for a handle that's not shopify-test,
+        // it's an unknown handle - treat as error (ruling: unknown handles don't demote)
+        if (resolvedKey === "none") {
+          safeLog("error", "partner_plan_handle_unknown", {
+            shopHash: await shopHash(ctx.shopDomain),
+          });
+          captureMessage("partner_plan_handle_unknown", "error");
+          throw new Error("partner_plan_handle_unknown");
+        }
+
+        partnerPlanCache.set(ctx.shopDomain, {
+          planKey: resolvedKey,
+          subscriptionId: sub.legacySubscriptionId ?? null,
+          handle: handle!,
+          expiresAt: Date.now() + PARTNER_CACHE_TTL_MS,
+        });
+        evictPartnerCacheIfNeeded();
+
+        await setCachedPlan(
+          ctx.sql,
+          shopId,
+          resolvedKey,
+          sub.legacySubscriptionId ?? null,
+          handle!,
+          false
+        );
+
+        return {
+          plan: getPlanConfig(resolvedKey),
+          planKey: resolvedKey,
+          subscriptionId: sub.legacySubscriptionId ?? null,
+          subscriptionName: handle!,
+          isTest: false,
+          fromCache: false,
+          sourceTag: "partner_api",
+          status: "active",
+          resolutionState: "active",
+        };
+      }
+
+      // No subscription - confirmed 'none' state
+      await setCachedPlan(ctx.sql, shopId, "none", null, null, false);
+
+      return {
+        plan: getDefaultPlan(),
+        planKey: "none",
+        subscriptionId: null,
+        subscriptionName: null,
+        isTest: false,
+        fromCache: false,
+        sourceTag: "partner_api",
+        status: "unknown",
+        resolutionState: "none",
+      };
+    } catch (err) {
+      const code = err instanceof PartnerApiError ? err.code : toErrorCode(err);
+      const httpStatus = err instanceof PartnerApiError ? err.httpStatus : undefined;
+
+      if (code !== "partner_throttled") {
+        captureExceptionWithTags(err, { shopId });
+      }
+      safeLog("warn", "partner_plan_fetch_failed", {
+        shopHash: await shopHash(ctx.shopDomain),
+        err: code,
+        httpStatus,
+      });
+
+      if (lastConfirmed) {
+        return {
+          plan: getPlanConfig(lastConfirmed.planKey),
+          planKey: lastConfirmed.planKey,
+          subscriptionId: lastConfirmed.subscriptionId,
+          subscriptionName: lastConfirmed.subscriptionName,
+          isTest: lastConfirmed.isTest,
+          fromCache: true,
+          sourceTag: "partner_api",
+          status: "unknown",
+          resolutionState: "unknown",
+        };
+      }
+
+      // No confirmed cache - return unknown state with default plan (ruling d)
+      return {
+        plan: getDefaultPlan(),
+        planKey: "none",
+        subscriptionId: null,
+        subscriptionName: null,
+        isTest: false,
+        fromCache: false,
+        sourceTag: "partner_api",
+        status: "unknown",
+        resolutionState: "unknown",
+      };
+    }
+  }
+
+  private async getShopGid(shopDomain: string): Promise<string> {
+    const cached = shopGidMemo.get(shopDomain);
+    if (cached) {
+      return cached;
+    }
+
+    const result = await adminGraphQL<{ shop: { id: string } }>(
+      shopDomain,
+      SHOP_GID_QUERY
+    );
+
+    if (!result.success || !result.data?.shop?.id) {
+      throw new Error("partner_shop_gid_failed");
+    }
+
+    const gid = result.data.shop.id;
+    if (!/^gid:\/\/shopify\/Shop\/\d+$/.test(gid)) {
+      throw new Error("partner_shop_gid_invalid");
+    }
+
+    shopGidMemo.set(shopDomain, gid);
+    if (shopGidMemo.size > PARTNER_CACHE_MAX_ENTRIES) {
+      const firstKey = shopGidMemo.keys().next().value;
+      if (firstKey) shopGidMemo.delete(firstKey);
+    }
+
+    return gid;
+  }
+
+  /**
+   * Map plan_handle from post-checkout redirect to internal plan key.
+   * Used by T6 for informational logging (mismatch detection).
+   */
+  onPlanRedirect(planHandle: string): PlanKey | null {
+    const normalized = planHandle.toLowerCase().trim();
+    // shopify-test is a private test plan, not a real plan key
+    if (normalized === "shopify-test") {
+      return null;
+    }
+    const resolved = resolvePlanKey(planHandle);
+    // If resolvePlanKey returns "none" for non-shopify-test handle, it's unknown
+    if (resolved === "none") {
+      return null;
+    }
+    return resolved;
   }
 }
 
@@ -726,20 +1158,38 @@ export class PartnerApiPlanSource implements PlanSource {
  * Created once and reused for all requests.
  */
 const adminSource = new AdminInstallationPlanSource();
-const partnerSource = new PartnerApiPlanSource();
+let partnerSource: PartnerApiPlanSource | null = null;
+
+let partnerNotConfiguredLogged = false;
 
 /**
  * Get the active PlanSource for plan resolution.
  *
- * Today, this ALWAYS returns AdminInstallationPlanSource.
- * No env var, credential, wrangler secret, or config flag controls selection.
+ * Selection logic:
+ * - If PLAN_SOURCE === "partner_api" and all Partner API env vars are valid,
+ *   returns PartnerApiPlanSource
+ * - Otherwise returns AdminInstallationPlanSource (today's behavior)
  *
- * Future Partner API integration will add selection logic here without
- * changing callers of resolvePlan(), getPlan(), etc.
+ * With PLAN_SOURCE unset or set to "admin_installation", behavior is identical
+ * to before this change: zero extra fetches, zero extra logs.
  *
  * @returns The active PlanSource instance
  */
 export function getPlanSource(): PlanSource {
+  const planSource = process.env.PLAN_SOURCE as string | undefined;
+  if (planSource === "partner_api") {
+    const config = readPartnerConfig();
+    if (config) {
+      if (!partnerSource) {
+        partnerSource = new PartnerApiPlanSource();
+      }
+      return partnerSource;
+    }
+    if (!partnerNotConfiguredLogged) {
+      partnerNotConfiguredLogged = true;
+      safeLog("warn", "partner_api_not_configured", {});
+    }
+  }
   return adminSource;
 }
 
@@ -753,12 +1203,27 @@ export function _getAdminSourceForTesting(): AdminInstallationPlanSource {
 }
 
 /**
- * Get the PartnerApiPlanSource instance.
+ * Get a PartnerApiPlanSource instance.
  * Exported for testing purposes only.
  * @internal
  */
 export function _getPartnerSourceForTesting(): PartnerApiPlanSource {
+  if (!partnerSource) {
+    partnerSource = new PartnerApiPlanSource();
+  }
   return partnerSource;
+}
+
+/**
+ * Reset Partner API caches for testing.
+ * Note: Call _resetConfigLoggingForTesting() from partner-api.server.ts separately if needed.
+ * @internal
+ */
+export function _resetPartnerCachesForTesting(): void {
+  partnerPlanCache.clear();
+  shopGidMemo.clear();
+  partnerNotConfiguredLogged = false;
+  partnerSource = null;
 }
 
 // Re-export types from plan-source.server.ts for convenience
@@ -768,4 +1233,5 @@ export type {
   SourceResolvedPlan,
   PlanSourceTag,
   PlanStatus,
+  ResolutionState,
 } from "./plan-source.server";
