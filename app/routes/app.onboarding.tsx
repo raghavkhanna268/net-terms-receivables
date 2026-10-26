@@ -861,14 +861,7 @@ export default function OnboardingPage() {
       : registrationStatus;
 
   const loaderSyncStatus: InitialSyncStatus = initialSyncState?.status ?? "not_started";
-  // Show "in_progress" immediately after a successful start_sync action, even if
-  // the loader hasn't revalidated yet. The server-side fix in getInitialSyncState
-  // checks for queued messages, so revalidation should also return "in_progress".
-  const effectiveSyncStatus: InitialSyncStatus =
-    (actionData?.success && actionData.action === "start_sync")
-      ? "in_progress"
-      : loaderSyncStatus;
-  const currentSyncState: InitialSyncState = { status: effectiveSyncStatus };
+  const currentSyncState: InitialSyncState = { status: loaderSyncStatus };
 
   useEffect(() => {
     if (loaderSyncStatus === "in_progress") {

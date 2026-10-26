@@ -2654,3 +2654,125 @@ describe("T4: newAccountsPausedBanner", () => {
     expect(html).not.toContain("Upgrade your plan");
   });
 });
+
+describe("Initial sync card shows loader status, not stale actionData", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("shows Complete badge when loader returns done, even with successful start_sync actionData", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: true,
+            completedCount: 4,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+        }),
+        useActionData: () => ({ success: true, action: "start_sync" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    // The sync status badge should show "Complete" (from SyncStatusBadge for status=done)
+    expect(html).toContain('tone="success">Complete</s-badge>');
+    // Should NOT show "In progress" badge
+    expect(html).not.toContain('tone="info">In progress</s-badge>');
+  });
+
+  it("shows Failed badge when loader returns failed, even with successful start_sync actionData", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "failed" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+        }),
+        useActionData: () => ({ success: true, action: "start_sync" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    // The sync status badge should show "Failed" (from SyncStatusBadge for status=failed)
+    expect(html).toContain('tone="critical">Failed</s-badge>');
+    // Should NOT show "In progress" badge
+    expect(html).not.toContain('tone="info">In progress</s-badge>');
+  });
+
+  it("shows In progress badge when loader returns in_progress with successful start_sync actionData", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "in_progress" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+        }),
+        useActionData: () => ({ success: true, action: "start_sync" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    // The sync status badge should show "In progress" (from SyncStatusBadge for status=in_progress)
+    expect(html).toContain('tone="info">In progress</s-badge>');
+    // Should NOT show "Complete" or "Failed" badge
+    expect(html).not.toContain('tone="success">Complete</s-badge>');
+    expect(html).not.toContain('tone="critical">Failed</s-badge>');
+  });
+});
