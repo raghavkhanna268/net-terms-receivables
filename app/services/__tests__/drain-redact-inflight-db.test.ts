@@ -381,7 +381,10 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
   });
 
   describe("bulk progress continuation via runDrain", () => {
-    it("no Shop row: no continuation sent, but archive still happens", async () => {
+    it("no Shop row: drain guard deletes message (handler never runs)", async () => {
+      // #239 PR1: With drain guard, messages for shops without a Shop row are
+      // DELETED before reaching the handler. This is the correct behavior for
+      // redacted shops - processing the message would re-create redacted data.
       const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
       const mockedProcessBulkOperation = vi.mocked(processBulkOperation);
       mockedProcessBulkOperation.mockImplementation(async () => ({
@@ -409,18 +412,21 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
 
       await runDrain(sql, { batchSize: 10, timeBudgetMs: 5000 });
 
-      // No continuation sent
+      // Message deleted by drain guard (not in queue)
       const [queueCount] = await sql<[{ count: string }]>`
         SELECT COUNT(*)::text as count FROM pgmq.q_s6_bulk
         WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
       `;
       expect(parseInt(queueCount.count, 10)).toBe(0);
 
-      // Message archived
+      // Message NOT archived - drain guard uses pgmq.delete, not archive
       const [archiveCount] = await sql<[{ count: string }]>`
         SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}::bigint
       `;
-      expect(parseInt(archiveCount.count, 10)).toBe(1);
+      expect(parseInt(archiveCount.count, 10)).toBe(0);
+
+      // Handler was never called (drain guard intercepted first)
+      expect(mockedProcessBulkOperation).not.toHaveBeenCalled();
 
       mockedProcessBulkOperation.mockRestore();
     });

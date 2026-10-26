@@ -1323,7 +1323,49 @@ async function processSyncQueue(
     }
     // G8: Terminal topics (PAID, CANCELLED, DRAFT_DELETE) pass through to handlers
     // which will update existing rows without importing new amounts
-    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
+
+    // #239 PR1: Drain guard for redacted shops. If the batch lookup didn't find the shop,
+    // re-check the Shop row inside a transaction. FOR SHARE serializes with an in-progress
+    // deleteShop that holds FOR UPDATE: the check waits until deleteShop commits, then
+    // sees the row is gone. FOR SHARE on an absent row locks nothing and does not block
+    // a concurrent INSERT (reinstall). The transaction ensures check+delete are atomic:
+    // if the Shop row is absent at check time, it stays absent through the delete. A
+    // reinstall INSERT that lands after the check but before commit would succeed, but
+    // the message being deleted was enqueued for the OLD install (identified by domain
+    // only, no shopId). Processing it would re-create redacted data, so deletion is safe.
+    // DB errors leave the message retryable (not deleted, not DLQ'd).
+    if (!shopFound && msg.message.shop) {
+      try {
+        const deleted = await sql.begin(async (tx) => {
+          const [shopRow] = await tx<[{ id: string }?]>`
+            SELECT id FROM "Shop" WHERE domain = ${msg.message.shop} FOR SHARE
+          `;
+          if (!shopRow) {
+            await tx`SELECT pgmq.delete(${S6_QUEUES.SYNC}, ${msg.msg_id}::bigint)`;
+            return true;
+          }
+          return false;
+        });
+        if (deleted) {
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "sync",
+            topic: msg.message.topic,
+            msgId: msg.msg_id,
+            count: 1,
+          });
+          result.skipped++;
+          continue;
+        }
+      } catch (err) {
+        safeLog("warn", "drain_error", {
+          queue: "sync",
+          topic: msg.message.topic,
+          err: toErrorCode(err),
+        });
+        result.failed++;
+        continue;
+      }
+    }
 
     // Skip already-sanitized messages (re-enqueued by hand)
     if ((msg.message as Record<string, unknown>).sanitized === true) {
@@ -1558,7 +1600,43 @@ async function processBulkQueue(
       );
       continue;
     }
-    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
+
+    // #239 PR1: Drain guard for redacted shops (bulk queue). Same as sync queue:
+    // FOR SHARE serializes with deleteShop's FOR UPDATE; absent row locks nothing.
+    // Transaction makes check+delete atomic. Reinstall INSERT may land after check,
+    // but message was for OLD install (domain-only, no shopId) - deletion is safe.
+    if (!shopFound && msg.message.shop) {
+      try {
+        const deleted = await sql.begin(async (tx) => {
+          const [shopRow] = await tx<[{ id: string }?]>`
+            SELECT id FROM "Shop" WHERE domain = ${msg.message.shop} FOR SHARE
+          `;
+          if (!shopRow) {
+            await tx`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+            return true;
+          }
+          return false;
+        });
+        if (deleted) {
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "bulk",
+            topic: msg.message.topic,
+            msgId: msg.msg_id,
+            count: 1,
+          });
+          result.skipped++;
+          continue;
+        }
+      } catch (err) {
+        safeLog("warn", "drain_error", {
+          queue: "bulk",
+          topic: msg.message.topic,
+          err: toErrorCode(err),
+        });
+        result.failed++;
+        continue;
+      }
+    }
 
     // Skip already-sanitized messages (re-enqueued by hand)
     if ((msg.message as Record<string, unknown>).sanitized === true) {

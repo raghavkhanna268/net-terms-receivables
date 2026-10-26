@@ -78,6 +78,7 @@ const DB_TEST_PATTERNS = [
   "app/__tests__/integration/s22-compliance.test.ts",
   "app/__tests__/integration/shop-redact-complete-db.test.ts",
   "app/__tests__/integration/shop-redact-reinstall-guard-db.test.ts",
+  "app/__tests__/integration/redact-late-messages-db.test.ts",
   "app/__tests__/integration/s5-schema.test.ts",
   "app/__tests__/integration/light-session-storage.test.ts",
   "app/__tests__/integration/prisma-session-storage.test.ts",
