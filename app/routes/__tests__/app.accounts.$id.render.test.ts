@@ -292,7 +292,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
   });
 
   describe("copy polish: breadcrumbs and badges", () => {
-    it("renders breadcrumb with href='/app' (not '/')", () => {
+    it("renders breadcrumb with href='/app' for normal account state", () => {
       const loaderData = buildLoaderData({
         isGated: false,
         gatingEnforced: false,
@@ -304,6 +304,35 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain('href="/app"');
       expect(html).toContain("Back to Dashboard");
       expect(html).not.toMatch(/href="\/"\s/);
+    });
+
+    it("renders breadcrumb with href='/app' for notSupported currency state", () => {
+      const loaderData = {
+        notSupported: true,
+        shopCurrency: "USD",
+        account: null,
+        creditStatus: null,
+        companyTotals: null,
+        invoices: { rows: [], totalCount: 0 },
+        gatingEnforced: false,
+        reminderOptOut: null,
+        upgradeUrl: null,
+        newAccountsPausedBanner: {
+          show: false,
+          heading: "",
+          bodyText: "",
+          upgradeUrl: null,
+        },
+        error: null,
+      };
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain('href="/app"');
+      expect(html).toContain("Back to Dashboard");
+      expect(html).not.toMatch(/href="\/"\s/);
+      expect(html).toContain("Currency Not Supported");
     });
 
     it("renders 'Credit check paused' badge for BYPASS holdState", () => {

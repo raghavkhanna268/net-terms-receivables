@@ -1857,21 +1857,172 @@ describe("S23-04: initial sync", () => {
   });
 });
 
-describe("sync reason code copy: no raw codes in error messages", () => {
-  it("all mapped reason codes produce user-friendly messages", () => {
-    const reasonMap: Record<string, string> = {
-      already_queued: "A sync is already running. Refresh the page to check progress.",
-      in_progress: "A sync is already running. Refresh the page to check progress.",
-      unsupported_currency: "Initial sync is available only for stores that use INR.",
-    };
-    const fallback = "Sync could not be started. Try again or contact support.";
+describe("sync reason code map: real action paths", () => {
+  const TEST_SHOP = "test-reason-map.myshopify.com";
+  const TEST_SHOP_ID = "shop-reason-map";
 
-    for (const [reason, expectedMessage] of Object.entries(reasonMap)) {
-      expect(expectedMessage).not.toContain(reason);
-      expect(expectedMessage.length).toBeGreaterThan(10);
-    }
-    expect(fallback).not.toContain("unknown");
-    expect(fallback.length).toBeGreaterThan(10);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("already_queued reason returns mapped message without raw code", async () => {
+    vi.doMock("~/lib/initial-sync.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/lib/initial-sync.server")>();
+      return {
+        ...actual,
+        getInitialSyncState: vi.fn().mockResolvedValue({ status: "not_started" }),
+        enqueueInitialSync: vi.fn().mockResolvedValue({ enqueued: false, reason: "already_queued" }),
+      };
+    });
+
+    const { getRequestSql } = await import("~/lib/request-context.server");
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      if (query.includes("SELECT currency FROM")) {
+        return Promise.resolve([{ currency: "INR" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { action } = await import("../app.onboarding");
+
+    const formData = new FormData();
+    formData.set("_action", "start_sync");
+
+    const result = await action({
+      request: new Request("https://example.com/app/onboarding", {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as never);
+
+    expect(result).not.toBeInstanceOf(Response);
+    const data = result as { success: boolean; error: string };
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("A sync is already running. Refresh the page to check progress.");
+    expect(data.error).not.toContain("already_queued");
+  });
+
+  it("in_progress reason returns mapped message without raw code", async () => {
+    vi.doMock("~/lib/initial-sync.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/lib/initial-sync.server")>();
+      return {
+        ...actual,
+        getInitialSyncState: vi.fn().mockResolvedValue({ status: "not_started" }),
+        enqueueInitialSync: vi.fn().mockResolvedValue({ enqueued: false, reason: "in_progress" }),
+      };
+    });
+
+    const { getRequestSql } = await import("~/lib/request-context.server");
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      if (query.includes("SELECT currency FROM")) {
+        return Promise.resolve([{ currency: "INR" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { action } = await import("../app.onboarding");
+
+    const formData = new FormData();
+    formData.set("_action", "start_sync");
+
+    const result = await action({
+      request: new Request("https://example.com/app/onboarding", {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as never);
+
+    expect(result).not.toBeInstanceOf(Response);
+    const data = result as { success: boolean; error: string };
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("A sync is already running. Refresh the page to check progress.");
+    expect(data.error).not.toContain("in_progress");
+  });
+
+  it("unknown reason returns fallback message without raw code", async () => {
+    vi.doMock("~/lib/initial-sync.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/lib/initial-sync.server")>();
+      return {
+        ...actual,
+        getInitialSyncState: vi.fn().mockResolvedValue({ status: "not_started" }),
+        enqueueInitialSync: vi.fn().mockResolvedValue({ enqueued: false, reason: "weird_new_code" }),
+      };
+    });
+
+    const { getRequestSql } = await import("~/lib/request-context.server");
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT id FROM") && query.includes('"Shop"')) {
+        return Promise.resolve([{ id: TEST_SHOP_ID }]);
+      }
+      if (query.includes("SELECT currency FROM")) {
+        return Promise.resolve([{ currency: "INR" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { action } = await import("../app.onboarding");
+
+    const formData = new FormData();
+    formData.set("_action", "start_sync");
+
+    const result = await action({
+      request: new Request("https://example.com/app/onboarding", {
+        method: "POST",
+        body: formData,
+      }),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: TEST_SHOP },
+            }),
+          },
+        },
+      },
+      params: {},
+    } as never);
+
+    expect(result).not.toBeInstanceOf(Response);
+    const data = result as { success: boolean; error: string };
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("Sync could not be started. Try again or contact support.");
+    expect(data.error).not.toContain("weird_new_code");
   });
 });
 
