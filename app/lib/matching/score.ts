@@ -342,11 +342,11 @@ function scorePayerNameMatch(
   }
 
   // Check aliases first (highest confidence - confirmed aliases only)
-  // Require minimum 3 chars for substring matches to avoid false positives
+  // Require minimum 3 chars for BOTH sides in substring matches to avoid false positives
   for (const alias of buyer.aliases) {
     const isExactMatch = alias === normalizedPayer;
-    const payerContainsAlias = normalizedPayer.length >= 3 && normalizedPayer.includes(alias);
-    const aliasContainsPayer = normalizedPayer.length >= 3 && alias.includes(normalizedPayer);
+    const payerContainsAlias = normalizedPayer.length >= 3 && alias.length >= 3 && normalizedPayer.includes(alias);
+    const aliasContainsPayer = normalizedPayer.length >= 3 && alias.length >= 3 && alias.includes(normalizedPayer);
     if (isExactMatch || payerContainsAlias || aliasContainsPayer) {
       return {
         matched: true,
