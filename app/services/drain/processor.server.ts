@@ -23,6 +23,7 @@ import {
   markWebhookProcessed,
 } from "~/services/sync/company.server";
 import { processCustomerWebhook, type CustomerPiiMode } from "~/services/sync/customer.server";
+import { validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 import { processDraftOrderWebhook } from "~/services/sync/draft-order.server";
 import { processCompanyLocationWebhook } from "~/services/sync/company-location.server";
@@ -238,6 +239,7 @@ async function handleCompanyLocation(sql: Sql, message: SyncMessage): Promise<Sy
 
   // Build query dynamically based on PII flag (data minimization)
   const query = getCompanyLocationQuery(env);
+  validateCustomerQuery(query, env);
 
   // Fetch location data via GraphQL
   const result = await adminGraphQL<{

@@ -36,7 +36,7 @@ import {
   parseBulkOperationResult,
   registerBulkOperation,
 } from "~/services/sync/bulk-operations.server";
-import { getBulkCustomersQuery } from "~/services/sync/customer-fields.server";
+import { getBulkCustomersQuery, validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getTagRules } from "~/services/sync/customer.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 
@@ -109,7 +109,9 @@ async function buildReconcileMutation(
   const env = getRequestEnv() ?? {};
 
   if (kind === "companies") {
-    return getBulkCompaniesQuery(env);
+    const query = getBulkCompaniesQuery(env);
+    validateCustomerQuery(query, env);
+    return query;
   }
 
   if (kind === "orders") {

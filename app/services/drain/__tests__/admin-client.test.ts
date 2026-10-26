@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getCompanyLocationQuery, getCompanyLocationQueryWithoutContact } from "../admin-client.server";
+import { validateCustomerQuery } from "~/services/sync/customer-fields.server";
 
 describe("Admin Client GraphQL Queries", () => {
   describe("getCompanyLocationQuery", () => {
@@ -71,6 +72,24 @@ describe("Admin Client GraphQL Queries", () => {
       expect(query).not.toContain("mainContact");
       expect(query).not.toContain("email");
       expect(query).not.toContain("displayName");
+    });
+  });
+
+  describe("validateCustomerQuery integration", () => {
+    it("getCompanyLocationQuery passes validation with CUSTOMER_PII_FIELDS=1", () => {
+      const query = getCompanyLocationQuery({ CUSTOMER_PII_FIELDS: "1" });
+      expect(() => validateCustomerQuery(query, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
+    });
+
+    it("getCompanyLocationQuery passes validation with flag off", () => {
+      const query = getCompanyLocationQuery({});
+      expect(() => validateCustomerQuery(query, {})).not.toThrow();
+    });
+
+    it("getCompanyLocationQueryWithoutContact passes validation (no PII fields)", () => {
+      const query = getCompanyLocationQueryWithoutContact();
+      expect(() => validateCustomerQuery(query, {})).not.toThrow();
+      expect(() => validateCustomerQuery(query, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
     });
   });
 });

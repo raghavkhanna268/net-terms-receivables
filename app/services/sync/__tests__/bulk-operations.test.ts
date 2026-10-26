@@ -4,6 +4,7 @@ import {
   getBulkCompaniesQuery,
   parseBulkOperationResult,
 } from "../bulk-operations.server";
+import { validateCustomerQuery } from "../customer-fields.server";
 
 describe("Bulk Operations GraphQL", () => {
   describe("BULK_ORDERS_QUERY", () => {
@@ -148,6 +149,23 @@ describe("Bulk Operations GraphQL", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("No bulkOperationRunQuery in response");
+    });
+  });
+
+  describe("validateCustomerQuery integration", () => {
+    it("getBulkCompaniesQuery passes validation with CUSTOMER_PII_FIELDS=1", () => {
+      const query = getBulkCompaniesQuery({ CUSTOMER_PII_FIELDS: "1" });
+      expect(() => validateCustomerQuery(query, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
+    });
+
+    it("getBulkCompaniesQuery passes validation with flag off", () => {
+      const query = getBulkCompaniesQuery({});
+      expect(() => validateCustomerQuery(query, {})).not.toThrow();
+    });
+
+    it("BULK_ORDERS_QUERY passes validation (no PII fields in customer)", () => {
+      expect(() => validateCustomerQuery(BULK_ORDERS_QUERY, {})).not.toThrow();
+      expect(() => validateCustomerQuery(BULK_ORDERS_QUERY, { CUSTOMER_PII_FIELDS: "1" })).not.toThrow();
     });
   });
 });
