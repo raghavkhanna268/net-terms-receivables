@@ -33,19 +33,21 @@ async function waitForBlocking(
   sql: ReturnType<typeof postgres>,
   blockedPid: number,
   blockerPid: number,
-  deadlineMs: number = 5000
-): Promise<boolean> {
+  deadlineMs: number = 10000
+): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < deadlineMs) {
     const [result] = await sql<[{ blocking_pids: number[] }]>`
       SELECT pg_blocking_pids(${blockedPid}) as blocking_pids
     `;
     if (result.blocking_pids.includes(blockerPid)) {
-      return true;
+      return;
     }
     await new Promise((r) => setTimeout(r, 20));
   }
-  return false;
+  throw new Error(
+    `Timeout: pid ${blockedPid} was not blocked by pid ${blockerPid} within ${deadlineMs}ms`
+  );
 }
 
 function isPromiseSettled<T>(p: Promise<T>): Promise<boolean> {
@@ -194,7 +196,7 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
   it("helper blocks while Shop row is locked by FOR SHARE (drain guard lock)", async () => {
     const { markUninstalledAndDeleteSessions } = await import("../compliance/compliance.server");
 
-    const connA = postgres(TEST_DATABASE_URL!, sqlOptions);
+    const connA = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
     const connB = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
 
     let releaseGate: () => void = () => {};
@@ -219,14 +221,17 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
         await gatePromise;
       });
 
+      const lockDeadline = Date.now() + 10000;
       while (!lockAcquired) {
+        if (Date.now() > lockDeadline) {
+          throw new Error("Timeout: connA did not acquire FOR SHARE lock within 10s");
+        }
         await new Promise((r) => setTimeout(r, 5));
       }
 
       const helperPromise = markUninstalledAndDeleteSessions(connB, TEST_SHOP_DOMAIN);
 
-      const isBlocking = await waitForBlocking(sql, pidB, pidA, 5000);
-      expect(isBlocking).toBe(true);
+      await waitForBlocking(sql, pidB, pidA);
 
       const settled = await isPromiseSettled(helperPromise);
       expect(settled).toBe(false);
@@ -258,6 +263,7 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
     const { markUninstalledAndDeleteSessions } = await import("../compliance/compliance.server");
     const { deleteShop } = await import("../compliance/compliance.server");
 
+    const gate = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
     const connA = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
     const connB = postgres(TEST_DATABASE_URL!, { ...sqlOptions, max: 1 });
 
@@ -274,19 +280,11 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
       await sql`
         CREATE OR REPLACE FUNCTION ${sql(triggerFnName)}()
         RETURNS TRIGGER AS $$
-        DECLARE
-          wait_result BOOLEAN;
         BEGIN
           IF OLD.domain LIKE 'test-uninstall_order_%' THEN
-            -- Poll for gate release via advisory lock (released by test)
-            LOOP
-              SELECT pg_try_advisory_lock(hashtext(OLD.domain)) INTO wait_result;
-              IF wait_result THEN
-                PERFORM pg_advisory_unlock(hashtext(OLD.domain));
-                EXIT;
-              END IF;
-              PERFORM pg_sleep(0.02);
-            END LOOP;
+            -- Acquire then release: blocks until gate session releases the lock
+            PERFORM pg_advisory_lock(hashtext(OLD.domain));
+            PERFORM pg_advisory_unlock(hashtext(OLD.domain));
           END IF;
           RETURN OLD;
         END;
@@ -300,24 +298,24 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
         EXECUTE FUNCTION ${sql(triggerFnName)}()
       `;
 
-      await sql`SELECT pg_advisory_lock(hashtext(${TEST_SHOP_DOMAIN}))`;
-
+      const [{ pid: gatePid }] = await gate<[{ pid: number }]>`SELECT pg_backend_pid() as pid`;
       const [{ pid: pidA }] = await connA<[{ pid: number }]>`SELECT pg_backend_pid() as pid`;
       const [{ pid: pidB }] = await connB<[{ pid: number }]>`SELECT pg_backend_pid() as pid`;
 
+      await gate`SELECT pg_advisory_lock(hashtext(${TEST_SHOP_DOMAIN}))`;
+
       const deleteShopPromise = deleteShop(connA, TEST_SHOP_DOMAIN);
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitForBlocking(sql, pidA, gatePid);
 
       const helperPromise = markUninstalledAndDeleteSessions(connB, TEST_SHOP_DOMAIN);
 
-      const isBlocking = await waitForBlocking(sql, pidB, pidA, 5000);
-      expect(isBlocking).toBe(true);
+      await waitForBlocking(sql, pidB, pidA);
 
       const settled = await isPromiseSettled(helperPromise);
       expect(settled).toBe(false);
 
-      await sql`SELECT pg_advisory_unlock(hashtext(${TEST_SHOP_DOMAIN}))`;
+      await gate`SELECT pg_advisory_unlock(hashtext(${TEST_SHOP_DOMAIN}))`;
 
       const deleteResult = await deleteShopPromise;
       expect(deleteResult.deleted).toBe(true);
@@ -331,9 +329,10 @@ describeWithDb("markUninstalledAndDeleteSessions (DB)", () => {
       `;
       expect(shops.length).toBe(0);
     } finally {
-      await sql`SELECT pg_advisory_unlock_all()`.catch(() => {});
+      await gate`SELECT pg_advisory_unlock_all()`.catch(() => {});
       await sql`DROP TRIGGER IF EXISTS ${sql(triggerName)} ON "Shop"`;
       await sql`DROP FUNCTION IF EXISTS ${sql(triggerFnName)}()`;
+      await gate.end();
       await connA.end();
       await connB.end();
     }
