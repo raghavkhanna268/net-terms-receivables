@@ -64,6 +64,17 @@ describeWithDb("processor backstop integration (DB-backed)", () => {
   });
 
   afterAll(async () => {
+    // Clean up queue messages enqueued by this test (e.g., CREDIT_STATUS_RECOMPUTE)
+    // before deleting the shop/account they reference
+    await sql`
+      SELECT pgmq.archive('s6_sync', ARRAY(
+        SELECT msg_id FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+      ))
+    `;
+    await sql`
+      DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+    `;
+
     await sql`DELETE FROM backstop_processed_orders WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`proc-${TEST_SUFFIX}%`}`;

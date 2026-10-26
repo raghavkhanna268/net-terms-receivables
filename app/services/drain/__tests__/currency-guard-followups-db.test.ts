@@ -47,6 +47,17 @@ describeWithDb("#292 G8 DB: Terminal topics update existing invoices for non-INR
   });
 
   afterEach(async () => {
+    // Clean up queue messages enqueued by this test (e.g., CREDIT_STATUS_RECOMPUTE)
+    // before deleting the shop/account they reference
+    await sql`
+      SELECT pgmq.archive('s6_sync', ARRAY(
+        SELECT msg_id FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+      ))
+    `;
+    await sql`
+      DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+    `;
+
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
