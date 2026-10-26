@@ -785,7 +785,7 @@ describe("after-auth", () => {
 
       const mockWriteShopConfigMetafield = vi
         .fn()
-        .mockResolvedValue({ success: false, error: "metafields_set_user_error" });
+        .mockResolvedValue({ success: false, error: "user_errors" });
       vi.doMock("~/services/shop-config.server", () => ({
         writeShopConfigMetafield: mockWriteShopConfigMetafield,
       }));
@@ -849,7 +849,7 @@ describe("after-auth", () => {
 
       const logOutput = safeLogCall![0] as string;
       expect(logOutput).toContain('"event":"shop_config_write_failed"');
-      expect(logOutput).toContain('"err":"metafields_set_user_error"');
+      expect(logOutput).toContain('"err":"user_errors"');
 
       expect(upsertCalled).toBe(true);
 

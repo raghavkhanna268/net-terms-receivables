@@ -115,9 +115,10 @@ export async function checkAndRecoverCurrency(
       );
 
       if (!writeResult.success) {
+        const errCode = writeResult.error || "shop_config_write_error";
         safeLog("warn", "currency_recovery_metafield_failed", {
           shopHash: hash,
-          err: writeResult.error ?? "shop_config_write_error",
+          err: errCode,
         });
         return currentCurrency;
       }
