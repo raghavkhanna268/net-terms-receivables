@@ -592,6 +592,21 @@ describe("narration-parser", () => {
         expect(elapsed).toBeLessThan(200);
       });
 
+      it("handles 100k segments (200k chars) in linear time", () => {
+        // 'a-'.repeat(100000) = 200k chars with 100k segments
+        const longInput = "PAYMENTUPI-" + "a-".repeat(100000) + "x@oksynt";
+        const start = performance.now();
+        const result = parseNarration(longInput);
+        const elapsed = performance.now() - start;
+
+        expect(result.rail).toBe("UPI");
+        // All segments are lowercase 'a', so they extend backwards
+        // Result is all 'a' segments joined with '-', plus 'x'
+        const expectedLocal = "a-".repeat(100000) + "x";
+        expect(result.upiId).toBe(expectedLocal + "@oksynt");
+        expect(elapsed).toBeLessThan(200);
+      });
+
       it("boundary finder equivalence: matches old regex behavior", () => {
         // Old regex: /.*[\s/]/ - finds last slash or whitespace
         // New loop: backward scan for first '/' or /\s/ char

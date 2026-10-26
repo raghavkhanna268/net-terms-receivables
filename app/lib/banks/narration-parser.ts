@@ -230,13 +230,15 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
 
         // Validate at-segment: must be alphanumeric with dots/underscores
         if (atSegment && /^[a-zA-Z0-9._]+$/.test(atSegment)) {
-          const localParts: string[] = [atSegment];
+          // Track start index for VPA segments to avoid O(n^2) unshift operations
+          let vpaStartIdx = segments.length - 1;
 
           // Check if narration is all-uppercase (affects extension rules)
           const isAllCaps = text === text.toUpperCase();
 
           // Phone format extension: at-segment is 1-3 digits, preceding is exactly 10 digits
           // This is the only case where we extend across digit segments
+          let extendedForPhone = false;
           if (segments.length >= 2) {
             const prevSeg = segments[segments.length - 2];
             if (
@@ -244,27 +246,29 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
               prevSeg &&
               /^\d{10}$/.test(prevSeg)
             ) {
-              localParts.unshift(prevSeg);
+              vpaStartIdx = segments.length - 2;
+              extendedForPhone = true;
             }
           }
 
           // For mixed-case text, extend backwards across lowercase segments
           // (only if we haven't already extended for phone format)
           // Do NOT extend across all-digit segments (they may be reference numbers)
-          if (!isAllCaps && localParts.length === 1) {
+          if (!isAllCaps && !extendedForPhone) {
             for (let i = segments.length - 2; i >= 0; i--) {
               const seg = segments[i];
               if (!seg) break;
               // Must be lowercase alphanumeric/dots/underscores, but NOT all digits
               if (/^[a-z0-9._]+$/.test(seg) && !/^\d+$/.test(seg)) {
-                localParts.unshift(seg);
+                vpaStartIdx = i;
               } else {
                 break;
               }
             }
           }
 
-          const localPart = localParts.join("-").toLowerCase();
+          // Join segments from vpaStartIdx to end (O(n) slice + join, no unshift)
+          const localPart = segments.slice(vpaStartIdx).join("-").toLowerCase();
           result.upiId = `${localPart}@${handle}`;
         }
       }
