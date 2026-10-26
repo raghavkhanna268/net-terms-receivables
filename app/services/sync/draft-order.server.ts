@@ -337,9 +337,17 @@ async function upsertDraftOrder(
       DO UPDATE SET
         buyer_account_id = ${data.buyerAccountId},
         name = ${data.name},
-        total = ${data.total},
+        -- Freeze total when terminal (completed): a stale refetch must not re-add pending exposure
+        total = CASE
+          WHEN s8_draft_orders.status = 'completed' THEN s8_draft_orders.total
+          ELSE ${data.total}
+        END,
         has_payment_terms = ${data.hasPaymentTerms},
-        status = ${data.status},
+        -- Never downgrade terminal status (completed)
+        status = CASE
+          WHEN s8_draft_orders.status = 'completed' THEN s8_draft_orders.status
+          ELSE ${data.status}
+        END,
         updated_at = NOW()
       RETURNING id, (xmax = 0)::text as action
     `;
@@ -490,9 +498,17 @@ export async function bulkUpsertDraftOrders(
         DO UPDATE SET
           buyer_account_id = ${d.buyerAccountId},
           name = ${d.name},
-          total = ${d.total},
+          -- Freeze total when terminal (completed): a stale refetch must not re-add pending exposure
+          total = CASE
+            WHEN s8_draft_orders.status = 'completed' THEN s8_draft_orders.total
+            ELSE ${d.total}
+          END,
           has_payment_terms = ${d.hasPaymentTerms},
-          status = ${d.status},
+          -- Never downgrade terminal status (completed)
+          status = CASE
+            WHEN s8_draft_orders.status = 'completed' THEN s8_draft_orders.status
+            ELSE ${d.status}
+          END,
           updated_at = NOW()
       `;
       upsertCount += upsertResult.count;
