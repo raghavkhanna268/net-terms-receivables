@@ -3811,8 +3811,9 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   // Auth-failure path: immediate DLQ without bumping failure_count
   // ==========================================================================
   describe("Auth-failure path: immediate DLQ with bulk_auth_needs_reauth", () => {
-    it("auth failure (invalid_grant) returns permanent error with bulk_auth_needs_reauth, failure_count unchanged", async () => {
-      const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
+    it("auth failure (invalid_grant) returns permanent error with bulk_auth_needs_reauth and marks op terminal", async () => {
+      // S25-QA2: Auth failures now mark op terminal to prevent nightly DLQ loop
+      const { processBulkOperation, BULK_ERROR_CODES, MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/auth-fail-${TEST_SUFFIX}`;
@@ -3847,12 +3848,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(result.errorCode).toBe(BULK_ERROR_CODES.AUTH_NEEDS_REAUTH);
       expect(result.errorType).toBe("permanent");
 
-      // failure_count should still be 2 (NOT incremented)
+      // S25-QA2: failure_count is now set to MAX to mark op terminal
       const [row] = await sql<{ failure_count: number; processing_lease_token: string | null; processing_lease_until: Date | null }[]>`
         SELECT failure_count, processing_lease_token, processing_lease_until
         FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
       `;
-      expect(row.failure_count).toBe(2);
+      expect(row.failure_count).toBe(MAX_FAILURE_COUNT);
 
       // Lease should be released (both token and until NULL)
       expect(row.processing_lease_token).toBeNull();
@@ -3927,8 +3928,9 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(result.errorType).toBe("permanent");
     });
 
-    it("non-auth non-retryable failure returns bulk_status_fetch_failed", async () => {
-      const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
+    it("non-auth non-retryable failure returns bulk_status_fetch_failed and marks op terminal", async () => {
+      // S25-QA2: Non-auth non-retryable failures now mark op terminal to prevent nightly DLQ loop
+      const { processBulkOperation, BULK_ERROR_CODES, MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/fetch-fail-${TEST_SUFFIX}`;
@@ -3961,11 +3963,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(result.errorCode).toBe(BULK_ERROR_CODES.STATUS_FETCH_FAILED);
       expect(result.errorType).toBe("permanent");
 
-      // failure_count should still be 1 (NOT incremented for non-retryable)
+      // S25-QA2: failure_count is now set to MAX to mark op terminal
+      // This prevents findStrandedBulkOperations from re-enqueuing every night
       const [row] = await sql<{ failure_count: number }[]>`
         SELECT failure_count FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
       `;
-      expect(row.failure_count).toBe(1);
+      expect(row.failure_count).toBe(MAX_FAILURE_COUNT);
     });
 
     it("retryable failure DOES bump failure_count", async () => {
@@ -4008,8 +4011,11 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(row.failure_count).toBe(3);
     });
 
-    it("MUTATION TEST: removing auth-failure check would bump failure_count (this test fails if check removed)", async () => {
-      const { processBulkOperation, BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
+    it("MUTATION TEST: auth-failure marks op terminal with failure_count=MAX (no incremental bump)", async () => {
+      // S25-QA2: Auth failures now mark op terminal (failure_count=MAX) to prevent nightly DLQ loop.
+      // Previously this tested that failure_count stayed at 0, but that caused ops to be
+      // re-enqueued every night by findStrandedBulkOperations.
+      const { processBulkOperation, BULK_ERROR_CODES, MAX_FAILURE_COUNT } = await import("~/services/sync/bulk-jsonl-processor.server");
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/auth-mutation-${TEST_SUFFIX}`;
@@ -4037,12 +4043,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       };
       const result = await processBulkOperation(sql, message);
 
-      // With auth-failure check: failure_count stays 0
-      // Without auth-failure check: failure_count would be 1 (bug)
+      // S25-QA2: Auth failures now mark op terminal (failure_count = MAX)
+      // This prevents findStrandedBulkOperations from re-enqueuing every night
       const [row] = await sql<{ failure_count: number }[]>`
         SELECT failure_count FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
       `;
-      expect(row.failure_count).toBe(0);
+      expect(row.failure_count).toBe(MAX_FAILURE_COUNT);
       expect(result.errorCode).toBe(BULK_ERROR_CODES.AUTH_NEEDS_REAUTH);
     });
   });
