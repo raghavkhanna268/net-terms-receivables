@@ -14,7 +14,7 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, useRouteError, isRouteErrorResponse } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, useRouteError, isRouteErrorResponse, data } from "react-router";
 import { useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
@@ -48,6 +48,7 @@ import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-curren
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
 import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
+import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 
 /**
  * Client-side version of canStartSync to avoid importing server-only module in client code.
@@ -266,6 +267,8 @@ const METAFIELD_DEFINITIONS_QUERY = `#graphql
 /**
  * Check metafield definitions status by querying existing definitions.
  * Returns "ok" if all expected definitions exist, "missing" if any are missing.
+ *
+ * Queries both owner types in parallel so one failing still reports the other.
  */
 async function checkMetafieldDefinitionsStatus(
   admin: AdminGraphqlClient
@@ -274,17 +277,34 @@ async function checkMetafieldDefinitionsStatus(
     const specs = getMetafieldDefinitionSpecs();
     const expectedOwnerTypes = specs[0]?.ownerTypes ?? ["COMPANY_LOCATION", "CUSTOMER"];
 
+    const results = await Promise.allSettled(
+      expectedOwnerTypes.map(async (ownerType) => {
+        const response = await admin.graphql(METAFIELD_DEFINITIONS_QUERY, {
+          variables: { ownerType, namespace: METAFIELD.namespace },
+        });
+        const data = (await response.json()) as MetafieldDefinitionsQueryResult;
+        return { ownerType, data };
+      })
+    );
+
     const foundTypes = new Set<string>();
+    let firstErrorCode: string | undefined;
 
-    for (const ownerType of expectedOwnerTypes) {
-      const response = await admin.graphql(METAFIELD_DEFINITIONS_QUERY, {
-        variables: { ownerType, namespace: METAFIELD.namespace },
-      });
+    for (const result of results) {
+      if (result.status === "rejected") {
+        if (!firstErrorCode) {
+          firstErrorCode = toErrorCode(result.reason);
+        }
+        continue;
+      }
 
-      const data = (await response.json()) as MetafieldDefinitionsQueryResult;
+      const { ownerType, data } = result.value;
 
       if (data.errors?.length) {
-        return { status: "error", errorCode: toErrorCode({ message: data.errors[0].message }) };
+        if (!firstErrorCode) {
+          firstErrorCode = toErrorCode({ message: data.errors[0].message });
+        }
+        continue;
       }
 
       const hasCreditStatus = data.data?.metafieldDefinitions?.edges.some(
@@ -294,6 +314,10 @@ async function checkMetafieldDefinitionsStatus(
       if (hasCreditStatus) {
         foundTypes.add(ownerType);
       }
+    }
+
+    if (firstErrorCode) {
+      return { status: "error", errorCode: firstErrorCode };
     }
 
     if (foundTypes.size === expectedOwnerTypes.length) {
@@ -359,15 +383,28 @@ export function isRegistrationComplete(status: RegistrationStatus): boolean {
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  const cold = readColdOnce(context);
+  const timing = new ServerTiming(cold);
+  timing.startPhase("loader_total");
+
   const { shopify } = context;
   const { session, admin } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const dbData = await fetchShopOnboardingData(sql, shopDomain);
+  const dbData = await timing.time("shop_lookup", () =>
+    fetchShopOnboardingData(sql, shopDomain)
+  );
 
   if (!dbData) {
-    return {
+    timing.endPhase("loader_total");
+    timing.logAllPhases();
+    const serverTiming = timing.toHeaderValue();
+    const headers: HeadersInit = {};
+    if (serverTiming) {
+      headers["Server-Timing"] = serverTiming;
+    }
+    return data({
       error: "Shop not found",
       state: null,
       registrationStatus: null,
@@ -378,33 +415,34 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         bodyText: "",
         upgradeUrl: null,
       } as NewAccountsPausedBannerState,
-    };
+      currencySupported: false,
+      currencyFlipBlocked: false,
+    }, { headers });
   }
 
-  // #292 G1: Read stored currency, then recover if needed (same as /app)
-  // Pass dbData.shopId to avoid re-querying the shop row in checkAndRecoverCurrency
-  const [shopCurrencyResult] = await sql<{ currency: string | null }[]>`
-    SELECT currency FROM "Shop" WHERE domain = ${shopDomain}
-  `;
-  const storedCurrency = shopCurrencyResult?.currency ?? NO_CURRENCY_SENTINEL;
-  // Defensive: handle null/undefined result with fail-closed defaults
-  const currencyResult = await checkAndRecoverCurrency(
-    sql,
-    shopDomain,
-    storedCurrency,
-    admin,
-    dbData.shopId,
-  );
+  // #292 G1: Currency comes from the shop query now (folded in).
+  // Currency recovery and Admin checks run in parallel; sync state runs alongside untimed.
+  const storedCurrency = dbData.currency ?? NO_CURRENCY_SENTINEL;
+
+  const [adminResults, syncState] = await Promise.all([
+    (async () => {
+      timing.startPhase("onboarding_checks");
+      const results = await Promise.all([
+        checkAndRecoverCurrency(sql, shopDomain, storedCurrency, admin, dbData.shopId),
+        fetchValidationInfo(admin),
+        fetchPaymentCustomizationInfo(admin),
+        checkMetafieldDefinitionsStatus(admin),
+      ]);
+      timing.endPhase("onboarding_checks");
+      return results;
+    })(),
+    getInitialSyncStateWithRecovery(sql, shopDomain),
+  ]);
+
+  const [currencyResult, validationResult, paymentCustomizationResult, metafieldStatus] = adminResults;
   const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
   const currencySupported = isShopCurrencySupported(shopCurrency);
-
-  const [validationResult, paymentCustomizationResult, metafieldStatus, syncState] = await Promise.all([
-    fetchValidationInfo(admin),
-    fetchPaymentCustomizationInfo(admin),
-    checkMetafieldDefinitionsStatus(admin),
-    getInitialSyncStateWithRecovery(sql, shopDomain),
-  ]);
 
   const validation = validationResult.info;
   const validationError = validationResult.error;
@@ -462,7 +500,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     }
   }
 
-  return {
+  timing.endPhase("loader_total");
+  timing.logAllPhases();
+
+  const serverTiming = timing.toHeaderValue();
+  const headers: HeadersInit = {};
+  if (serverTiming) {
+    headers["Server-Timing"] = serverTiming;
+  }
+
+  return data({
     error: null,
     state: {
       steps: state.steps,
@@ -477,7 +524,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     newAccountsPausedBanner,
     currencySupported,
     currencyFlipBlocked,
-  };
+  }, { headers });
 };
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
@@ -1132,5 +1179,15 @@ export function ErrorBoundary() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
+  const boundaryHeaders = boundary.headers(headersArgs);
+  const resultHeaders = new Headers(boundaryHeaders);
+
+  const parentTiming = headersArgs.parentHeaders?.get("Server-Timing");
+  const loaderTiming = headersArgs.loaderHeaders?.get("Server-Timing");
+  const mergedTiming = mergeServerTimingHeaders(parentTiming, loaderTiming);
+  if (mergedTiming) {
+    resultHeaders.set("Server-Timing", mergedTiming);
+  }
+
+  return resultHeaders;
 };
