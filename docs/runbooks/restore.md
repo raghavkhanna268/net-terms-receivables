@@ -18,7 +18,7 @@ Workflow: [`.github/workflows/db-backup.yml`](../../.github/workflows/db-backup.
 - **Format:** `pg_dump -Fc --no-owner --no-privileges` (custom format), piped
   straight into `age -r <AGE_RECIPIENT>`. The plaintext dump never touches the
   runner's disk, and nothing from it is printed in the (public) Actions log.
-- **When:** nightly at 21:00 UTC (02:30 IST), plus manual `workflow_dispatch`
+- **When:** nightly at 21:17 UTC (02:47 IST), plus manual `workflow_dispatch`
   from `main`.
 - **Where:** Cloudflare R2, bucket `$R2_BUCKET`. Key layout (UTC):
 
@@ -126,7 +126,7 @@ SELECT 'latest_migration', max(migration_name) FROM _prisma_migrations;
 SQL
 ```
 
-The counts should be close to prod at the backup time (new rows after 02:30 IST
+The counts should be close to prod at the backup time (new rows after 02:47 IST
 are expected), and `latest_migration` should match the newest directory under
 `prisma/migrations/` that had been applied by then.
 
