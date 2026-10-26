@@ -1310,7 +1310,42 @@ async function processSyncQueue(
     const shopFound = shopCurrencies.has(msg.message.shop);
     // Fail closed: NULL/"" or unsupported currency treated as non-INR
     const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
-    
+
+    // #239: Shop row missing (redacted or never existed) → re-check and delete message.
+    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    if (!shopFound) {
+      try {
+        const [shopRow] = await sql<[{ id: string }?]>`
+          SELECT id FROM "Shop" WHERE domain = ${msg.message.shop}
+        `;
+        if (!shopRow) {
+          await sql`SELECT pgmq.delete(${S6_QUEUES.SYNC}, ${msg.msg_id}::bigint)`;
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "sync",
+            topic: msg.message.topic,
+            msgId: msg.msg_id,
+            count: 1,
+          });
+          continue;
+        }
+      } catch (err) {
+        const errorCode = toErrorCode(err);
+        safeLog("error", "sync_message_exception", {
+          topic: msg.message.topic,
+          queue: S6_QUEUES.SYNC,
+          errorCode,
+          readCt: msg.read_ct,
+        });
+        result.failed++;
+        result.errors.push({
+          msgId: msg.msg_id,
+          topic: msg.message.topic,
+          code: errorCode,
+        });
+        continue;
+      }
+    }
+
     if (isNonInr && !TERMINAL_TOPICS.has(msg.message.topic)) {
       // G8: Non-INR shop, non-terminal topic - skip (don't import new amounts)
       await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
@@ -1548,6 +1583,41 @@ async function processBulkQueue(
     // Fail closed: NULL/"" or unsupported currency treated as non-INR
     const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
     
+    // #239: Shop row missing (redacted or never existed) → re-check and delete message.
+    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    if (!shopFound) {
+      try {
+        const [shopRow] = await sql<[{ id: string }?]>`
+          SELECT id FROM "Shop" WHERE domain = ${msg.message.shop}
+        `;
+        if (!shopRow) {
+          await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "bulk",
+            topic: msg.message.topic,
+            msgId: msg.msg_id,
+            count: 1,
+          });
+          continue;
+        }
+      } catch (err) {
+        const errorCode = toErrorCode(err);
+        safeLog("error", "bulk_message_exception", {
+          topic: msg.message.topic,
+          queue: S6_QUEUES.BULK,
+          errorCode,
+          readCt: msg.read_ct,
+        });
+        result.failed++;
+        result.errors.push({
+          msgId: msg.msg_id,
+          topic: msg.message.topic,
+          code: errorCode,
+        });
+        continue;
+      }
+    }
+
     if (isNonInr) {
       // G8: Bulk queue has no terminal topics - all non-INR are skipped
       await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
@@ -1558,7 +1628,6 @@ async function processBulkQueue(
       );
       continue;
     }
-    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
 
     // Skip already-sanitized messages (re-enqueued by hand)
     if ((msg.message as Record<string, unknown>).sanitized === true) {

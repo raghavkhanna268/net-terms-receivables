@@ -381,7 +381,9 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
   });
 
   describe("bulk progress continuation via runDrain", () => {
-    it("no Shop row: no continuation sent, but archive still happens", async () => {
+    it("no Shop row: message is DELETED by drain guard (not archived)", async () => {
+      // #239: With the drain guard, messages for missing shops are deleted before
+      // the handler runs. The handler is never called.
       const { processBulkOperation } = await import("~/services/sync/bulk-jsonl-processor.server");
       const mockedProcessBulkOperation = vi.mocked(processBulkOperation);
       mockedProcessBulkOperation.mockImplementation(async () => ({
@@ -402,10 +404,9 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
         enqueuedAt: new Date().toISOString(),
       };
 
-      const [sendResult] = await sql<[{ send: string }]>`
+      await sql`
         SELECT pgmq.send(${S6_QUEUES.BULK}, ${sql.json(bulkMsg)})
       `;
-      const msgId = sendResult.send;
 
       await runDrain(sql, { batchSize: 10, timeBudgetMs: 5000 });
 
@@ -416,11 +417,15 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
       `;
       expect(parseInt(queueCount.count, 10)).toBe(0);
 
-      // Message archived
+      // Message NOT archived (deleted by guard)
       const [archiveCount] = await sql<[{ count: string }]>`
-        SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk WHERE msg_id = ${msgId}::bigint
+        SELECT COUNT(*)::text as count FROM pgmq.a_s6_bulk
+        WHERE message->>'shop' = ${NO_SHOP_DOMAIN}
       `;
-      expect(parseInt(archiveCount.count, 10)).toBe(1);
+      expect(parseInt(archiveCount.count, 10)).toBe(0);
+
+      // Handler was never called
+      expect(mockedProcessBulkOperation).not.toHaveBeenCalled();
 
       mockedProcessBulkOperation.mockRestore();
     });
