@@ -1152,6 +1152,10 @@ export async function minimiseCustomerPiiIfInactive(
  * Mark a shop as uninstalled.
  * Full data deletion happens on shop/redact (48h later per Shopify docs).
  *
+ * Also invalidates the plan cache so that on reinstall, the app fetches fresh
+ * subscription status from Shopify. Without this, a cancelled subscription
+ * would show as active if the cache TTL hasn't expired.
+ *
  * @param sql - postgres.js SQL client
  * @param shopDomain - Shop domain
  * @returns Whether the shop was found and updated
@@ -1162,7 +1166,7 @@ export async function markShopUninstalled(
 ): Promise<boolean> {
   const result = await sql`
     UPDATE "Shop"
-    SET "uninstalledAt" = NOW(), "updatedAt" = NOW()
+    SET "uninstalledAt" = NOW(), "updatedAt" = NOW(), plan_cached_at = NULL
     WHERE domain = ${shopDomain}
   `;
   return result.count > 0;
