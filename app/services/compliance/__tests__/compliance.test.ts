@@ -32,6 +32,7 @@ import {
   minimiseInactiveCustomerPii,
   minimiseCustomerPiiIfInactive,
   markShopUninstalled,
+  markUninstalledAndDeleteSessions,
   markDataRequestDownloaded,
 } from "../compliance.server";
 
@@ -884,6 +885,38 @@ describe("compliance.server", () => {
       const result = await markShopUninstalled(mockSql, "test-unknown-shop.myshopify.com");
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe("markUninstalledAndDeleteSessions", () => {
+    it("marks shop as uninstalled and deletes sessions in one transaction", async () => {
+      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+
+      const result = await markUninstalledAndDeleteSessions(mockSql, "test-shop.myshopify.com");
+
+      expect(result).toEqual({ shopFound: true, sessionsDeleted: 5 });
+      expect(mockSql.begin).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns shopFound=false when shop not found but still deletes sessions", async () => {
+      mockTx.mockResolvedValueOnce([]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+
+      const result = await markUninstalledAndDeleteSessions(mockSql, "test-unknown-shop.myshopify.com");
+
+      expect(result).toEqual({ shopFound: false, sessionsDeleted: 3 });
+    });
+
+    it("returns sessionsDeleted=0 when no sessions exist", async () => {
+      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+
+      const result = await markUninstalledAndDeleteSessions(mockSql, "test-shop.myshopify.com");
+
+      expect(result).toEqual({ shopFound: true, sessionsDeleted: 0 });
     });
   });
 

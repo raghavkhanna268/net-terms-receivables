@@ -122,10 +122,7 @@ describe("Route context storage verification", () => {
   });
 
   describe("webhooks.app.uninstalled route", () => {
-    it("uses sessionStorage.deleteAllForShop (bypasses 25-session limit)", async () => {
-      const sessionStorage = createMockSessionStorage();
-      sessionStorage.deleteAllForShop.mockResolvedValue(5);
-
+    it("uses markUninstalledAndDeleteSessions helper (atomic session delete + uninstall mark)", async () => {
       mockVerifyWebhook.mockResolvedValue({
         shop: "test-uninstall.myshopify.com",
         topic: "app/uninstalled",
@@ -135,24 +132,21 @@ describe("Route context storage verification", () => {
         rawBody: new ArrayBuffer(0),
       });
 
-      const args = createMockArgs({ sessionStorage });
+      mockTx.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
+
+      const args = createMockArgs({});
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
       );
       await action(args);
 
-      expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(
-        "test-uninstall.myshopify.com"
-      );
+      expect(mockSql.begin).toHaveBeenCalled();
     });
 
-    it("uses context.sessionStorage, not a module-level import", async () => {
-      const storage1 = createMockSessionStorage();
-      const storage2 = createMockSessionStorage();
-      storage1.deleteAllForShop.mockResolvedValue(3);
-      storage2.deleteAllForShop.mockResolvedValue(7);
-
+    it("calls markUninstalledAndDeleteSessions for each shop concurrently", async () => {
       mockVerifyWebhook
         .mockResolvedValueOnce({
           shop: "shop1.myshopify.com",
@@ -171,8 +165,15 @@ describe("Route context storage verification", () => {
           rawBody: new ArrayBuffer(0),
         });
 
-      const args1 = createMockArgs({ sessionStorage: storage1 });
-      const args2 = createMockArgs({ sessionStorage: storage2 });
+      mockTx.mockResolvedValueOnce([{ id: "shop-1" }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      mockTx.mockResolvedValueOnce([{ id: "shop-2" }]);
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 7 }));
+
+      const args1 = createMockArgs({});
+      const args2 = createMockArgs({});
 
       const { action } = await import(
         "../../routes/webhooks.app.uninstalled"
@@ -180,8 +181,7 @@ describe("Route context storage verification", () => {
 
       await Promise.all([action(args1), action(args2)]);
 
-      expect(storage1.deleteAllForShop).toHaveBeenCalledWith("shop1.myshopify.com");
-      expect(storage2.deleteAllForShop).toHaveBeenCalledWith("shop2.myshopify.com");
+      expect(mockSql.begin).toHaveBeenCalledTimes(4);
     });
   });
 

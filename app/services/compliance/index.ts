@@ -17,6 +17,10 @@ export {
   minimiseInactiveCustomerPii,
   minimiseCustomerPiiIfInactive,
   markShopUninstalled,
+  markUninstalledAndDeleteSessions,
 } from "./compliance.server";
 
-export type { DataRequestEmailResult } from "./compliance.server";
+export type {
+  DataRequestEmailResult,
+  MarkUninstalledResult,
+} from "./compliance.server";
