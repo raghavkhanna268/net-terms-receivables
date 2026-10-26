@@ -124,6 +124,7 @@ const DB_TEST_PATTERNS = [
   "app/lib/__tests__/initial-sync-db.test.ts",
   "app/lib/__tests__/offline-admin-db.test.ts",
   "app/lib/__tests__/offline-token.test.ts",
+  "app/lib/__tests__/reinstall-enqueue-db.test.ts",
   "app/lib/__tests__/reinstall-sync-reset-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
