@@ -1192,8 +1192,8 @@ describeWithDb("#294 PR2: reinstall enqueues credit status recompute (DB)", () =
           WHERE msg_id = ${msg_id}
           RETURNING message
         `;
-        if (row) {
-          const result = await handler!(sql, row.message as Parameters<typeof handler>[1]);
+        if (row && handler) {
+          const result = await handler(sql, row.message as never);
           if (result.success) {
             await sql`SELECT pgmq.archive('s6_sync', ${msg_id}::bigint)`;
           }

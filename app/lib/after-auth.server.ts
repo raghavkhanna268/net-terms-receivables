@@ -17,7 +17,7 @@ import { ensurePaymentCustomization } from "./payment-customization-registration
 import { getRequestSql } from "./request-context.server";
 import { validateTimezone } from "./aging-dates.server";
 import { safeLog, shopHash, toErrorCode } from "./log.server";
-import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY, isShopCurrencySupported } from "./shop-currency.server";
+import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "./shop-currency.server";
 import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "./shop-currency-guard.server";
 import { enqueueCreditStatusRecompute } from "~/services/credit-status-recompute.server";
@@ -136,18 +136,10 @@ async function clearAndMaybeSetup(
         return;
       }
 
-      const [shopRow] = await sql<{ currency: string | null; uninstalledAt: Date | null }[]>`
-        SELECT currency, "uninstalledAt" FROM "Shop" WHERE id = ${reinstallResult.shopId}
-      `;
-
-      if (!shopRow || shopRow.uninstalledAt !== null) {
-        return;
-      }
-
-      if (!isShopCurrencySupported(shopRow.currency)) {
-        return;
-      }
-
+      // Currency and uninstalledAt guards are in the SQL query (enqueueReinstallResync):
+      // - s.currency = ${SUPPORTED_SHOP_CURRENCY} filters non-INR shops
+      // - s."uninstalledAt" IS NULL filters re-uninstalled shops
+      // No JS-level check needed; the SQL returns 0 rows for ineligible shops.
       await enqueueReinstallResync(sql, reinstallResult.shopId, shop);
     } catch {
       // Best-effort: enqueue failure must not block auth
