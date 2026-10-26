@@ -145,6 +145,23 @@ When `PLAN_GATING_ENFORCED` is ON and a new BuyerAccount would exceed the limit:
    reactivation doesn't re-check the limit. This is by design: tag operations
    are controlled by the merchant's Shopify admin, not our app.
 
+7. **Deleted company location exclusion (T5)**: When a company location is deleted
+   in Shopify (COMPANY_LOCATIONS_DELETE webhook), the BuyerAccount row is preserved
+   for financial history but `locationDeletedAt` is set. Accounts with
+   `locationDeletedAt IS NOT NULL` are excluded from the active account count.
+   - **Webhook restore**: A non-delete webhook (CREATE/UPDATE) clears `locationDeletedAt`
+     only if the event's `triggeredAt` (X-Shopify-Triggered-At) is newer than the delete.
+     This prevents stale webhooks from incorrectly restoring a location.
+   - **Bulk reconcile restore**: A bulk operation clears `locationDeletedAt` only if
+     the bulk operation's `createdAt` (Shopify's snapshot time) is newer than the delete.
+     If the snapshot time is unknown (null), the location is NOT restored to prevent
+     stale bulk payloads from incorrectly clearing a recent delete.
+   - A restored location CAN push the shop over its plan limit because no gating
+     check runs on restore (same as tag reactivation).
+   - Repeat deletes are idempotent: `COALESCE` preserves the first delete timestamp.
+   - Only COMPANY-kind accounts have `locationDeletedAt`; TAGGED_CUSTOMER rows
+     are never marked.
+
 ### Bank Statement Imports
 
 Bank statement imports are **unlimited on all plans**. There is no import limit enforcement.
@@ -342,7 +359,14 @@ S21 adds this column to the `BuyerAccount` table:
 |--------|------|-------------|
 | `gated_at` | TIMESTAMPTZ | When this account was gated. NULL means active. |
 
-Migration: `prisma/migrations/20261025000000_s21_plan_cache/migration.sql`
+T5 adds this column to the `BuyerAccount` table:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `locationDeletedAt` | TIMESTAMPTZ(3) | When the company location was deleted in Shopify. NULL for active locations and TAGGED_CUSTOMER kind. Accounts with this set are excluded from active count. |
+
+Migration: `prisma/migrations/20261025000000_s21_plan_cache/migration.sql` (S21)
+Migration: `prisma/migrations/20261120000000_buyer_account_location_deleted_at/migration.sql` (T5)
 
 ## Scopes
 

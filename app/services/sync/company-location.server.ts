@@ -26,6 +26,29 @@ import { safeLog, shopHash } from "~/lib/log.server";
 import { shouldIncludePiiFields, type PiiEnv } from "./customer-fields.server";
 
 /**
+ * Build SQL fragment to conditionally restore locationDeletedAt on upsert.
+ *
+ * Clears locationDeletedAt only if the restore timestamp is newer than the existing delete.
+ * This prevents stale events (late-delivered webhooks or old bulk snapshots) from incorrectly
+ * restoring a location that was deleted after them.
+ *
+ * @param sql - postgres.js SQL client for building the fragment
+ * @param restoreTime - Timestamp of the restore event (webhook triggeredAt or bulk createdAt).
+ *                      If null (unknown bulk snapshot time), conservatively keeps the delete.
+ * @returns SQL fragment for use in DO UPDATE SET "locationDeletedAt" = ...
+ */
+export function locationDeletedAtRestore(sql: Sql, restoreTime: Date | null) {
+  if (restoreTime === null) {
+    return sql`"BuyerAccount"."locationDeletedAt"`;
+  }
+  return sql`CASE
+    WHEN "BuyerAccount"."locationDeletedAt" IS NOT NULL AND ${restoreTime} > "BuyerAccount"."locationDeletedAt"
+    THEN NULL
+    ELSE "BuyerAccount"."locationDeletedAt"
+  END`;
+}
+
+/**
  * Process a CompanyLocation webhook event.
  *
  * CREATE: Creates a new BuyerAccount with kind=COMPANY
@@ -52,7 +75,8 @@ export async function processCompanyLocationWebhook(
   location: ShopifyCompanyLocation,
   webhookId: string,
   env: PiiEnv,
-  contactKnown: boolean = true
+  contactKnown: boolean = true,
+  triggeredAt: Date | null = null
 ): Promise<SyncResult> {
   // Idempotency check
   if (await isWebhookProcessed(sql, webhookId)) {
@@ -80,16 +104,31 @@ export async function processCompanyLocationWebhook(
   const shopId = shop.id;
 
   if (topic === "COMPANY_LOCATIONS_DELETE") {
-    // Don't delete BuyerAccount - it may have invoices (financial history)
-    // Just mark the webhook as processed
+    // T5: Set locationDeletedAt on existing COMPANY row (preserves first delete time)
+    // Use COALESCE so a repeat delete keeps the original timestamp
+    const deleteTime = triggeredAt ?? new Date();
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "locationDeletedAt" = COALESCE("locationDeletedAt", ${deleteTime}),
+          "updatedAt" = NOW()
+      WHERE "shopId" = ${shopId}
+        AND "companyLocationId" = ${location.id}
+        AND kind = 'COMPANY'
+    `;
     await markWebhookProcessed(sql, webhookId, topic, location.id);
     return {
       success: true,
-      action: "skipped",
-      skipReason: "Company location deleted; BuyerAccount preserved for financial history",
+      action: "updated",
+      skipReason: "Company location deleted; BuyerAccount marked with locationDeletedAt",
     };
   }
 
+  // T5 restore semantics for webhook path: A non-DELETE webhook (CREATE/UPDATE) means
+  // Shopify just told us this location exists NOW. The webhook payload is a fresh fetch,
+  // so seeing the location here is equivalent to re-fetching it from Shopify. We clear
+  // locationDeletedAt only if triggeredAt (X-Shopify-Triggered-At) is newer than the
+  // existing delete timestamp - this prevents stale webhook payloads (delivered late or
+  // reprocessed) from incorrectly restoring a location that was deleted after them.
   const paymentTerms = location.buyerExperienceConfiguration?.paymentTermsTemplate;
   const defaultTermsDays = paymentTerms?.dueInDays ?? null;
 
@@ -114,6 +153,8 @@ export async function processCompanyLocationWebhook(
   if (!isGatingEnforced()) {
     // Flag off: main's code path - plain upsert, no transaction, no lock
     // When contactKnown=false (ACCESS_DENIED fallback), preserve existing contact fields
+    // T5: Clear locationDeletedAt only if triggeredAt is newer than the delete
+    const restoreTime = triggeredAt ?? new Date();
     const [result] = await sql<{ id: string; upsertAction: string }[]>`
       INSERT INTO "BuyerAccount" (
         "shopId",
@@ -150,6 +191,7 @@ export async function processCompanyLocationWebhook(
         "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
         "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
         "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
+        "locationDeletedAt" = ${locationDeletedAtRestore(sql, restoreTime)},
         "updatedAt" = NOW()
       RETURNING id, (xmax = 0)::text as "upsertAction"
     `;
@@ -162,6 +204,8 @@ export async function processCompanyLocationWebhook(
 
     if (limit === -1) {
       // Unlimited plan: plain upsert without transaction (no gating needed)
+      // T5: Clear locationDeletedAt only if triggeredAt is newer than the delete
+      const restoreTime = triggeredAt ?? new Date();
       const [result] = await sql<{ id: string; upsertAction: string }[]>`
         INSERT INTO "BuyerAccount" (
           "shopId",
@@ -198,6 +242,7 @@ export async function processCompanyLocationWebhook(
           "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
           "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
           "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
+          "locationDeletedAt" = ${locationDeletedAtRestore(sql, restoreTime)},
           "updatedAt" = NOW()
         RETURNING id, (xmax = 0)::text as "upsertAction"
       `;
@@ -205,6 +250,8 @@ export async function processCompanyLocationWebhook(
       entityId = result.id;
     } else {
       // Limited plan: use transaction with gating decision
+      // T5: Clear locationDeletedAt only if triggeredAt is newer than the delete
+      const restoreTime = triggeredAt ?? new Date();
       const hash = await shopHash(shopDomain);
       const txResult = await sql.begin(async (tx) => {
         const [existingAccount] = await tx<{ id: string; gated_at: Date | null }[]>`
@@ -257,6 +304,7 @@ export async function processCompanyLocationWebhook(
             "mainContactEmail" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactEmail" ELSE "BuyerAccount"."mainContactEmail" END,
             "mainContactName" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactName" ELSE "BuyerAccount"."mainContactName" END,
             "mainContactCustomerId" = CASE WHEN ${contactKnown} THEN EXCLUDED."mainContactCustomerId" ELSE "BuyerAccount"."mainContactCustomerId" END,
+            "locationDeletedAt" = ${locationDeletedAtRestore(tx, restoreTime)},
             "updatedAt" = NOW()
           RETURNING id, (xmax = 0)::text as "upsertAction", gated_at
         `;
@@ -376,15 +424,27 @@ export function mapCompanyLocationToBuyerAccount(
  * parent company was in an earlier chunk), the mainContact* columns are preserved
  * rather than overwritten with NULL. This prevents losing stored contacts.
  *
+ * T5 locationDeletedAt restore: When a bulk operation sees a location, it may
+ * clear locationDeletedAt (restore). To prevent stale bulk snapshots from clearing
+ * a recent delete, we compare snapshotAt (Shopify's bulk operation createdAt) to
+ * locationDeletedAt. If snapshotAt is older than locationDeletedAt, the location
+ * was deleted after the snapshot was taken, so we must NOT clear. If snapshotAt
+ * is unknown (null), we conservatively do NOT clear to avoid data loss.
+ *
  * @param sql - postgres.js SQL client
  * @param accounts - Array of mapped BuyerAccount data
+ * @param snapshotAt - Bulk operation's createdAt from Shopify (when the snapshot was taken)
  * @returns Number of accounts upserted
  */
 export async function bulkUpsertBuyerAccounts(
   sql: Sql,
-  accounts: MappedBuyerAccount[]
+  accounts: MappedBuyerAccount[],
+  snapshotAt?: Date | null
 ): Promise<number> {
   if (accounts.length === 0) return 0;
+  
+  // Normalize undefined to null for SQL compatibility (postgres.js rejects undefined)
+  const bulkSnapshotAt: Date | null = snapshotAt ?? null;
 
   // Group accounts by shopId for batch limit checking
   const accountsByShop = new Map<string, MappedBuyerAccount[]>();
@@ -397,6 +457,8 @@ export async function bulkUpsertBuyerAccounts(
   let totalCount = 0;
 
   // Flag off: row-by-row without transaction (main's behavior, errors propagate)
+  // T5: Clear locationDeletedAt only when snapshotAt is newer than the delete.
+  // If snapshotAt is null (unknown), do NOT clear to prevent stale payloads from restoring.
   if (!isGatingEnforced()) {
     for (const [, shopAccounts] of accountsByShop) {
       for (const a of shopAccounts) {
@@ -440,6 +502,7 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactEmail" = EXCLUDED."mainContactEmail",
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -478,6 +541,7 @@ export async function bulkUpsertBuyerAccounts(
               "companyId" = EXCLUDED."companyId",
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -506,6 +570,8 @@ export async function bulkUpsertBuyerAccounts(
     }
 
     // Unlimited: process row-by-row without gating (no transaction needed, errors propagate)
+    // T5: Clear locationDeletedAt only when snapshotAt is newer than the delete.
+    // If snapshotAt is null (unknown), do NOT clear to prevent stale payloads from restoring.
     if (limit === -1) {
       for (const a of shopAccounts) {
         if (a.contactKnown) {
@@ -545,6 +611,7 @@ export async function bulkUpsertBuyerAccounts(
               "mainContactEmail" = EXCLUDED."mainContactEmail",
               "mainContactName" = EXCLUDED."mainContactName",
               "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -582,6 +649,7 @@ export async function bulkUpsertBuyerAccounts(
               "companyId" = EXCLUDED."companyId",
               name = EXCLUDED.name,
               "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+              "locationDeletedAt" = ${locationDeletedAtRestore(sql, bulkSnapshotAt)},
               "updatedAt" = NOW()
           `;
           totalCount += result.count;
@@ -624,6 +692,8 @@ export async function bulkUpsertBuyerAccounts(
           }
 
           // Use different UPDATE logic based on contactKnown
+          // T5: Clear locationDeletedAt only when snapshotAt is newer than the delete.
+          // If snapshotAt is null (unknown), do NOT clear to prevent stale payloads from restoring.
           if (a.contactKnown) {
             const result = await tx`
               INSERT INTO "BuyerAccount" (
@@ -663,6 +733,7 @@ export async function bulkUpsertBuyerAccounts(
                 "mainContactEmail" = EXCLUDED."mainContactEmail",
                 "mainContactName" = EXCLUDED."mainContactName",
                 "mainContactCustomerId" = EXCLUDED."mainContactCustomerId",
+                "locationDeletedAt" = ${locationDeletedAtRestore(tx, bulkSnapshotAt)},
                 "updatedAt" = NOW()
             `;
             count += result.count;
@@ -703,6 +774,7 @@ export async function bulkUpsertBuyerAccounts(
                 "companyId" = EXCLUDED."companyId",
                 name = EXCLUDED.name,
                 "defaultTermsDays" = COALESCE(EXCLUDED."defaultTermsDays", "BuyerAccount"."defaultTermsDays"),
+                "locationDeletedAt" = ${locationDeletedAtRestore(tx, bulkSnapshotAt)},
                 "updatedAt" = NOW()
             `;
             count += result.count;

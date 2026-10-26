@@ -303,6 +303,10 @@ model BuyerAccount {
   /// B2B main contact's Shopify Customer GID. Used by customers/redact to match and null the PII.
   /// NULL for TAGGED_CUSTOMER kind.
   mainContactCustomerId  String?
+  /// T5: When the company location was deleted in Shopify (COMPANY_LOCATIONS_DELETE webhook).
+  /// Deleted locations are excluded from the active account count. A restore clears this only
+  /// when the event timestamp is newer. NULL for active locations and TAGGED_CUSTOMER kind.
+  locationDeletedAt      DateTime? @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
   shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)

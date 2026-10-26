@@ -121,10 +121,8 @@ export function isAccountActive(gatedAt: Date | null): boolean {
  * - Gated accounts (gated_at IS NOT NULL) don't count
  * - TAGGED_CUSTOMER accounts with inactive tags (s8_tagged_customers.tag_active=false)
  *   don't count - these are customers whose tag was removed
- *
- * Note: COMPANY accounts from deleted company locations still count (no marker exists
- * on BuyerAccount for deleted locations - COMPANY_LOCATIONS_DELETE keeps the row).
- * A backlog issue tracks adding a deleted-location marker.
+ * - COMPANY accounts with locationDeletedAt IS NOT NULL don't count (T5) -
+ *   these are company locations deleted in Shopify
  *
  * @param sql - postgres.js SQL client (or transaction)
  * @param shopId - Internal shop ID
@@ -139,6 +137,7 @@ export async function countActiveAccounts(
     FROM "BuyerAccount" ba
     WHERE ba."shopId" = ${shopId}
       AND ba.gated_at IS NULL
+      AND ba."locationDeletedAt" IS NULL
       AND NOT (
         ba.kind = 'TAGGED_CUSTOMER'
         AND EXISTS (
