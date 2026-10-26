@@ -266,15 +266,13 @@ export function computeReminderStep(
 /**
  * Compute the full onboarding state from inputs.
  * This is a pure function - all data fetching happens elsewhere.
- *
- * Note: "Set default payment terms" step was removed because there is no
- * settings route to set shop-level default terms. A future settings page
- * should restore this step.
  */
 export function computeOnboardingState(
   inputs: OnboardingStepInputs
 ): OnboardingState {
   const steps: OnboardingStep[] = [
+    // Re-enable in v1.1 once a default-terms settings route exists
+    // computeDefaultTermsStep(inputs.defaultTermsDays),
     computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),

@@ -418,7 +418,7 @@ describe("app.onboarding", () => {
 
       expect(result.error).toBeNull();
       expect(result.state).not.toBeNull();
-      expect(result.state?.steps).toHaveLength(4); // default-terms step removed
+      expect(result.state?.steps).toHaveLength(4);
       expect(result.state?.isComplete).toBe(true);
       expect(result.shopId).toBe(TEST_SHOP_ID);
       expect(result.registrationStatus).not.toBeNull();
@@ -2100,7 +2100,6 @@ describe("S23-03: tag-rules link in buyer-setup step", () => {
           error: null,
           state: {
             steps: [
-              { id: "default-terms", title: "Set default payment terms", status: "complete", helpText: "Net 30 days" },
               { id: "buyer-setup", title: "Configure buyer accounts", status: "pending", helpText: "No accounts", actionUrl: "/app/tag-rules", actionLabel: "Create tag rule" },
               { id: "checkout-validation", title: "Enable checkout protection", status: "complete", helpText: "Active" },
               { id: "payment-customization", title: "Configure payment options", status: "complete", helpText: "Active" },
@@ -2108,7 +2107,7 @@ describe("S23-03: tag-rules link in buyer-setup step", () => {
             ],
             isComplete: false,
             completedCount: 3,
-            totalCount: 5,
+            totalCount: 4,
             dismissedAt: null,
           },
           registrationStatus: null,
@@ -2141,15 +2140,14 @@ describe("S23-03: tag-rules link in buyer-setup step", () => {
           error: null,
           state: {
             steps: [
-              { id: "default-terms", title: "Set default payment terms", status: "complete", helpText: "Net 30 days" },
               { id: "buyer-setup", title: "Configure buyer accounts", status: "complete", helpText: "5 accounts" },
               { id: "checkout-validation", title: "Enable checkout protection", status: "complete", helpText: "Active" },
               { id: "payment-customization", title: "Configure payment options", status: "complete", helpText: "Active" },
               { id: "reminders", title: "Email reminders", status: "coming_soon", helpText: "Coming soon" },
             ],
             isComplete: true,
-            completedCount: 5,
-            totalCount: 5,
+            completedCount: 4,
+            totalCount: 4,
             dismissedAt: null,
           },
           registrationStatus: null,
@@ -2483,7 +2481,7 @@ describe("T4: newAccountsPausedBanner", () => {
             steps: [],
             isComplete: false,
             completedCount: 0,
-            totalCount: 5,
+            totalCount: 4,
             dismissedAt: null,
           },
           registrationStatus: null,
@@ -2524,7 +2522,7 @@ describe("T4: newAccountsPausedBanner", () => {
             steps: [],
             isComplete: false,
             completedCount: 0,
-            totalCount: 5,
+            totalCount: 4,
             dismissedAt: null,
           },
           registrationStatus: null,

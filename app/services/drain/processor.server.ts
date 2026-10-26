@@ -931,10 +931,30 @@ async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<Sy
   return startReconcileBulkOperation(sql, message.shop, "orders", message.webhookId);
 }
 
+/**
+ * Handler for RECONCILE_DRAFT_ORDERS topic.
+ * Starts a bulk draft orders export for the shop.
+ *
+ * Exports draft orders with status=open or status=invoice_sent for
+ * pending credit exposure tracking.
+ */
+async function handleReconcileDraftOrders(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  return startReconcileBulkOperation(sql, message.shop, "draft_orders", message.webhookId);
+}
+
 // Register RECONCILE_* handlers
 registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
 registerSyncHandler("RECONCILE_CUSTOMERS", handleReconcileCustomers);
 registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
+registerSyncHandler("RECONCILE_DRAFT_ORDERS", handleReconcileDraftOrders);
 
 // =============================================================================
 // CREDIT STATUS RECOMPUTE HANDLER
