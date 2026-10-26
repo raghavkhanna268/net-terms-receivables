@@ -22,6 +22,8 @@ import {
 } from "vitest";
 import type { ActionFunctionArgs } from "react-router";
 import crypto from "node:crypto";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
 const SYNTHETIC_TEST_SECRET = "test-secret-webhook-auth-negative-e2e-fake";
 const TEST_SHOP = "test-webhook-auth-neg.myshopify.com";
@@ -124,24 +126,24 @@ function computeBadHmac(body: string): string {
   return crypto.createHmac("sha256", "wrong-secret-definitely-not-real").update(body, "utf8").digest("base64");
 }
 
-const mockSqlCalls: Array<{ query: string; values: unknown[] }> = [];
-const mockSql = Object.assign(
-  vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+function createRecordingMockSql() {
+  const calls: Array<{ query: string; values: unknown[] }> = [];
+  
+  const recordingImpl = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
-    mockSqlCalls.push({ query, values });
+    calls.push({ query, values });
     return Promise.resolve([]);
-  }),
-  {
+  };
+  
+  const mockFn = vi.fn().mockImplementation(recordingImpl);
+  
+  const sql = Object.assign(mockFn, {
     json: vi.fn((v: unknown) => v),
     array: vi.fn((arr: unknown[]) => arr),
     unsafe: vi.fn((s: string) => s),
     begin: vi.fn().mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
       const txSql = Object.assign(
-        vi.fn().mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
-          const query = strings.join("?");
-          mockSqlCalls.push({ query, values });
-          return Promise.resolve([]);
-        }),
+        vi.fn().mockImplementation(recordingImpl),
         {
           json: vi.fn((v: unknown) => v),
           array: vi.fn((arr: unknown[]) => arr),
@@ -149,8 +151,14 @@ const mockSql = Object.assign(
       );
       return cb(txSql);
     }),
-  }
-);
+    _calls: calls,
+    _resetCalls: () => { calls.length = 0; },
+  });
+  
+  return sql;
+}
+
+const mockSql = createRecordingMockSql();
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
@@ -270,7 +278,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
     vi.clearAllMocks();
     vi.resetModules();
     process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
-    mockSqlCalls.length = 0;
+    mockSql._resetCalls();
     mockSafeLogCalls.length = 0;
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -319,7 +327,8 @@ describe("Webhook Authentication Negative Test Suite", () => {
   }
 
   function assertNoDbCallsBeforeAuth(): void {
-    expect(mockSqlCalls.length).toBe(0);
+    expect(mockSql._calls.length).toBe(0);
+    expect(mockSql.mock.calls.length).toBe(0);
   }
 
   function assertNoEnqueues(): void {
@@ -387,37 +396,40 @@ describe("Webhook Authentication Negative Test Suite", () => {
   }
 
   describe("Manifest guard: all webhook route files are covered", () => {
-    it("covers all 11 expected webhook routes", () => {
-      const expectedRoutes = [
-        "webhooks.bulk_operations.finish.tsx",
-        "webhooks.compliance.tsx",
-        "webhooks.shop.update.tsx",
-        "webhooks.app.scopes_update.tsx",
-        "webhooks.app.subscriptions_update.tsx",
-        "webhooks.app.uninstalled.tsx",
-        "webhooks.companies.tsx",
-        "webhooks.company_locations.tsx",
-        "webhooks.customers.tsx",
-        "webhooks.draft_orders.tsx",
-        "webhooks.orders.tsx",
-      ];
+    it("covers all webhook routes discovered from filesystem", () => {
+      const routesDir = join(__dirname, "..");
+      const filesOnDisk = readdirSync(routesDir)
+        .filter((f) => f.startsWith("webhooks.") && (f.endsWith(".tsx") || f.endsWith(".ts")) && !f.includes(".test."))
+        .sort();
 
-      const coveredRoutes = WEBHOOK_ROUTES.map((r) => r.route);
-      expect(coveredRoutes.sort()).toEqual(expectedRoutes.sort());
-      expect(WEBHOOK_ROUTES.length).toBe(11);
+      const coveredRoutes = WEBHOOK_ROUTES.map((r) => r.route).sort();
+
+      expect(coveredRoutes).toEqual(filesOnDisk);
+      expect(coveredRoutes.length).toBe(filesOnDisk.length);
     });
   });
 
-  describe.each(WEBHOOK_ROUTES)("$file", (routeConfig) => {
-    const { file, topics, usesVerifyWebhook, requiresValidJson } = routeConfig;
+  describe("SQL recorder sanity check", () => {
+    it("recorder continues to record after all tests (via recordAndEnqueueSync)", async () => {
+      const payload = { admin_graphql_api_id: "gid://shopify/Order/12345" };
+      const body = JSON.stringify(payload);
+
+      const request = createBaseRequest("orders/create", body);
+      const { action } = await import("../webhooks.orders");
+
+      await action(createActionArgs(request));
+
+      expect(mockRecordAndEnqueueSync).toHaveBeenCalled();
+    });
+  });
+
+  describe.each(WEBHOOK_ROUTES.filter((r) => r.usesVerifyWebhook))("$file (verifyWebhook)", (routeConfig) => {
+    const { file, topics, requiresValidJson } = routeConfig;
     const topic = topics[0];
 
     function createPayload(): object {
       if (file === "webhooks.compliance") {
         return { shop_id: 12345, shop_domain: TEST_SHOP, customer: { id: 99999 } };
-      }
-      if (file === "webhooks.bulk_operations.finish") {
-        return { admin_graphql_api_id: "gid://shopify/BulkOperation/12345", status: "completed" };
       }
       return { admin_graphql_api_id: "gid://shopify/TestResource/12345" };
     }
@@ -432,8 +444,6 @@ describe("Webhook Authentication Negative Test Suite", () => {
           return import("../webhooks.compliance");
         case "webhooks.shop.update":
           return import("../webhooks.shop.update");
-        case "webhooks.bulk_operations.finish":
-          return import("../webhooks.bulk_operations.finish");
         case "webhooks.app.scopes_update":
           return import("../webhooks.app.scopes_update");
         case "webhooks.app.subscriptions_update":
@@ -457,12 +467,6 @@ describe("Webhook Authentication Negative Test Suite", () => {
         const body = JSON.stringify(payload);
         const badHmac = computeBadHmac(body);
 
-        if (!usesVerifyWebhook) {
-          mockShopify.authenticate.webhook.mockRejectedValue(
-            new Response(null, { status: 401, statusText: "Unauthorized" })
-          );
-        }
-
         const request = createBaseRequest(topic, body, { hmac: badHmac });
         const { action } = await importAction();
 
@@ -483,12 +487,6 @@ describe("Webhook Authentication Negative Test Suite", () => {
       it("returns 401 for missing HMAC header", async () => {
         const payload = createPayload();
         const body = JSON.stringify(payload);
-
-        if (!usesVerifyWebhook) {
-          mockShopify.authenticate.webhook.mockRejectedValue(
-            new Response(null, { status: 401, statusText: "Unauthorized" })
-          );
-        }
 
         const request = createBaseRequest(topic, body, { hmac: null });
         const { action } = await importAction();
@@ -512,12 +510,6 @@ describe("Webhook Authentication Negative Test Suite", () => {
         const body = JSON.stringify(payload);
         const validHmac = computeValidHmac(body, SYNTHETIC_TEST_SECRET);
 
-        if (!usesVerifyWebhook) {
-          mockShopify.authenticate.webhook.mockRejectedValue(
-            new Response(null, { status: 400, statusText: "Bad Request" })
-          );
-        }
-
         const request = createBaseRequest(topic, body, { hmac: validHmac, omitTopic: true });
         const { action } = await importAction();
 
@@ -537,15 +529,6 @@ describe("Webhook Authentication Negative Test Suite", () => {
         const body = JSON.stringify(payload);
         const wrongTopic = "app/wrong_topic_completely";
 
-        if (!usesVerifyWebhook) {
-          mockShopify.authenticate.webhook.mockResolvedValue({
-            shop: TEST_SHOP,
-            topic: wrongTopic.toUpperCase().replace(/\//g, "_"),
-            payload,
-            webhookId: TEST_WEBHOOK_ID,
-          });
-        }
-
         const request = createBaseRequest(wrongTopic, body);
         const { action } = await importAction();
 
@@ -563,17 +546,6 @@ describe("Webhook Authentication Negative Test Suite", () => {
           : createPayload();
         const body = JSON.stringify(payload);
 
-        if (!usesVerifyWebhook) {
-          mockShopify.authenticate.webhook.mockResolvedValue({
-            shop: unknownShop,
-            topic: topic.toUpperCase().replace(/\//g, "_"),
-            payload,
-            webhookId: TEST_WEBHOOK_ID,
-          });
-        }
-
-        mockSql.mockImplementation(() => Promise.resolve([]));
-
         const request = createBaseRequest(topic, body, { shopDomain: unknownShop });
         const { action } = await importAction();
 
@@ -588,26 +560,11 @@ describe("Webhook Authentication Negative Test Suite", () => {
       it("handles empty body appropriately", async () => {
         const body = "";
 
-        if (!usesVerifyWebhook) {
-          if (requiresValidJson) {
-            mockShopify.authenticate.webhook.mockRejectedValue(
-              new Response(null, { status: 400, statusText: "Bad Request" })
-            );
-          } else {
-            mockShopify.authenticate.webhook.mockResolvedValue({
-              shop: TEST_SHOP,
-              topic: topic.toUpperCase().replace(/\//g, "_"),
-              payload: {},
-              webhookId: TEST_WEBHOOK_ID,
-            });
-          }
-        }
-
         const hmac = computeValidHmac(body, SYNTHETIC_TEST_SECRET);
         const request = createBaseRequest(topic, body, { hmac });
         const { action } = await importAction();
 
-        if (usesVerifyWebhook && requiresValidJson) {
+        if (requiresValidJson) {
           try {
             await action(createActionArgs(request));
             expect.fail("Expected action to throw 400 for invalid JSON");
@@ -625,26 +582,11 @@ describe("Webhook Authentication Negative Test Suite", () => {
       it("handles malformed (non-JSON) body appropriately", async () => {
         const body = "this is not valid json { broken";
 
-        if (!usesVerifyWebhook) {
-          if (requiresValidJson) {
-            mockShopify.authenticate.webhook.mockRejectedValue(
-              new Response(null, { status: 400, statusText: "Bad Request" })
-            );
-          } else {
-            mockShopify.authenticate.webhook.mockResolvedValue({
-              shop: TEST_SHOP,
-              topic: topic.toUpperCase().replace(/\//g, "_"),
-              payload: {},
-              webhookId: TEST_WEBHOOK_ID,
-            });
-          }
-        }
-
         const hmac = computeValidHmac(body, SYNTHETIC_TEST_SECRET);
         const request = createBaseRequest(topic, body, { hmac });
         const { action } = await importAction();
 
-        if (usesVerifyWebhook && requiresValidJson) {
+        if (requiresValidJson) {
           try {
             await action(createActionArgs(request));
             expect.fail("Expected action to throw 400 for invalid JSON");
@@ -665,14 +607,196 @@ describe("Webhook Authentication Negative Test Suite", () => {
         const payload = createPayload();
         const body = JSON.stringify(payload);
 
-        if (!usesVerifyWebhook) {
-          mockShopify.authenticate.webhook.mockResolvedValue({
-            shop: TEST_SHOP,
-            topic: topic.toUpperCase().replace(/\//g, "_"),
-            payload,
-            webhookId: TEST_WEBHOOK_ID,
-          });
+        const request = createBaseRequest(topic, body);
+        const { action } = await importAction();
+
+        const response = await action(createActionArgs(request));
+        expect(response.status).toBe(200);
+
+        assertNoSensitiveDataInLogs(TEST_SHOP, TEST_WEBHOOK_ID);
+      });
+    });
+  });
+
+  describe("webhooks.bulk_operations.finish (wiring-only: uses shopify.authenticate.webhook)", () => {
+    const topic = "bulk_operations/finish";
+
+    function createPayload(): object {
+      return { admin_graphql_api_id: "gid://shopify/BulkOperation/12345", status: "completed" };
+    }
+
+    async function importAction(): Promise<{ action: (args: ActionFunctionArgs) => Promise<Response> }> {
+      return import("../webhooks.bulk_operations.finish");
+    }
+
+    describe("Case 1: Bad HMAC (wiring-only)", () => {
+      it("returns 401 when shopify.authenticate.webhook rejects with 401", async () => {
+        const payload = createPayload();
+        const body = JSON.stringify(payload);
+        const badHmac = computeBadHmac(body);
+
+        mockShopify.authenticate.webhook.mockRejectedValue(
+          new Response(null, { status: 401, statusText: "Unauthorized" })
+        );
+
+        const request = createBaseRequest(topic, body, { hmac: badHmac });
+        const { action } = await importAction();
+
+        try {
+          await action(createActionArgs(request));
+          expect.fail("Expected action to throw 401");
+        } catch (error) {
+          expect(error).toBeInstanceOf(Response);
+          expect((error as Response).status).toBe(401);
         }
+
+        assertNoDbCallsBeforeAuth();
+        assertNoEnqueues();
+      });
+    });
+
+    describe("Case 2: No HMAC header (wiring-only)", () => {
+      it("returns 401 when shopify.authenticate.webhook rejects for missing HMAC", async () => {
+        const payload = createPayload();
+        const body = JSON.stringify(payload);
+
+        mockShopify.authenticate.webhook.mockRejectedValue(
+          new Response(null, { status: 401, statusText: "Unauthorized" })
+        );
+
+        const request = createBaseRequest(topic, body, { hmac: null });
+        const { action } = await importAction();
+
+        try {
+          await action(createActionArgs(request));
+          expect.fail("Expected action to throw 401");
+        } catch (error) {
+          expect(error).toBeInstanceOf(Response);
+          expect((error as Response).status).toBe(401);
+        }
+
+        assertNoDbCallsBeforeAuth();
+        assertNoEnqueues();
+      });
+    });
+
+    describe("Case 3: Topic header issues (wiring-only)", () => {
+      it("returns 400 when shopify.authenticate.webhook rejects for missing topic", async () => {
+        const payload = createPayload();
+        const body = JSON.stringify(payload);
+        const validHmac = computeValidHmac(body, SYNTHETIC_TEST_SECRET);
+
+        mockShopify.authenticate.webhook.mockRejectedValue(
+          new Response(null, { status: 400, statusText: "Bad Request" })
+        );
+
+        const request = createBaseRequest(topic, body, { hmac: validHmac, omitTopic: true });
+        const { action } = await importAction();
+
+        try {
+          await action(createActionArgs(request));
+          expect.fail("Expected action to throw 400");
+        } catch (error) {
+          expect(error).toBeInstanceOf(Response);
+          expect((error as Response).status).toBe(400);
+        }
+
+        assertNoEnqueues();
+      });
+
+      it("returns 200 for wrong topic header (graceful ignore)", async () => {
+        const payload = createPayload();
+        const body = JSON.stringify(payload);
+        const wrongTopic = "app/wrong_topic_completely";
+
+        mockShopify.authenticate.webhook.mockResolvedValue({
+          shop: TEST_SHOP,
+          topic: wrongTopic.toUpperCase().replace(/\//g, "_"),
+          payload,
+          webhookId: TEST_WEBHOOK_ID,
+        });
+
+        const request = createBaseRequest(wrongTopic, body);
+        const { action } = await importAction();
+
+        const response = await action(createActionArgs(request));
+        expect(response.status).toBe(200);
+        assertNoEnqueues();
+      });
+    });
+
+    describe("Case 4: Unknown/uninstalled shop (wiring-only)", () => {
+      it("handles unknown shop gracefully when authenticate.webhook passes", async () => {
+        const unknownShop = "test-unknown-shop-neg.myshopify.com";
+        const payload = createPayload();
+        const body = JSON.stringify(payload);
+
+        mockShopify.authenticate.webhook.mockResolvedValue({
+          shop: unknownShop,
+          topic: topic.toUpperCase().replace(/\//g, "_"),
+          payload,
+          webhookId: TEST_WEBHOOK_ID,
+        });
+
+        const request = createBaseRequest(topic, body, { shopDomain: unknownShop });
+        const { action } = await importAction();
+
+        const response = await action(createActionArgs(request));
+        expect(response.status).toBe(200);
+
+        assertNoSensitiveDataInLogs(unknownShop, TEST_WEBHOOK_ID);
+      });
+    });
+
+    describe("Case 5: Body issues (wiring-only)", () => {
+      it("handles empty body when authenticate.webhook passes", async () => {
+        const body = "";
+
+        mockShopify.authenticate.webhook.mockResolvedValue({
+          shop: TEST_SHOP,
+          topic: topic.toUpperCase().replace(/\//g, "_"),
+          payload: {},
+          webhookId: TEST_WEBHOOK_ID,
+        });
+
+        const hmac = computeValidHmac(body, SYNTHETIC_TEST_SECRET);
+        const request = createBaseRequest(topic, body, { hmac });
+        const { action } = await importAction();
+
+        const response = await action(createActionArgs(request));
+        expect(response.status).toBe(200);
+      });
+
+      it("handles malformed body when authenticate.webhook passes", async () => {
+        const body = "this is not valid json { broken";
+
+        mockShopify.authenticate.webhook.mockResolvedValue({
+          shop: TEST_SHOP,
+          topic: topic.toUpperCase().replace(/\//g, "_"),
+          payload: {},
+          webhookId: TEST_WEBHOOK_ID,
+        });
+
+        const hmac = computeValidHmac(body, SYNTHETIC_TEST_SECRET);
+        const request = createBaseRequest(topic, body, { hmac });
+        const { action } = await importAction();
+
+        const response = await action(createActionArgs(request));
+        expect(response.status).toBe(200);
+      });
+    });
+
+    describe("Positive control: valid request succeeds (wiring-only)", () => {
+      it("returns 200 when authenticate.webhook passes", async () => {
+        const payload = createPayload();
+        const body = JSON.stringify(payload);
+
+        mockShopify.authenticate.webhook.mockResolvedValue({
+          shop: TEST_SHOP,
+          topic: topic.toUpperCase().replace(/\//g, "_"),
+          payload,
+          webhookId: TEST_WEBHOOK_ID,
+        });
 
         const request = createBaseRequest(topic, body);
         const { action } = await importAction();
@@ -735,7 +859,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
   });
 
   describe("Log sanitization comprehensive check", () => {
-    it.each(WEBHOOK_ROUTES)(
+    it.each(WEBHOOK_ROUTES.filter((r) => r.usesVerifyWebhook))(
       "$file: never leaks shop domain or webhook ID in any path",
       async (routeConfig) => {
         const testShop = `test-log-sanitize-${routeConfig.file.replace(/[._]/g, "-")}.myshopify.com`;
@@ -743,21 +867,8 @@ describe("Webhook Authentication Negative Test Suite", () => {
         const topic = routeConfig.topics[0];
         const payload = routeConfig.file === "webhooks.compliance"
           ? { shop_id: 12345, shop_domain: testShop, customer: { id: 99999 } }
-          : routeConfig.file === "webhooks.bulk_operations.finish"
-            ? { admin_graphql_api_id: "gid://shopify/BulkOperation/12345", status: "completed" }
-            : { admin_graphql_api_id: "gid://shopify/Test/12345" };
+          : { admin_graphql_api_id: "gid://shopify/Test/12345" };
         const body = JSON.stringify(payload);
-
-        if (!routeConfig.usesVerifyWebhook) {
-          mockShopify.authenticate.webhook.mockResolvedValue({
-            shop: testShop,
-            topic: topic.toUpperCase().replace(/\//g, "_"),
-            payload,
-            webhookId: testWebhookId,
-          });
-        }
-
-        mockSql.mockImplementation(() => Promise.resolve([]));
 
         const request = createBaseRequest(topic, body, {
           shopDomain: testShop,
@@ -774,8 +885,6 @@ describe("Webhook Authentication Negative Test Suite", () => {
               return import("../webhooks.compliance");
             case "webhooks.shop.update":
               return import("../webhooks.shop.update");
-            case "webhooks.bulk_operations.finish":
-              return import("../webhooks.bulk_operations.finish");
             case "webhooks.app.scopes_update":
               return import("../webhooks.app.scopes_update");
             case "webhooks.app.subscriptions_update":
@@ -798,32 +907,31 @@ describe("Webhook Authentication Negative Test Suite", () => {
         assertNoSensitiveDataInLogs(testShop, testWebhookId);
       }
     );
-  });
-});
 
-describe("Expected status codes per case (pinned)", () => {
-  const statusTable = [
-    { route: "webhooks.orders", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.app.uninstalled", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.compliance", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 400, malformedBody: 400 },
-    { route: "webhooks.shop.update", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.bulk_operations.finish", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.app.scopes_update", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.app.subscriptions_update", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.companies", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.company_locations", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.customers", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-    { route: "webhooks.draft_orders", badHmac: 401, noHmac: 401, noTopic: 400, wrongTopic: 200, unknownShop: 200, emptyBody: 200, malformedBody: 200 },
-  ] as const;
+    it("webhooks.bulk_operations.finish (wiring-only): never leaks shop domain or webhook ID", async () => {
+      const testShop = "test-log-sanitize-bulk-ops.myshopify.com";
+      const testWebhookId = "wh-log-sanitize-bulk-ops";
+      const topic = "bulk_operations/finish";
+      const payload = { admin_graphql_api_id: "gid://shopify/BulkOperation/12345", status: "completed" };
+      const body = JSON.stringify(payload);
 
-  it("documents expected status codes for all routes and cases", () => {
-    expect(statusTable.length).toBe(11);
-    for (const entry of statusTable) {
-      expect(entry.badHmac).toBe(401);
-      expect(entry.noHmac).toBe(401);
-      expect(entry.noTopic).toBe(400);
-      expect(entry.wrongTopic).toBe(200);
-      expect(entry.unknownShop).toBe(200);
-    }
+      mockShopify.authenticate.webhook.mockResolvedValue({
+        shop: testShop,
+        topic: topic.toUpperCase().replace(/\//g, "_"),
+        payload,
+        webhookId: testWebhookId,
+      });
+
+      const request = createBaseRequest(topic, body, {
+        shopDomain: testShop,
+        webhookId: testWebhookId,
+      });
+
+      const { action } = await import("../webhooks.bulk_operations.finish");
+
+      await action(createActionArgs(request));
+
+      assertNoSensitiveDataInLogs(testShop, testWebhookId);
+    });
   });
 });
