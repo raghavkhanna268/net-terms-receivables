@@ -62,7 +62,7 @@ const inFlightRefreshes = new Map<string, Promise<void>>();
 
 /**
  * In-flight forced refresh promises by shop ID for resolvePlanForDisplay.
- * Prevents concurrent forced calls from racing. Entry is deleted on settle.
+ * Lets concurrent forced calls share one request. Entry is deleted on settle.
  */
 const inFlightForcedRefreshes = new Map<string, Promise<ResolvedPlan>>();
 
