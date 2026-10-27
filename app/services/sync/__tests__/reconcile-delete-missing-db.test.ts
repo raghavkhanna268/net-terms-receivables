@@ -26,6 +26,8 @@ import {
   saveBulkOperationProgress,
   claimBulkCompletion,
   acquireProcessingLease,
+  handleReconcileDeleteMissing,
+  type BulkOperationStatusResult,
 } from "../bulk-jsonl-processor.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -838,6 +840,19 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("lines_read DB tests", () => {
     it("(a) NULL lines_read at resume under-counts and closes nothing", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
       const bulkOpId = `gid://shopify/BulkOperation/null-resume-${TEST_SUFFIX}`;
       const draftMissing = `gid://shopify/DraftOrder/null-resume-draft-${TEST_SUFFIX}`;
 
@@ -873,10 +888,13 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseToken!);
       expect(claimed).toBe(true);
 
-      const [opRow] = await sql<{ lines_processed: string | null }[]>`
-        SELECT lines_processed FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
+        SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
       `;
-      expect(opRow.lines_processed).toBeNull();
+      expect(opRow.lines_read).toBe("0");
+      expect(opRow.lines_processed).toBe("0");
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
 
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
@@ -912,7 +930,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(tokenB).not.toBeNull();
       expect(tokenB).not.toBe(tokenA);
 
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, tokenA!, 20);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, tokenA!, undefined, { linesInChunk: 20 });
       expect(rowUpdated).toBe(false);
 
       const [opRow] = await sql<{ lines_read: string | null }[]>`
@@ -939,7 +957,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
       expect(leaseToken).not.toBeNull();
 
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!, 15);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!, undefined, { linesInChunk: 15 });
       expect(rowUpdated).toBe(false);
 
       const [opRow] = await sql<{ lines_read: string | null }[]>`
@@ -951,6 +969,19 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("(c) only lines_processed == objectCount allows close; objectCount-1 closes nothing", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
       const bulkOpId = `gid://shopify/BulkOperation/mismatch-minus1-${TEST_SUFFIX}`;
       const draftMissing = `gid://shopify/DraftOrder/mismatch-m1-draft-${TEST_SUFFIX}`;
 
@@ -974,6 +1005,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
+
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
       `;
@@ -983,6 +1016,19 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("(c) only lines_processed == objectCount allows close; objectCount+1 closes nothing", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
       const bulkOpId = `gid://shopify/BulkOperation/mismatch-plus1-${TEST_SUFFIX}`;
       const draftMissing = `gid://shopify/DraftOrder/mismatch-p1-draft-${TEST_SUFFIX}`;
 
@@ -1005,6 +1051,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
           NOW(), 5000, 101, 101, NOW()
         )
       `;
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
 
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
@@ -1030,7 +1078,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
       expect(leaseToken).not.toBeNull();
 
-      const { rowUpdated: update1 } = await saveBulkOperationProgress(sql, bulkOpId, 1000, leaseToken!, 10);
+      const { rowUpdated: update1 } = await saveBulkOperationProgress(sql, bulkOpId, 1000, leaseToken!, undefined, { linesInChunk: 10 });
       expect(update1).toBe(true);
 
       const [row1] = await sql<{ lines_read: string | null }[]>`
@@ -1038,7 +1086,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       `;
       expect(row1.lines_read).toBe("10");
 
-      const { rowUpdated: update2 } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!, 15);
+      const { rowUpdated: update2 } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!, undefined, { linesInChunk: 15 });
       expect(update2).toBe(true);
 
       const [row2] = await sql<{ lines_read: string | null }[]>`
@@ -1046,7 +1094,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       `;
       expect(row2.lines_read).toBe("25");
 
-      const { rowUpdated: update3 } = await saveBulkOperationProgress(sql, bulkOpId, 3000, leaseToken!, 5);
+      const { rowUpdated: update3 } = await saveBulkOperationProgress(sql, bulkOpId, 3000, leaseToken!, undefined, { linesInChunk: 5 });
       expect(update3).toBe(true);
 
       const [row3] = await sql<{ lines_read: string | null }[]>`
@@ -1057,7 +1105,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
     });
 
-    it("claimBulkCompletion sets lines_processed from lines_read", async () => {
+    it("claimBulkCompletion adds finalLinesInChunk to lines_read and lines_processed", async () => {
       const bulkOpId = `gid://shopify/BulkOperation/claim-sets-processed-${TEST_SUFFIX}`;
 
       await sql`
@@ -1066,21 +1114,21 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
           started_at, byte_offset, lines_read
         ) VALUES (
           ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          NOW(), 5000, 100
+          NOW(), 5000, 80
         )
       `;
 
       const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
       expect(leaseToken).not.toBeNull();
 
-      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseToken!);
+      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseToken!, 20);
       expect(claimed).toBe(true);
 
       const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
         SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
       `;
-      expect(opRow.lines_processed).toBe("100");
       expect(opRow.lines_read).toBe("100");
+      expect(opRow.lines_processed).toBe("100");
 
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
     });
@@ -1088,6 +1136,19 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("Completeness guard tests (each closes nothing)", () => {
     it("guard: status != COMPLETED closes nothing", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "RUNNING",
+          url: null,
+          fileSize: null,
+          objectCount: null,
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
       const bulkOpId = `gid://shopify/BulkOperation/guard-status-${TEST_SUFFIX}`;
       const draftMissing = `gid://shopify/DraftOrder/guard-status-draft-${TEST_SUFFIX}`;
 
@@ -1104,12 +1165,14 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       await sql`
         INSERT INTO s6_bulk_operations (
           bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
-          started_at, byte_offset, lines_read, lines_processed
+          started_at, byte_offset, lines_read, lines_processed, completed_at
         ) VALUES (
           ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          NOW(), 5000, 100, 100
+          NOW(), 5000, 100, 100, NOW()
         )
       `;
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
 
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
@@ -1120,6 +1183,19 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("guard: errorCode set closes nothing", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
+          errorCode: "ACCESS_DENIED",
+          partialDataUrl: null,
+        },
+      });
+
       const bulkOpId = `gid://shopify/BulkOperation/guard-errorcode-${TEST_SUFFIX}`;
       const draftMissing = `gid://shopify/DraftOrder/guard-errorcode-draft-${TEST_SUFFIX}`;
 
@@ -1143,6 +1219,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
+
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
       `;
@@ -1152,6 +1230,19 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("guard: partialDataUrl set closes nothing", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
+          errorCode: null,
+          partialDataUrl: "https://example.com/partial.jsonl",
+        },
+      });
+
       const bulkOpId = `gid://shopify/BulkOperation/guard-partial-${TEST_SUFFIX}`;
       const draftMissing = `gid://shopify/DraftOrder/guard-partial-draft-${TEST_SUFFIX}`;
 
@@ -1175,6 +1266,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
+
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
       `;
@@ -1184,6 +1277,19 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("guard: not the newest COMPLETED reconcile op of the stage closes nothing", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
       const olderBulkOpId = `gid://shopify/BulkOperation/guard-older-${TEST_SUFFIX}`;
       const newerBulkOpId = `gid://shopify/BulkOperation/guard-newer-${TEST_SUFFIX}`;
       const draftMissing = `gid://shopify/DraftOrder/guard-newest-draft-${TEST_SUFFIX}`;
@@ -1218,12 +1324,147 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, olderBulkOpId, "draft_orders", mockGetStatus);
+
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
       `;
       expect(draftRow.status).toBe("open");
 
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id IN (${olderBulkOpId}, ${newerBulkOpId})`;
+    });
+
+    it("lines_processed == objectCount DOES close drafts when all guards pass", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
+      const bulkOpId = `gid://shopify/BulkOperation/positive-close-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/positive-close-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#POSITIVE-CLOSE', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 100, 100, NOW()
+        )
+      `;
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("closed");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+  });
+
+  describe("Empty result (objectCount 0) behavior", () => {
+    it("objectCount 0 with lines_processed 0 passes guards and closes unseen drafts", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: null,
+          fileSize: null,
+          objectCount: "0",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
+      const bulkOpId = `gid://shopify/BulkOperation/empty-result-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/empty-result-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#EMPTY-RESULT', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 0, 0, 0, NOW()
+        )
+      `;
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("closed");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+  });
+
+  describe("Deactivate race condition guards", () => {
+    it("deactivateMissingTaggedCustomers respects shop_id and tag_active in final UPDATE", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/deactivate-race-${TEST_SUFFIX}`;
+      const customerId = `gid://shopify/Customer/deactivate-race-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, last_seen_bulk_op_id, created_at, updated_at
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, ${OLD_BULK_OP_ID}, NOW(), NOW()
+        )
+      `;
+
+      const adminGraphQLMock = vi.fn().mockResolvedValue({
+        success: true,
+        data: { nodes: [] },
+      });
+
+      const result = await deactivateMissingTaggedCustomers(
+        sql,
+        TEST_SHOP_ID,
+        TEST_SHOP_DOMAIN,
+        bulkOpId,
+        adminGraphQLMock
+      );
+
+      expect(result.deactivatedCount).toBe(1);
+
+      const [row] = await sql<{ tag_active: boolean }[]>`
+        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(row.tag_active).toBe(false);
+
+      await sql`DELETE FROM s8_tagged_customers WHERE customer_id = ${customerId}`;
     });
   });
 });

@@ -1149,6 +1149,10 @@ export async function deactivateMissingTaggedCustomers(
     UPDATE s8_tagged_customers
     SET tag_active = false, tag_deactivated_at = NOW(), updated_at = NOW()
     WHERE id IN ${sql(toDeactivateRowIds)}
+      AND shop_id = ${shopId}
+      AND tag_active = true
+      AND last_seen_bulk_op_id IS NOT NULL
+      AND last_seen_bulk_op_id != ${bulkOperationId}
   `;
 
   return { deactivatedCount: updateResult.count, skippedMismatchCount, skippedOutstandingCount };

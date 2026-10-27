@@ -168,15 +168,19 @@ export function getNextStage(
  * @param shop - Shop domain
  * @param bulkOperationId - The completed bulk operation ID
  * @param reconcileStage - The reconcile stage that completed
+ * @param getBulkOperationStatusFn - Optional: inject for testing
  */
-async function handleReconcileDeleteMissing(
+export async function handleReconcileDeleteMissing(
   sql: Sql,
   shop: string,
   bulkOperationId: string,
-  reconcileStage: string | null
+  reconcileStage: string | null,
+  getBulkOperationStatusFn?: typeof getBulkOperationStatus
 ): Promise<void> {
   if (!reconcileStage) return;
   if (reconcileStage !== "draft_orders" && reconcileStage !== "customers") return;
+
+  const getStatus = getBulkOperationStatusFn ?? getBulkOperationStatus;
 
   try {
     // Get shop ID
@@ -187,7 +191,7 @@ async function handleReconcileDeleteMissing(
     const shopId = shopRow.id;
 
     // Fetch bulk operation status from Shopify for completeness guards
-    const statusResult = await getBulkOperationStatus(shop, bulkOperationId);
+    const statusResult = await getStatus(shop, bulkOperationId);
     if (!statusResult.success || !statusResult.data) return;
 
     const { status, errorCode, partialDataUrl, objectCount } = statusResult.data;
@@ -1120,8 +1124,8 @@ export async function loadBulkOperationProgress(
  * This prevents reopening a closed/completed row.
  *
  * v1.1: Also increments lines_read atomically with byte_offset.
- * linesInChunk is the number of JSONL lines in this chunk (all lines, parents
- * and children, including lines skipped or failed to parse).
+ * options.linesInChunk is the number of JSONL lines in this chunk (all lines,
+ * parents and children, including lines skipped or failed to parse).
  *
  * R1: Owner-checked with processing_lease_token to prevent stale processor A
  * from overwriting progress after processor B has taken over the lease.
@@ -1132,9 +1136,10 @@ export async function saveBulkOperationProgress(
   bulkOperationId: string,
   byteOffset: number,
   leaseToken: string,
-  linesInChunk: number = 0,
-  chunkSize?: number
+  chunkSize?: number,
+  options?: { linesInChunk?: number }
 ): Promise<{ rowUpdated: boolean }> {
+  const linesInChunk = options?.linesInChunk ?? 0;
   let result;
   if (chunkSize !== undefined) {
     result = await sql`
@@ -1168,25 +1173,29 @@ export async function saveBulkOperationProgress(
  * Only the winner gets to chain nextStage; losers mark their message processed and skip.
  *
  * S25: This is the ONLY path that writes completed_at.
- * v1.1: Also sets lines_processed = lines_read for delete-missing completeness check.
+ * v1.1: Also sets lines_processed = COALESCE(lines_read, 0) + finalLinesInChunk.
  * The lines_read value was accumulated during processing via saveBulkOperationProgress.
+ * The finalLinesInChunk adds the last batch's lines atomically with completion.
  *
  * R1: Owner-checked with processing_lease_token to prevent stale processor A
  * from claiming completion after processor B has taken over the lease.
  * leaseToken is REQUIRED - all processor writes must be owner-checked.
  *
+ * @param finalLinesInChunk - Lines in the final chunk to add to lines_read (default 0)
  * @returns true if this caller won the claim, false otherwise
  */
 export async function claimBulkCompletion(
   sql: Sql,
   bulkOperationId: string,
   shop: string,
-  leaseToken: string
+  leaseToken: string,
+  finalLinesInChunk: number = 0
 ): Promise<boolean> {
   const result = await sql`
     UPDATE s6_bulk_operations
     SET completed_at = now(),
-        lines_processed = lines_read
+        lines_read = COALESCE(lines_read, 0) + ${finalLinesInChunk},
+        lines_processed = COALESCE(lines_read, 0) + ${finalLinesInChunk}
     WHERE bulk_operation_id = ${bulkOperationId}
       AND shop = ${shop}
       AND completed_at IS NULL
@@ -1904,8 +1913,8 @@ export async function processBulkOperation(
   if (isComplete) {
     // S25: Use claimBulkCompletion for exactly-once completion
     // R1: Pass leaseToken for owner-checked completion
-    // v1.1: lines_processed is set from lines_read by claimBulkCompletion
-    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
+    // v1.1: Final batch's lines added to lines_read atomically with completion
+    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken, linesToProcess.length);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1979,7 +1988,7 @@ export async function processBulkOperation(
   // Reset chunk size to default if we found lines (owner-checked)
   // v1.1: Also increment lines_read atomically with byte_offset
   const nextChunkSize = lines.length > 0 ? DEFAULT_CHUNK_SIZE : currentChunkSize;
-  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, leaseToken, linesToProcess.length, nextChunkSize);
+  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, leaseToken, nextChunkSize, { linesInChunk: linesToProcess.length });
 
   // Reset failure count on successful progress
   // R1: Pass leaseToken for owner-checked reset
