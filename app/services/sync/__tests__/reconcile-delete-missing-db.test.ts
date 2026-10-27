@@ -30,6 +30,68 @@ import {
   type BulkOperationStatusResult,
 } from "../bulk-jsonl-processor.server";
 
+vi.mock("../../drain/admin-client.server", () => ({
+  adminGraphQL: vi.fn(),
+  BULK_OPERATION_STATUS_QUERY: "mock-query",
+}));
+
+vi.mock("~/lib/request-context.server", () => ({
+  getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
+  getRequestSql: vi.fn(() => ({})),
+  getRequestWaitUntil: vi.fn(() => () => {}),
+  requestContext: { getStore: vi.fn() },
+}));
+
+vi.mock("~/shopify.server", () => ({
+  sessionStorage: {},
+  shopify: {},
+}));
+
+vi.mock("~/services/sync/company.server", () => ({
+  isWebhookProcessed: vi.fn().mockResolvedValue(false),
+  markWebhookProcessed: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("~/services/sync/company-location.server", () => ({
+  mapCompanyLocationToBuyerAccount: vi.fn(() => ({})),
+  bulkUpsertBuyerAccounts: vi.fn().mockResolvedValue(0),
+}));
+
+vi.mock("~/services/sync/order.server", () => ({
+  mapOrderToInvoiceWithEligibility: vi.fn(() => ({ invoiceData: {}, outstandingMissing: false })),
+  bulkUpsertInvoices: vi.fn().mockResolvedValue(0),
+}));
+
+vi.mock("~/lib/invoice-eligibility", () => ({
+  checkOrderEligibility: vi.fn().mockResolvedValue({ eligible: true, buyerAccountId: "buyer-mock" }),
+  getEligibilityContext: vi.fn().mockResolvedValue({ shop: { id: "shop-123" } }),
+  isTerminalFinancialStatus: vi.fn().mockReturnValue(false),
+}));
+
+vi.mock("~/services/sync/customer.server", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../customer.server")>();
+  return {
+    ...original,
+    processBulkCustomer: vi.fn().mockResolvedValue({ success: true, action: "skipped" }),
+    getTagRules: vi.fn().mockResolvedValue([]),
+  };
+});
+
+vi.mock("~/services/sync/draft-order.server", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../draft-order.server")>();
+  return {
+    ...original,
+    processBulkDraftOrder: vi.fn().mockResolvedValue({ success: true, action: "upserted" }),
+    mapDraftOrderToDraft: vi.fn().mockReturnValue({
+      draftOrderId: "test-draft-id",
+      name: "#TEST",
+      total: "1000.00",
+      hasPaymentTerms: true,
+      status: "open",
+    }),
+  };
+});
+
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -39,14 +101,14 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
   const TEST_SHOP_ID = `shop-v11dm-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-v11dm-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `account-v11dm-${TEST_SUFFIX}`;
-  const TEST_COMPANY_ID = `gid://shopify/Company/co-v11dm-${TEST_SUFFIX}`;
-  const TEST_LOCATION_ID = `gid://shopify/CompanyLocation/loc-v11dm-${TEST_SUFFIX}`;
+  const TEST_COMPANY_ID = `company-v11dm-${TEST_SUFFIX}`;
+  const TEST_LOCATION_ID = `location-v11dm-${TEST_SUFFIX}`;
 
   const SHOP_B_ID = `shop-v11dm-b-${TEST_SUFFIX}`;
   const SHOP_B_DOMAIN = `test-v11dm-b-${TEST_SUFFIX}.myshopify.com`;
 
-  const CURRENT_BULK_OP_ID = `gid://shopify/BulkOperation/current-${TEST_SUFFIX}`;
-  const OLD_BULK_OP_ID = `gid://shopify/BulkOperation/old-${TEST_SUFFIX}`;
+  const CURRENT_BULK_OP_ID = `bulk-op-current-${TEST_SUFFIX}`;
+  const OLD_BULK_OP_ID = `bulk-op-old-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -96,7 +158,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("closeMissingDraftOrders", () => {
     it("closes drafts with a different last_seen_bulk_op_id", async () => {
-      const draftMissing = `gid://shopify/DraftOrder/missing-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-missing-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
@@ -118,7 +180,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT close drafts with matching last_seen_bulk_op_id (seen in current run)", async () => {
-      const draftSeen = `gid://shopify/DraftOrder/seen-${TEST_SUFFIX}`;
+      const draftSeen = `draft-order-seen-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
@@ -140,7 +202,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT close drafts with NULL last_seen_bulk_op_id (webhook upserts)", async () => {
-      const draftWebhook = `gid://shopify/DraftOrder/webhook-${TEST_SUFFIX}`;
+      const draftWebhook = `draft-order-webhook-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
@@ -162,7 +224,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT touch another shop's rows (scoped by shop_id)", async () => {
-      const draftShopB = `gid://shopify/DraftOrder/shopb-${TEST_SUFFIX}`;
+      const draftShopB = `draft-order-shopb-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, name, total,
@@ -184,10 +246,10 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("only closes open and invoice_sent drafts, not completed or closed ones", async () => {
-      const draftOpen = `gid://shopify/DraftOrder/status-open-${TEST_SUFFIX}`;
-      const draftSent = `gid://shopify/DraftOrder/status-sent-${TEST_SUFFIX}`;
-      const draftCompleted = `gid://shopify/DraftOrder/status-completed-${TEST_SUFFIX}`;
-      const draftClosed = `gid://shopify/DraftOrder/status-closed-${TEST_SUFFIX}`;
+      const draftOpen = `draft-order-status-open-${TEST_SUFFIX}`;
+      const draftSent = `draft-order-status-sent-${TEST_SUFFIX}`;
+      const draftCompleted = `draft-order-status-completed-${TEST_SUFFIX}`;
+      const draftClosed = `draft-order-status-closed-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, name, total, has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id)
@@ -220,7 +282,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT touch redacted rows (buyer account with _redacted_ in customerId)", async () => {
-      const redactedCustomerId = `gid://shopify/Customer/redacted-cust-${TEST_SUFFIX}_redacted_1698500000000`;
+      const redactedCustomerId = `customer-redacted-cust-${TEST_SUFFIX}_redacted_1698500000000`;
       const redactedAccountId = `account-redacted-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO "BuyerAccount" (
@@ -231,7 +293,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
-      const draftRedacted = `gid://shopify/DraftOrder/redacted-${TEST_SUFFIX}`;
+      const draftRedacted = `draft-order-redacted-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
@@ -256,11 +318,11 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("returns affected account IDs for recompute", async () => {
-      const draft1 = `gid://shopify/DraftOrder/affected1-${TEST_SUFFIX}`;
-      const draft2 = `gid://shopify/DraftOrder/affected2-${TEST_SUFFIX}`;
+      const draft1 = `draft-order-affected1-${TEST_SUFFIX}`;
+      const draft2 = `draft-order-affected2-${TEST_SUFFIX}`;
       const account2Id = `account-v11dm-2-${TEST_SUFFIX}`;
-      const company2Id = `gid://shopify/Company/co2-v11dm-${TEST_SUFFIX}`;
-      const location2Id = `gid://shopify/CompanyLocation/loc2-v11dm-${TEST_SUFFIX}`;
+      const company2Id = `company2-v11dm-${TEST_SUFFIX}`;
+      const location2Id = `location2-v11dm-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO "BuyerAccount" (
@@ -288,7 +350,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("handles draft with null buyer_account_id correctly", async () => {
-      const draftNullAccount = `gid://shopify/DraftOrder/null-account-${TEST_SUFFIX}`;
+      const draftNullAccount = `draft-order-null-account-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
@@ -331,7 +393,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     }
 
     it("deactivates customers gone from Shopify (nodes returns null)", async () => {
-      const customerGone = `gid://shopify/Customer/gone-${TEST_SUFFIX}`;
+      const customerGone = `customer-gone-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -358,7 +420,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT deactivate customers still in Shopify but no longer matching tag rule (mismatch never deactivates)", async () => {
-      const customerStillExists = `gid://shopify/Customer/still-exists-${TEST_SUFFIX}`;
+      const customerStillExists = `customer-still-exists-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -384,7 +446,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT deactivate gone customer with outstanding balance (open invoice)", async () => {
-      const customerWithBalance = `gid://shopify/Customer/has-balance-${TEST_SUFFIX}`;
+      const customerWithBalance = `customer-has-balance-${TEST_SUFFIX}`;
       const accountId = `account-has-balance-${TEST_SUFFIX}`;
 
       await sql`
@@ -400,7 +462,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status, "issuedAt", "createdAt", "updatedAt"
         ) VALUES (
-          ${"inv-balance-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${accountId}, ${"gid://shopify/Order/balance-" + TEST_SUFFIX},
+          ${"inv-balance-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${accountId}, ${"order-balance-" + TEST_SUFFIX},
           '#INV-BALANCE', 1000.00, 500.00, 'open', NOW(), NOW(), NOW()
         )
       `;
@@ -433,7 +495,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT deactivate gone customer with open draft orders", async () => {
-      const customerWithDraft = `gid://shopify/Customer/has-draft-${TEST_SUFFIX}`;
+      const customerWithDraft = `customer-has-draft-${TEST_SUFFIX}`;
       const accountId = `account-has-draft-${TEST_SUFFIX}`;
 
       await sql`
@@ -449,7 +511,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at
         ) VALUES (
-          ${TEST_SHOP_ID}, ${"gid://shopify/DraftOrder/draft-skip-" + TEST_SUFFIX}, ${accountId}, '#DRAFT-SKIP', '500.00',
+          ${TEST_SHOP_ID}, ${"draft-order-draft-skip-" + TEST_SUFFIX}, ${accountId}, '#DRAFT-SKIP', '500.00',
           true, 'open', NOW(), NOW()
         )
       `;
@@ -477,12 +539,12 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       `;
       expect(row.tag_active).toBe(true);
 
-      await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${"gid://shopify/DraftOrder/draft-skip-" + TEST_SUFFIX}`;
+      await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${"draft-order-draft-skip-" + TEST_SUFFIX}`;
       await sql`DELETE FROM "BuyerAccount" WHERE id = ${accountId}`;
     });
 
     it("Shopify read failure deactivates nothing", async () => {
-      const customerMissing = `gid://shopify/Customer/api-fail-${TEST_SUFFIX}`;
+      const customerMissing = `customer-api-fail-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -508,7 +570,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT deactivate customers with matching last_seen_bulk_op_id (seen in current run)", async () => {
-      const customerSeen = `gid://shopify/Customer/seen-cust-${TEST_SUFFIX}`;
+      const customerSeen = `customer-seen-cust-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -533,7 +595,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT deactivate customers with NULL last_seen_bulk_op_id (webhook upserts)", async () => {
-      const customerWebhook = `gid://shopify/Customer/webhook-cust-${TEST_SUFFIX}`;
+      const customerWebhook = `customer-webhook-cust-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -558,7 +620,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT touch another shop's rows (scoped by shop_id)", async () => {
-      const customerShopB = `gid://shopify/Customer/shopb-cust-${TEST_SUFFIX}`;
+      const customerShopB = `customer-shopb-cust-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -583,7 +645,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT touch redacted rows (customer_id containing _redacted_)", async () => {
-      const customerRedacted = `gid://shopify/Customer/redacted-cust-${TEST_SUFFIX}_redacted_1698500000000`;
+      const customerRedacted = `customer-redacted-cust-${TEST_SUFFIX}_redacted_1698500000000`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -608,8 +670,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("only deactivates tag_active=true customers, not already inactive ones", async () => {
-      const customerActive = `gid://shopify/Customer/active-${TEST_SUFFIX}`;
-      const customerInactive = `gid://shopify/Customer/inactive-${TEST_SUFFIX}`;
+      const customerActive = `customer-active-${TEST_SUFFIX}`;
+      const customerInactive = `customer-inactive-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id)
@@ -638,7 +700,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("sets tag_deactivated_at and updated_at on deactivation", async () => {
-      const customerMissing = `gid://shopify/Customer/timestamp-cust-${TEST_SUFFIX}`;
+      const customerMissing = `customer-timestamp-cust-${TEST_SUFFIX}`;
       const originalUpdatedAt = new Date("2026-01-01T00:00:00Z");
       await sql`
         INSERT INTO s8_tagged_customers (
@@ -664,9 +726,9 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("mixed scenarios", () => {
     it("handles a mix of seen, unseen, null, and redacted rows correctly", async () => {
-      const draftSeen = `gid://shopify/DraftOrder/mix-seen-${TEST_SUFFIX}`;
-      const draftUnseen = `gid://shopify/DraftOrder/mix-unseen-${TEST_SUFFIX}`;
-      const draftNull = `gid://shopify/DraftOrder/mix-null-${TEST_SUFFIX}`;
+      const draftSeen = `draft-order-mix-seen-${TEST_SUFFIX}`;
+      const draftUnseen = `draft-order-mix-unseen-${TEST_SUFFIX}`;
+      const draftNull = `draft-order-mix-null-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id)
@@ -711,10 +773,10 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("getPendingExposure excludes closed status", () => {
     it("excludes 'closed' status from exposure, same as 'completed'", async () => {
-      const draftOpen = `gid://shopify/DraftOrder/exp-open-${TEST_SUFFIX}`;
-      const draftSent = `gid://shopify/DraftOrder/exp-sent-${TEST_SUFFIX}`;
-      const draftCompleted = `gid://shopify/DraftOrder/exp-completed-${TEST_SUFFIX}`;
-      const draftClosed = `gid://shopify/DraftOrder/exp-closed-${TEST_SUFFIX}`;
+      const draftOpen = `draft-order-exp-open-${TEST_SUFFIX}`;
+      const draftSent = `draft-order-exp-sent-${TEST_SUFFIX}`;
+      const draftCompleted = `draft-order-exp-completed-${TEST_SUFFIX}`;
+      const draftClosed = `draft-order-exp-closed-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
@@ -731,8 +793,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("exposure is unchanged for open and invoice_sent statuses", async () => {
-      const draft1 = `gid://shopify/DraftOrder/exp-unchanged1-${TEST_SUFFIX}`;
-      const draft2 = `gid://shopify/DraftOrder/exp-unchanged2-${TEST_SUFFIX}`;
+      const draft1 = `draft-order-exp-unchanged1-${TEST_SUFFIX}`;
+      const draft2 = `draft-order-exp-unchanged2-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
@@ -749,7 +811,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("Status pins: getPendingExposure counts by status", () => {
     it("counts 'open' status in exposure", async () => {
-      const draftId = `gid://shopify/DraftOrder/pin-open-${TEST_SUFFIX}`;
+      const draftId = `draft-order-pin-open-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
         VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-OPEN', '1000.00', true, 'open', NOW(), NOW())
@@ -759,7 +821,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("counts 'invoice_sent' status in exposure", async () => {
-      const draftId = `gid://shopify/DraftOrder/pin-sent-${TEST_SUFFIX}`;
+      const draftId = `draft-order-pin-sent-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
         VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-SENT', '2000.00', true, 'invoice_sent', NOW(), NOW())
@@ -769,7 +831,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("excludes 'completed' status from exposure", async () => {
-      const draftId = `gid://shopify/DraftOrder/pin-completed-${TEST_SUFFIX}`;
+      const draftId = `draft-order-pin-completed-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
         VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-COMPLETED', '3000.00', true, 'completed', NOW(), NOW())
@@ -779,7 +841,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("excludes 'closed' status from exposure", async () => {
-      const draftId = `gid://shopify/DraftOrder/pin-closed-${TEST_SUFFIX}`;
+      const draftId = `draft-order-pin-closed-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
         VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-CLOSED', '4000.00', true, 'closed', NOW(), NOW())
@@ -791,7 +853,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("Transaction rollback: enqueue failure rolls back close", () => {
     it("drafts stay open when flagAccountsForRecompute throws (transaction rollback)", async () => {
-      const draftId = `gid://shopify/DraftOrder/tx-rollback-${TEST_SUFFIX}`;
+      const draftId = `draft-order-tx-rollback-${TEST_SUFFIX}`;
       
       await sql`
         INSERT INTO s8_draft_orders (
@@ -853,8 +915,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/null-resume-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/null-resume-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-null-resume-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-null-resume-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -905,7 +967,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("(b) retry with stale token is rejected and lines_read unchanged", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/stale-token-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-stale-token-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s6_bulk_operations (
@@ -942,7 +1004,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("(b) replay of same offset is rejected and lines_read unchanged", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/same-offset-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-same-offset-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s6_bulk_operations (
@@ -982,8 +1044,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/mismatch-minus1-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/mismatch-m1-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-mismatch-minus1-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-mismatch-m1-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1029,8 +1091,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/mismatch-plus1-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/mismatch-p1-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-mismatch-plus1-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-mismatch-p1-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1063,7 +1125,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("forward progress increments lines_read correctly", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/forward-progress-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-forward-progress-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s6_bulk_operations (
@@ -1106,7 +1168,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("claimBulkCompletion adds finalLinesInChunk to lines_read and lines_processed", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/claim-sets-processed-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-claim-sets-processed-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s6_bulk_operations (
@@ -1149,8 +1211,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/guard-status-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/guard-status-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-guard-status-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-guard-status-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1196,8 +1258,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/guard-errorcode-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/guard-errorcode-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-guard-errorcode-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-guard-errorcode-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1243,8 +1305,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/guard-partial-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/guard-partial-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-guard-partial-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-guard-partial-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1290,9 +1352,9 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const olderBulkOpId = `gid://shopify/BulkOperation/guard-older-${TEST_SUFFIX}`;
-      const newerBulkOpId = `gid://shopify/BulkOperation/guard-newer-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/guard-newest-draft-${TEST_SUFFIX}`;
+      const olderBulkOpId = `bulk-op-guard-older-${TEST_SUFFIX}`;
+      const newerBulkOpId = `bulk-op-guard-newer-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-guard-newest-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1348,8 +1410,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/positive-close-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/positive-close-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-positive-close-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-positive-close-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1397,8 +1459,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         },
       });
 
-      const bulkOpId = `gid://shopify/BulkOperation/empty-result-${TEST_SUFFIX}`;
-      const draftMissing = `gid://shopify/DraftOrder/empty-result-draft-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-empty-result-${TEST_SUFFIX}`;
+      const draftMissing = `draft-order-empty-result-draft-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1433,8 +1495,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   describe("Deactivate race condition guards", () => {
     it("deactivateMissingTaggedCustomers respects shop_id and tag_active in final UPDATE", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/deactivate-race-${TEST_SUFFIX}`;
-      const customerId = `gid://shopify/Customer/deactivate-race-${TEST_SUFFIX}`;
+      const bulkOpId = `bulk-op-deactivate-race-${TEST_SUFFIX}`;
+      const customerId = `customer-deactivate-race-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_tagged_customers (
@@ -1465,6 +1527,203 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(row.tag_active).toBe(false);
 
       await sql`DELETE FROM s8_tagged_customers WHERE customer_id = ${customerId}`;
+    });
+  });
+
+  describe("End-to-end processBulkOperation with delete-missing", () => {
+    beforeEach(async () => {
+      vi.clearAllMocks();
+      vi.resetModules();
+    });
+
+    it("single-chunk export (empty result): lines_processed == objectCount and unseen drafts are closed", async () => {
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+      const mockAdminGraphQL = vi.mocked(adminGraphQL);
+
+      const bulkOpId = `bulk-op-e2e-single-chunk-${TEST_SUFFIX}`;
+      const webhookId = `webhook-e2e-single-chunk-${TEST_SUFFIX}`;
+      const draftMissingId = `draft-order-e2e-missing-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissingId}, ${TEST_ACCOUNT_ID}, '#E2E-MISSING', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, byte_offset
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders', NOW(), 0
+        )
+      `;
+
+      mockAdminGraphQL.mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            objectCount: "0",
+            fileSize: null,
+            errorCode: null,
+          }
+        },
+        retryable: false,
+      });
+
+      const result = await processBulkOperation(sql, {
+        topic: "BULK_OPERATIONS_FINISH",
+        shop: TEST_SHOP_DOMAIN,
+        webhookId,
+        enqueuedAt: new Date().toISOString(),
+        bulkOperationId: bulkOpId,
+      });
+
+      expect(result.success).toBe(true);
+
+      const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
+        SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(opRow.lines_processed).toBe("0");
+      expect(opRow.lines_read).toBe("0");
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}
+      `;
+      expect(draftRow.status).toBe("closed");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+      await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}`;
+    });
+
+    it("claimBulkCompletion with finalLinesInChunk simulates single-chunk export: lines_processed == objectCount", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "5",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
+      const bulkOpId = `bulk-op-e2e-claim-single-${TEST_SUFFIX}`;
+      const draftMissingId = `draft-order-e2e-claim-missing-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissingId}, ${TEST_ACCOUNT_ID}, '#E2E-CLAIM-MISSING', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, byte_offset, lines_read
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders', NOW(), 5000, 0
+        )
+      `;
+
+      const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseToken).not.toBeNull();
+
+      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseToken!, 5);
+      expect(claimed).toBe(true);
+
+      const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
+        SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(opRow.lines_read).toBe("5");
+      expect(opRow.lines_processed).toBe("5");
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}
+      `;
+      expect(draftRow.status).toBe("closed");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+      await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}`;
+    });
+
+    it("multi-chunk via saveBulkOperationProgress + claimBulkCompletion: lines_processed == objectCount", async () => {
+      const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
+        success: true,
+        data: {
+          id: "test-id",
+          status: "COMPLETED",
+          url: "https://example.com/results.jsonl",
+          fileSize: 2000,
+          objectCount: "10",
+          errorCode: null,
+          partialDataUrl: null,
+        },
+      });
+
+      const bulkOpId = `bulk-op-e2e-multi-chunk-${TEST_SUFFIX}`;
+      const draftMissingId = `draft-order-e2e-multi-missing-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissingId}, ${TEST_ACCOUNT_ID}, '#E2E-MULTI-MISSING', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, byte_offset
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders', NOW(), 0
+        )
+      `;
+
+      const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseToken).not.toBeNull();
+
+      await saveBulkOperationProgress(sql, bulkOpId, 500, leaseToken!, undefined, { linesInChunk: 3 });
+      await saveBulkOperationProgress(sql, bulkOpId, 1000, leaseToken!, undefined, { linesInChunk: 4 });
+
+      const [midRow] = await sql<{ lines_read: string | null }[]>`
+        SELECT lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(midRow.lines_read).toBe("7");
+
+      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseToken!, 3);
+      expect(claimed).toBe(true);
+
+      const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
+        SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(opRow.lines_read).toBe("10");
+      expect(opRow.lines_processed).toBe("10");
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId, "draft_orders", mockGetStatus);
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}
+      `;
+      expect(draftRow.status).toBe("closed");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+      await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}`;
     });
   });
 });
