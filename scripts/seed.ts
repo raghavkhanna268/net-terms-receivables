@@ -4265,6 +4265,9 @@ export async function runG4Fixture(state: SeedState, mode: "write" | "cleanup"):
           recipient,
           dryRun: state.dryRun,
         });
+        // A dry run is READ ONLY and never aborts on a failed pre-check: it
+        // reports each (window, other sendable, fixture slot) and exits 0. Only
+        // real errors (store not resolving, not INR, DB error) throw below.
         for (const line of formatG4WriteOutput(result)) console.log(line);
       } else {
         const result = await runG4Cleanup(sql, {
