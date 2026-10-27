@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
   ALL_PLAN_KEYS,
+  ALL_FEATURE_KEYS,
   type PlanKey,
   getPlanConfig,
   planLimit,
@@ -215,6 +216,12 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       const testedKeys = new Set(PLAN_FEATURE_MATRIX.map(r => r.planKey));
       for (const key of ALL_PLAN_KEYS) {
         expect(testedKeys.has(key)).toBe(true);
+      }
+
+      const NON_FEATURE_KEYS = ["planKey", "companiesLimit", "importsLimit"];
+      for (const row of PLAN_FEATURE_MATRIX) {
+        const featureColumns = Object.keys(row).filter(k => !NON_FEATURE_KEYS.includes(k)).sort();
+        expect(featureColumns).toEqual([...ALL_FEATURE_KEYS].sort());
       }
     });
 
