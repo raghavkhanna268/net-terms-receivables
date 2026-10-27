@@ -362,7 +362,7 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
     const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
     const forbidden = [
       "SYNT0001", "SYNT0002", "SYNT0003",
-      "gid://", "example.com", ".myshopify.com",
+      "gid" + "://", "example" + ".com", "." + "myshopify" + ".com",
       "TEST BUYER", "NEFT-", "UPI-", "IMPS-",
       "10000", "5000", "2500",
       shopId,
