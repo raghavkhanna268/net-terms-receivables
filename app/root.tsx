@@ -135,6 +135,10 @@ export function ErrorBoundary() {
     const copy = getGenericErrorCopy(error.status);
     title = copy.title;
     message = copy.message;
+  } else if (error instanceof Error) {
+    if (import.meta.env.DEV) {
+      console.error(error);
+    }
   }
 
   return (
