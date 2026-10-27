@@ -59,7 +59,7 @@ This plan verifies that:
 ## 4. Protected customer data, scopes and data minimization (DPDP)
 - **PCD-1:** Only customer **Email and Name** (`email`, `displayName`) are used, and only with `CUSTOMER_PII_FIELDS=1`. **Phone and address are a fail.** No new customer fields are fetched.
 - **PCD-2:** Email is read from the DB or Shopify at send time. It is not copied into reminder log or idempotency tables (store `invoiceId` and `offset` only).
-- **SCOPE-1:** Exactly the 11 production scopes. **No `write_payment_terms`, no `write_draft_orders`.** Sending email needs no Shopify scope. The scope-sync check passes.
+- **SCOPE-1:** Exactly the 9 production scopes. **No `write_payment_terms`, no `write_draft_orders`.** Sending email needs no Shopify scope. The scope-sync check passes.
 - **DPDP-1 (minimization / purpose limitation):** Reminders go only to buyers with an existing net-terms relationship. Data sent to Resend is limited to the recipient email, name and invoice summary.
 - **DPDP-2 (processor):** **No data is sent to Resend until the DPA is accepted.** This is enforced by the unset key (section A). Document Resend as a processor in `docs/privacy.md` before the key is set.
 - **DPDP-3:** `customers/redact` removes the buyer from future reminders and purges any reminder records keyed to them. Logs contain no email addresses (assert with a regex over the `console.*` spy).

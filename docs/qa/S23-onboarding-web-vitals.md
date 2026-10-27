@@ -60,7 +60,7 @@ This plan verifies that:
 ## 4. Protected customer data, scopes and data minimization (DPDP)
 - **PCD-1:** Onboarding shows counts and statuses only. Where buyer names appear, they are customer **Name/Email** gated by `CUSTOMER_PII_FIELDS=1`. **Phone and address are a fail.**
 - **PCD-2:** Web Vitals payloads contain no PII, shop-owner email, buyer data or full URLs with query strings.
-- **SCOPE-1:** Exactly the 11 production scopes. **No `write_payment_terms`, no `write_draft_orders`.** Onboarding must not trigger a scope re-approval. The scope-sync check passes.
+- **SCOPE-1:** Exactly the 9 production scopes. **No `write_payment_terms`, no `write_draft_orders`.** Onboarding must not trigger a scope re-approval. The scope-sync check passes.
 - **DPDP-1:** `ShopOnboarding` stores flags and timestamps only. It is purged on `shop/redact`.
 - **DPDP-2:** Any analytics or Web Vitals endpoint data is kept ≤ 30 days (pg_cron purge, like `s20_webhook_receipts_cleanup`) and is documented in `docs/privacy.md`.
 
