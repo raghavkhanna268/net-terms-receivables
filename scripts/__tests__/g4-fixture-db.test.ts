@@ -14,7 +14,13 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../tests/helpers/queue-leftovers";
-import { formatG4WriteOutput, g4FixtureIds, runG4Cleanup, runG4Write } from "../lib/g4-fixture";
+import {
+  formatG4CleanupOutput,
+  formatG4WriteOutput,
+  g4FixtureIds,
+  runG4Cleanup,
+  runG4Write,
+} from "../lib/g4-fixture";
 
 const RESEND_URL = "https://api.resend.com/emails";
 
@@ -466,7 +472,7 @@ describeWithDb("G4 reminder fixture (DB)", () => {
       })}::jsonb)
     `;
 
-    await runG4Cleanup(sql, { shopDomain: domain, dryRun: false });
+    const result = await runG4Cleanup(sql, { shopDomain: domain, dryRun: false });
 
     const logs = await sql`SELECT 1 FROM "ReminderLog" WHERE "invoiceId" = ${otherInvoice}`;
     expect(logs.length).toBe(1);
@@ -476,6 +482,15 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     expect(queued.c).toBe(1);
     // The fixture's own rows are gone.
     await assertFixtureDeleted(shopId);
+
+    // (b) The reported side-effect counts match the rows left in place.
+    expect(result.nonfixtureReminderLogByStatus).toEqual({ sent: 1 });
+    expect(result.nonfixtureQueued).toBe(1);
+    // The output carries the counts as fixed-key, PII-free lines (no addresses).
+    const output = formatG4CleanupOutput(result).join("\n");
+    expect(output).toContain("g4_cleanup_sideeffects nonfixture_reminderlog sent=1");
+    expect(output).toContain("g4_cleanup_sideeffects nonfixture_queued=1");
+    expect(output).not.toContain("@");
 
     await cleanupByDomain(sql, domain);
   });

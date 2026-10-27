@@ -357,6 +357,38 @@ async function countFixtureLogs(tx: Sql, fixtureInvoiceId: string): Promise<numb
   return row.c;
 }
 
+/** Non-fixture ReminderLog rows on the shop (invoiceId <> fixture), grouped by status. */
+async function nonFixtureReminderLogByStatus(
+  tx: Sql,
+  shopId: string,
+  fixtureInvoiceId: string
+): Promise<Record<string, number>> {
+  const rows = await tx<{ status: string; c: number }[]>`
+    SELECT status::text AS status, count(*)::int AS c
+    FROM "ReminderLog"
+    WHERE "shopId" = ${shopId} AND "invoiceId" <> ${fixtureInvoiceId}
+    GROUP BY status
+  `;
+  const byStatus: Record<string, number> = {};
+  for (const row of rows) byStatus[row.status] = row.c;
+  return byStatus;
+}
+
+/** Non-fixture reminder queue messages on the shop (invoiceId <> fixture). */
+async function countNonFixtureQueued(
+  tx: Sql,
+  shopId: string,
+  fixtureInvoiceId: string
+): Promise<number> {
+  const [row] = await tx<{ c: number }[]>`
+    SELECT count(*)::int AS c FROM pgmq.q_s6_sync
+    WHERE message->>'shopId' = ${shopId}
+      AND message->>'topic' IN ('REMINDER_SEND', 'REMINDER_CATCHUP')
+      AND COALESCE(message->>'invoiceId', '') <> ${fixtureInvoiceId}
+  `;
+  return row.c;
+}
+
 export interface G4WriteResult {
   mode: "write";
   dryRun: boolean;
@@ -515,6 +547,10 @@ export interface G4CleanupResult {
   prior: RemindersSetting | "unknown";
   fixture: "deleted" | "would_delete";
   queued: number;
+  /** Non-fixture ReminderLog rows on the shop (invoiceId <> fixture), by status. */
+  nonfixtureReminderLogByStatus: Record<string, number>;
+  /** Non-fixture reminder queue messages on the shop (invoiceId <> fixture). */
+  nonfixtureQueued: number;
 }
 
 export interface G4CleanupParams {
@@ -535,6 +571,12 @@ export async function runG4Cleanup(sql: Sql, params: G4CleanupParams): Promise<G
 
     const ids = g4FixtureIds(store.id);
     const queued = await countQueuedReminders(tx, store.id);
+
+    // (b) Non-fixture side effects to REPORT (never delete). Read before any
+    // delete; the deletes only touch fixture rows, so these counts describe the
+    // rows that remain in place.
+    const nonfixtureReminderLogByStatus = await nonFixtureReminderLogByStatus(tx, store.id, ids.invoice);
+    const nonfixtureQueued = await countNonFixtureQueued(tx, store.id, ids.invoice);
 
     // (1) read prior setting from the DB record
     const [priorRow] = await tx<{ prior: string | null }[]>`
@@ -560,6 +602,8 @@ export async function runG4Cleanup(sql: Sql, params: G4CleanupParams): Promise<G
         prior,
         fixture: "would_delete",
         queued,
+        nonfixtureReminderLogByStatus,
+        nonfixtureQueued,
       } satisfies G4CleanupResult;
     }
 
@@ -605,6 +649,8 @@ export async function runG4Cleanup(sql: Sql, params: G4CleanupParams): Promise<G
       prior,
       fixture: "deleted",
       queued,
+      nonfixtureReminderLogByStatus,
+      nonfixtureQueued,
     } satisfies G4CleanupResult;
   };
   return dryRun ? sql.begin("READ ONLY", work) : sql.begin(work);
@@ -635,10 +681,17 @@ export function formatG4WriteOutput(r: G4WriteResult): string[] {
   ];
 }
 
-/** Format a cleanup result as fixed-key, PII-free output lines. */
+/** Format a cleanup result as fixed-key, PII-free output lines (counts only). */
 export function formatG4CleanupOutput(r: G4CleanupResult): string[] {
+  const statuses = Object.keys(r.nonfixtureReminderLogByStatus).sort();
+  const logLine =
+    statuses.length > 0
+      ? statuses.map((k) => `${k}=${r.nonfixtureReminderLogByStatus[k]}`).join(" ")
+      : "none";
   return [
     `g4_fixture mode=cleanup dry_run=${r.dryRun} store=${r.store} prior=${r.prior} ` +
       `fixture=${r.fixture} queued=${r.queued}`,
+    `g4_cleanup_sideeffects nonfixture_reminderlog ${logLine}`,
+    `g4_cleanup_sideeffects nonfixture_queued=${r.nonfixtureQueued}`,
   ];
 }
