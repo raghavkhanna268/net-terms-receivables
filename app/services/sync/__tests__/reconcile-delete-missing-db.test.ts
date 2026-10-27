@@ -22,6 +22,11 @@ import { sqlOptions } from "~/lib/db-light.server";
 import { closeMissingDraftOrders, getPendingExposure } from "../draft-order.server";
 import { deactivateMissingTaggedCustomers } from "../customer.server";
 import * as creditRecompute from "~/services/credit-status-recompute.server";
+import {
+  saveBulkOperationProgress,
+  claimBulkCompletion,
+  acquireProcessingLease,
+} from "../bulk-jsonl-processor.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -73,6 +78,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
   });
 
   afterAll(async () => {
+    await sql`DELETE FROM s6_bulk_operations WHERE shop IN (${TEST_SHOP_DOMAIN}, ${SHOP_B_DOMAIN})`;
     await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "AccountSource" WHERE "shopId" = ${TEST_SHOP_ID}`;
@@ -827,6 +833,397 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(row.status).toBe("open");
 
       flagSpy.mockRestore();
+    });
+  });
+
+  describe("lines_read DB tests", () => {
+    it("(a) NULL lines_read at resume under-counts and closes nothing", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/null-resume-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/null-resume-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#NULL-RESUME', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 50
+        )
+      `;
+
+      const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseToken).not.toBeNull();
+
+      await sql`
+        UPDATE s6_bulk_operations
+        SET lines_read = NULL
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+
+      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseToken!);
+      expect(claimed).toBe(true);
+
+      const [opRow] = await sql<{ lines_processed: string | null }[]>`
+        SELECT lines_processed FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(opRow.lines_processed).toBeNull();
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("open");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("(b) retry with stale token is rejected and lines_read unchanged", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/stale-token-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 1000, 10
+        )
+      `;
+
+      const tokenA = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(tokenA).not.toBeNull();
+
+      await sql`
+        UPDATE s6_bulk_operations
+        SET processing_lease_until = NOW() - INTERVAL '1 second'
+        WHERE bulk_operation_id = ${bulkOpId}
+      `;
+
+      const tokenB = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(tokenB).not.toBeNull();
+      expect(tokenB).not.toBe(tokenA);
+
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, tokenA!, 20);
+      expect(rowUpdated).toBe(false);
+
+      const [opRow] = await sql<{ lines_read: string | null }[]>`
+        SELECT lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(opRow.lines_read).toBe("10");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("(b) replay of same offset is rejected and lines_read unchanged", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/same-offset-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 2000, 20
+        )
+      `;
+
+      const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseToken).not.toBeNull();
+
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!, 15);
+      expect(rowUpdated).toBe(false);
+
+      const [opRow] = await sql<{ lines_read: string | null }[]>`
+        SELECT lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(opRow.lines_read).toBe("20");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("(c) only lines_processed == objectCount allows close; objectCount-1 closes nothing", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/mismatch-minus1-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/mismatch-m1-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#MISMATCH-M1', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 99, 99, NOW()
+        )
+      `;
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("open");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("(c) only lines_processed == objectCount allows close; objectCount+1 closes nothing", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/mismatch-plus1-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/mismatch-p1-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#MISMATCH-P1', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 101, 101, NOW()
+        )
+      `;
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("open");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("forward progress increments lines_read correctly", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/forward-progress-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 0, NULL
+        )
+      `;
+
+      const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseToken).not.toBeNull();
+
+      const { rowUpdated: update1 } = await saveBulkOperationProgress(sql, bulkOpId, 1000, leaseToken!, 10);
+      expect(update1).toBe(true);
+
+      const [row1] = await sql<{ lines_read: string | null }[]>`
+        SELECT lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row1.lines_read).toBe("10");
+
+      const { rowUpdated: update2 } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!, 15);
+      expect(update2).toBe(true);
+
+      const [row2] = await sql<{ lines_read: string | null }[]>`
+        SELECT lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row2.lines_read).toBe("25");
+
+      const { rowUpdated: update3 } = await saveBulkOperationProgress(sql, bulkOpId, 3000, leaseToken!, 5);
+      expect(update3).toBe(true);
+
+      const [row3] = await sql<{ lines_read: string | null }[]>`
+        SELECT lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(row3.lines_read).toBe("30");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("claimBulkCompletion sets lines_processed from lines_read", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/claim-sets-processed-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 100
+        )
+      `;
+
+      const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
+      expect(leaseToken).not.toBeNull();
+
+      const claimed = await claimBulkCompletion(sql, bulkOpId, TEST_SHOP_DOMAIN, leaseToken!);
+      expect(claimed).toBe(true);
+
+      const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
+        SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+      `;
+      expect(opRow.lines_processed).toBe("100");
+      expect(opRow.lines_read).toBe("100");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+  });
+
+  describe("Completeness guard tests (each closes nothing)", () => {
+    it("guard: status != COMPLETED closes nothing", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/guard-status-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/guard-status-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#GUARD-STATUS', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 100, 100
+        )
+      `;
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("open");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("guard: errorCode set closes nothing", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/guard-errorcode-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/guard-errorcode-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#GUARD-ERRORCODE', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 100, 100, NOW()
+        )
+      `;
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("open");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("guard: partialDataUrl set closes nothing", async () => {
+      const bulkOpId = `gid://shopify/BulkOperation/guard-partial-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/guard-partial-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#GUARD-PARTIAL', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 100, 100, NOW()
+        )
+      `;
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("open");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+    });
+
+    it("guard: not the newest COMPLETED reconcile op of the stage closes nothing", async () => {
+      const olderBulkOpId = `gid://shopify/BulkOperation/guard-older-${TEST_SUFFIX}`;
+      const newerBulkOpId = `gid://shopify/BulkOperation/guard-newer-${TEST_SUFFIX}`;
+      const draftMissing = `gid://shopify/DraftOrder/guard-newest-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#GUARD-NEWEST', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${olderBulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW() - INTERVAL '1 hour', 5000, 100, 100, NOW() - INTERVAL '1 hour'
+        )
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${newerBulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
+          NOW(), 5000, 100, 100, NOW()
+        )
+      `;
+
+      const [draftRow] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+      `;
+      expect(draftRow.status).toBe("open");
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id IN (${olderBulkOpId}, ${newerBulkOpId})`;
     });
   });
 });
