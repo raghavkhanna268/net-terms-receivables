@@ -1714,3 +1714,219 @@ describe("backoff schedule for retryable sync failures (#212)", () => {
     });
   });
 });
+
+describe("parseCreditLimitString (Indian number formatting)", () => {
+  describe("accepts valid formats", () => {
+    it("accepts Indian lakh format '1,00,000' as 100000", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("1,00,000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000);
+      }
+    });
+
+    it("accepts Indian 10 lakh format '10,00,000' as 1000000", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("10,00,000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(1000000);
+      }
+    });
+
+    it("accepts Western format '100,000' as 100000", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("100,000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000);
+      }
+    });
+
+    it("accepts rupee prefix '₹1,00,000' as 100000", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("₹1,00,000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000);
+      }
+    });
+
+    it("accepts rupee with space '₹ 1,00,000' as 100000", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("₹ 1,00,000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000);
+      }
+    });
+
+    it("accepts rupee with decimals '₹1,00,000.50' as 100000.50", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("₹1,00,000.50");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000.5);
+      }
+    });
+
+    it("accepts single decimal '1,00,000.5' as 100000.5", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("1,00,000.5");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000.5);
+      }
+    });
+
+    it("accepts plain number '100000' as 100000", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("100000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000);
+      }
+    });
+
+    it("strips non-breaking spaces (U+00A0)", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("1\u00A000\u00A0000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000);
+      }
+    });
+
+    it("strips thin spaces (U+2009)", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("₹\u20091,00,000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(100000);
+      }
+    });
+  });
+
+  describe("rejects invalid formats", () => {
+    it("rejects letters at end '1,00,000abc'", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("1,00,000abc");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Invalid credit limit format");
+      }
+    });
+
+    it("rejects 'Rs 100' (non-₹ currency prefix)", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("Rs 100");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Invalid credit limit format");
+      }
+    });
+
+    it("rejects scientific notation '1e5'", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("1e5");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Invalid credit limit format");
+      }
+    });
+
+    it("rejects negative '-100'", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("-100");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("non-negative");
+      }
+    });
+
+    it("rejects negative with rupee '₹-100'", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("₹-100");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("non-negative");
+      }
+    });
+
+    it("rejects empty string", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("cannot be empty");
+      }
+    });
+
+    it("rejects whitespace-only input", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("   ");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("cannot be empty");
+      }
+    });
+
+    it("rejects lone rupee sign '₹'", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("₹");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("cannot be empty");
+      }
+    });
+
+    it("rejects more than 2 decimal places '100.505'", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("100.505");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Invalid credit limit format");
+      }
+    });
+
+    it("rejects multiple dots '100.50.25'", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("100.50.25");
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("Invalid credit limit format");
+      }
+    });
+
+    it("rejects null input", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString(null);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("cannot be empty");
+      }
+    });
+
+    it("rejects undefined input", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString(undefined);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("cannot be empty");
+      }
+    });
+  });
+
+  describe("preserves existing max limit validation", () => {
+    it("rejects amount exceeding MAX_CREDIT_LIMIT_AMOUNT", async () => {
+      const { parseCreditLimitString, MAX_CREDIT_LIMIT_AMOUNT } = await import("../credit-status.server");
+      const tooLarge = (MAX_CREDIT_LIMIT_AMOUNT + 1).toString();
+      const result = parseCreditLimitString(tooLarge);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error).toContain("cannot exceed");
+      }
+    });
+  });
+});
