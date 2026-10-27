@@ -42,7 +42,7 @@ impl ShopConfig {
 
     /// #292: Check if the shop is an INR shop.
     /// Returns Some(true) if shop_config has INR currency, Some(false) if non-INR.
-    /// Returns None if shop_config is missing/invalid (caller decides fail-open vs fail-closed).
+    /// Returns None if shop_config is missing/invalid (caller decides shows all vs fail-closed).
     fn is_inr_shop(&self) -> Option<bool> {
         self.currency_code.as_ref().map(|c| c == SUPPORTED_SHOP_CURRENCY)
     }
@@ -172,7 +172,7 @@ fn pass() -> schema::CartValidationsGenerateRunResult {
 ///
 /// Decision table (per rulings):
 /// 1. HELD → block (before any other check)
-/// 2. schemaVersion missing or != 1 → pass (fail-open)
+/// 2. schemaVersion missing or != 1 → pass (shows all)
 /// 3. Non-INR shop (shop_config.currencyCode != "INR") → pass (non-held buyers never blocked)
 /// 4. INR shop with non-INR cart → pass (hide-terms handles it, no blocking)
 /// 5. Over-limit → block
@@ -198,7 +198,7 @@ fn evaluate_credit_status(
     }
 
     // #292: Non-INR shop → pass (non-held buyers never blocked in non-INR shop)
-    // Missing shop_config: continue checking (fail-closed, not fail-open)
+    // Missing shop_config: continue checking (fail-closed, not shows all)
     if let Some(is_inr) = shop_config.is_inr_shop() {
         if !is_inr {
             return pass();
@@ -211,7 +211,7 @@ fn evaluate_credit_status(
     };
 
     // #292: INR shop with non-INR cart → pass (hide-terms handles it)
-    // Changed from the original fail-open to explicit pass with different intent
+    // Changed from the original shows all to explicit pass with different intent
     if status_currency != cart_currency {
         return pass();
     }
@@ -490,9 +490,7 @@ mod tests {
         let fixture = load_fixture("valid.usdCurrency");
         let input = make_input("1000.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: non-INR status with INR cart now blocks
-        // Old behaviour: pass (currency mismatch). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-INR status with INR cart blocks");
+        assert_eq!(result.operations.len(), 1, "non-INR status with INR cart blocks");
     }
 
     #[test]
@@ -511,42 +509,38 @@ mod tests {
 
     #[test]
     fn test_fixtures_invalid_wrong_schema_version_not_held_blocks() {
-        // v1.1: Non-held buyer with wrong schemaVersion now blocks (Indeterminate)
+        // Wrong schemaVersion blocks.
         let fixture = load_fixture("invalid.wrongSchemaVersionNotHeld");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: wrong schemaVersion blocks");
+        assert_eq!(result.operations.len(), 1, "wrong schemaVersion blocks");
     }
 
     #[test]
     fn test_fixtures_invalid_missing_fields_blocks() {
-        // v1.1: Missing required fields now blocks (Indeterminate)
+        // Missing required fields blocks.
         let fixture = load_fixture("invalid.missingFields");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: missing fields blocks");
+        assert_eq!(result.operations.len(), 1, "missing fields blocks");
     }
 
     #[test]
     fn test_fixtures_invalid_paise_blocks() {
-        // v1.1: Invalid paise format now blocks (Indeterminate)
+        // Invalid paise format blocks.
         let fixture = load_fixture("invalid.invalidPaise");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: invalid paise blocks");
+        assert_eq!(result.operations.len(), 1, "invalid paise blocks");
     }
 
     #[test]
-    fn test_fixtures_invalid_malformed_blocks() {
-        // v1.1: Malformed JSON now blocks (Indeterminate)
-        let fixture = load_fixture("invalid.malformed");
+    fn test_fixtures_invalid_unreadable_blocks() {
+        // Unreadable metafield blocks.
+        let fixture = load_fixture("invalid.unreadable");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: malformed metafield blocks");
+        assert_eq!(result.operations.len(), 1, "unreadable metafield blocks");
     }
 
     #[test]
@@ -711,11 +705,11 @@ mod tests {
             "CHECKOUT_COMPLETION"
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Currency mismatch should pass (fail-open)");
+        assert!(result.operations.is_empty(), "Currency mismatch should pass (shows all)");
     }
 
     /// #292: Non-INR shop with over-limit buyer should NOT block (net-terms not enforced)
-    /// This test verifies the validation function does NOT fail-open incorrectly:
+    /// This test verifies the validation function does NOT shows all incorrectly:
     /// - shop_config.currencyCode = "EUR" (non-INR shop)
     /// - Buyer has a limit that would be exceeded (limit=10000000, exposure=5000000, cart=60000.00)
     /// - Checkout should PASS because non-INR shop = no net-terms enforcement
@@ -733,7 +727,7 @@ mod tests {
         assert!(result.operations.is_empty(), "Non-INR shop should NOT block over-limit buyer (net-terms not enforced)");
     }
 
-    /// #292: Missing shop_config must NOT fail-open - over-limit buyer should be blocked.
+    /// #292: Missing shop_config must NOT shows all - over-limit buyer should be blocked.
     /// When shop_config is missing, we cannot determine if the shop is INR or not,
     /// so we conservatively continue checking credit limits.
     #[test]
@@ -744,15 +738,15 @@ mod tests {
             Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
             false,
             Some("CHECKOUT_COMPLETION"),
-            None,  // Missing shop_config - should NOT fail-open
+            None,  // Missing shop_config - should NOT shows all
         );
         let result = run_test(&input).unwrap();
-        assert!(!result.operations.is_empty(), "Missing shop_config must NOT fail-open - over-limit buyer should be blocked");
+        assert!(!result.operations.is_empty(), "Missing shop_config must NOT shows all - over-limit buyer should be blocked");
     }
 
     #[test]
-    fn test_malformed_json_blocks() {
-        // v1.1: Malformed JSON (missing required fields) now blocks
+    fn test_unreadable_json_blocks() {
+        // Unreadable JSON blocks.
         let input = make_input(
             "100.00",
             "INR",
@@ -761,8 +755,7 @@ mod tests {
             "CHECKOUT_COMPLETION"
         );
         let result = run_test(&input).unwrap();
-        // Old behaviour: pass (fail-open). New: block (Indeterminate).
-        assert_eq!(result.operations.len(), 1, "v1.1: malformed JSON blocks");
+        assert_eq!(result.operations.len(), 1, "unreadable JSON blocks");
     }
 
     #[test]
@@ -846,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_unknown_schema_version_not_held_blocks() {
-        // v1.1: Non-held buyer with unknown schemaVersion now blocks (Indeterminate)
+        // Unknown schemaVersion blocks.
         let input = make_input(
             "100.00",
             "INR",
@@ -855,8 +848,7 @@ mod tests {
             "CHECKOUT_COMPLETION"
         );
         let result = run_test(&input).unwrap();
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: unknown schemaVersion blocks");
+        assert_eq!(result.operations.len(), 1, "unknown schemaVersion blocks");
     }
 
     #[test]
@@ -880,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_b2b_location_no_metafield_falls_back_to_customer() {
-        // v1.1: When B2B location has no metafield, fall back to customer for hold check
+        // When B2B location has no metafield, fall back to customer for hold check.
         let input = r#"
         {
             "cart": {
@@ -922,9 +914,8 @@ mod tests {
         }
         "#;
         let result = run_test(input).unwrap();
-        // v1.1: B2B with no location metafield falls back to customer for hold check
-        // Old behaviour: pass (no location metafield = not net-terms). New: block (customer is held).
-        assert_eq!(result.operations.len(), 1, "v1.1: B2B falls back to customer hold status");
+        // B2B with no location metafield falls back to customer for hold check.
+        assert_eq!(result.operations.len(), 1, "B2B falls back to customer hold status");
         match &result.operations[0] {
             schema::Operation::ValidationAdd(op) => {
                 assert!(op.errors[0].message.contains("on hold"));
@@ -933,7 +924,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Missing/Null $app:credit_status metafield = ALLOW (fail-open)
+    // Missing/Null $app:credit_status metafield = ALLOW (shows all)
     // These tests verify that seed CompanyLocations without the metafield
     // are allowed through checkout (no validation error, nothing hidden).
     // =========================================================================
@@ -941,7 +932,7 @@ mod tests {
     #[test]
     fn test_missing_credit_status_metafield_allows_checkout() {
         // When $app:credit_status is missing (null), checkout should ALLOW.
-        // This is the fail-open behavior required for seed CompanyLocations
+        // This is the shows all behavior required for seed CompanyLocations
         // that haven't had their metafield synced yet.
         let input = make_input("100.00", "INR", None, false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
@@ -966,14 +957,13 @@ mod tests {
 
     #[test]
     fn test_empty_object_metafield_blocks() {
-        // v1.1: Empty object {} now blocks (Indeterminate - missing hold field)
+        // Empty object blocks.
         let input = make_input("100.00", "INR", Some("{}"), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: empty object metafield blocks");
+        assert_eq!(result.operations.len(), 1, "empty object metafield blocks");
     }
 
-    /// #292: Both credit_status AND shop_config missing must ALLOW (fail-open).
+    /// #292: Both credit_status AND shop_config missing must ALLOW.
     /// This is the scenario for brand-new CompanyLocations before any metafield sync.
     #[test]
     fn test_missing_credit_status_and_missing_shop_config_allows_checkout() {
@@ -986,7 +976,7 @@ mod tests {
             None,  // No shop_config metafield
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Missing credit_status AND missing shop_config must ALLOW (fail-open)");
+        assert!(result.operations.is_empty(), "Missing credit_status AND missing shop_config must ALLOW (shows all)");
     }
 
     /// #292: B2B location with both metafields missing must ALLOW.
@@ -1145,22 +1135,22 @@ mod tests {
     }
 
     // =========================================================================
-    // #292 G2: Malformed shop_config tests (fail-closed for over-limit)
+    // #292 G2: Unreadable shop_config tests (fail-closed for over-limit)
     // =========================================================================
 
     #[test]
-    fn test_malformed_shop_config_held_buyer_still_blocks() {
-        // #292 G2: A HELD buyer is still blocked even with malformed shop_config
+    fn test_unreadable_shop_config_held_buyer_still_blocks() {
+        // #292 G2: A HELD buyer is still blocked even with unreadable shop_config
         let input = make_input_with_step_and_shop_config(
             "100.00",
             "INR",
             Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#),
             false,
             Some("CHECKOUT_COMPLETION"),
-            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+            Some(r#"{"notValid": true}"#),  // Unreadable shop_config
         );
         let result = run_test(&input).unwrap();
-        assert_eq!(result.operations.len(), 1, "HELD buyer must be blocked even with malformed shop_config");
+        assert_eq!(result.operations.len(), 1, "HELD buyer must be blocked even with unreadable shop_config");
         match &result.operations[0] {
             schema::Operation::ValidationAdd(op) => {
                 assert!(op.errors[0].message.contains("on hold"));
@@ -1169,18 +1159,18 @@ mod tests {
     }
 
     #[test]
-    fn test_malformed_shop_config_over_limit_fails_closed() {
-        // #292 G2: Over-limit buyer fails closed even with malformed shop_config
+    fn test_unreadable_shop_config_over_limit_fails_closed() {
+        // #292 G2: Over-limit buyer fails closed even with unreadable shop_config
         let input = make_input_with_step_and_shop_config(
             "60000.00",  // 6000000 paise - would exceed limit
             "INR",
             Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
             false,
             Some("CHECKOUT_COMPLETION"),
-            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+            Some(r#"{"notValid": true}"#),  // Unreadable shop_config
         );
         let result = run_test(&input).unwrap();
-        assert_eq!(result.operations.len(), 1, "Over-limit buyer must be blocked even with malformed shop_config (fail-closed)");
+        assert_eq!(result.operations.len(), 1, "Over-limit buyer must be blocked even with unreadable shop_config (fail-closed)");
         match &result.operations[0] {
             schema::Operation::ValidationAdd(op) => {
                 assert!(op.errors[0].message.contains("credit limit"));
@@ -1189,22 +1179,22 @@ mod tests {
     }
 
     #[test]
-    fn test_malformed_shop_config_no_credit_status_passes() {
-        // #292 G2: Ordinary cart with no credit_status and malformed shop_config passes
+    fn test_unreadable_shop_config_no_credit_status_passes() {
+        // #292 G2: Ordinary cart with no credit_status and unreadable shop_config passes
         let input = make_input_with_step_and_shop_config(
             "100.00",
             "INR",
             None,  // No credit_status
             false,
             Some("CHECKOUT_COMPLETION"),
-            Some(r#"{"notValid": true}"#),  // Malformed shop_config
+            Some(r#"{"notValid": true}"#),  // Unreadable shop_config
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Ordinary cart with no credit_status should pass even with malformed shop_config");
+        assert!(result.operations.is_empty(), "Ordinary cart with no credit_status should pass even with unreadable shop_config");
     }
 
     #[test]
-    fn test_malformed_shop_config_wrong_schema_version_over_limit_blocks() {
+    fn test_unreadable_shop_config_wrong_schema_version_over_limit_blocks() {
         // #292 G2: Over-limit buyer with wrong schemaVersion in shop_config fails closed
         let input = make_input_with_step_and_shop_config(
             "60000.00",
@@ -1219,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_malformed_shop_config_missing_currency_code_over_limit_blocks() {
+    fn test_unreadable_shop_config_missing_currency_code_over_limit_blocks() {
         // #292 G2: Over-limit buyer with missing currencyCode in shop_config fails closed
         let input = make_input_with_step_and_shop_config(
             "60000.00",
@@ -1528,9 +1518,8 @@ mod tests {
     fn test_metafield_empty_string() {
         let input = make_input("100.00", "INR", Some(r#""""#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
+        // Non-object metafield blocks.
+        assert_eq!(result.operations.len(), 1, "non-object metafield blocks");
     }
 
     /// Array metafield (not a JSON object) - stricter parsing now blocks.
@@ -1538,9 +1527,8 @@ mod tests {
     fn test_metafield_array() {
         let input = make_input("100.00", "INR", Some(r#"[1, 2, 3]"#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
+        // Non-object metafield blocks.
+        assert_eq!(result.operations.len(), 1, "non-object metafield blocks");
     }
 
     /// Number metafield (not a JSON object) - stricter parsing now blocks.
@@ -1548,9 +1536,8 @@ mod tests {
     fn test_metafield_number() {
         let input = make_input("100.00", "INR", Some(r#"12345"#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
+        // Non-object metafield blocks.
+        assert_eq!(result.operations.len(), 1, "non-object metafield blocks");
     }
 
     /// Boolean metafield (not a JSON object) - stricter parsing now blocks.
@@ -1558,9 +1545,8 @@ mod tests {
     fn test_metafield_boolean() {
         let input = make_input("100.00", "INR", Some(r#"true"#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
+        // Non-object metafield blocks.
+        assert_eq!(result.operations.len(), 1, "non-object metafield blocks");
     }
 
     /// hold field as string "true" instead of boolean - stricter parsing now blocks.
@@ -1569,9 +1555,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "true", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-boolean hold blocks");
+        // Non-boolean hold blocks.
+        assert_eq!(result.operations.len(), 1, "non-boolean hold blocks");
     }
 
     /// hold field as string "HOLD" - stricter parsing now blocks.
@@ -1580,9 +1565,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "HOLD", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: string hold value blocks");
+        // Non-boolean hold blocks.
+        assert_eq!(result.operations.len(), 1, "string hold value blocks");
     }
 
     /// hold field as empty string - stricter parsing now blocks.
@@ -1591,9 +1575,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: empty string hold blocks");
+        // Non-boolean hold blocks.
+        assert_eq!(result.operations.len(), 1, "empty string hold blocks");
     }
 
     /// hold field as number 1 - stricter parsing now blocks.
@@ -1602,9 +1585,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": 1, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: numeric hold blocks");
+        // Non-boolean hold blocks.
+        assert_eq!(result.operations.len(), 1, "numeric hold blocks");
     }
 
     /// schemaVersion field as string "1" with hold=true.
@@ -1622,9 +1604,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - schemaVersion not integer is Indeterminate → Block
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: string schemaVersion blocks");
+        // Non-integer schemaVersion blocks.
+        assert_eq!(result.operations.len(), 1, "string schemaVersion blocks");
     }
 
     /// schemaVersion as 0 with hold=true - held always blocks.
@@ -1642,9 +1623,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - schemaVersion != 1 is Indeterminate → Block
-        // Old behaviour: pass (fail-open). New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: schemaVersion 0 blocks");
+        // SchemaVersion != 1 blocks.
+        assert_eq!(result.operations.len(), 1, "schemaVersion 0 blocks");
     }
 
     /// schemaVersion as -1, not held - stricter parsing now blocks.
@@ -1653,9 +1633,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": -1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - schemaVersion != 1 is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: negative schemaVersion blocks");
+        // SchemaVersion != 1 blocks.
+        assert_eq!(result.operations.len(), 1, "negative schemaVersion blocks");
     }
 
     /// currencyCode field missing - stricter parsing now blocks.
@@ -1664,9 +1643,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - missing currencyCode is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: missing currencyCode blocks");
+        // Missing currencyCode blocks.
+        assert_eq!(result.operations.len(), 1, "missing currencyCode blocks");
     }
 
     /// currencyCode as number - stricter parsing now blocks.
@@ -1675,9 +1653,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": 356, "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-string currencyCode is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: numeric currencyCode blocks");
+        // Non-string currencyCode blocks.
+        assert_eq!(result.operations.len(), 1, "numeric currencyCode blocks");
     }
 
     /// limitPaise as empty string - stricter parsing now blocks.
@@ -1686,9 +1663,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - empty limitPaise is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: empty limitPaise blocks");
+        // Empty limitPaise blocks.
+        assert_eq!(result.operations.len(), 1, "empty limitPaise blocks");
     }
 
     /// limitPaise as number instead of string - stricter parsing now blocks.
@@ -1697,9 +1673,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": 10000000, "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-string limitPaise is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: numeric limitPaise blocks");
+        // Non-string limitPaise blocks.
+        assert_eq!(result.operations.len(), 1, "numeric limitPaise blocks");
     }
 
     /// limitPaise as non-numeric string "abc" - stricter parsing now blocks.
@@ -1708,9 +1683,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "abc", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-ASCII-digit limitPaise is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-ASCII limitPaise blocks");
+        // Non-ASCII limitPaise blocks.
+        assert_eq!(result.operations.len(), 1, "non-ASCII limitPaise blocks");
     }
 
     /// exposurePaise as empty string - stricter parsing now blocks.
@@ -1719,9 +1693,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - empty exposurePaise is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: empty exposurePaise blocks");
+        // Empty exposurePaise blocks.
+        assert_eq!(result.operations.len(), 1, "empty exposurePaise blocks");
     }
 
     /// exposurePaise as number instead of string - stricter parsing now blocks.
@@ -1730,9 +1703,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": 5000000, "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-string exposurePaise is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: numeric exposurePaise blocks");
+        // Non-string exposurePaise blocks.
+        assert_eq!(result.operations.len(), 1, "numeric exposurePaise blocks");
     }
 
     /// exposurePaise as non-numeric string "abc" - stricter parsing now blocks.
@@ -1741,9 +1713,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "abc", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - non-ASCII-digit exposurePaise is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: non-ASCII exposurePaise blocks");
+        // Non-ASCII exposurePaise blocks.
+        assert_eq!(result.operations.len(), 1, "non-ASCII exposurePaise blocks");
     }
 
     // =========================================================================
@@ -1756,9 +1727,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "-10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - negative limitPaise (contains '-') is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: negative limitPaise blocks");
+        // Negative limitPaise blocks.
+        assert_eq!(result.operations.len(), 1, "negative limitPaise blocks");
     }
 
     /// Negative exposurePaise string - stricter parsing now blocks.
@@ -1767,9 +1737,8 @@ mod tests {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "-5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        // v1.1: stricter parsing - negative exposurePaise (contains '-') is Indeterminate → Block
-        // Old behaviour: pass. New: block.
-        assert_eq!(result.operations.len(), 1, "v1.1: negative exposurePaise blocks");
+        // Negative exposurePaise blocks.
+        assert_eq!(result.operations.len(), 1, "negative exposurePaise blocks");
     }
 
     /// Very large limitPaise (near u64 max).

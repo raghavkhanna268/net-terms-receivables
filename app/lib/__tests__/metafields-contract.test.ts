@@ -111,8 +111,8 @@ describe("metafields-contract", () => {
       expect(parseCreditStatus(json)).toBeNull();
     });
 
-    it("returns null for malformed JSON", () => {
-      const json = JSON.stringify(fixtures.invalid.malformed);
+    it("returns null for unreadable JSON", () => {
+      const json = JSON.stringify(fixtures.invalid.unreadable);
       expect(parseCreditStatus(json)).toBeNull();
     });
 
@@ -123,7 +123,7 @@ describe("metafields-contract", () => {
   });
 
   describe("checkCreditStatus", () => {
-    it("returns blocked=false for null status (fail-open)", () => {
+    it("returns blocked=false for null status", () => {
       const result = checkCreditStatus(null, 100000n, "INR");
       expect(result.blocked).toBe(false);
     });
@@ -154,7 +154,7 @@ describe("metafields-contract", () => {
       expect(result.blocked).toBe(false);
     });
 
-    it("allows on currency mismatch (fail-open)", () => {
+    it("allows on currency mismatch", () => {
       const status = fixtures.valid.notOnHold;
       const result = checkCreditStatus(status, 999999999n, "USD");
       expect(result.blocked).toBe(false);
