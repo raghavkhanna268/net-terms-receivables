@@ -313,14 +313,16 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
     it("DLQ count stays bounded for uninstalled shop messages (guard: sanitization in moveToDeadLetter)", async () => {
       const testWebhookId = `test-dlq-${TEST_SUFFIX}`;
 
-      await sql`
+      const [sendResult] = await sql<{ msg_id: string }[]>`
         SELECT pgmq.send('s6_sync', ${sql.json({
           topic: "ORDERS_CREATE",
           shop: SHOP_A_DOMAIN,
           webhookId: testWebhookId,
           enqueuedAt: new Date().toISOString(),
-        })})
+          resourceGid: `gid://shopify/Order/dlq-test-${TEST_SUFFIX}`,
+        })}) AS msg_id
       `;
+      const msgId = sendResult.msg_id;
 
       const { moveToDeadLetter } = await import("~/services/drain/processor.server");
       const syncMessage = {
@@ -333,7 +335,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       await moveToDeadLetter(
         sql,
         "s6_sync",
-        testWebhookId,
+        msgId,
         syncMessage,
         "shop_not_found",
         5
@@ -465,15 +467,18 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         validEnv
       );
 
-      expect(result.skipReason).not.toMatch(/uninstalled/i);
+      expect(result.skipReason ?? "").not.toMatch(/uninstalled/i);
     });
   });
 
   describe("4. Nightly reconcile skips uninstalled shops", () => {
     beforeEach(async () => {
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+      await sql`DELETE FROM "ReminderLog" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM "ReminderRule" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM s8_tagged_customers WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "Session" WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
       await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
