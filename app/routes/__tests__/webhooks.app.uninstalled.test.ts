@@ -74,6 +74,9 @@ describe("webhooks.app.uninstalled", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSql.begin.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => {
+      return callback(mockTx);
+    });
     process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
     mockVerifyWebhook.mockResolvedValue({
       shop: TEST_SHOP,

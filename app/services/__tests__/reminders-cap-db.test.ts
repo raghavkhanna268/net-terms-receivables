@@ -32,6 +32,7 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
   const FIXED_DATE = new Date("2026-10-15T12:00:00Z");
   const FIXED_DATE_STR = "2026-10-15";
   const FIXED_MONTH_STR = "2026-10";
+  const FIXED_TODAY_IST = { year: 2026, month: 10, day: 15, hour: 12, minute: 0 };
   // Earlier day in the same month for monthly volume
   const EARLIER_DATE_STR = "2026-10-01";
 
@@ -233,14 +234,14 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
         VALUES 
           (${invoiceId1}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId1},
            '#MULTI-1', 10000.00, 10000.00, 'open',
-           NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()),
+           ${FIXED_DATE_STR}::DATE - INTERVAL '5 days', ${FIXED_DATE_STR}::DATE, NOW(), NOW()),
           (${invoiceId2}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId2},
            '#MULTI-2', 20000.00, 20000.00, 'open',
-           NOW() - INTERVAL '5 days', NOW(), NOW(), NOW())
+           ${FIXED_DATE_STR}::DATE - INTERVAL '5 days', ${FIXED_DATE_STR}::DATE, NOW(), NOW())
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       mockFetch
@@ -288,12 +289,12 @@ describeWithDb("S18 reminder cap enforcement (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#IDEM-1', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_DATE_STR}::DATE - INTERVAL '5 days', ${FIXED_DATE_STR}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-idem" }) });

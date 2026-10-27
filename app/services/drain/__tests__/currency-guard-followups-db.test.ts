@@ -19,7 +19,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 describeWithDb("#292 G8 DB: Terminal topics update existing invoices for non-INR shops", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = `g8db-${Date.now().toString(36)}`;
+  const TEST_SUFFIX = `g8db-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const TEST_SHOP_ID = `shop-g8db-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-g8db-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `account-g8db-${TEST_SUFFIX}`;
@@ -212,7 +212,7 @@ describeWithDb("#292 G8 DB: Terminal topics update existing invoices for non-INR
 
 describeWithDb("#292 G5 DB: markWebhookProcessed called on non-INR skip", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = `g5db-${Date.now().toString(36)}`;
+  const TEST_SUFFIX = `g5db-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const TEST_SHOP_ID = `shop-g5db-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-g5db-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `account-g5db-${TEST_SUFFIX}`;
@@ -297,7 +297,7 @@ describeWithDb("#292 G5 DB: markWebhookProcessed called on non-INR skip", () => 
 
 describeWithDb("#292 G4 DB: Failed currency read sets XXX (no preserve-on-conflict)", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = `g4db-${Date.now().toString(36)}`;
+  const TEST_SUFFIX = `g4db-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const TEST_SHOP_DOMAIN = `test-g4db-${TEST_SUFFIX}.myshopify.com`;
 
   beforeEach(async () => {
