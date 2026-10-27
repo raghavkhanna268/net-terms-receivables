@@ -9,8 +9,9 @@
  *   when SHOP != ALLOWED_DEV_STORE
  * - scripts/ci/redact-seed-output.sh: GIDs, order names, amounts, emails and
  *   domains never reach public logs
- * - the workflow itself: dispatch-only, main-only, boolean inputs only (no
- *   shop/domain input), dry_run defaults to true, pinned actions, guard first
+ * - the workflow itself: dispatch-only, main-only, no shop/domain input (the
+ *   g4_fixture choice is none/write/cleanup), dry_run defaults to true, pinned
+ *   actions, guard first
  *
  * All domains here are fake placeholders.
  */
@@ -187,14 +188,18 @@ describe("seed-e2e-store.yml static checks", () => {
     expect(wf).toMatch(/^\s+if: github\.ref == 'refs\/heads\/main'$/m);
   });
 
-  it("has only boolean inputs dry_run (default true) and reviewer_demo (default false)", () => {
+  it("has boolean inputs dry_run/reviewer_demo and the g4_fixture choice (none/write/cleanup), no shop/domain input", () => {
     const inputsBlock = wf.split(/^ {4}inputs:\s*$/m)[1].split(/^permissions:/m)[0];
-    const names = [...inputsBlock.matchAll(/^ {6}([a-z_]+):/gm)].map((m) => m[1]);
-    expect(names).toEqual(["dry_run", "reviewer_demo"]);
+    const names = [...inputsBlock.matchAll(/^ {6}([a-z0-9_]+):/gm)].map((m) => m[1]);
+    expect(names).toEqual(["dry_run", "reviewer_demo", "g4_fixture"]);
     const types = [...inputsBlock.matchAll(/^ {8}type: (\S+)/gm)].map((m) => m[1]);
-    expect(types).toEqual(["boolean", "boolean"]);
+    expect(types).toEqual(["boolean", "boolean", "choice"]);
     const defaults = [...inputsBlock.matchAll(/^ {8}default: (\S+)/gm)].map((m) => m[1]);
-    expect(defaults).toEqual(["true", "false"]);
+    // dry_run defaults true (writes need an explicit non-dry-run choice); the
+    // fixture defaults to none, so a write/cleanup is never the default action.
+    expect(defaults).toEqual(["true", "false", "none"]);
+    const options = [...inputsBlock.matchAll(/^ {10}- (\S+)/gm)].map((m) => m[1]);
+    expect(options).toEqual(["none", "write", "cleanup"]);
     expect(names.some((n) => /shop|domain|store/i.test(n))).toBe(false);
   });
 
