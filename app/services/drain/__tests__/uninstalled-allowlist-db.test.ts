@@ -481,7 +481,7 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
       }
     });
 
-    it("CUSTOMERS_UPDATE (tag removed): uninstalled shop reaches handler, tag_active=false, 0 Admin calls", async () => {
+    it("CUSTOMERS_UPDATE (tag removed): uninstalled shop reaches handler, tag_active=false, handler path (Admin call made)", async () => {
       const suffix = testContext.suffix;
       const domain = `test-cust-update-tag-removed-${suffix}.example.com`;
       const shopId = `shop-cust-update-tag-removed-${suffix}`;
