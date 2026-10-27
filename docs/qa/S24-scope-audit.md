@@ -1,5 +1,7 @@
 # S24 Scope Audit: Production OAuth scope verification
 
+> **Note (2026-10-27):** production has had 9 scopes since #289; the counts below are historical and kept as recorded.
+
 ---
 
 ## 2026-10-25: Scope reduction 11 → 8
@@ -42,7 +44,7 @@ Behaviour for already-installed stores (whether removed scopes are revoked, and 
 
 ### Webhook Subscription Scope Requirements
 
-All webhook topics in `shopify.app.toml` are verified deliverable with the 9 production scopes:
+All webhook topics in `shopify.app.toml` are verified deliverable with the 8 production scopes:
 
 | Topic | Required Scope | Status |
 |-------|---------------|--------|
@@ -57,7 +59,7 @@ All webhook topics in `shopify.app.toml` are verified deliverable with the 9 pro
 | `customers/*` | `read_customers` (implied by `write_customers`) | ✓ |
 | `draft_orders/*` | `read_draft_orders` (explicit) | ✓ |
 
-**Verification method:** The original 2026-10-23 audit (below) documented that `companies/*`, `company_locations/*`, `customers/*`, `orders/*`, and `draft_orders/*` webhook subscriptions existed and were deliverable with the then-9 scopes. Per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes), write scopes imply read access, so these webhooks remain deliverable. App lifecycle, billing, and compliance webhooks do not require resource scopes.
+**Verification method:** The original 2026-10-23 audit (below) documented that `companies/*`, `company_locations/*`, `customers/*`, `orders/*`, and `draft_orders/*` webhook subscriptions existed and were deliverable with the then-11 scopes. Per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes), write scopes imply read access, so these webhooks remain deliverable. App lifecycle, billing, and compliance webhooks do not require resource scopes.
 
 ---
 
@@ -67,7 +69,7 @@ All webhook topics in `shopify.app.toml` are verified deliverable with the 9 pro
 **Commit:** `main` @ [`51d2266`](https://github.com/raghavkhanna268/net-terms-receivables/commit/51d22662b0629656fb810221a01054ef012f0d93) (`51d22662b0629656fb810221a01054ef012f0d93`, #70 S10b). All file:line citations below are at this SHA.  
 **Auditor:** QA
 
-This document maps each of the 9 production OAuth scopes in `shopify.app.toml` to the merged code on `main` that actually uses them. Each scope is classified as:
+This document maps each of the 11 production OAuth scopes in `shopify.app.toml` to the merged code on `main` that actually uses them. Each scope is classified as:
 - **USED**: Merged code on `main` exercises the scope via GraphQL operations or webhooks
 - **PRE-GRANTED**: Scope is included for an unshipped story; no merged code uses it yet
 - **UNUSED**: Scope is in production config but no code (merged or planned) requires it
@@ -265,7 +267,7 @@ rg "paymentCustomization" app/ --glob "*.ts" --glob "*.tsx"
 
 ## Recommendations
 
-1. **No unused scopes found.** All 9 production scopes are either actively used or pre-granted for documented upcoming stories (S13, S17).
+1. **No unused scopes found.** All 11 production scopes are either actively used or pre-granted for documented upcoming stories (S13, S17).
 
 2. **Pre-granted scopes (3) should ship with their stories:**
    - `write_merchant_managed_fulfillment_orders` — S13
@@ -276,7 +278,7 @@ rg "paymentCustomization" app/ --glob "*.ts" --glob "*.tsx"
 
 4. **S8 wiring follow-up (engineering):** register drain handlers for CUSTOMERS_* and DRAFT_ORDERS_*, or stop enqueueing them. At present they are dead-lettered after 48 reads (`processor.server.ts:68,566-575`).
 
-5. **Session scope string:** the prod offline session stores 8 scope tokens (`read_draft_orders, read_payment_terms, write_companies, write_customers, write_merchant_managed_fulfillment_orders, write_orders, write_payment_customizations, write_validations`), per Prod Diagnostics run [39980626029](https://github.com/raghavkhanna268/net-terms-receivables/actions/runs/39980626029) on 2026-10-23 21:12 IST. Shopify omits `read_X` when `write_X` is granted, so this is the same 9 effective scopes with no `write_payment_terms` and no `write_draft_orders`.
+5. **Session scope string:** the prod offline session stores 8 scope tokens (`read_draft_orders, read_payment_terms, write_companies, write_customers, write_merchant_managed_fulfillment_orders, write_orders, write_payment_customizations, write_validations`), per Prod Diagnostics run [39980626029](https://github.com/raghavkhanna268/net-terms-receivables/actions/runs/39980626029) on 2026-10-23 21:12 IST. Shopify omits `read_X` when `write_X` is granted, so this is the same 11 effective scopes with no `write_payment_terms` and no `write_draft_orders`.
 
 6. **Confirm no `write_payment_terms` or `write_draft_orders` in production:** Verified ✓ (`shopify.app.toml` and the `wrangler.jsonc` SCOPES var at 51d2266, plus the prod session scope string above)
 
