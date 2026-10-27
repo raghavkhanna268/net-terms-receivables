@@ -284,6 +284,177 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     await cleanupByDomain(sql, domain);
   });
 
+  async function countReminderRules(shopId: string): Promise<number> {
+    const [row] = await sql<{ c: number }[]>`
+      SELECT count(*)::int AS c FROM "ReminderRule" WHERE "shopId" = ${shopId}
+    `;
+    return row.c;
+  }
+
+  // Rule reporting: the dry run predicts the live write's reuse/create decision
+  // from the shared read-only lookup. Reverting it (dry run hard-codes "reused")
+  // makes the would_create case below fail.
+  it("dry run with an existing enabled offset-0 email rule reports would_reuse", async () => {
+    const suffix = freshSuffix();
+    const { shopId, domain } = await insertShop({
+      suffix,
+      timezone: etcZoneForLocalHour(await dbNow(), 12),
+    });
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${`existing-rule-${suffix}`}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.rule).toBe("would_reuse");
+    expect(result.fixture).toBe("would_write");
+    const output = formatG4WriteOutput(result).join("\n");
+    expect(output).toContain("rule=would_reuse");
+    expect(output).not.toContain("@");
+
+    // READ ONLY: nothing written and the existing rule is the only one present.
+    expect(await countFixtureRows(shopId)).toBe(0);
+    expect(await countReminderRules(shopId)).toBe(1);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("dry run with no offset-0 email rule reports would_create and writes nothing", async () => {
+    const suffix = freshSuffix();
+    const { shopId, domain } = await insertShop({
+      suffix,
+      timezone: etcZoneForLocalHour(await dbNow(), 12),
+    });
+    const before = await countReminderRules(shopId);
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.rule).toBe("would_create");
+    expect(result.fixture).toBe("would_write");
+    const output = formatG4WriteOutput(result).join("\n");
+    expect(output).toContain("rule=would_create");
+
+    // READ ONLY: no fixture rows and the rule count is unchanged (none created).
+    expect(await countFixtureRows(shopId)).toBe(0);
+    expect(await countReminderRules(shopId)).toBe(before);
+    expect(await countReminderRules(shopId)).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  // Gated count: an OTHER (non-fixture) gated buyer with an open invoice due
+  // today is reported via other_gated_due_today (the would-be offset-0 rule is
+  // folded in, since this fresh shop has no offset-0 email rule). The buyer is
+  // gated, so it never appears in other_due_today/other_sendable_today. Reverting
+  // the gated count makes the otherGatedDueToday assertion fail.
+  it("counts a gated other buyer with an invoice due today", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const gatedAccount = `gated-acct-${suffix}`;
+    const gatedInvoice = `gated-inv-${suffix}`;
+    const gatedOrder = `gated-order-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", gated_at, "createdAt", "updatedAt")
+      VALUES (${gatedAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Gated Buyer', 'gated@example.com', 'OK', now(), NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${gatedInvoice}, ${shopId}, ${gatedAccount}, ${gatedOrder}, 'GATED-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.otherGatedDueToday).toBe(1);
+    // The gated buyer is excluded from the non-gated due/sendable counts.
+    expect(result.sideEffects.otherDueToday).toBe(0);
+    expect(result.sideEffects.otherSendableToday).toBe(0);
+    const output = formatG4WriteOutput(result).join("\n");
+    expect(output).toContain("other_gated_due_today=1");
+    expect(output).not.toContain("@");
+
+    expect(await countFixtureRows(shopId)).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("reports other_gated_due_today=0 when there is no gated buyer due today", async () => {
+    const suffix = freshSuffix();
+    const { shopId, domain } = await insertShop({
+      suffix,
+      timezone: etcZoneForLocalHour(await dbNow(), 12),
+    });
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.otherGatedDueToday).toBe(0);
+    expect(formatG4WriteOutput(result).join("\n")).toContain("other_gated_due_today=0");
+
+    expect(await countFixtureRows(shopId)).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  // Live-write parity: the shared lookup drives the live reused/created value too.
+  it("live write reports reused with an existing offset-0 rule and created without", async () => {
+    // (a) existing enabled offset-0 email rule => reused, and no seed rule added.
+    const reuseSuffix = freshSuffix();
+    const reuse = await insertShop({
+      suffix: reuseSuffix,
+      timezone: etcZoneForLocalHour(await dbNow(), 12),
+    });
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${`existing-rule-${reuseSuffix}`}, ${reuse.shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    const reuseResult = await runG4Write(sql, {
+      shopDomain: reuse.domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: false,
+    });
+    expect(reuseResult.rule).toBe("reused");
+    expect(reuseResult.fixture).toBe("written");
+    const seedRule = await sql`SELECT 1 FROM "ReminderRule" WHERE id = ${g4FixtureIds(reuse.shopId).rule}`;
+    expect(seedRule.length).toBe(0);
+    await cleanupByDomain(sql, reuse.domain);
+
+    // (b) no offset-0 email rule => created (seed-g4-rule0-<shop>).
+    const createSuffix = freshSuffix();
+    const create = await insertShop({
+      suffix: createSuffix,
+      timezone: etcZoneForLocalHour(await dbNow(), 12),
+    });
+    const createResult = await runG4Write(sql, {
+      shopDomain: create.domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: false,
+    });
+    expect(createResult.rule).toBe("created");
+    expect(createResult.fixture).toBe("written");
+    const created = await sql`SELECT 1 FROM "ReminderRule" WHERE id = ${g4FixtureIds(create.shopId).rule}`;
+    expect(created.length).toBe(1);
+    await cleanupByDomain(sql, create.domain);
+  });
+
   // Guard: write window. Removing assertWithinWriteWindow lets this proceed and write.
   // A LIVE write outside the window still aborts with the existing code.
   it("aborts outside the write window and writes nothing", async () => {

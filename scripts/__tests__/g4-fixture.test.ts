@@ -11,6 +11,7 @@ import {
   formatG4CleanupOutput,
   formatG4CleanupWindowLine,
   formatG4WindowLine,
+  formatG4WriteOutput,
   G4_CLEANUP_DUE_BEFORE,
   G4_RECIPIENT_ENV,
   g4FixtureIds,
@@ -583,6 +584,80 @@ describe("formatG4ChecksLine", () => {
       "g4_checks write_window_ok=false other_sendable_ok=false fixture_slot=taken"
     );
     expect(line).not.toContain("@");
+  });
+});
+
+describe("formatG4WriteOutput (rule reporting + gated counts)", () => {
+  // Fixed-key, PII-free output: times/offsets, enums, counts only. All synthetic.
+  const window = {
+    shopTzOffset: "+05:30",
+    nextEnqueueUtc: "13:15",
+    nextEnqueueLocal: "18:45",
+    lastEnqueueLocalToday: "18:45",
+    writeWindowOk: true,
+  };
+  const checks = { writeWindowOk: true, otherSendableOk: true, fixtureSlot: "free" as const };
+  const sideEffects = {
+    otherDueToday: 2,
+    otherSendableToday: 1,
+    otherGatedDueToday: 3,
+    wouldEnqueueNonFixture: 2,
+    wouldEnqueueExpectedSkip: 1,
+    wouldEnqueueExpectedSend: 1,
+    existingLogsByStatus: {},
+  };
+  const dryBase = {
+    mode: "write" as const,
+    dryRun: true,
+    store: "resolved" as const,
+    prior: "absent" as const,
+    fixture: "would_write" as const,
+    reminders: "unchanged" as const,
+    queued: 0,
+    sideEffects,
+    checks,
+    window,
+  };
+
+  it("dry run with an existing offset-0 rule prints rule=would_reuse", () => {
+    const out = formatG4WriteOutput({ ...dryBase, rule: "would_reuse" }).join("\n");
+    expect(out).toContain("rule=would_reuse");
+    expect(out).not.toContain("rule=reused ");
+  });
+
+  it("dry run without an offset-0 rule prints rule=would_create", () => {
+    const out = formatG4WriteOutput({ ...dryBase, rule: "would_create" }).join("\n");
+    expect(out).toContain("rule=would_create");
+  });
+
+  // Guards the other_gated_due_today key on the existing g4_sideeffects line.
+  // Removing the key from formatG4SideEffects makes this fail.
+  it("prints other_gated_due_today on the g4_sideeffects line (counts only)", () => {
+    const out = formatG4WriteOutput({ ...dryBase, rule: "would_create" }).join("\n");
+    expect(out).toContain(
+      "g4_sideeffects other_due_today=2 other_sendable_today=1 other_gated_due_today=3"
+    );
+    // Counts only: no addresses, ids, or amounts leak into the output.
+    expect(out).not.toContain("@");
+  });
+
+  it("live write still prints rule=created and rule=reused unchanged", () => {
+    const created = formatG4WriteOutput({
+      ...dryBase,
+      dryRun: false,
+      fixture: "written",
+      reminders: "on",
+      rule: "created",
+    }).join("\n");
+    expect(created).toContain("rule=created");
+    const reused = formatG4WriteOutput({
+      ...dryBase,
+      dryRun: false,
+      fixture: "written",
+      reminders: "on",
+      rule: "reused",
+    }).join("\n");
+    expect(reused).toContain("rule=reused");
   });
 });
 
