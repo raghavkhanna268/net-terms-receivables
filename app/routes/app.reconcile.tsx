@@ -19,7 +19,7 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useNavigation, Form } from "react-router";
+import { useLoaderData, useActionData, useNavigation, Form } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import {
@@ -421,12 +421,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   `;
 
   if (!shop) {
-    return { success: false, error: "Shop not found" };
+    return { success: false, intent: null, error: "Shop not found" };
   }
 
   // #292/G7: Currency guard - refuse all reconcile actions for non-INR or unknown shops
   if (!isCurrencyGateOpen(shop.currency)) {
-    return { success: false, error: "Currency not supported" };
+    return { success: false, intent: null, error: "Currency not supported" };
   }
 
   const userId = session.onlineAccessInfo?.associatedUser?.id?.toString() ?? "system";
@@ -438,6 +438,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const result = await runMatcher(sql, shop.id, { limit: MAX_PAYMENTS_PER_REQUEST });
         return {
           success: true,
+          intent: "run_matcher",
           message: `Processed ${result.paymentsProcessed} payments, created ${result.matchesCreated} matches (${result.highConfidenceMatches} high confidence)${result.hasMore ? " (more pending)" : ""}`,
         };
       }
@@ -445,12 +446,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "confirm": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "confirm", error: "Match ID required" };
         }
         const result = await confirmMatch(sql, shop.id, matchId, userId);
         // P2.6: Return generic error messages, details logged server-side
         return {
           success: result.success,
+          intent: "confirm",
           error: result.success ? null : "Failed to confirm match",
         };
       }
@@ -458,12 +460,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "reject": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "reject", error: "Match ID required" };
         }
         const result = await rejectMatch(sql, shop.id, matchId, userId);
         // P2.6: Return generic error messages, details logged server-side
         return {
           success: result.success,
+          intent: "reject",
           error: result.success ? null : "Failed to reject match",
         };
       }
@@ -473,11 +476,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "apply": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "apply", error: "Match ID required" };
         }
         const result = await applyMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
+          intent: "apply",
           error: result.success ? null : toHumanError(result.error) ?? "Failed to apply match",
         };
       }
@@ -487,11 +491,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "unmatch": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "unmatch", error: "Match ID required" };
         }
         const result = await unmatchMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
+          intent: "unmatch",
           error: result.success ? null : toHumanError(result.error) ?? "Failed to unmatch",
         };
       }
@@ -501,7 +506,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           shopId: shop.id,
           action: toSafeIntent(intent),
         });
-        return { success: false, error: "Unknown action" };
+        return { success: false, intent: "unknown", error: "Unknown action" };
     }
   } catch (err) {
     safeLog("error", "reconcile_action_error", {
@@ -511,6 +516,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     });
     return {
       success: false,
+      intent: toSafeIntent(intent) as ReconcileIntent | "unknown",
       error: "Action failed",
     };
   }
@@ -1080,6 +1086,13 @@ function PushingMatchesView({
   );
 }
 
+const ACTION_SUCCESS_MESSAGES: Record<string, string> = {
+  confirm: "Match confirmed.",
+  reject: "Match rejected.",
+  apply: "Payment applied to the invoice.",
+  unmatch: "Match removed.",
+};
+
 export default function ReconcilePage() {
   const loaderData = useLoaderData<typeof loader>();
   const {
@@ -1092,6 +1105,7 @@ export default function ReconcilePage() {
     error,
     tabCounts,
   } = loaderData;
+  const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
   const actionsDisabled = isSubmitting;
@@ -1116,6 +1130,20 @@ export default function ReconcilePage() {
           <s-banner tone="critical" heading="Error">
             {error}
           </s-banner>
+        </s-section>
+      )}
+
+      {actionData && (
+        <s-section>
+          {actionData.success ? (
+            <s-banner tone="success">
+              {actionData.message ?? (actionData.intent && ACTION_SUCCESS_MESSAGES[actionData.intent]) ?? "Action completed."}
+            </s-banner>
+          ) : (
+            <s-banner tone="critical">
+              {actionData.error ?? "Something went wrong. Please try again."}
+            </s-banner>
+          )}
         </s-section>
       )}
 
