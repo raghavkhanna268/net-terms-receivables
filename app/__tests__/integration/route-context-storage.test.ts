@@ -114,7 +114,11 @@ describe("Route context storage verification", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+    process.env = {
+      ...originalEnv,
+      SHOPIFY_API_SECRET: "test-secret",
+      SHOPIFY_API_KEY: "test-api-key",
+    };
   });
 
   afterEach(() => {

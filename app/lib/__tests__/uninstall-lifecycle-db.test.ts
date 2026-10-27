@@ -246,7 +246,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
 
     beforeEach(async () => {
       vi.clearAllMocks();
-      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret", SHOPIFY_API_KEY: "test-client-id" };
       await sql`DELETE FROM "Session" WHERE shop = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM webhook_receipts WHERE shop = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + SHOP_A_DOMAIN + '%'}`;
@@ -733,7 +733,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
 
     beforeEach(async () => {
       vi.clearAllMocks();
-      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret", SHOPIFY_API_KEY: "test-client-id" };
 
       await sql`DELETE FROM "Match" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "ReminderLog" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
@@ -1073,7 +1073,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret", SHOPIFY_API_KEY: "test-client-id" };
 
       await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${SHOP_A_ID}`;

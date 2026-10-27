@@ -68,8 +68,11 @@ const mockSessionStorage = {
 };
 
 const mockTx = vi.fn().mockResolvedValue(Object.assign([], { count: 0 }));
+const mockSqlQuery = vi.fn().mockResolvedValue([]);
 const mockSql = Object.assign(
-  vi.fn().mockResolvedValue([]),
+  function(strings: TemplateStringsArray, ...values: unknown[]) {
+    return mockSqlQuery(strings, ...values);
+  },
   {
     json: vi.fn((v) => v),
     begin: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
@@ -80,6 +83,21 @@ const mockSql = Object.assign(
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+}));
+
+const mockGetOfflineAdminContext = vi.fn().mockResolvedValue({
+  success: false,
+  errorCode: "no_session",
+  retryable: false,
+  needsReauth: true,
+});
+vi.mock("~/lib/offline-admin.server", () => ({
+  getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
+}));
+
+const mockParseTriggeredAt = vi.fn().mockReturnValue(null);
+vi.mock("~/lib/webhook-receipts.server", () => ({
+  parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
 }));
 
 const mockMarkShopUninstalled = vi.fn().mockResolvedValue(true);
@@ -116,8 +134,15 @@ describe("webhooks.app.uninstalled unmocked HMAC tests", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSql.mockResolvedValue([]);
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
+    mockSqlQuery.mockResolvedValue([]);
+    mockGetOfflineAdminContext.mockResolvedValue({
+      success: false,
+      errorCode: "no_session",
+      retryable: false,
+      needsReauth: true,
+    });
+    mockParseTriggeredAt.mockReturnValue(null);
+    process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET, SHOPIFY_API_KEY: "test-client-id" };
   });
 
   afterEach(() => {

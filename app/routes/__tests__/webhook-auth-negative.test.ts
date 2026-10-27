@@ -248,7 +248,7 @@ describe("Webhook Authentication Negative Test Suite", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
-    process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
+    process.env = { ...originalEnv, SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET, SHOPIFY_API_KEY: "test-client-id" };
     
     mockSql.mockClear();
     mockSql.begin.mockClear();
