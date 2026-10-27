@@ -123,7 +123,7 @@ describeWithDb("AuditEvent contains no buyer name or email", () => {
       INSERT INTO "BuyerAccount" (
         id, "shopId", kind, "companyId", "companyLocationId",
         name, "mainContactName", "mainContactEmail",
-        "creditLimit", "holdState", bypass, "manualHold", "holdReasonCode",
+        "creditLimit", "holdState", "manualHold", "holdReasonCode",
         "defaultTermsDays", "defaultTermsSource",
         "syncPending", "syncVersion", "createdAt", "updatedAt"
       )
@@ -131,7 +131,7 @@ describeWithDb("AuditEvent contains no buyer name or email", () => {
         ${TEST_ACCOUNT_ID}, ${TEST_SHOP_ID}, 'COMPANY',
         ${"co-" + TEST_SUFFIX}, ${TEST_COMPANY_LOCATION_ID},
         ${BUYER_NAME}, ${BUYER_NAME}, ${BUYER_EMAIL},
-        100000.00, 'OK', false, false, NULL,
+        100000.00, 'OK', false, NULL,
         30, 'explicit',
         false, 1, NOW(), NOW()
       )
