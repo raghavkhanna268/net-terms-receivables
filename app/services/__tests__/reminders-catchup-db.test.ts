@@ -96,8 +96,6 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   const TEST_RULE_ID_1 = `rule-catchup-1-${TEST_SUFFIX}`;
   const TEST_RULE_ID_2 = `rule-catchup-2-${TEST_SUFFIX}`;
   const TEST_RULE_ID_3 = `rule-catchup-3-${TEST_SUFFIX}`;
-  const TEST_TIEBREAK_RULE_AAA = `rule-tie-aaa-${TEST_SUFFIX}`;
-  const TEST_TIEBREAK_RULE_ZZZ = `rule-tie-zzz-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -148,9 +146,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       VALUES 
         (${TEST_RULE_ID_1}, ${TEST_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW()),
         (${TEST_RULE_ID_2}, ${TEST_SHOP_ID}, 7, 'email'::"ReminderChannel", true, NOW(), NOW()),
-        (${TEST_RULE_ID_3}, ${TEST_SHOP_ID}, 14, 'email'::"ReminderChannel", true, NOW(), NOW()),
-        (${TEST_TIEBREAK_RULE_AAA}, ${TEST_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW()),
-        (${TEST_TIEBREAK_RULE_ZZZ}, ${TEST_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+        (${TEST_RULE_ID_3}, ${TEST_SHOP_ID}, 14, 'email'::"ReminderChannel", true, NOW(), NOW())
     `;
   });
 
@@ -158,7 +154,6 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
     const dates = computeDatesFromDbNow(dbNow, testTimezone);
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "ReminderRule" WHERE id IN (${TEST_TIEBREAK_RULE_AAA}, ${TEST_TIEBREAK_RULE_ZZZ})`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${TEST_SHOP_ID}`;
@@ -1544,8 +1539,6 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
   describe("amount tiebreak ordering (#230)", () => {
     it("orders by outstanding DESC when reminder dates are equal (larger amount first)", { timeout: 15000 }, async () => {
-      // CI measured 3.5-4.2s (job 122169705630: 4036ms UTC, 3552ms Auckland; timed out at
-      // 5007ms in job 122220619475); local ~500-550ms. Timeout raised as CI safety net.
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       // IDs chosen so invoiceId ASC order is OPPOSITE of amount DESC order:
       // - inv-a-... has SMALL amount (1000) but sorts FIRST by invoiceId
@@ -1769,68 +1762,87 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
 
     it("ruleId ASC tiebreaker for same invoice with two rules at same offsetDays", { timeout: 15000 }, async () => {
       // Test ruleId ordering when date, amount, and invoiceId all tie.
-      // Uses pre-created rules TEST_TIEBREAK_RULE_AAA and TEST_TIEBREAK_RULE_ZZZ
-      // (both offsetDays=0). Part 2 only skips stages where offsetDays < max, so
-      // equal offsetDays both survive. Rule IDs: aaa < zzz alphabetically.
-      // CI measured 2.6-3.5s (job 122169705630, 122220619475); local ~350-425ms.
+      // Create TWO DEDICATED rules with the SAME offsetDays=0, both enabled email rules.
+      // Part 2 only skips stages where offsetDays < max, so equal offsetDays both survive.
+      // IDs chosen so insertion order is REVERSE of ruleId ASC: zzz inserted before aaa.
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       const invoiceId = `inv-ruleid-tie-${TEST_SUFFIX}`;
       const orderId = `gid://shopify/Order/ruleid-tie-${TEST_SUFFIX}`;
-
-      await sql`
-        INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-        )
-        VALUES (
-          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-          '#RULEID-TIE', 10000.00, 5000.00, 'open',
-          ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}
-        )
-      `;
-
-      // Insert delayed logs in REVERSE ruleId order (zzz, then aaa) to prove ORDER BY
-      await sql`
-        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES 
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_TIEBREAK_RULE_ZZZ}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
-          (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${TEST_TIEBREAK_RULE_AAA}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
-      `;
-
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
-      await sql`SELECT public.s18_enqueue_reminders()`;
-
-      // Check that Part 2 did NOT skip either (both have same offsetDays=0 = max for this invoice)
-      const logs = await sql<{ ruleId: string; status: string }[]>`
-        SELECT "ruleId", status FROM "ReminderLog"
-        WHERE "invoiceId" = ${invoiceId}
-        ORDER BY "ruleId" ASC
-      `;
       
-      // Both should still be 'delayed' (not skipped by Part 2)
-      expect(logs.length).toBe(2);
-      expect(logs[0].ruleId).toBe(TEST_TIEBREAK_RULE_AAA);
-      expect(logs[0].status).toBe("delayed");
-      expect(logs[1].ruleId).toBe(TEST_TIEBREAK_RULE_ZZZ);
-      expect(logs[1].status).toBe("delayed");
+      // Rule IDs: aaa < zzz alphabetically, so ruleId ASC = [aaa, zzz]
+      // Insert zzz first to prove ORDER BY, not insertion order
+      const ruleIdAaa = `rule-tie-aaa-${TEST_SUFFIX}`;
+      const ruleIdZzz = `rule-tie-zzz-${TEST_SUFFIX}`;
 
-      const messages = await sql<{ invoiceId: string; ruleId: string }[]>`
-        SELECT message->>'invoiceId' AS "invoiceId", message->>'ruleId' AS "ruleId"
-        FROM pgmq.q_s6_sync
-        WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
-          AND message->>'topic' = 'REMINDER_CATCHUP'
-          AND message->>'invoiceId' = ${invoiceId}
-        ORDER BY msg_id ASC
-      `;
+      try {
+        // Create two dedicated rules with offsetDays=0 (same as TEST_RULE_ID_1)
+        // Insert in REVERSE ruleId order: zzz first, then aaa
+        await sql`
+          INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+          VALUES 
+            (${ruleIdZzz}, ${TEST_SHOP_ID}, 0, 'email'::"ReminderChannel", true, ${dates.dbNow}, ${dates.dbNow}),
+            (${ruleIdAaa}, ${TEST_SHOP_ID}, 0, 'email'::"ReminderChannel", true, ${dates.dbNow}, ${dates.dbNow})
+        `;
 
-      // Both rules should be enqueued (same offsetDays=0, both survive Part 2)
-      // and ordered by ruleId ASC despite reverse insertion order
-      // This test FAILS without rl."ruleId" ASC in the ORDER BY
-      expect(messages.length).toBe(2);
-      expect(messages[0].ruleId).toBe(TEST_TIEBREAK_RULE_AAA);  // aaa < zzz
-      expect(messages[1].ruleId).toBe(TEST_TIEBREAK_RULE_ZZZ);
+        await sql`
+          INSERT INTO "Invoice" (
+            id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+            status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+          )
+          VALUES (
+            ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+            '#RULEID-TIE', 10000.00, 5000.00, 'open',
+            ${dates.daysAgo(8)}, ${dates.daysAgo(2)}, ${dates.dbNow}, ${dates.dbNow}
+          )
+        `;
 
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+        // Insert delayed logs in REVERSE ruleId order (zzz, then aaa)
+        await sql`
+          INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
+          VALUES 
+            (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${ruleIdZzz}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)}),
+            (gen_random_uuid()::TEXT, ${TEST_SHOP_ID}, ${ruleIdAaa}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${dates.daysAgo(2)})
+        `;
+
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+        await sql`SELECT public.s18_enqueue_reminders()`;
+
+        // Check that Part 2 did NOT skip either (both have same offsetDays=0 = max for this invoice)
+        const logs = await sql<{ ruleId: string; status: string }[]>`
+          SELECT "ruleId", status FROM "ReminderLog"
+          WHERE "invoiceId" = ${invoiceId}
+          ORDER BY "ruleId" ASC
+        `;
+        
+        // Both should still be 'delayed' (not skipped by Part 2)
+        expect(logs.length).toBe(2);
+        expect(logs[0].ruleId).toBe(ruleIdAaa);
+        expect(logs[0].status).toBe("delayed");
+        expect(logs[1].ruleId).toBe(ruleIdZzz);
+        expect(logs[1].status).toBe("delayed");
+
+        const messages = await sql<{ invoiceId: string; ruleId: string }[]>`
+          SELECT message->>'invoiceId' AS "invoiceId", message->>'ruleId' AS "ruleId"
+          FROM pgmq.q_s6_sync
+          WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
+            AND message->>'topic' = 'REMINDER_CATCHUP'
+            AND message->>'invoiceId' = ${invoiceId}
+          ORDER BY msg_id ASC
+        `;
+
+        // Both rules should be enqueued (same offsetDays=0, both survive Part 2)
+        // and ordered by ruleId ASC despite reverse insertion order
+        // This test FAILS without rl."ruleId" ASC in the ORDER BY
+        expect(messages.length).toBe(2);
+        expect(messages[0].ruleId).toBe(ruleIdAaa);  // aaa < zzz
+        expect(messages[1].ruleId).toBe(ruleIdZzz);
+
+      } finally {
+        // Cleanup: delete the dedicated rules and logs
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+        await sql`DELETE FROM "ReminderLog" WHERE "ruleId" IN (${ruleIdAaa}, ${ruleIdZzz})`;
+        await sql`DELETE FROM "ReminderRule" WHERE id IN (${ruleIdAaa}, ${ruleIdZzz})`;
+      }
     });
   });
 
