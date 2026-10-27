@@ -312,10 +312,12 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
   // 2b. Read-only: how many of the reviewer-demo invoices exist for this shop
   // (0-N where N = length of REVIEWER_DEMO_ORDER_NAMES). Runs in both modes
   // before any write. Count only: no names, ids or amounts are printed.
+  // Uses explicit IN clause since REVIEWER_DEMO_ORDER_NAMES is a constant.
   const [demo] = await sql<{ n: string }[]>`
     SELECT COUNT(DISTINCT name)::text AS n
     FROM "Invoice"
-    WHERE "shopId" = ${shop.id} AND name = ANY(${[...REVIEWER_DEMO_ORDER_NAMES]})
+    WHERE "shopId" = ${shop.id}
+      AND name IN (${REVIEWER_DEMO_ORDER_NAMES[0]}, ${REVIEWER_DEMO_ORDER_NAMES[1]})
   `;
   emit("reviewer_demo_invoices_present", Number(demo?.n ?? 0));
 
