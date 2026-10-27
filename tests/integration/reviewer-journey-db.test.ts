@@ -36,7 +36,7 @@ vi.mock("../../app/services/shopify-client.server", async (importOriginal) => {
           success: true,
           data: {
             orderMarkAsPaid: {
-              order: { id: "gid://shopify/Order/test", displayFinancialStatus: "PAID" },
+              order: { id: "test-order-mock", displayFinancialStatus: "PAID" },
               userErrors: [],
             },
           },
@@ -45,7 +45,7 @@ vi.mock("../../app/services/shopify-client.server", async (importOriginal) => {
       if (query.includes("query GetOrder")) {
         return {
           success: true,
-          data: { order: { id: "gid://shopify/Order/test", displayFinancialStatus: "PENDING" } },
+          data: { order: { id: "test-order-mock", displayFinancialStatus: "PENDING" } },
         };
       }
       return { success: true, data: {} };
@@ -60,7 +60,7 @@ vi.mock("@sentry/cloudflare", () => ({
   setContext: vi.fn(),
 }));
 
-function createMockAdminClient(shopCurrency: string, shopGidSuffix: string) {
+function createMockAdminClient(shopCurrency: string, shopIdSuffix: string) {
   return {
     graphql: vi.fn().mockImplementation(async (query: string) => {
       if (query.includes("query ShopAuthInfo") || query.includes("query ShopCurrencyAndId")) {
@@ -68,7 +68,7 @@ function createMockAdminClient(shopCurrency: string, shopGidSuffix: string) {
           json: async () => ({
             data: {
               shop: {
-                id: `gid://shopify/Shop/${shopGidSuffix}`,
+                id: `test-shop-${shopIdSuffix}`,
                 ianaTimezone: "Asia/Kolkata",
                 currencyCode: shopCurrency,
                 metafield: null,
@@ -87,7 +87,7 @@ function createMockAdminClient(shopCurrency: string, shopGidSuffix: string) {
                     ? [
                         {
                           node: {
-                            id: "gid://shopify/Validation/test",
+                            id: "test-validation",
                             shopifyFunction: { handle: "credit-check-validation" },
                             title: "Termwise Credit Check",
                             enabled: true,
@@ -108,7 +108,7 @@ function createMockAdminClient(shopCurrency: string, shopGidSuffix: string) {
             data: {
               validationCreate: {
                 validation: {
-                  id: "gid://shopify/Validation/test",
+                  id: "test-validation",
                   shopifyFunction: { handle: "credit-check-validation" },
                   title: "Termwise Credit Check",
                   enabled: true,
@@ -129,7 +129,7 @@ function createMockAdminClient(shopCurrency: string, shopGidSuffix: string) {
                     ? [
                         {
                           node: {
-                            id: "gid://shopify/PaymentCustomization/test",
+                            id: "test-payment-customization",
                             shopifyFunction: { handle: "hide-terms-payment" },
                             title: "Termwise Payment Hide",
                             enabled: true,
@@ -149,7 +149,7 @@ function createMockAdminClient(shopCurrency: string, shopGidSuffix: string) {
             data: {
               paymentCustomizationCreate: {
                 paymentCustomization: {
-                  id: "gid://shopify/PaymentCustomization/test",
+                  id: "test-payment-customization",
                   shopifyFunction: { handle: "hide-terms-payment" },
                   title: "Termwise Payment Hide",
                   enabled: true,
@@ -323,8 +323,8 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
 
   describe("4. CREATE NET-TERMS BUYER (B2B)", () => {
     it("4. CREATE NET-TERMS BUYER: B2B Company buyer created with holdState OK", async () => {
-      const companyIdSuffix = `company-${runId}`;
-      const locationIdSuffix = `location-${runId}`;
+      const companyId = `test-company-${runId}`;
+      const locationId = `test-location-${runId}`;
 
       const [buyer] = await sql<{ id: string; name: string; kind: string; holdState: string }[]>`
         INSERT INTO "BuyerAccount" (
@@ -335,8 +335,7 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
         )
         VALUES (
           gen_random_uuid()::text, ${testShopId}, 'COMPANY',
-          ${"gid://shopify/Company/" + companyIdSuffix},
-          ${"gid://shopify/CompanyLocation/" + locationIdSuffix},
+          ${companyId}, ${locationId},
           'Test Buyer Co',
           'contact@example.com', 'Test Contact',
           100000.00, 'OK', 30, 'explicit', NOW(), NOW()
@@ -413,9 +412,66 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
   });
 
   describe("5. LEDGER AND AGING", () => {
-    it.skip("5. LEDGER AND AGING: B2B stores use Companies, not tag rules (divergent path)", async () => {
-      // B2B stores don't have tag rules - they use Shopify Companies instead.
-      // This step is exercised in the Tagged Customer Variant below.
+    it("5. LEDGER AND AGING: aging buckets show correct totals and buyer ledger shows holdState", async () => {
+      const { getShopAgingTotals, getBuyerLedger } = await import(
+        "../../app/lib/aging-queries.server"
+      );
+      const { DateTime } = await import("luxon");
+
+      const timezone = "Asia/Kolkata";
+      const now = DateTime.now().setZone(timezone);
+      const issuedAt = now.toJSDate();
+      const dueAt = now.plus({ days: 30 }).toJSDate();
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "dueSource", "createdAt", "updatedAt"
+        )
+        VALUES (
+          gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
+          ${"test-order-aging-" + runId}, '#AGING001', 10000.00, 10000.00, 'open',
+          ${issuedAt}, ${dueAt}, 'schedule', NOW(), NOW()
+        )
+      `;
+
+      const agingTotals = await getShopAgingTotals(sql, testShopId, new Date());
+
+      expect(agingTotals.buckets.current.byCurrency["INR"]).toBe("1000000");
+      expect(agingTotals.totalByCurrency["INR"]).toBe("1000000");
+
+      const ledger = await getBuyerLedger(sql, testShopId, new Date(), {
+        limit: 10,
+        offset: 0,
+        sortBy: "outstanding",
+        sortOrder: "desc",
+      });
+
+      expect(ledger.totalCount).toBe(1);
+      expect(ledger.rows.length).toBe(1);
+      expect(ledger.rows[0].buyer_name).toBe("Test Buyer Co");
+      expect(ledger.rows[0].hold_state).toBe("OK");
+      expect(ledger.rows[0].outstanding_paise).toBe("1000000");
+    });
+
+    it("5. LEDGER AND AGING: buyer account page shows credit status and recent invoices", async () => {
+      const { getCreditStatusDisplay } = await import("../../app/services/credit-status.server");
+      const { getBuyerInvoices } = await import("../../app/lib/aging-queries.server");
+
+      const creditStatus = await getCreditStatusDisplay(sql, testBuyerAccountId);
+
+      expect(creditStatus).not.toBeNull();
+      expect(creditStatus!.holdState).toBe("OK");
+      expect(creditStatus!.creditLimitPaise).toBe(10000000n);
+
+      const invoices = await getBuyerInvoices(sql, testShopId, testBuyerAccountId, new Date(), {
+        limit: 10,
+        offset: 0,
+      });
+
+      expect(invoices.totalCount).toBe(1);
+      expect(invoices.rows.length).toBe(1);
+      expect(invoices.rows[0].name).toBe("#AGING001");
     });
   });
 
@@ -431,33 +487,36 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
   });
 
   describe("7. TEST THE CHECKOUT BLOCK", () => {
-    it("7. TEST THE CHECKOUT BLOCK: invoice created with name #B2B001 and due date per terms (raw SQL insert)", async () => {
-      const dueDate = new Date();
-      dueDate.setDate(dueDate.getDate() + 30);
-      const orderIdSuffix = `order-b2b-${runId}`;
+    it("7. TEST THE CHECKOUT BLOCK: invoice created with name #B2B001 and dueAt exactly issuedAt + 30 days", async () => {
+      const { DateTime } = await import("luxon");
+      const timezone = "Asia/Kolkata";
 
-      const [invoice] = await sql<{ id: string; name: string; dueAt: Date }[]>`
+      const issuedAt = DateTime.now().setZone(timezone).startOf("day").toJSDate();
+      const dueAt = DateTime.fromJSDate(issuedAt, { zone: timezone })
+        .plus({ days: 30 })
+        .toJSDate();
+
+      const [invoice] = await sql<{ id: string; name: string; issuedAt: Date; dueAt: Date }[]>`
         INSERT INTO "Invoice" (
           id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
           status, "issuedAt", "dueAt", "dueSource", "createdAt", "updatedAt"
         )
         VALUES (
           gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
-          ${"gid://shopify/Order/" + orderIdSuffix}, '#B2B001', 10000.00, 10000.00, 'open',
-          NOW(), ${dueDate}, 'schedule', NOW(), NOW()
+          ${"test-order-b2b-" + runId}, '#B2B001', 10000.00, 10000.00, 'open',
+          ${issuedAt}, ${dueAt}, 'schedule', NOW(), NOW()
         )
-        RETURNING id, name, "dueAt"
+        RETURNING id, name, "issuedAt", "dueAt"
       `;
       testInvoiceId = invoice.id;
 
       expect(invoice.name).toBe("#B2B001");
-      expect(invoice.dueAt).toBeDefined();
 
-      const diffDays = Math.round(
-        (invoice.dueAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-      );
-      expect(diffDays).toBeGreaterThanOrEqual(29);
-      expect(diffDays).toBeLessThanOrEqual(31);
+      const issuedDateTime = DateTime.fromJSDate(invoice.issuedAt, { zone: timezone });
+      const dueDateTime = DateTime.fromJSDate(invoice.dueAt, { zone: timezone });
+      const diffDays = dueDateTime.diff(issuedDateTime, "days").days;
+
+      expect(diffDays).toBe(30);
     });
   });
 
@@ -508,7 +567,7 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
   });
 
   describe("9. CONFIRM A MATCH", () => {
-    it("9. CONFIRM A MATCH: suggested match appears with confidence band (score >= 50 for Medium or >= 80 for High)", async () => {
+    it("9. CONFIRM A MATCH: suggested match appears with Medium confidence band", async () => {
       const { runMatcher } = await import("../../app/services/matcher.server");
 
       await sql`
@@ -736,7 +795,7 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
   });
 
   it("VARIANT: Tagged buyer created with holdState OK (raw SQL insert)", async () => {
-    const customerIdSuffix = `customer-tagged-${runId}`;
+    const customerId = `test-customer-${runId}`;
 
     const [buyer] = await sql<{ id: string }[]>`
       INSERT INTO "BuyerAccount" (
@@ -745,7 +804,7 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, 'TAGGED_CUSTOMER',
-        ${"gid://shopify/Customer/" + customerIdSuffix}, 'Test Buyer Co', 100000.00, 'OK',
+        ${customerId}, 'Test Buyer Co', 100000.00, 'OK',
         30, 'explicit', NOW(), NOW()
       )
       RETURNING id
@@ -754,7 +813,7 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
 
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
-      VALUES (${testShopId}, ${"gid://shopify/Customer/" + customerIdSuffix}, 'buyer@example.com', 'Test Buyer Co', NOW())
+      VALUES (${testShopId}, ${customerId}, 'buyer@example.com', 'Test Buyer Co', NOW())
       ON CONFLICT (shop_id, customer_id) DO NOTHING
     `;
 
@@ -771,27 +830,72 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
     expect(taggedCustomer[0].email).toBe("buyer@example.com");
   });
 
-  it("VARIANT: Invoice created with name #1001 (raw SQL insert)", async () => {
-    const orderIdSuffix = `order-tagged-${runId}`;
-    const dueDate = new Date();
-    dueDate.setDate(dueDate.getDate() + 30);
+  it("VARIANT: Ledger and aging shows correct totals for tagged buyer", async () => {
+    const { getShopAgingTotals, getBuyerLedger } = await import(
+      "../../app/lib/aging-queries.server"
+    );
+    const { DateTime } = await import("luxon");
 
-    const [invoice] = await sql<{ id: string; name: string; dueAt: Date }[]>`
+    const timezone = "Asia/Kolkata";
+    const now = DateTime.now().setZone(timezone);
+    const issuedAt = now.toJSDate();
+    const dueAt = now.plus({ days: 30 }).toJSDate();
+
+    await sql`
       INSERT INTO "Invoice" (
         id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
         status, "issuedAt", "dueAt", "dueSource", "createdAt", "updatedAt"
       )
       VALUES (
         gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
-        ${"gid://shopify/Order/" + orderIdSuffix}, '#1001', 10000.00, 10000.00, 'open',
-        NOW(), ${dueDate}, 'schedule', NOW(), NOW()
+        ${"test-order-aging-tagged-" + runId}, '#AGING001', 10000.00, 10000.00, 'open',
+        ${issuedAt}, ${dueAt}, 'schedule', NOW(), NOW()
       )
-      RETURNING id, name, "dueAt"
+    `;
+
+    const agingTotals = await getShopAgingTotals(sql, testShopId, new Date());
+    expect(agingTotals.buckets.current.byCurrency["INR"]).toBe("1000000");
+
+    const ledger = await getBuyerLedger(sql, testShopId, new Date(), {
+      limit: 10,
+      offset: 0,
+      sortBy: "outstanding",
+      sortOrder: "desc",
+    });
+
+    expect(ledger.totalCount).toBe(1);
+    expect(ledger.rows[0].buyer_name).toBe("Test Buyer Co");
+    expect(ledger.rows[0].hold_state).toBe("OK");
+  });
+
+  it("VARIANT: Invoice created with name #1001 and dueAt exactly issuedAt + 30 days", async () => {
+    const { DateTime } = await import("luxon");
+    const timezone = "Asia/Kolkata";
+
+    const issuedAt = DateTime.now().setZone(timezone).startOf("day").toJSDate();
+    const dueAt = DateTime.fromJSDate(issuedAt, { zone: timezone }).plus({ days: 30 }).toJSDate();
+
+    const [invoice] = await sql<{ id: string; name: string; issuedAt: Date; dueAt: Date }[]>`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "dueSource", "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
+        ${"test-order-tagged-" + runId}, '#1001', 10000.00, 10000.00, 'open',
+        ${issuedAt}, ${dueAt}, 'schedule', NOW(), NOW()
+      )
+      RETURNING id, name, "issuedAt", "dueAt"
     `;
     testInvoiceId = invoice.id;
 
     expect(invoice.name).toBe("#1001");
-    expect(invoice.dueAt).toBeDefined();
+
+    const issuedDateTime = DateTime.fromJSDate(invoice.issuedAt, { zone: timezone });
+    const dueDateTime = DateTime.fromJSDate(invoice.dueAt, { zone: timezone });
+    const diffDays = dueDateTime.diff(issuedDateTime, "days").days;
+
+    expect(diffDays).toBe(30);
   });
 
   it("VARIANT: Bank import creates exactly 3 Payment rows", async () => {
@@ -835,7 +939,7 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
     expect(payments.length).toBe(3);
   });
 
-  it("VARIANT: Match by specific testPaymentId with exact confidence band", async () => {
+  it("VARIANT: Match by specific testPaymentId with High confidence band", async () => {
     const { runMatcher, confirmMatch } = await import("../../app/services/matcher.server");
     const { applyMatch } = await import("../../app/services/apply.server");
 
