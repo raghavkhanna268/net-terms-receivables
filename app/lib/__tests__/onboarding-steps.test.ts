@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   computeDefaultTermsStep,
   computeBuyerSetupStep,
@@ -186,6 +186,7 @@ describe("onboarding-steps", () => {
 
   describe("computeReminderStep with isEmailSendingConfigured", () => {
     it("step is not-ready when only API key is set (sender missing)", async () => {
+      vi.stubEnv("RESEND_FROM", "");
       const { isEmailSendingConfigured } = await import("../email-sender-config.server");
       const configured = isEmailSendingConfigured({
         RESEND_API_KEY: "re_fake_key_for_test_only_12345",
@@ -196,6 +197,7 @@ describe("onboarding-steps", () => {
     });
 
     it("step is not-ready when only sender is set (API key missing)", async () => {
+      vi.stubEnv("RESEND_API_KEY", "");
       const { isEmailSendingConfigured } = await import("../email-sender-config.server");
       const configured = isEmailSendingConfigured({
         RESEND_API_KEY: undefined,

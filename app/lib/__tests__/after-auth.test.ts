@@ -962,6 +962,8 @@ describe("after-auth", () => {
     });
 
     it("syncShopInfo failure on reinstall leaves shop retryable", async () => {
+      vi.stubEnv("SHOPIFY_API_KEY", "");
+      vi.stubEnv("SHOPIFY_API_SECRET", "");
       const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       
       mockEnsureMetafieldDefinitions.mockResolvedValue([]);

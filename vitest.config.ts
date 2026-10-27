@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import tsconfigPaths from "vite-tsconfig-paths";
+import { SECRET_ENV_VARS } from "./tests/helpers/env-secrets";
 
 /**
  * DB-backed test files that hit the real Postgres/pgmq and must run sequentially.
@@ -229,6 +230,12 @@ const DB_TEST_PATTERNS = [
 export default defineConfig({
   plugins: [tsconfigPaths()],
   test: {
+    env: {
+      ...Object.fromEntries(SECRET_ENV_VARS.map((v) => [v.name, v.fakeValue])),
+      SHOPIFY_APP_URL: "https://example.com",
+    } as Record<string, string>,
+    unstubEnvs: true,
+    setupFiles: ["./tests/helpers/scrub-inherited-secrets.ts"],
     projects: [
       {
         test: {
