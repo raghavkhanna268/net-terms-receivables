@@ -664,7 +664,8 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
           domain,
           "COMPANY_LOCATIONS_DELETE",
           { id: locationGid, name: "Test Location", company: { id: companyGid } },
-          `wh-cl-delete-${suffix}`
+          `wh-cl-delete-${suffix}`,
+          {}
         );
 
         expect(result.success).toBe(true);
