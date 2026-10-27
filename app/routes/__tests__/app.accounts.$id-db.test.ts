@@ -29,6 +29,7 @@ vi.mock("~/services/credit-status.server", () => ({
   getCreditStatusDisplay: vi.fn(),
   getCompanyTotals: vi.fn().mockResolvedValue(null),
   updateCreditStatus: vi.fn(),
+  parseCreditLimitString: vi.fn().mockReturnValue({ valid: true, value: 0 }),
 }));
 
 import { getCreditStatusDisplay } from "~/services/credit-status.server";

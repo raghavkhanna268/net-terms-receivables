@@ -28,6 +28,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:build": "vitest run --config vitest.build.config.ts",
+    "gen:function-fixtures": "vitest run --config vitest.gen.config.ts",
     "benchmark:cpu": "node scripts/benchmark-cpu.mjs",
     "seed": "tsx scripts/seed.ts",
     "credit-status:backfill": "tsx scripts/credit-status-metafield-backfill.ts"

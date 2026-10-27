@@ -862,7 +862,9 @@ describeWithDb("Bank Import Action Integration Tests", () => {
       };
 
       const response = await callAction(sql, "test-nonexistent-shop.myshopify.com", payload);
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(400);
+      const data = await parseResponse(response);
+      expect(data.error).toContain("still being set up");
 
       // Verify no PII even in error scenario
       for (const log of [...consoleLogs, ...consoleErrors]) {
