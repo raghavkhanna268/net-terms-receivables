@@ -568,8 +568,9 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       enqueuedAt: new Date().toISOString(),
     };
 
-    // Create a Shop row so that moveToDeadLetter sees the shop as existing and NOT uninstalled.
-    // This ensures non-shop errors keep the full message - only shop-gone scenarios sanitize.
+    // Create a Shop row that is NOT uninstalled so the message reaches the handler.
+    // COMPANY_LOCATIONS_UPDATE is on ARCHIVE_SAFE_UNINSTALLED_TOPICS, so an uninstalled
+    // shop would archive it before the handler. We need DLQ to test sanitization.
     // First delete the uninstalled Shop created by beforeEach, then insert a non-uninstalled one.
     await sqlRef`DELETE FROM "Shop" WHERE domain = ${testContext.missingShopDomain}`;
     await sqlRef`

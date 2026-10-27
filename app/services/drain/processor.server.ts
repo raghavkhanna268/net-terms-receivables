@@ -127,6 +127,40 @@ const TERMINAL_TOPICS = new Set([
 ]);
 
 /**
+ * Topics safe to archive (ACK without processing) for uninstalled shops.
+ *
+ * A topic is on this list only if reinstall + reconcile restores the correct
+ * local state. Topics not on this list follow main's DLQ behaviour unchanged.
+ *
+ * RECOVERS (state restored by bulk reconcile):
+ * - ORDERS_*: RECONCILE_ORDERS re-reads displayFinancialStatus from Shopify
+ * - COMPANY_LOCATIONS_*: RECONCILE_COMPANIES re-upserts all locations
+ * - CUSTOMERS_CREATE/UPDATE: RECONCILE_CUSTOMERS re-upserts matching customers
+ *
+ * N/A (no local state modified):
+ * - COMPANIES_*: No BuyerAccount created; only marks webhook processed
+ * - COMPANY_LOCATIONS_DELETE: BuyerAccount preserved for financial history
+ *
+ * NOT on this list (must DLQ to preserve message for manual review):
+ * - DRAFT_ORDERS_*: Bulk reconcile is upsert-only; orphan rows remain
+ * - CUSTOMERS_DELETE: Bulk reconcile doesn't delete orphan s8_tagged_customers
+ */
+export const ARCHIVE_SAFE_UNINSTALLED_TOPICS = new Set([
+  "ORDERS_CREATE",
+  "ORDERS_UPDATED",
+  "ORDERS_PAID",
+  "ORDERS_CANCELLED",
+  "COMPANIES_CREATE",
+  "COMPANIES_UPDATE",
+  "COMPANIES_DELETE",
+  "COMPANY_LOCATIONS_CREATE",
+  "COMPANY_LOCATIONS_UPDATE",
+  "COMPANY_LOCATIONS_DELETE",
+  "CUSTOMERS_CREATE",
+  "CUSTOMERS_UPDATE",
+]);
+
+/**
  * Configuration for drain processing.
  */
 export interface DrainConfig {
@@ -1413,7 +1447,7 @@ async function processSyncQueue(
     const isNonInr = shopFound && !isShopCurrencySupported(shopInfo?.currency ?? "");
 
     // #239: Shop row missing (redacted or never existed) → re-check and delete message.
-    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    // Uninstalled-but-present shops: archive if topic in ARCHIVE_SAFE_UNINSTALLED_TOPICS.
     if (!shopFound) {
       try {
         const [shopRow] = await sql<[{ id: string }?]>`
@@ -1472,15 +1506,33 @@ async function processSyncQueue(
     // G8: Terminal topics (PAID, CANCELLED, DRAFT_DELETE) pass through to handlers
     // which will update existing rows without importing new amounts
 
-    // Skip uninstalled shops BEFORE any Admin client call (zero API calls for uninstalled shops)
+    // Archive uninstalled shops ONLY for topics proven to recover via reconcile.
+    // Topics not on the allowlist DLQ with full message preserved.
     if (shopInfo?.uninstalledAt !== null && shopInfo?.uninstalledAt !== undefined) {
-      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
-      result.skipped++;
-      safeLog("info", "order_webhook_uninstalled_shop_acked", {
-        shopHash: await shopHash(msg.message.shop),
-        topic: msg.message.topic,
-        reason: "shop_uninstalled",
-      });
+      if (ARCHIVE_SAFE_UNINSTALLED_TOPICS.has(msg.message.topic)) {
+        await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+        result.skipped++;
+        safeLog("info", "order_webhook_uninstalled_shop_acked", {
+          shopHash: await shopHash(msg.message.shop),
+          topic: msg.message.topic,
+          reason: "shop_uninstalled",
+        });
+        continue;
+      }
+      // Topic not on allowlist: DLQ immediately with full message (no sanitization)
+      if (msg.read_ct >= config.maxRetries) {
+        await moveToDeadLetter(
+          sql,
+          S6_QUEUES.SYNC,
+          msg.msg_id,
+          msg.message,
+          "shop_uninstalled",
+          msg.read_ct
+        );
+        result.deadLettered++;
+      } else {
+        result.failed++;
+      }
       continue;
     }
 
@@ -1714,7 +1766,7 @@ async function processBulkQueue(
     const isNonInr = shopFound && !isShopCurrencySupported(shopInfo?.currency ?? "");
 
     // #239: Shop row missing (redacted or never existed) → re-check and delete message.
-    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    // Bulk queue has no uninstalled-shop archive logic; messages proceed to handlers.
     if (!shopFound) {
       try {
         const [shopRow] = await sql<[{ id: string }?]>`
