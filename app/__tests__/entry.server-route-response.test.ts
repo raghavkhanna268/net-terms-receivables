@@ -8,16 +8,42 @@
  * This test suite verifies:
  * - handleError skips Sentry capture for expected 4xx route responses (e.g., 410)
  * - handleError calls Sentry capture for 5xx responses and thrown Errors
- * - The isExpectedResponse helper correctly identifies expected vs unexpected errors
- * - The onError callback skips ssr_render_error logging for expected responses
+ * - The real render path's onError callback honors the same logic
  *
  * Uses the REAL entry.server module and REAL safeLog (log.server.ts is not mocked).
  * Only ~/lib/sentry is mocked to verify capture behavior.
+ * react-dom/server is mocked because renderToReadableStream is only available in
+ * edge environments (Cloudflare Workers), not in Node.js test environment.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { ReactNode } from "react";
+import { createRequestHandler, useRouteError } from "react-router";
+import type { ServerBuild } from "react-router";
+import * as React from "react";
 
 vi.mock("~/lib/sentry", () => ({
   captureExceptionWithTags: vi.fn(),
+}));
+
+let _capturedOnError: ((error: unknown) => void) | null = null;
+
+vi.mock("react-dom/server", () => ({
+  renderToReadableStream: vi.fn(
+    async (
+      _element: ReactNode,
+      options?: { onError?: (error: unknown) => void }
+    ) => {
+      _capturedOnError = options?.onError ?? null;
+      return new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode("<html><body>mock</body></html>")
+          );
+          controller.close();
+        },
+      });
+    }
+  ),
 }));
 
 describe("entry.server route response handling", () => {
@@ -28,6 +54,7 @@ describe("entry.server route response handling", () => {
 
   beforeEach(() => {
     vi.resetModules();
+    _capturedOnError = null;
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -125,207 +152,181 @@ describe("entry.server route response handling", () => {
     });
   });
 
-  describe("isExpectedResponse helper logic", () => {
-    it("identifies 4xx Response as expected", async () => {
-      const { isRouteErrorResponse } = await import("react-router");
-      
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (isRouteErrorResponse(e)) {
-          return e.status < 500;
-        }
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
+  describe("render path via createRequestHandler", () => {
+    function RethrowingErrorBoundary(): React.ReactNode {
+      const error = useRouteError();
+      throw error;
+    }
+
+    async function createTestBuild(
+      loaderError: Response | Error
+    ): Promise<ServerBuild> {
+      const entryModule = await import("../entry.server");
+
+      return {
+        entry: { module: entryModule },
+        routes: {
+          root: {
+            id: "root",
+            path: "",
+            module: {
+              default: function Root({
+                children,
+              }: {
+                children?: React.ReactNode;
+              }) {
+                return React.createElement(
+                  "html",
+                  null,
+                  React.createElement("body", null, children)
+                );
+              },
+              ErrorBoundary: RethrowingErrorBoundary,
+            },
+          },
+          "routes/test": {
+            id: "routes/test",
+            parentId: "root",
+            path: "test",
+            module: {
+              loader() {
+                throw loaderError;
+              },
+              default: function TestRoute() {
+                return React.createElement("div", null, "test content");
+              },
+              ErrorBoundary: RethrowingErrorBoundary,
+            },
+          },
+        },
+        assets: {
+          entry: { imports: [], module: "/build/entry.client.js" },
+          routes: {
+            root: {
+              id: "root",
+              path: "",
+              hasAction: false,
+              hasLoader: false,
+              hasClientAction: false,
+              hasClientLoader: false,
+              hasClientMiddleware: false,
+              hasErrorBoundary: true,
+              module: "/build/root.js",
+              clientActionModule: undefined,
+              clientLoaderModule: undefined,
+              clientMiddlewareModule: undefined,
+              hydrateFallbackModule: undefined,
+            },
+            "routes/test": {
+              id: "routes/test",
+              parentId: "root",
+              path: "test",
+              hasAction: false,
+              hasLoader: true,
+              hasClientAction: false,
+              hasClientLoader: false,
+              hasClientMiddleware: false,
+              hasErrorBoundary: true,
+              module: "/build/routes/test.js",
+              clientActionModule: undefined,
+              clientLoaderModule: undefined,
+              clientMiddlewareModule: undefined,
+              hydrateFallbackModule: undefined,
+            },
+          },
+          url: "/build/manifest.json",
+          version: "test",
+        },
+        basename: undefined,
+        publicPath: "/build/",
+        assetsBuildDirectory: "public/build",
+        future: {
+          v8_passThroughRequests: false,
+          v8_trailingSlashAwareDataRequests: false,
+          v8_middleware: false,
+        },
+        ssr: true,
+        isSpaMode: false,
+        prerender: [],
+        routeDiscovery: {
+          mode: "initial",
+          manifestPath: "/__manifest",
+        },
+      } as ServerBuild;
+    }
+
+    it("returns 410 status, no ssr_render_error log, no Sentry capture for 410 Response", async () => {
+      const { captureExceptionWithTags } = await import("~/lib/sentry");
+      const mockCapture = vi.mocked(captureExceptionWithTags);
+      mockCapture.mockClear();
+
+      const build = await createTestBuild(new Response(null, { status: 410 }));
+      const handler = createRequestHandler(build, "test");
+
+      const request = new Request("https://test-store.example.com/test");
+      const loadContext = {
+        shopify: { addDocumentResponseHeaders: vi.fn() },
+        cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
+        sessionStorage: {},
       };
 
-      expect(isExpectedResponse(new Response(null, { status: 410 }))).toBe(true);
-      expect(isExpectedResponse(new Response(null, { status: 404 }))).toBe(true);
-      expect(isExpectedResponse(new Response(null, { status: 401 }))).toBe(true);
-      expect(isExpectedResponse(new Response(null, { status: 499 }))).toBe(true);
-    });
+      const response = await handler(request, loadContext as unknown as Parameters<typeof handler>[1]);
+      await response.text();
 
-    it("identifies 5xx Response as unexpected", async () => {
-      const { isRouteErrorResponse } = await import("react-router");
-      
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (isRouteErrorResponse(e)) {
-          return e.status < 500;
-        }
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
-      };
-
-      expect(isExpectedResponse(new Response(null, { status: 500 }))).toBe(false);
-      expect(isExpectedResponse(new Response(null, { status: 502 }))).toBe(false);
-      expect(isExpectedResponse(new Response(null, { status: 503 }))).toBe(false);
-    });
-
-    it("identifies Error as unexpected", async () => {
-      const { isRouteErrorResponse } = await import("react-router");
-      
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (isRouteErrorResponse(e)) {
-          return e.status < 500;
-        }
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
-      };
-
-      expect(isExpectedResponse(new Error("test"))).toBe(false);
-      expect(isExpectedResponse(new TypeError("test"))).toBe(false);
-    });
-  });
-
-  describe("onError SSR callback behavior via safeLog", () => {
-    it("does not log ssr_render_error for 410 Response", async () => {
-      const { safeLog, toErrorCode } = await import("~/lib/log.server");
-      const { isRouteErrorResponse } = await import("react-router");
-
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (isRouteErrorResponse(e)) {
-          return e.status < 500;
-        }
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
-      };
-
-      const error = new Response(null, { status: 410 });
-      
-      if (!isExpectedResponse(error)) {
-        safeLog("error", "ssr_render_error", { err: toErrorCode(error) });
-      }
+      expect(response.status).toBe(410);
 
       const allConsoleOutput = consoleErrorSpy.mock.calls
         .map((c: unknown[]) => String(c[0]))
         .join("\n");
-
       expect(allConsoleOutput).not.toContain("ssr_render_error");
+
+      expect(mockCapture).not.toHaveBeenCalled();
     });
 
-    it("logs ssr_render_error for 500 Response", async () => {
-      const { safeLog, toErrorCode } = await import("~/lib/log.server");
-      const { isRouteErrorResponse } = await import("react-router");
+    it("returns 500 status for 500 Response", async () => {
+      const { captureExceptionWithTags } = await import("~/lib/sentry");
+      const mockCapture = vi.mocked(captureExceptionWithTags);
+      mockCapture.mockClear();
 
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (isRouteErrorResponse(e)) {
-          return e.status < 500;
-        }
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
+      const build = await createTestBuild(
+        new Response("error", { status: 500 })
+      );
+      const handler = createRequestHandler(build, "test");
+
+      const request = new Request("https://test-store.example.com/test");
+      const loadContext = {
+        shopify: { addDocumentResponseHeaders: vi.fn() },
+        cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
+        sessionStorage: {},
       };
 
-      const error = new Response("error", { status: 500 });
-      
-      if (!isExpectedResponse(error)) {
-        safeLog("error", "ssr_render_error", { err: toErrorCode(error) });
-      }
+      const response = await handler(request, loadContext as unknown as Parameters<typeof handler>[1]);
+      await response.text();
 
-      const allConsoleOutput = consoleErrorSpy.mock.calls
-        .map((c: unknown[]) => String(c[0]))
-        .join("\n");
-
-      expect(allConsoleOutput).toContain("ssr_render_error");
+      expect(response.status).toBe(500);
     });
 
-    it("logs ssr_render_error for thrown Error", async () => {
-      const { safeLog, toErrorCode } = await import("~/lib/log.server");
-      const { isRouteErrorResponse } = await import("react-router");
+    it("returns 500 status, logs ssr_render_error, calls Sentry capture for thrown Error", async () => {
+      const { captureExceptionWithTags } = await import("~/lib/sentry");
+      const mockCapture = vi.mocked(captureExceptionWithTags);
+      mockCapture.mockClear();
 
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (isRouteErrorResponse(e)) {
-          return e.status < 500;
-        }
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
+      const build = await createTestBuild(new Error("something went wrong"));
+      const handler = createRequestHandler(build, "test");
+
+      const request = new Request("https://test-store.example.com/test");
+      const loadContext = {
+        shopify: { addDocumentResponseHeaders: vi.fn() },
+        cloudflare: { env: {}, ctx: { waitUntil: vi.fn() } },
+        sessionStorage: {},
       };
 
-      const error = new Error("something went wrong");
-      
-      if (!isExpectedResponse(error)) {
-        safeLog("error", "ssr_render_error", { err: toErrorCode(error) });
-      }
+      const response = await handler(request, loadContext as unknown as Parameters<typeof handler>[1]);
+      await response.text();
 
-      const allConsoleOutput = consoleErrorSpy.mock.calls
-        .map((c: unknown[]) => String(c[0]))
-        .join("\n");
+      expect(response.status).toBe(500);
 
-      expect(allConsoleOutput).toContain("ssr_render_error");
-    });
-  });
-
-  describe("response status preservation", () => {
-    it("preserves 410 status when onError returns early for expected response", () => {
-      let responseStatusCode = 410;
-
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
-      };
-
-      const error = new Response(null, { status: 410 });
-      
-      if (isExpectedResponse(error)) {
-        // Early return - don't set responseStatusCode to 500
-      } else {
-        responseStatusCode = 500;
-      }
-
-      expect(responseStatusCode).toBe(410);
-    });
-
-    it("sets 500 status for 5xx Response in onError", () => {
-      let responseStatusCode = 500;
-
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
-      };
-
-      const error = new Response("error", { status: 500 });
-      
-      if (isExpectedResponse(error)) {
-        // Early return - don't set responseStatusCode to 500
-      } else {
-        responseStatusCode = 500;
-      }
-
-      expect(responseStatusCode).toBe(500);
-    });
-
-    it("sets 500 status for thrown Error in onError", () => {
-      let responseStatusCode = 200;
-
-      const isExpectedResponse = (e: unknown): boolean => {
-        if (e instanceof Response) {
-          return e.status < 500;
-        }
-        return false;
-      };
-
-      const error = new Error("something went wrong");
-      
-      if (isExpectedResponse(error)) {
-        // Early return - don't set responseStatusCode to 500
-      } else {
-        responseStatusCode = 500;
-      }
-
-      expect(responseStatusCode).toBe(500);
+      expect(mockCapture).toHaveBeenCalled();
     });
   });
 });
