@@ -1,13 +1,11 @@
-#!/usr/bin/env npx vitest run
 /**
  * Generate Shopify Function input fixtures from real TypeScript metafield writers.
  *
  * Usage:
- *   npx vitest run scripts/gen-function-fixtures.ts
+ *   npm run gen:function-fixtures
  *
- * This script runs the REAL updateCreditStatus writer and captures the serialized
- * metafield values to generate fixtures for Rust Function tests. It must be run
- * via vitest to properly mock the Shopify client.
+ * This script runs the REAL credit_status and shop_config writers, captures the
+ * serialized metafield values, and generates fixtures for Rust Function tests.
  *
  * The test file app/lib/__tests__/metafield-function-fixtures.test.ts has guard
  * tests that verify the committed fixtures match the writer output. Run this
@@ -28,6 +26,7 @@ function companyLocationGid(id: number): string {
 }
 
 const MOCK_SHOP_DOMAIN = "test-fixtures.example.com";
+const MOCK_SHOP_GID = "gid://shopify/Shop/12345";
 
 interface MockBuyerAccount {
   id: string;
@@ -222,6 +221,14 @@ let creditStatusMetafieldCaptures: Array<{
   type?: string;
 }> = [];
 
+let shopConfigMetafieldCaptures: Array<{
+  ownerId: string;
+  namespace: string;
+  key: string;
+  value: string;
+  type?: string;
+}> = [];
+
 vi.mock("~/services/shopify-client.server", () => ({
   shopifyGraphQLRequest: vi.fn().mockImplementation(async (_domain, _query, variables) => {
     const metafields = variables?.metafields as Array<{
@@ -322,6 +329,33 @@ function createMockSql(config: MockConfig) {
       },
     }
   );
+}
+
+function createMockAdminClient() {
+  return {
+    graphql: vi.fn().mockImplementation(async (_query: string, opts?: { variables?: Record<string, unknown> }) => {
+      const metafields = opts?.variables?.metafields as Array<{
+        ownerId: string;
+        namespace: string;
+        key: string;
+        value: string;
+        type?: string;
+      }>;
+      if (metafields) {
+        shopConfigMetafieldCaptures.push(...metafields);
+      }
+      return {
+        json: async () => ({
+          data: {
+            metafieldsSet: {
+              metafields: metafields?.map((m, i) => ({ id: `mf-shop-${i}` })) ?? [],
+              userErrors: [],
+            },
+          },
+        }),
+      };
+    }),
+  };
 }
 
 function buildCreditCheckFixture(
@@ -429,6 +463,7 @@ describe("Generate Function Fixtures", () => {
 
     for (const fixtureCase of FIXTURE_CASES) {
       creditStatusMetafieldCaptures = [];
+      shopConfigMetafieldCaptures = [];
 
       const sql = createMockSql({
         account: fixtureCase.account,
@@ -447,7 +482,17 @@ describe("Generate Function Fixtures", () => {
       expect(captured, `No credit_status metafield captured for ${fixtureCase.name}`).toBeDefined();
 
       const creditStatusValue = JSON.parse(captured!.value);
-      const shopConfigValue = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
+
+      const mockAdmin = createMockAdminClient();
+      const { writeShopConfigMetafield } = await import("~/services/shop-config.server");
+      const shopConfigResult = await writeShopConfigMetafield(mockAdmin, MOCK_SHOP_GID, fixtureCase.shop.currency);
+
+      expect(shopConfigResult.success, `writeShopConfigMetafield failed for ${fixtureCase.name}`).toBe(true);
+
+      const shopConfigCapture = shopConfigMetafieldCaptures.find((m) => m.key === "shop_config");
+      expect(shopConfigCapture, `No shop_config metafield captured for ${fixtureCase.name}`).toBeDefined();
+
+      const shopConfigValue = JSON.parse(shopConfigCapture!.value);
 
       const isB2B = fixtureCase.account.kind === "COMPANY";
 

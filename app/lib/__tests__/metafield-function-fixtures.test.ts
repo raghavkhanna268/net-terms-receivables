@@ -6,7 +6,7 @@
  * match the exact output of the real writers.
  *
  * To regenerate fixtures:
- *   npx vitest run scripts/gen-function-fixtures.ts
+ *   npm run gen:function-fixtures
  */
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
 import * as fs from "fs";
@@ -15,9 +15,18 @@ import type { Sql } from "~/lib/db-light.server";
 import { companyLocationGid } from "../../../tests/helpers/gid";
 
 const MOCK_SHOP_DOMAIN = "test-fixtures.example.com";
+const MOCK_SHOP_GID = "gid://shopify/Shop/12345";
 const FIXED_TIMESTAMP = "2026-10-15T00:00:00.000Z";
 
 let creditStatusMetafieldCaptures: Array<{
+  ownerId: string;
+  namespace: string;
+  key: string;
+  value: string;
+  type?: string;
+}> = [];
+
+let shopConfigMetafieldCaptures: Array<{
   ownerId: string;
   namespace: string;
   key: string;
@@ -154,6 +163,33 @@ function createComprehensiveMockSql(config: MockConfig) {
   ) as unknown as Sql;
 
   return sql;
+}
+
+function createMockAdminClient() {
+  return {
+    graphql: vi.fn().mockImplementation(async (_query: string, opts?: { variables?: Record<string, unknown> }) => {
+      const metafields = opts?.variables?.metafields as Array<{
+        ownerId: string;
+        namespace: string;
+        key: string;
+        value: string;
+        type?: string;
+      }>;
+      if (metafields) {
+        shopConfigMetafieldCaptures.push(...metafields);
+      }
+      return {
+        json: async () => ({
+          data: {
+            metafieldsSet: {
+              metafields: metafields?.map((m, i) => ({ id: `mf-shop-${i}` })) ?? [],
+              userErrors: [],
+            },
+          },
+        }),
+      };
+    }),
+  };
 }
 
 
@@ -327,6 +363,7 @@ describe("Metafield Function Fixtures Guard", () => {
 
   beforeEach(() => {
     creditStatusMetafieldCaptures = [];
+    shopConfigMetafieldCaptures = [];
     vi.clearAllMocks();
   });
 
@@ -337,6 +374,7 @@ describe("Metafield Function Fixtures Guard", () => {
         expect(fs.existsSync(fixturePath), `Fixture file missing: ${fixturePath}`).toBe(true);
 
         creditStatusMetafieldCaptures = [];
+        shopConfigMetafieldCaptures = [];
 
         const sql = createComprehensiveMockSql({
           account: fixtureCase.account,
@@ -350,11 +388,20 @@ describe("Metafield Function Fixtures Guard", () => {
         const result = await recomputeCreditStatus(sql, fixtureCase.account.id, "invoice_change");
         expect(result.success, `recomputeCreditStatus failed: ${result.error}`).toBe(true);
 
-        const captured = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
-        expect(captured, "No credit_status metafield was captured").toBeDefined();
+        const creditStatusCapture = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
+        expect(creditStatusCapture, "No credit_status metafield was captured").toBeDefined();
 
-        const writerOutput = JSON.parse(captured!.value);
-        const expectedShopConfig = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
+        const writerCreditStatusOutput = JSON.parse(creditStatusCapture!.value);
+
+        const mockAdmin = createMockAdminClient();
+        const { writeShopConfigMetafield } = await import("../../services/shop-config.server");
+        const shopConfigResult = await writeShopConfigMetafield(mockAdmin, MOCK_SHOP_GID, fixtureCase.shop.currency);
+        expect(shopConfigResult.success, "writeShopConfigMetafield failed").toBe(true);
+
+        const shopConfigCapture = shopConfigMetafieldCaptures.find((m) => m.key === "shop_config");
+        expect(shopConfigCapture, "No shop_config metafield was captured").toBeDefined();
+
+        const writerShopConfigOutput = JSON.parse(shopConfigCapture!.value);
 
         const fixtureContent = JSON.parse(fs.readFileSync(fixturePath, "utf-8"));
 
@@ -364,8 +411,8 @@ describe("Metafield Function Fixtures Guard", () => {
 
         const fixtureEmbeddedShopConfig = fixtureContent.shop?.metafield?.jsonValue;
 
-        expect(writerOutput).toEqual(fixtureEmbeddedCreditStatus);
-        expect(expectedShopConfig).toEqual(fixtureEmbeddedShopConfig);
+        expect(writerCreditStatusOutput).toEqual(fixtureEmbeddedCreditStatus);
+        expect(writerShopConfigOutput).toEqual(fixtureEmbeddedShopConfig);
       });
     }
   });
@@ -377,6 +424,7 @@ describe("Metafield Function Fixtures Guard", () => {
         expect(fs.existsSync(fixturePath), `Fixture file missing: ${fixturePath}`).toBe(true);
 
         creditStatusMetafieldCaptures = [];
+        shopConfigMetafieldCaptures = [];
 
         const sql = createComprehensiveMockSql({
           account: fixtureCase.account,
@@ -390,11 +438,20 @@ describe("Metafield Function Fixtures Guard", () => {
         const result = await recomputeCreditStatus(sql, fixtureCase.account.id, "invoice_change");
         expect(result.success, `recomputeCreditStatus failed: ${result.error}`).toBe(true);
 
-        const captured = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
-        expect(captured, "No credit_status metafield was captured").toBeDefined();
+        const creditStatusCapture = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
+        expect(creditStatusCapture, "No credit_status metafield was captured").toBeDefined();
 
-        const writerOutput = JSON.parse(captured!.value);
-        const expectedShopConfig = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
+        const writerCreditStatusOutput = JSON.parse(creditStatusCapture!.value);
+
+        const mockAdmin = createMockAdminClient();
+        const { writeShopConfigMetafield } = await import("../../services/shop-config.server");
+        const shopConfigResult = await writeShopConfigMetafield(mockAdmin, MOCK_SHOP_GID, fixtureCase.shop.currency);
+        expect(shopConfigResult.success, "writeShopConfigMetafield failed").toBe(true);
+
+        const shopConfigCapture = shopConfigMetafieldCaptures.find((m) => m.key === "shop_config");
+        expect(shopConfigCapture, "No shop_config metafield was captured").toBeDefined();
+
+        const writerShopConfigOutput = JSON.parse(shopConfigCapture!.value);
 
         const fixtureContent = JSON.parse(fs.readFileSync(fixturePath, "utf-8"));
 
@@ -404,8 +461,8 @@ describe("Metafield Function Fixtures Guard", () => {
 
         const fixtureEmbeddedShopConfig = fixtureContent.shop?.metafield?.jsonValue;
 
-        expect(writerOutput).toEqual(fixtureEmbeddedCreditStatus);
-        expect(expectedShopConfig).toEqual(fixtureEmbeddedShopConfig);
+        expect(writerCreditStatusOutput).toEqual(fixtureEmbeddedCreditStatus);
+        expect(writerShopConfigOutput).toEqual(fixtureEmbeddedShopConfig);
 
         expect(
           fixtureContent.paymentCustomization?.metafield,
