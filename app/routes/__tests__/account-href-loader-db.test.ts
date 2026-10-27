@@ -14,6 +14,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
+  ApiVersion: { October26: "2026-10" },
 }));
 
 vi.mock("@sentry/cloudflare", () => ({
