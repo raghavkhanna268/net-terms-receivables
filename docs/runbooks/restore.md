@@ -18,7 +18,7 @@ Workflow: [`.github/workflows/db-backup.yml`](../../.github/workflows/db-backup.
 - **Format:** `pg_dump -Fc --no-owner --no-privileges` (custom format), piped
   straight into `age -r <AGE_RECIPIENT>`. The plaintext dump never touches the
   runner's disk, and nothing from it is printed in the (public) Actions log.
-- **When:** nightly at 21:00 UTC (02:30 IST), plus manual `workflow_dispatch`
+- **When:** nightly at 21:17 UTC (02:47 IST), plus manual `workflow_dispatch`
   from `main`.
 - **Where:** Cloudflare R2, bucket `$R2_BUCKET`. Key layout (UTC):
 
@@ -126,7 +126,7 @@ SELECT 'latest_migration', max(migration_name) FROM _prisma_migrations;
 SQL
 ```
 
-The counts should be close to prod at the backup time (new rows after 02:30 IST
+The counts should be close to prod at the backup time (new rows after 02:47 IST
 are expected), and `latest_migration` should match the newest directory under
 `prisma/migrations/` that had been applied by then.
 
@@ -190,21 +190,25 @@ floor. The prune job runs after every successful backup.
 | **Keep-newest-7**   | The 7 most recent backups are **always kept**, even if all are >30 days old |
 | **Prefix scope**    | Only objects under `db/` in bucket `ntr-db-backups` are considered |
 | **Prefix guard**    | Strict check: the job exits non-zero if any listed key doesn't start with `db/` |
+| **Listing guard**   | The job exits non-zero (deleting nothing) if the listing fails, is partial, or has an entry without a key or a valid `LastModified` |
+| **Small bucket**    | Fewer than 7 objects listed: nothing is deleted (`prune_refused=true`, exit 0) |
+| **Sanity floor**    | With anything eligible: refuses (exit non-zero) if total < 8, if deletion would leave < 7, or if the newest backup is > 48h old |
+| **Plan re-check**   | Right before deleting, the plan is re-checked independently: no key among the newest 7, all under `db/`, all older than 30 days |
 
 This means a stalled backup job can never delete the last good copies: at worst
 you keep 7 backups indefinitely.
 
-### Dry-run-first rollout
+### Prune mode
 
-The prune mode defaults to `dry_run`:
+Pruning is enabled for scheduled runs, within the rails above:
 
-- **Scheduled runs** (cron): always `dry_run` until a follow-up PR changes the
-  default. Logs print counts only: `total=`, `eligible=`, `kept=`.
-- **Manual dispatch**: you can select `delete` to actually remove eligible
-  objects. Logs then also print `deleted=`.
-
-Once the dry-run output looks correct for a few days, a follow-up PR can flip
-scheduled runs to `delete`.
+- **Scheduled runs** (cron): `delete`. Logs print counts only: `total=`,
+  `eligible=`, `kept=`, `deleted=`, `newest_age_hours=`.
+- **Manual dispatch**: the `dry_run` input defaults to `true` and prints counts
+  only (`total=`, `eligible=`, `kept=`) without deleting anything. A manual run
+  deletes only when you explicitly set `dry_run=false`.
+- A delete failure stops the run at the first failed object and exits
+  non-zero (`prune_error=true reason=partial_delete_failure`).
 
 ### Output safety
 

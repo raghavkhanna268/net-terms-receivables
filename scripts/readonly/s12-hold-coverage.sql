@@ -13,6 +13,13 @@
 -- Vars:
 --   since (ISO-8601 UTC of the sweep run, e.g. 2026-10-24T19:00:00Z). The sweep's dedupe key
 --         date is since's UTC date.
+--   allowed, e2e (masked secrets, passed by prod-readonly-query.yml) for shop_kind.
+-- shop_kind: identity label from the canonical shop_labels CTE
+-- (scripts/ci/shop-labels.ts). 'main' = the shop whose domain is :'allowed'
+-- (ALLOWED_DEV_STORE), 'e2e' = :'e2e' (E2E_SHOP), 'other_N' = the rest ranked by
+-- Shop.id within this run only (N is stable within one run but does NOT identify
+-- a shop across runs), 'unknown' for every shop if a secret is empty or both are
+-- equal. Domains are compared, never printed.
 -- Orphan locations (sections B and C) are derived inside SQL from COMPANY_LOCATIONS_DELETE
 -- webhook receipts, not passed as psql variables.
 -- @col kind, "holdState", proname, dep_table: enum
@@ -34,10 +41,22 @@ SELECT proname,
 FROM pg_proc WHERE proname = 'enqueue_credit_status_recomputes';
 
 \echo '== H1 shop-level defaultTermsDays (config_int, clamped) per shop'
-SELECT DENSE_RANK() OVER (ORDER BY s.id) AS shop_idx,
+WITH shop_labels AS (
+  SELECT s.id AS shop_id,
+         CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+              WHEN s.domain = :'allowed' THEN 'main'
+              WHEN s.domain = :'e2e' THEN 'e2e'
+              ELSE 'other_' || (ROW_NUMBER() OVER (
+                     PARTITION BY s.domain IN (:'allowed', :'e2e')
+                     ORDER BY s.id))::text
+         END AS shop_kind
+  FROM "Shop" s
+)
+SELECT sl.shop_kind,
        s."uninstalledAt" IS NULL AS installed,
        CASE WHEN s."defaultTermsDays" BETWEEN 0 AND 365 THEN s."defaultTermsDays" END AS "defaultTermsDays"
 FROM "Shop" s
+JOIN shop_labels sl ON sl.shop_id = s.id
 ORDER BY 1;
 
 \echo '== A per BuyerAccount with >= 1 past-due unpaid invoice (aggregated)'
@@ -117,7 +136,8 @@ WHERE message->>'source' = 'daily_sweep' AND dead_lettered_at >= (:'since')::tim
 \echo '== B #200 orphan gids: COMPANY_LOCATIONS_DELETE dedupe rows + account sync state (aggregated)'
 -- QA 2 audit: orphan CompanyLocations derived from COMPANY_LOCATIONS_DELETE webhook receipts.
 -- No psql variables or workflow dispatch inputs. Locations are identified by the presence of
--- a delete webhook in s6_processed_webhooks (7-day retention) or webhook_receipts (30-day).
+-- a delete webhook in s6_processed_webhooks (7-day retention) or a webhook_receipts row
+-- (30-day) joined to its s6_sync message (archive, live queue or DLQ) for the resource gid.
 -- Output is aggregated by holdState; individual IDs are not printed.
 WITH deleted_locations AS (
   SELECT DISTINCT
@@ -128,13 +148,25 @@ WITH deleted_locations AS (
   FROM s6_processed_webhooks w
   WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
   UNION
+  -- webhook_receipts has no resource column (PK shop, webhook_id; see
+  -- prisma/migrations/20261025010000_s20_webhook_receipts). The resource gid travels in the
+  -- s6_sync message (SyncMessage.resourceGid, app/lib/pgmq.server.ts), so join the edge
+  -- receipt to its message on (shop, webhookId), as redriven-webhook-receipts.sql does.
   SELECT DISTINCT
     CASE
-      WHEN wr.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN wr.resource_gid
-      ELSE 'gid://shopify/CompanyLocation/' || wr.resource_gid
+      WHEN m.message->>'resourceGid' LIKE 'gid://shopify/CompanyLocation/%' THEN m.message->>'resourceGid'
+      ELSE 'gid://shopify/CompanyLocation/' || (m.message->>'resourceGid')
     END AS company_location_gid
   FROM webhook_receipts wr
+  JOIN (
+    SELECT message FROM pgmq.a_s6_sync
+    UNION ALL
+    SELECT message FROM pgmq.q_s6_sync
+    UNION ALL
+    SELECT message FROM s6_dead_letter
+  ) m ON m.message->>'shop' = wr.shop AND m.message->>'webhookId' = wr.webhook_id
   WHERE wr.topic = 'COMPANY_LOCATIONS_DELETE'
+    AND COALESCE(m.message->>'resourceGid', '') <> ''
 ),
 delete_counts AS (
   SELECT w.resource_gid, COUNT(*) AS delete_ct
@@ -182,13 +214,25 @@ WITH deleted_locations AS (
   FROM s6_processed_webhooks w
   WHERE w.topic = 'COMPANY_LOCATIONS_DELETE'
   UNION
+  -- webhook_receipts has no resource column (PK shop, webhook_id; see
+  -- prisma/migrations/20261025010000_s20_webhook_receipts). The resource gid travels in the
+  -- s6_sync message (SyncMessage.resourceGid, app/lib/pgmq.server.ts), so join the edge
+  -- receipt to its message on (shop, webhookId), as redriven-webhook-receipts.sql does.
   SELECT DISTINCT
     CASE
-      WHEN wr.resource_gid LIKE 'gid://shopify/CompanyLocation/%' THEN wr.resource_gid
-      ELSE 'gid://shopify/CompanyLocation/' || wr.resource_gid
+      WHEN m.message->>'resourceGid' LIKE 'gid://shopify/CompanyLocation/%' THEN m.message->>'resourceGid'
+      ELSE 'gid://shopify/CompanyLocation/' || (m.message->>'resourceGid')
     END AS company_location_gid
   FROM webhook_receipts wr
+  JOIN (
+    SELECT message FROM pgmq.a_s6_sync
+    UNION ALL
+    SELECT message FROM pgmq.q_s6_sync
+    UNION ALL
+    SELECT message FROM s6_dead_letter
+  ) m ON m.message->>'shop' = wr.shop AND m.message->>'webhookId' = wr.webhook_id
   WHERE wr.topic = 'COMPANY_LOCATIONS_DELETE'
+    AND COALESCE(m.message->>'resourceGid', '') <> ''
 ),
 invoice_counts AS (
   SELECT i."buyerAccountId" AS ba_id, COUNT(*) AS ct FROM "Invoice" i GROUP BY 1

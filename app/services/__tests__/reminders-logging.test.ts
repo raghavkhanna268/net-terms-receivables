@@ -28,26 +28,24 @@ vi.mock("~/emails/PaymentReminderEmail", () => ({
 
 vi.mock("luxon", async () => {
   const actual = await vi.importActual<typeof import("luxon")>("luxon");
+  const createDateTimeMock = (): Record<string, unknown> => {
+    const mock: Record<string, unknown> = {
+      hasSame: vi.fn().mockReturnValue(true),
+      diff: vi.fn().mockReturnValue({ days: 1 }),
+      toLocaleString: vi.fn().mockReturnValue("October 30, 2026"),
+    };
+    mock.startOf = vi.fn().mockReturnValue(mock);
+    mock.plus = vi.fn().mockReturnValue(mock);
+    mock.setZone = vi.fn().mockReturnValue({ ...mock, hour: 12 });
+    mock.setLocale = vi.fn().mockReturnValue(mock);
+    return mock;
+  };
   return {
     ...actual,
     DateTime: {
       ...actual.DateTime,
-      now: vi.fn().mockReturnValue({
-        setZone: vi.fn().mockReturnValue({
-          hour: 12,
-          startOf: vi.fn().mockReturnValue({
-            hasSame: vi.fn().mockReturnValue(true),
-          }),
-        }),
-      }),
-      fromJSDate: vi.fn().mockReturnValue({
-        startOf: vi.fn().mockReturnValue({
-          plus: vi.fn().mockReturnValue({
-            hasSame: vi.fn().mockReturnValue(true),
-          }),
-        }),
-        toLocaleString: vi.fn().mockReturnValue("October 30, 2026"),
-      }),
+      now: vi.fn().mockReturnValue(createDateTimeMock()),
+      fromJSDate: vi.fn().mockReturnValue(createDateTimeMock()),
     },
   };
 });
@@ -396,5 +394,242 @@ describe("Reminders Logging: No PII in log output (R1)", () => {
     const resultStr = JSON.stringify(result);
     expect(resultStr).not.toContain("503");
     expect(resultStr).not.toContain("secret@leak.test");
+  });
+});
+
+/**
+ * R1: Catch-up path logging tests - no PII in log output.
+ *
+ * Tests that sendCatchupReminder does not leak PII to logs.
+ * Uses REAL safeLog (never vi.mock it), spies on console methods.
+ * Test domains use test-* prefix.
+ */
+describe("Reminders Catch-up Logging: No PII in log output (R1)", () => {
+  const SENSITIVE_DOMAIN = "test-catchup-pii.myshopify.com";
+  const SENSITIVE_EMAIL = "catchup-buyer@pii-catchup-test.example";
+  const SENSITIVE_BUYER_NAME = "Catchup PII Buyer Name";
+  const SENSITIVE_AMOUNT = "88888";
+
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetch.mockReset();
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleLogSpy?.mockRestore();
+    consoleWarnSpy?.mockRestore();
+    consoleErrorSpy?.mockRestore();
+  });
+
+  function assertNoSensitiveDataInRawCalls(...spies: ReturnType<typeof vi.spyOn>[]) {
+    for (const spy of spies) {
+      for (const call of spy.mock.calls) {
+        const raw = String(call[0]);
+        expect(raw).not.toContain("myshopify.com");
+        expect(raw).not.toContain(SENSITIVE_EMAIL);
+        expect(raw).not.toContain(SENSITIVE_BUYER_NAME);
+        expect(raw).not.toContain(SENSITIVE_AMOUNT);
+      }
+    }
+  }
+
+  function createCatchupMockSql() {
+    const mockResults = new Map<string, unknown>();
+
+    const createQueryHandler = () => async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+
+      // getReminderLogStatus check
+      if (query.includes("firstCappedAt") && query.includes("FROM \"ReminderLog\"") && query.includes("SELECT status")) {
+        return mockResults.get("log_status") ?? [{ status: "delayed", firstCappedAt: new Date() }];
+      }
+      // getInvoiceForReminder
+      if (query.includes("FROM \"Invoice\"") && query.includes("INNER JOIN")) {
+        return mockResults.get("invoice") ?? [];
+      }
+      // getBuyerAccountId lookup
+      if (query.includes("buyerAccountId") && query.includes("FROM \"Invoice\"") && !query.includes("INNER JOIN")) {
+        return mockResults.get("buyer_account_id") ?? [{ buyerAccountId: "buyer-catchup-123" }];
+      }
+      // isBuyerOptedOut check
+      if (query.includes("reminderOptOutAt") && query.includes("FROM \"BuyerAccount\"")) {
+        return mockResults.get("buyer_opted_out") ?? [{ optedOut: false }];
+      }
+      if (query.includes("FROM s8_tagged_customers")) {
+        return mockResults.get("customer") ?? [];
+      }
+      // Shop currency check
+      if (query.includes("currency") && query.includes("Shop") && query.includes("SELECT")) {
+        return mockResults.get("shop_currency") ?? [{ currency: "INR" }];
+      }
+      // Shop reminder settings
+      if (query.includes("s18_shop_reminder_settings")) {
+        return mockResults.get("reminder_settings") ?? [{ enabled: true }];
+      }
+      // Reminder rule
+      if (query.includes("ReminderRule") && query.includes("SELECT")) {
+        return mockResults.get("rule") ?? [{ id: "rule-catchup-123", offsetDays: 0, channel: "email", enabled: true }];
+      }
+      // Advisory lock
+      if (query.includes("pg_advisory_xact_lock")) {
+        return [];
+      }
+      // Global sends
+      if (query.includes("dailyCount") && query.includes("monthlyTotal")) {
+        return mockResults.get("global_counts") ?? [{ dailyCount: 0, monthlyTotal: 0 }];
+      }
+      if (query.includes("INSERT INTO s18_global_sends")) {
+        return mockResults.get("global_increment") ?? [{ dailyCount: 1 }];
+      }
+      // hasReminderSentToday
+      if (query.includes("sentToday")) {
+        return [{ sentToday: false }];
+      }
+      // hasNewerStageForInvoice
+      if (query.includes("hasNewer")) {
+        return [{ hasNewer: false }];
+      }
+      // UPDATE ReminderLog (claim)
+      if (query.includes("UPDATE \"ReminderLog\"") && query.includes("SET status = 'sent'")) {
+        return [{ id: "log-catchup-123" }];
+      }
+      // DELETE ReminderLog
+      if (query.includes("DELETE FROM \"ReminderLog\"")) {
+        return [];
+      }
+      return [];
+    };
+
+    const queryHandler = createQueryHandler();
+    const mockTx = Object.assign(vi.fn(queryHandler), {});
+
+    const sql = Object.assign(
+      vi.fn(queryHandler),
+      {
+        json: vi.fn((v) => v),
+        unsafe: vi.fn((s: string) => s),
+        setMockResult: (key: string, value: unknown) => mockResults.set(key, value),
+        clearMockResults: () => mockResults.clear(),
+        begin: vi.fn(async <T>(callback: (tx: typeof mockTx) => Promise<T>): Promise<T> => {
+          return callback(mockTx);
+        }),
+      }
+    ) as unknown as import("~/lib/db-light.server").Sql & {
+      setMockResult: (key: string, value: unknown) => void;
+      clearMockResults: () => void;
+    };
+
+    return sql;
+  }
+
+  it("catch-up auth error log contains no PII (no email, name, amount, domain)", async () => {
+    const { sendCatchupReminder } = await import("../reminders.server");
+    const mockSql = createCatchupMockSql();
+
+    const mockInvoiceData = {
+      invoiceId: "inv-catchup-auth",
+      shopId: "shop-catchup-auth",
+      shopDomain: SENSITIVE_DOMAIN,
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#CATCHUP-AUTH",
+      total: SENSITIVE_AMOUNT,
+      outstanding: SENSITIVE_AMOUNT,
+      currency: "INR",
+      dueAt: new Date(Date.now() - 24 * 60 * 60 * 1000), // yesterday
+      status: "open",
+      buyerAccountId: "buyer-catchup-auth",
+      customerId: "gid://shopify/Customer/catchup-auth",
+      buyerAccountGatedAt: null,
+      shopUninstalledAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoiceData]);
+    mockSql.setMockResult("customer", [{ email: SENSITIVE_EMAIL, displayName: SENSITIVE_BUYER_NAME }]);
+    mockSql.setMockResult("global_increment", [{ dailyCount: 1, monthlyTotal: 1 }]);
+
+    // Force 401 error
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      text: async () => `Unauthorized for ${SENSITIVE_DOMAIN}: ${SENSITIVE_EMAIL} owes ${SENSITIVE_AMOUNT}`,
+    });
+
+    await sendCatchupReminder(
+      mockSql,
+      "shop-catchup-auth",
+      "inv-catchup-auth",
+      "rule-catchup-auth",
+      "log-catchup-auth",
+      0,
+      "Asia/Kolkata",
+      { RESEND_API_KEY: "re_test_invalid", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com", RESEND_TEST_RECIPIENTS: SENSITIVE_EMAIL }
+    );
+
+    // Verify no PII in any log output
+    assertNoSensitiveDataInRawCalls(consoleLogSpy, consoleWarnSpy, consoleErrorSpy);
+
+    // Verify the auth error was logged (event name only, no PII)
+    const errorLogs = consoleErrorSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    const hasAuthErrorLog = errorLogs.some((log: string) => log.includes("reminders_catchup_auth_error"));
+    expect(hasAuthErrorLog).toBe(true);
+  });
+
+  it("catch-up gated skip log contains no PII", async () => {
+    const { sendCatchupReminder } = await import("../reminders.server");
+    const mockSql = createCatchupMockSql();
+
+    const mockInvoiceData = {
+      invoiceId: "inv-catchup-gated",
+      shopId: "shop-catchup-gated",
+      shopDomain: SENSITIVE_DOMAIN,
+      shopTimezone: "Asia/Kolkata",
+      invoiceName: "#CATCHUP-GATED",
+      total: SENSITIVE_AMOUNT,
+      outstanding: SENSITIVE_AMOUNT,
+      currency: "INR",
+      dueAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      status: "open",
+      buyerAccountId: "buyer-catchup-gated",
+      customerId: "gid://shopify/Customer/catchup-gated",
+      buyerAccountGatedAt: new Date(), // Account is gated
+      shopUninstalledAt: null,
+    };
+
+    mockSql.setMockResult("invoice", [mockInvoiceData]);
+    mockSql.setMockResult("customer", [{ email: SENSITIVE_EMAIL, displayName: SENSITIVE_BUYER_NAME }]);
+
+    // Enable gating
+    const originalEnv = process.env.PLAN_GATING_ENFORCED;
+    (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = "true";
+
+    try {
+      await sendCatchupReminder(
+        mockSql,
+        "shop-catchup-gated",
+        "inv-catchup-gated",
+        "rule-catchup-gated",
+        "log-catchup-gated",
+        0,
+        "Asia/Kolkata",
+        { RESEND_API_KEY: "re_test_1234", RESEND_FROM: "noreply@example.com", REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake", SHOPIFY_APP_URL: "https://app.example.com" }
+      );
+
+      // Verify no PII in any log output
+      assertNoSensitiveDataInRawCalls(consoleLogSpy, consoleWarnSpy, consoleErrorSpy);
+
+      // Verify gated skip was logged
+      const infoLogs = consoleLogSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+      const hasGatedLog = infoLogs.some((log: string) => log.includes("reminders_catchup_gated_skip"));
+      expect(hasGatedLog).toBe(true);
+    } finally {
+      (process.env as Record<string, string | undefined>).PLAN_GATING_ENFORCED = originalEnv;
+    }
   });
 });

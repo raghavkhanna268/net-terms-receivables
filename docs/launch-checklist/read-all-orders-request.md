@@ -1,6 +1,6 @@
 # Request `read_all_orders` Scope
 
-**Status:** ⏳ **Requested** 25 Oct 22:13 IST; grant pending confirmation
+**Status:** ✅ **Appears granted** — Requested 25 Oct 22:13 IST. Granted session scope shows 9/9 including read_all_orders, in Shopify App Release run ci-40305655924-1 (2026-10-26).
 
 This checklist guided the request for Shopify approval of the `read_all_orders` protected scope. This scope extends order access to orders older than 60 days.
 
@@ -78,7 +78,7 @@ Termwise is a B2B net-terms receivables management app for Shopify merchants. It
 
 - The bulk order query (`BULK_ORDERS_QUERY` in `bulk-operations.server.ts:127-210`) fetches only receivables fields: order ID, name, timestamps (createdAt, processedAt, updatedAt, cancelledAt, closedAt), displayFinancialStatus, displayFulfillmentStatus, totalPriceSet, totalOutstandingSet, paymentTerms (including paymentSchedules with dueAt, issuedAt, completedAt, amount), purchasingEntity (company/location IDs), and customer (ID and tags only—no email in order queries)
 - Order queries do NOT fetch line items, shipping addresses, or customer contact details (email, phone, address). However, email and displayName ARE read from separate sources when `CUSTOMER_PII_FIELDS` is enabled (production: `wrangler.jsonc:42`): from tagged customers via `getCustomerFields()` (`customer-fields.server.ts:78`) and `fetchCustomerWithFallback()` (`customer-fetch.server.ts:63`) for reminders; from B2B company main contacts via `getBulkCompaniesQuery()` (`bulk-operations.server.ts:36`) and `getCompanyLocationQuery()` (`admin-client.server.ts:98`). Phone and address are NEVER fetched
-- Protected Customer Data (PCD) Level 1 (Name, Email): request completed, pending Shopify review, not yet approved (per `docs/scopes.md`); phone and address fields are never fetched
+- PCD Level 2 (Name, Email): request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing (per `docs/scopes.md`); phone and address fields are never fetched
 - Data request exports (`s22_data_requests`) have 30-day expiration with auto-purge; GDPR `customers/redact` webhook deletes customer-linked data
 - All data is deleted on `shop/redact` webhook (48 hours post-uninstall)
 
@@ -86,16 +86,16 @@ Termwise is a B2B net-terms receivables management app for Shopify merchants. It
 
 ## After Approval
 
-**Request submitted:** 25 Oct 2026 22:13 IST — grant pending confirmation
+**Request submitted:** 25 Oct 2026 22:13 IST — appears granted (dev-store session shows 9/9 granted scopes; scope in released app version ci-40305655924-1)
 
-Post-approval steps (once grant is confirmed):
+Post-approval steps:
 
 1. ✅ Add `read_all_orders` to `shopify.app.toml` scopes (extends access from `write_orders` which implies `read_orders`)
 2. ✅ Update `wrangler.jsonc` SCOPES variable to match
 3. ✅ Run `scripts/check-scope-sync.ts` to verify sync
-4. ⏳ Deploy new app version with `shopify app deploy` (batched with next release)
-5. ⏳ Dev store must re-approve the scope after that release
-6. ⏳ Production merchants will approve when they next open the app after that release
+4. ✅ Deploy new app version with `shopify app deploy` (scope in released app version ci-40305655924-1)
+5. ✅ Dev store re-approved the scope (granted session scope 9/9 incl. read_all_orders, shown by run ci-40305655924-1)
+6. ⏳ Production merchants will approve when they next open the app — Why open: no production merchants yet
 
 ## Data Minimization Evidence
 
@@ -123,7 +123,7 @@ See `docs/privacy.md` for the public privacy policy and `docs/privacy-implementa
 - [x] Find **Read all orders** card and click **Request access**
 - [x] Paste and customize the justification text above
 - [x] Submit the request (25 Oct 22:13 IST)
-- [ ] **Grant pending confirmation** — check API access request status in Partner Dashboard
+- [x] **Grant status** — Requested 25 Oct 22:13 IST. Granted session scope shows 9/9 including read_all_orders, in Shopify App Release run ci-40305655924-1 (2026-10-26).
 - [x] Create PR to add `read_all_orders` scope
-- [ ] Deploy release with scope change (batched with next release)
-- [ ] Dev store re-approves scope after release
+- [x] Deploy release with scope change (scope in released app version ci-40305655924-1)
+- [x] Dev store re-approves scope after release (granted session scope 9/9 incl. read_all_orders, shown by run ci-40305655924-1)

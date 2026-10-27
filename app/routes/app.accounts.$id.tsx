@@ -38,6 +38,7 @@ import {
   getCreditStatusDisplay,
   getCompanyTotals,
   updateCreditStatus,
+  parseCreditLimitString,
   type CreditStatusUpdate,
 } from "~/services/credit-status.server";
 import { getBuyerInvoices, type BuyerInvoiceRow } from "~/lib/aging-queries.server";
@@ -52,6 +53,7 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { pluralizeWithCount } from "~/lib/copy-helpers";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -511,27 +513,15 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
       }
     } else if (noLimit) {
       creditLimitAmount = null;
-    } else if (creditLimitStr && creditLimitStr.trim() !== "") {
-      const trimmed = creditLimitStr.trim();
-      if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) {
-        return {
-          success: false,
-          error: "Invalid credit limit format. Use a number with up to 2 decimal places (e.g., 100000 or 100000.50).",
-        } satisfies ActionData;
-      }
-      const parsed = Number(trimmed);
-      if (parsed < 0) {
-        return {
-          success: false,
-          error: "Credit limit must be non-negative.",
-        } satisfies ActionData;
-      }
-      creditLimitAmount = parsed;
     } else {
-      return {
-        success: false,
-        error: "Credit limit cannot be empty. Check 'No credit limit' to allow unlimited credit.",
-      } satisfies ActionData;
+      const parseResult = parseCreditLimitString(creditLimitStr);
+      if (!parseResult.valid) {
+        return {
+          success: false,
+          error: parseResult.error,
+        } satisfies ActionData;
+      }
+      creditLimitAmount = parseResult.value;
     }
 
     const update: CreditStatusUpdate = {
@@ -638,11 +628,11 @@ function InvoiceTable({
               </s-table-cell>
               <s-table-cell>
                 {inv.daysPastDue > 0 ? (
-                  <s-badge tone="critical">{inv.daysPastDue} days overdue</s-badge>
+                  <s-badge tone="critical">{pluralizeWithCount(inv.daysPastDue, "day")} overdue</s-badge>
                 ) : inv.daysPastDue === 0 ? (
                   <s-badge tone="warning">Due today</s-badge>
                 ) : (
-                  <s-badge>{Math.abs(inv.daysPastDue)} days left</s-badge>
+                  <s-badge>{pluralizeWithCount(Math.abs(inv.daysPastDue), "day")} left</s-badge>
                 )}
               </s-table-cell>
               <s-table-cell>
@@ -679,7 +669,7 @@ export default function AccountPage() {
   if (loaderData.notSupported) {
     return (
       <s-page heading="Account">
-        <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
+        <s-link href="/app" slot="breadcrumb-actions">Back to Dashboard</s-link>
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
@@ -705,7 +695,7 @@ export default function AccountPage() {
 
   return (
     <s-page heading={account.name}>
-      <s-link href="/" slot="breadcrumb-actions">Back to Dashboard</s-link>
+      <s-link href="/app" slot="breadcrumb-actions">Back to Dashboard</s-link>
 
       {/* T4: New accounts paused banner */}
       {newAccountsPausedBanner.show && (
@@ -731,7 +721,7 @@ export default function AccountPage() {
             heading={actionData.metafieldSyncPending ? "Partially saved" : "Saved"}
           >
             {actionData.metafieldSyncPending
-              ? "Credit settings saved but Shopify sync is pending. The validation function may not reflect changes immediately."
+              ? "Credit settings saved. Changes will apply at checkout once the sync to Shopify finishes. We keep retrying automatically."
               : "Credit settings saved successfully."}
           </s-banner>
         </s-section>
@@ -803,7 +793,7 @@ export default function AccountPage() {
           )}
           {creditStatus.syncState === "pending_retry" && (
             <s-banner tone="warning" heading="Sync Pending">
-              Shopify metafield sync is pending. Changes will be retried automatically.
+              Your changes are still syncing to Shopify and will be retried automatically.
             </s-banner>
           )}
           <s-stack>
@@ -855,7 +845,7 @@ export default function AccountPage() {
               ) : creditStatus.holdState === "NEAR_LIMIT" ? (
                 <s-badge tone="warning">Near Limit</s-badge>
               ) : creditStatus.holdState === "BYPASS" ? (
-                <s-badge tone="info">Bypass Active</s-badge>
+                <s-badge tone="info">Credit check paused</s-badge>
               ) : (
                 <s-badge>OK</s-badge>
               )}
@@ -870,7 +860,7 @@ export default function AccountPage() {
             <s-banner tone="warning" heading="Mixed Currencies">
               Some locations use different currencies and are excluded from these totals.
               {companyTotals.excludedLocationCount > 0 && (
-                <s-text> ({companyTotals.excludedLocationCount} location(s) excluded)</s-text>
+                <s-text> ({pluralizeWithCount(companyTotals.excludedLocationCount, "location")} excluded)</s-text>
               )}
             </s-banner>
           )}
@@ -921,14 +911,13 @@ export default function AccountPage() {
             <input type="hidden" name="_action" value="updateCredit" />
             <s-stack gap="base">
               <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
-                <s-money-field
+                <s-text-field
                   label="Credit Limit"
                   name="creditLimit"
-                  min={0}
-                  placeholder="e.g., 100000"
+                  placeholder="e.g., 1,00,000 or ₹1,00,000.50"
                   value={noLimitChecked ? "" : (creditStatus?.creditLimitAmount?.toString() ?? "")}
                   disabled={noLimitChecked}
-                ></s-money-field>
+                ></s-text-field>
                 <s-text>{currency}</s-text>
               </s-grid>
 
@@ -1083,8 +1072,8 @@ export default function AccountPage() {
               </s-button>
               {reminderOptOut.optedOut && (
                 <s-paragraph>
-                  Re-enabling reminders does not resend previously skipped reminder stages.
-                  The next due stage will send normally.
+                  Turning reminders back on won&apos;t resend reminders that were skipped. The
+                  next scheduled reminder will be sent as usual.
                 </s-paragraph>
               )}
             </s-stack>
@@ -1112,14 +1101,14 @@ export default function AccountPage() {
             <s-text type="strong">Credit Limit</s-text>: Maximum outstanding amount allowed
           </s-list-item>
           <s-list-item>
-            <s-text type="strong">Outstanding</s-text>: Current unpaid invoices + pending draft orders
+            <s-text type="strong">Outstanding</s-text>: Unpaid invoices plus pending draft orders
           </s-list-item>
           <s-list-item>
             <s-text type="strong">Hold</s-text>: When active, blocks checkout regardless of limit
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
-          Changes sync to Shopify and affect the checkout validation function immediately.
+          Changes apply at checkout once they sync to Shopify.
         </s-paragraph>
       </s-section>
 
@@ -1141,7 +1130,7 @@ export default function AccountPage() {
           Only merchants can re-enable reminders for an opted-out buyer.
         </s-paragraph>
         <s-paragraph>
-          Re-enabling does not resend skipped reminders; the next scheduled stage sends normally.
+          Turning reminders back on does not resend skipped reminders. The next scheduled reminder sends normally.
         </s-paragraph>
       </s-section>
     </s-page>

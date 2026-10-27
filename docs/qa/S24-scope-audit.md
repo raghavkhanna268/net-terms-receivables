@@ -1,5 +1,7 @@
 # S24 Scope Audit: Production OAuth scope verification
 
+> **Note (2026-10-27):** production has had 9 scopes since #289; the counts below are historical and kept as recorded.
+
 ---
 
 ## 2026-10-25: Scope reduction 11 → 8
@@ -21,7 +23,7 @@ Per [Shopify Access Scopes documentation](https://shopify.dev/docs/api/usage/acc
 | `read_customers` | `write_customers` | `admin-client.server.ts:136-191` (ORDER_QUERY `customer { id }`), `bulk-operations.server.ts:108-186` (BULK_ORDERS_QUERY `purchasingEntity … on Customer`, `customer { id }`), `customer-fields.server.ts:149,229` (`getCustomerQuery`, `getBulkCustomersQuery`), `webhooks.customers.tsx` |
 | `read_orders` | `write_orders` | `bulk-operations.server.ts:108-186` (BULK_ORDERS_QUERY), `webhooks.orders.tsx` |
 
-**Protected Customer Data note:** Reading customer data via `write_customers` is still protected customer data. The PCD approval (Level 1 + Name + Email, 2026-10-23) remains required.
+**Protected Customer Data note:** Reading customer data via `write_customers` is still protected customer data. PCD Level 2 (protected customer fields: Name, Email only): request complete (16/16), in Draft until App Store listing submission; Shopify reviews it with the listing.
 
 ### Final Production Scope List (8)
 

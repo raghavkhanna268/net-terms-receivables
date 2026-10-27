@@ -83,6 +83,17 @@ import {
   type HeldFixtureRow,
   type OwnerMetafield,
 } from "./lib/held-fixture-currency";
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  assertAllowlistEnforced,
+  formatG4CleanupOutput,
+  formatG4WriteOutput,
+  readAllowlistEnforcedFromWrangler,
+  resolveG4Recipient,
+  runG4Cleanup,
+  runG4Write,
+} from "./lib/g4-fixture";
 
 // -- Types --
 
@@ -188,6 +199,34 @@ export interface OrderPaymentTerms {
 export const API_VERSION = "2026-10";
 export const SEED_TAG = "ntr-seed";
 export const SEED_PREFIX = "ntr-seed-";
+
+/**
+ * Reserved email domain for fixture customers (RFC 2606).
+ * Using example.com instead of .example TLD which Shopify rejects as invalid.
+ */
+export const SEED_EMAIL_DOMAIN = "example.com";
+
+/**
+ * Generate a fixture customer email in the format ntr-seed-<key>@example.com.
+ * All fixture customer emails must be generated through this helper to ensure
+ * consistency and use of the reserved domain.
+ */
+export function seedEmail(key: string): string {
+  return `${SEED_PREFIX}${key}@${SEED_EMAIL_DOMAIN}`;
+}
+
+/**
+ * Legacy email patterns that need migration to the new format.
+ * Maps from seed key to the old email that may exist on Shopify.
+ */
+export const LEGACY_SEED_EMAILS: Record<string, string> = {
+  "company-1": "raj.sharma@acme-wholesale.example",
+  "company-2": "priya@bharat-traders.example",
+  "company-3": "amit.singh@delhi-dist.example",
+  "company-4": "sneha@mumbai-merchants.example",
+  "company-5": "arjun.das@kolkata-commerce.example",
+  "company-reviewer-demo": "demo.reviewer@test-buyer.example",
+};
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 1000;
 
@@ -287,11 +326,11 @@ export function getIndiaProvinceCode(city: string): string {
 }
 
 export const COMPANY_SEEDS = [
-  { key: "company-1", name: "Acme Wholesale Pvt Ltd", city: "Mumbai", contact: { firstName: "Raj", lastName: "Sharma", email: "raj.sharma@acme-wholesale.example" } },
-  { key: "company-2", name: "Bharat Traders Co", city: "Ahmedabad", contact: { firstName: "Priya", lastName: "Patel", email: "priya@bharat-traders.example" } },
-  { key: "company-3", name: "Delhi Distributors LLP", city: "Delhi", contact: { firstName: "Amit", lastName: "Singh", email: "amit.singh@delhi-dist.example" } },
-  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", city: "Pune", contact: { firstName: "Sneha", lastName: "Desai", email: "sneha@mumbai-merchants.example" } },
-  { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: "arjun.das@kolkata-commerce.example" } },
+  { key: "company-1", name: "Acme Wholesale Pvt Ltd", city: "Mumbai", contact: { firstName: "Raj", lastName: "Sharma", email: seedEmail("company-1") } },
+  { key: "company-2", name: "Bharat Traders Co", city: "Ahmedabad", contact: { firstName: "Priya", lastName: "Patel", email: seedEmail("company-2") } },
+  { key: "company-3", name: "Delhi Distributors LLP", city: "Delhi", contact: { firstName: "Amit", lastName: "Singh", email: seedEmail("company-3") } },
+  { key: "company-4", name: "Mumbai Merchants Pvt Ltd", city: "Pune", contact: { firstName: "Sneha", lastName: "Desai", email: seedEmail("company-4") } },
+  { key: "company-5", name: "Kolkata Commerce House", city: "Kolkata", contact: { firstName: "Arjun", lastName: "Das", email: seedEmail("company-5") } },
 ] as const;
 
 /**
@@ -316,7 +355,7 @@ export const REVIEWER_DEMO_COMPANY_SEED = {
   contact: {
     firstName: "Demo",
     lastName: "Reviewer",
-    email: "demo.reviewer@test-buyer.example",
+    email: seedEmail("company-reviewer-demo"),
   },
 } as const;
 
@@ -408,14 +447,15 @@ export interface SeedState {
   currencyCode: string;
   companies: Map<string, CompanyData>;
   paymentTermsTemplates: PaymentTermsTemplate[];
-  createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number };
-  unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number };
+  createdCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRules: number; dbAccounts: number; customers: number };
+  unchangedCount: { companies: number; locations: number; orders: number; roleAssignments: number; customers: number };
+  updatedCount: { customers: number };
   adoptedCount: { companies: number };
   driftedCount: { companies: number };
   skippedCount: { companies: number; orders: number; roleAssignments: number };
   skippedReasons: string[];
   deletedCount: { companies: number; orders: number };
-  failedCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRows: number };
+  failedCount: { companies: number; locations: number; orders: number; roleAssignments: number; dbRows: number; customers: number };
   ordersWithShopifyTerms: number;
   ordersWithoutShopifyTerms: number;
   overdueOrdersCount: number;
@@ -509,6 +549,44 @@ export function logUserErrors(userErrors: UserError[], context?: string): void {
       console.error(`     - [${code}]${fieldStr ? ` (field: ${fieldStr})` : ""}`);
     }
   }
+}
+
+/**
+ * Result of a mutation operation with consistent failure detection.
+ */
+export interface MutationResult<T> {
+  ok: boolean;
+  data: T | null;
+  failureReason: "graphql_errors" | "user_errors" | "null_result" | null;
+}
+
+/**
+ * Check a mutation response for failure conditions.
+ * A mutation is considered FAILED when:
+ * - The response has top-level GraphQL errors
+ * - The response has non-empty userErrors
+ * - The result object is null or missing
+ *
+ * @param response - The GraphQL response
+ * @param userErrors - The userErrors array from the mutation payload
+ * @param result - The result object (e.g., customer, order) from the mutation payload
+ * @returns MutationResult with ok=true if successful, ok=false with failureReason otherwise
+ */
+export function checkMutationResult<T>(
+  response: GraphQLResponse<unknown>,
+  userErrors: UserError[] | undefined,
+  result: T | null | undefined
+): MutationResult<T> {
+  if (response.errors && response.errors.length > 0) {
+    return { ok: false, data: null, failureReason: "graphql_errors" };
+  }
+  if (userErrors && userErrors.length > 0) {
+    return { ok: false, data: null, failureReason: "user_errors" };
+  }
+  if (result === null || result === undefined) {
+    return { ok: false, data: null, failureReason: "null_result" };
+  }
+  return { ok: true, data: result, failureReason: null };
 }
 
 export async function graphql<T>(
@@ -1212,8 +1290,10 @@ export async function seedCompanies(state: SeedState): Promise<void> {
     let wasAdopted = false;
 
     // If no externalId match, try adoption via contact email or name
+    // Also try legacy email for migration from .example to @example.com
     if (!existing && !state.dryRun) {
-      const adoptionResult = await findCompanyForAdoption(state, seed);
+      const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+      const adoptionResult = await findCompanyForAdoption(state, seed, legacyEmail);
       
       if (adoptionResult && "ambiguous" in adoptionResult) {
         // Multiple candidates - skip and log
@@ -1620,8 +1700,9 @@ export async function adoptCompany(
 
 /**
  * Try to find an existing company for adoption using fallback matching:
- * 1. First by contact email
- * 2. Then by exact name (only if that company has the seed's contact)
+ * 1. First by contact email (new format)
+ * 2. Then by legacy contact email (if provided, for migration)
+ * 3. Then by exact name (only if that company has the seed's contact)
  * 
  * Returns:
  * - { company, matchType } if exactly one match found
@@ -1630,13 +1711,14 @@ export async function adoptCompany(
  */
 export async function findCompanyForAdoption(
   state: SeedState,
-  seed: { name: string; contact: { email: string } }
+  seed: { name: string; contact: { email: string } },
+  legacyEmail?: string
 ): Promise<
-  | { company: CompanyCandidate; matchType: "email" | "name" }
+  | { company: CompanyCandidate; matchType: "email" | "name" | "legacy_email" }
   | { ambiguous: true; candidates: CompanyCandidate[] }
   | null
 > {
-  // Try contact email first
+  // Try contact email first (new format)
   const emailMatches = await findCompaniesByContactEmail(state, seed.contact.email);
   
   if (emailMatches.length === 1) {
@@ -1647,15 +1729,32 @@ export async function findCompanyForAdoption(
     return { ambiguous: true, candidates: emailMatches };
   }
   
-  // Fall back to name match (only if company has the seed's contact)
+  // Try legacy email if provided (for migration from .example to @example.com)
+  if (legacyEmail) {
+    const legacyMatches = await findCompaniesByContactEmail(state, legacyEmail);
+    
+    if (legacyMatches.length === 1) {
+      return { company: legacyMatches[0], matchType: "legacy_email" };
+    }
+    
+    if (legacyMatches.length > 1) {
+      return { ambiguous: true, candidates: legacyMatches };
+    }
+  }
+  
+  // Fall back to name match (only if company has the seed's contact or legacy email)
   const nameMatches = await findCompaniesByName(state, seed.name);
   
   // P3b: Filter to only companies that have the seed's contact email (check ALL contacts)
+  // Also accept legacy email for migration
   const seedEmailLower = seed.contact.email.toLowerCase();
+  const legacyEmailLower = legacyEmail?.toLowerCase();
   const nameMatchesWithContact = nameMatches.filter(c => {
-    // Check _allContactEmails if available (from name search), otherwise fall back to contactEmail
     const emails = c._allContactEmails ?? (c.contactEmail ? [c.contactEmail] : []);
-    return emails.some(email => email.toLowerCase() === seedEmailLower);
+    return emails.some(email => {
+      const emailLower = email.toLowerCase();
+      return emailLower === seedEmailLower || (legacyEmailLower && emailLower === legacyEmailLower);
+    });
   });
   
   if (nameMatchesWithContact.length === 1) {
@@ -2097,7 +2196,9 @@ export async function createCompanyWithLocations(
     console.log(`    ⚠️  Contact email already taken for ${externalId}, attempting recovery...`);
     
     // Find company by contact email and adopt it
-    const adoptionResult = await findCompanyForAdoption(state, seed);
+    // Also try legacy email for migration from .example to @example.com
+    const legacyEmail = LEGACY_SEED_EMAILS[seed.key];
+    const adoptionResult = await findCompanyForAdoption(state, seed, legacyEmail);
     
     if (adoptionResult && "ambiguous" in adoptionResult) {
       console.error(`    ❌ Cannot recover: multiple companies with same contact email`);
@@ -2579,6 +2680,21 @@ export const FIND_CUSTOMER_BY_EMAIL_QUERY = `
 `;
 
 /**
+ * Mutation to update a customer's email.
+ * 
+ * NOTE: Admin API 2026-10 customerUpdate uses plain UserError (field, message only).
+ * Do NOT select `code` on userErrors - it doesn't exist on this type.
+ */
+export const CUSTOMER_UPDATE_MUTATION = `
+  mutation CustomerUpdate($input: CustomerInput!) {
+    customerUpdate(input: $input) {
+      customer { id email }
+      userErrors { field message }
+    }
+  }
+`;
+
+/**
  * Mutation to assign an existing customer as a contact on a company.
  * Used when a customer already exists (from a previous seed run) and we want
  * to attach them to a new company instead of getting a TAKEN error.
@@ -2941,6 +3057,102 @@ interface CustomersSearchResult {
 }
 
 /**
+ * Migrate legacy seed customer emails from .example TLD to @example.com domain.
+ * 
+ * Shopify rejects .example TLD as invalid ("Email contains an invalid domain name").
+ * This function finds existing customers via company externalId (the stable key for
+ * fixture company contacts) and updates their email in place using customerUpdate.
+ * 
+ * Lookup is by company externalId (ntr-seed-company-*), then the contact customer.
+ * 
+ * Idempotent:
+ * - If the contact customer's email is already @example.com, count as unchanged.
+ * - If the contact customer's email is legacy (.example), update it.
+ * - If no company or contact exists, nothing to migrate (create path handles it).
+ * 
+ * The create path uses legacy-email fallback adoption: if no company is found by
+ * externalId, it tries to find and adopt an existing company by contact email
+ * (including legacy .example emails) or by name with matching contact.
+ * 
+ * @returns void - counts are tracked in state
+ */
+export async function migrateCustomerEmails(state: SeedState): Promise<void> {
+  if (state.dryRun) {
+    return;
+  }
+  
+  for (const [seedKey, legacyEmail] of Object.entries(LEGACY_SEED_EMAILS)) {
+    const companyExternalId = `${SEED_PREFIX}${seedKey}`;
+    const newEmail = seedEmail(seedKey);
+    
+    // Find company by externalId (stable key)
+    const company = await findCompanyByExternalId(state, companyExternalId);
+    if (!company) {
+      continue;
+    }
+    
+    // Get the contact customer
+    const contactCustomer = company.contacts.edges[0]?.node?.customer;
+    if (!contactCustomer) {
+      continue;
+    }
+    
+    const currentEmail = contactCustomer.email?.toLowerCase() ?? "";
+    const newEmailLower = newEmail.toLowerCase();
+    const legacyEmailLower = legacyEmail.toLowerCase();
+    
+    // Already migrated
+    if (currentEmail === newEmailLower) {
+      state.unchangedCount.customers++;
+      continue;
+    }
+    
+    // Not the legacy email we're looking for (possibly manual change)
+    if (currentEmail !== legacyEmailLower) {
+      continue;
+    }
+    
+    // Update the customer's email
+    const updated = await updateCustomerEmail(state, contactCustomer.id, newEmail);
+    if (updated) {
+      state.updatedCount.customers++;
+    } else {
+      state.failedCount.customers++;
+    }
+  }
+}
+
+/**
+ * Update a customer's email using customerUpdate mutation.
+ * Returns true on success, false on failure.
+ */
+async function updateCustomerEmail(
+  state: SeedState,
+  customerId: string,
+  newEmail: string
+): Promise<boolean> {
+  const result = await graphql<{
+    customerUpdate: {
+      customer: { id: string; email: string } | null;
+      userErrors: UserError[];
+    };
+  }>(state, CUSTOMER_UPDATE_MUTATION, {
+    input: {
+      id: customerId,
+      email: newEmail,
+    },
+  }, { isMutation: true, mutationName: "customerUpdate" });
+  
+  const check = checkMutationResult(
+    result,
+    result.data?.customerUpdate?.userErrors,
+    result.data?.customerUpdate?.customer
+  );
+  
+  return check.ok;
+}
+
+/**
  * Find or create a tagged customer, then tag with tagsAdd (idempotent).
  * Does NOT tag B2B contacts - their terms come from location/DB defaults.
  * 
@@ -3005,7 +3217,7 @@ export async function ensureTaggedCustomer(
       mutation CreateCustomer($input: CustomerInput!) {
         customerCreate(input: $input) {
           customer { id }
-          userErrors { field message code }
+          userErrors { field message }
         }
       }
     `, {
@@ -3015,18 +3227,18 @@ export async function ensureTaggedCustomer(
       },
     }, { isMutation: true });
 
-    if (createResult.errors) {
-      console.log(`    ⚠️  GraphQL error creating customer: ${createResult.errors.length} error(s)`);
+    const createCheck = checkMutationResult(
+      createResult,
+      createResult.data?.customerCreate?.userErrors,
+      createResult.data?.customerCreate?.customer
+    );
+
+    if (!createCheck.ok) {
+      console.log(`    ⚠️  Failed to create customer: ${createCheck.failureReason}`);
       return null;
     }
 
-    if (createResult.data?.customerCreate.userErrors.length) {
-      const code = createResult.data.customerCreate.userErrors[0].code ?? "UNKNOWN";
-      console.log(`    ⚠️  Failed to create customer: [${code}]`);
-      return null;
-    }
-
-    customerId = createResult.data?.customerCreate.customer?.id;
+    customerId = createCheck.data?.id;
     if (!customerId) {
       console.log(`    ⚠️  No customer ID returned`);
       return null;
@@ -3044,7 +3256,7 @@ export async function ensureTaggedCustomer(
     mutation TagCustomer($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
         node { ... on Customer { id } }
-        userErrors { field message code }
+        userErrors { field message }
       }
     }
   `, {
@@ -3052,13 +3264,15 @@ export async function ensureTaggedCustomer(
     tags: [tag],
   }, { isMutation: true });
 
-  if (tagResult.errors) {
-    console.log(`    ⚠️  GraphQL error tagging customer: ${tagResult.errors.length} error(s)`);
-  }
+  const tagCheck = checkMutationResult(
+    tagResult,
+    tagResult.data?.tagsAdd?.userErrors,
+    tagResult.data?.tagsAdd?.node
+  );
 
-  if (tagResult.data?.tagsAdd.userErrors.length) {
-    const code = tagResult.data.tagsAdd.userErrors[0].code ?? "UNKNOWN";
-    console.log(`    ⚠️  Failed to tag customer: [${code}]`);
+  if (!tagCheck.ok) {
+    console.log(`    ⚠️  Failed to tag customer: ${tagCheck.failureReason}`);
+    return null;
   }
 
   return customerId;
@@ -3087,6 +3301,8 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     if (customerId) {
       customerMap.set(seed.termsDays, customerId);
       console.log(`  ✅ Customer tagged with ${SEED_TAG}-net${seed.termsDays}`);
+    } else {
+      state.errors.push(`Failed to ensure tagged customer for Net ${seed.termsDays}`);
     }
   }
 
@@ -3109,6 +3325,8 @@ export async function seedTaggedCustomerOrders(state: SeedState): Promise<void> 
     const customerId = customerMap.get(orderSpec.customerTermsDays);
     if (!customerId) {
       console.error(`  ❌ [${orderIndex}/${totalTaggedOrders}] No customer found for Net ${orderSpec.customerTermsDays}`);
+      state.failedCount.orders++;
+      state.errors.push(`No customer found for tagged order ${orderIndex}`);
       continue;
     }
 
@@ -3926,7 +4144,16 @@ export function isReviewerDemoEnabled(argv: string[], env: Record<string, string
   return false;
 }
 
-function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean; reseedHeldCurrencyMode: boolean; reviewerDemo: boolean } {
+function parseArgs(): {
+  dryRun: boolean;
+  reset: boolean;
+  resetApply: boolean;
+  reportDuplicatesMode: boolean;
+  reseedHeldCurrencyMode: boolean;
+  reviewerDemo: boolean;
+  g4ReminderFixture: boolean;
+  g4ReminderFixtureCleanup: boolean;
+} {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
@@ -3935,7 +4162,138 @@ function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; re
     reportDuplicatesMode: args.includes("--report-duplicates"),
     reseedHeldCurrencyMode: args.includes("--reseed-held-currency"),
     reviewerDemo: isReviewerDemoEnabled(args, process.env),
+    g4ReminderFixture: args.includes("--g4-reminder-fixture"),
+    g4ReminderFixtureCleanup: args.includes("--g4-reminder-fixture-cleanup"),
   };
+}
+
+/**
+ * The G4 fixture modes are mutually exclusive with each other and with every
+ * other mode flag (reset, report-duplicates, reseed-held-currency).
+ */
+export function isG4FixtureBadArgs(a: {
+  reset: boolean;
+  reportDuplicatesMode: boolean;
+  reseedHeldCurrencyMode: boolean;
+  g4ReminderFixture: boolean;
+  g4ReminderFixtureCleanup: boolean;
+}): boolean {
+  if (!a.g4ReminderFixture && !a.g4ReminderFixtureCleanup) return false;
+  if (a.g4ReminderFixture && a.g4ReminderFixtureCleanup) return true;
+  return a.reset || a.reportDuplicatesMode || a.reseedHeldCurrencyMode;
+}
+
+/**
+ * Injectable dependencies for the allowlist / deploy-SHA drift guard, so the
+ * wiring can be unit tested without touching the filesystem or git.
+ */
+export interface G4AllowlistGuardDeps {
+  /** Read the checked-out wrangler.jsonc text. */
+  readWrangler: () => string;
+  /** Read the deployed commit's wrangler.jsonc text (git show <sha>:wrangler.jsonc). */
+  readDeployedWrangler: (sha: string) => string;
+  /** The last successful deploy SHA (G4_DEPLOY_SHA), or undefined. */
+  deploySha?: string;
+  /** The dispatch checkout SHA (GITHUB_SHA), or undefined. */
+  checkoutSha?: string;
+}
+
+/**
+ * Verify the allowlist enforcement value in the checked-out wrangler.jsonc is
+ * absent or exactly "true", plus the deployed-vs-checkout drift check: when a
+ * deploy SHA differs from the checkout, the deployed config must pass the same
+ * guard. Throws a fixed g4_* code; the recipient is never read. Pure over its
+ * injected deps (no fs/git/process access of its own) so it is unit testable.
+ */
+export function assertG4AllowlistGuardWith(deps: G4AllowlistGuardDeps): void {
+  assertAllowlistEnforced(readAllowlistEnforcedFromWrangler(deps.readWrangler()));
+
+  const deploySha = deps.deploySha?.trim();
+  const checkoutSha = deps.checkoutSha?.trim();
+  if (deploySha && checkoutSha && deploySha !== checkoutSha) {
+    let deployedText: string;
+    try {
+      deployedText = deps.readDeployedWrangler(deploySha);
+    } catch {
+      throw new Error("g4_deploy_sha_mismatch");
+    }
+    try {
+      assertAllowlistEnforced(readAllowlistEnforcedFromWrangler(deployedText));
+    } catch {
+      throw new Error("g4_deploy_sha_mismatch");
+    }
+  }
+}
+
+/** Production wiring: read from the filesystem and git, SHAs from the env. */
+function assertG4AllowlistGuard(): void {
+  assertG4AllowlistGuardWith({
+    readWrangler: () => readFileSync("wrangler.jsonc", "utf8"),
+    readDeployedWrangler: (sha) =>
+      execFileSync("git", ["show", `${sha}:wrangler.jsonc`], { encoding: "utf8" }),
+    deploySha: process.env.G4_DEPLOY_SHA,
+    checkoutSha: process.env.GITHUB_SHA,
+  });
+}
+
+/**
+ * Orchestrate a G4 fixture run (write or cleanup). Prints counts/enums only and
+ * fixed g4_* error codes; never amounts, emails, domains, ids, or tokens.
+ * Returns the process exit code.
+ */
+export async function runG4Fixture(state: SeedState, mode: "write" | "cleanup"): Promise<number> {
+  try {
+    if (state.currencyCode !== "INR") {
+      throw new Error("g4_store_not_inr");
+    }
+    if (!state.databaseUrl) {
+      throw new Error("g4_no_database");
+    }
+
+    // The allowlist guard (and deploy-SHA drift check) gate sends; cleanup only
+    // restores/clears and must always be able to run.
+    if (mode === "write") {
+      assertG4AllowlistGuard();
+    }
+
+    const sql = postgres(state.databaseUrl, { max: 1 });
+    try {
+      if (mode === "write") {
+        const recipient = resolveG4Recipient(process.env);
+        const result = await runG4Write(sql, {
+          shopDomain: state.shop,
+          recipient,
+          dryRun: state.dryRun,
+        });
+        // A dry run is READ ONLY and never aborts on a failed pre-check: it
+        // reports each (window, other sendable, fixture slot) and exits 0. Only
+        // real errors (store not resolving, not INR, DB error) throw below.
+        for (const line of formatG4WriteOutput(result)) console.log(line);
+      } else {
+        const result = await runG4Cleanup(sql, {
+          shopDomain: state.shop,
+          dryRun: state.dryRun,
+        });
+        for (const line of formatG4CleanupOutput(result)) console.log(line);
+      }
+    } finally {
+      await sql.end();
+    }
+    return 0;
+  } catch (err) {
+    const code = err instanceof Error && /^g4_[a-z_]+$/.test(err.message) ? err.message : null;
+    if (code) {
+      console.error(`g4_fixture mode=${mode} error=${code}`);
+    } else {
+      // DB/unknown error: print SQLSTATE only, never message/detail.
+      const sqlstate =
+        err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string"
+          ? (err as { code: string }).code
+          : "unknown";
+      console.error(`g4_fixture mode=${mode} error=g4_db_error code=${sqlstate}`);
+    }
+    return 1;
+  }
 }
 
 /**
@@ -4059,7 +4417,30 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset, resetApply, reportDuplicatesMode, reseedHeldCurrencyMode, reviewerDemo } = parseArgs();
+  const {
+    dryRun,
+    reset,
+    resetApply,
+    reportDuplicatesMode,
+    reseedHeldCurrencyMode,
+    reviewerDemo,
+    g4ReminderFixture,
+    g4ReminderFixtureCleanup,
+  } = parseArgs();
+
+  if (
+    isG4FixtureBadArgs({
+      reset,
+      reportDuplicatesMode,
+      reseedHeldCurrencyMode,
+      g4ReminderFixture,
+      g4ReminderFixtureCleanup,
+    })
+  ) {
+    console.error("g4_fixture error=g4_fixture_bad_args");
+    process.exit(1);
+  }
+
   const env = validateEnv();
 
   if (!env) {
@@ -4078,14 +4459,15 @@ export async function main(): Promise<void> {
     currencyCode: "",
     companies: new Map(),
     paymentTermsTemplates: [],
-    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0 },
-    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0 },
+    createdCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRules: 0, dbAccounts: 0, customers: 0 },
+    unchangedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, customers: 0 },
+    updatedCount: { customers: 0 },
     adoptedCount: { companies: 0 },
     driftedCount: { companies: 0 },
     skippedCount: { companies: 0, orders: 0, roleAssignments: 0 },
     skippedReasons: [],
     deletedCount: { companies: 0, orders: 0 },
-    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0 },
+    failedCount: { companies: 0, locations: 0, orders: 0, roleAssignments: 0, dbRows: 0, customers: 0 },
     ordersWithShopifyTerms: 0,
     ordersWithoutShopifyTerms: 0,
     overdueOrdersCount: 0,
@@ -4109,6 +4491,13 @@ export async function main(): Promise<void> {
   const devStoreOk = await checkDevStore(state);
   if (!devStoreOk) {
     process.exit(1);
+  }
+
+  // G4 reminder delivery fixture: runs after the dev-store guard, before the
+  // normal seeding path, and exits. Writes are gated by a non-dry-run choice.
+  if (g4ReminderFixture || g4ReminderFixtureCleanup) {
+    const code = await runG4Fixture(state, g4ReminderFixtureCleanup ? "cleanup" : "write");
+    process.exit(code);
   }
 
   const b2bOk = await checkB2BSupport(state);
@@ -4149,6 +4538,9 @@ export async function main(): Promise<void> {
     }
     // --reset --apply succeeded, continue to seeding
   }
+
+  // Migrate legacy fixture customer emails (idempotent)
+  await migrateCustomerEmails(state);
 
   // Seed Shopify data
   await seedCompanies(state);
@@ -4198,19 +4590,26 @@ export async function main(): Promise<void> {
   console.log(`      Role assignments: ${state.createdCount.roleAssignments}`);
   console.log(`      Orders:           ${state.createdCount.orders}`);
 
+  if (state.updatedCount.customers > 0) {
+    console.log("    Updated:");
+    console.log(`      Customers:        ${state.updatedCount.customers}`);
+  }
+
   if (state.adoptedCount.companies > 0) {
     console.log("    Adopted (existing company, externalId set):");
     console.log(`      Companies:        ${state.adoptedCount.companies}`);
   }
 
   const hasUnchanged = state.unchangedCount.companies > 0 || state.unchangedCount.locations > 0 ||
-                       state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0;
+                       state.unchangedCount.orders > 0 || state.unchangedCount.roleAssignments > 0 ||
+                       state.unchangedCount.customers > 0;
   if (hasUnchanged) {
     console.log("    Unchanged:");
     console.log(`      Companies:        ${state.unchangedCount.companies}`);
     console.log(`      Locations:        ${state.unchangedCount.locations}`);
     console.log(`      Role assignments: ${state.unchangedCount.roleAssignments}`);
     console.log(`      Orders:           ${state.unchangedCount.orders}`);
+    console.log(`      Customers:        ${state.unchangedCount.customers}`);
   }
 
   if (state.driftedCount.companies > 0) {
@@ -4241,12 +4640,14 @@ export async function main(): Promise<void> {
 
   // Always print explicit failed counts for every category
   const totalFailures = state.failedCount.companies + state.failedCount.locations + 
-                        state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+                        state.failedCount.orders + state.failedCount.roleAssignments + 
+                        state.failedCount.dbRows + state.failedCount.customers;
   console.log("    Failed:");
   console.log(`      Companies:        ${state.failedCount.companies}`);
   console.log(`      Locations:        ${state.failedCount.locations}`);
   console.log(`      Role assignments: ${state.failedCount.roleAssignments}`);
   console.log(`      Orders:           ${state.failedCount.orders}`);
+  console.log(`      Customers:        ${state.failedCount.customers}`);
   console.log(`      DB rows:          ${state.failedCount.dbRows}`);
 
   // Order breakdown
@@ -4299,7 +4700,8 @@ export async function main(): Promise<void> {
  */
 export function computeExitCode(state: SeedState): number {
   const totalFailures = state.failedCount.companies + state.failedCount.locations + 
-                        state.failedCount.orders + state.failedCount.roleAssignments + state.failedCount.dbRows;
+                        state.failedCount.orders + state.failedCount.roleAssignments + 
+                        state.failedCount.dbRows + state.failedCount.customers;
   return (totalFailures > 0 || state.errors.length > 0) ? 1 : 0;
 }
 

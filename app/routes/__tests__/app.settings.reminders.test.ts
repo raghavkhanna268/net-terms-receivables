@@ -91,7 +91,7 @@ describe("Reminder Settings Route", () => {
       } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue(
         null
@@ -128,7 +128,7 @@ describe("Reminder Settings Route", () => {
       } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
         enabled: false,
@@ -164,7 +164,7 @@ describe("Reminder Settings Route", () => {
       } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
         enabled: false,
@@ -200,7 +200,7 @@ describe("Reminder Settings Route", () => {
       } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
         enabled: true,
@@ -239,7 +239,7 @@ describe("Reminder Settings Route", () => {
       } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
         enabled: false,
@@ -272,7 +272,7 @@ describe("Reminder Settings Route", () => {
       expect(typeof result.shopSentToday).toBe("number");
     });
 
-    it("returns shop not found error when shop doesn't exist", async () => {
+    it("returns settingUp=true when shop doesn't exist", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([]);
@@ -287,7 +287,8 @@ describe("Reminder Settings Route", () => {
         pattern: mockPattern,
       });
 
-      expect(result.error).toBe("Shop not found");
+      expect(result.error).toBeNull();
+      expect(result.settingUp).toBe(true);
       expect(result.settings).toBeNull();
     });
 
@@ -300,7 +301,7 @@ describe("Reminder Settings Route", () => {
       } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-456", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-456", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
         enabled: false,
@@ -339,7 +340,7 @@ describe("Reminder Settings Route", () => {
     it("blocks enabling when only RESEND_API_KEY is set (real isReminderSendingEnabled)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Only RESEND_API_KEY, no RESEND_FROM
@@ -367,13 +368,13 @@ describe("Reminder Settings Route", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("email provider is configured");
+      expect(result.error).toBe("Email reminders aren't available yet");
     });
 
     it("blocks enabling when only RESEND_FROM is set (real isReminderSendingEnabled)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Only RESEND_FROM, no RESEND_API_KEY
@@ -401,7 +402,7 @@ describe("Reminder Settings Route", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("email provider is configured");
+      expect(result.error).toBe("Email reminders aren't available yet");
     });
 
     it("allows disabling even when provider is not configured", async () => {
@@ -410,7 +411,7 @@ describe("Reminder Settings Route", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (
         updateShopReminderSettings as ReturnType<typeof vi.fn>
@@ -450,7 +451,7 @@ describe("Reminder Settings Route", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (
         updateShopReminderSettings as ReturnType<typeof vi.fn>
@@ -493,7 +494,7 @@ describe("Reminder Settings Route", () => {
       const { updateReminderRule, getShopReminderRules } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
@@ -537,7 +538,7 @@ describe("Reminder Settings Route", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       mockContext.cloudflare.env = {
@@ -579,7 +580,7 @@ describe("Reminder Settings Route", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       mockContext.cloudflare.env = {
@@ -619,7 +620,7 @@ describe("Reminder Settings Route", () => {
       const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
 
@@ -658,7 +659,7 @@ describe("Reminder Settings Route", () => {
       const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
 
@@ -692,7 +693,7 @@ describe("Reminder Settings Route", () => {
       const { updateReminderRule, getShopReminderRules } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (updateReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(false);
@@ -735,7 +736,7 @@ describe("Reminder Settings Route", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([
         { id: "rule-1", offsetDays: 7, channel: "email", enabled: true },
@@ -782,7 +783,7 @@ describe("Reminder Settings Route", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
       (createReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -825,7 +826,7 @@ describe("Reminder Settings Route", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderRules as ReturnType<typeof vi.fn>).mockResolvedValue([
         { id: "rule-1", offsetDays: 7, channel: "email", enabled: true },
@@ -867,7 +868,7 @@ describe("Reminder Settings Route", () => {
       const { deleteReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (deleteReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(true);
 
@@ -905,7 +906,7 @@ describe("Reminder Settings Route", () => {
       const { deleteReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (deleteReminderRule as ReturnType<typeof vi.fn>).mockResolvedValue(false);
 
@@ -944,7 +945,7 @@ describe("Reminder Settings Route", () => {
     it("returns error for unknown intent", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       mockContext.cloudflare.env = {
@@ -978,7 +979,7 @@ describe("Reminder Settings Route", () => {
   });
 
   describe("action - shop not found", () => {
-    it("returns error when shop not found", async () => {
+    it("toggle_enabled returns setting up error when shop not found", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
       mockSql.mockResolvedValueOnce([]);
@@ -1006,7 +1007,7 @@ describe("Reminder Settings Route", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Shop not found");
+      expect(result.error).toContain("still being set up");
     });
   });
 });
@@ -1021,7 +1022,7 @@ describe("ensureDefaultReminderRules (via loader)", () => {
     } = await import("~/services/reminders.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
-    const mockSql = vi.fn().mockResolvedValueOnce([{ id: "shop-xyz", timezone: "UTC" }]);
+    const mockSql = vi.fn().mockResolvedValueOnce([{ id: "shop-xyz", timezone: "UTC", currency: "INR" }]);
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
     (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
       enabled: false,
@@ -1109,7 +1110,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
       );
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-action-test", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-action-test", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       mockContext.cloudflare.env = {
@@ -1164,7 +1165,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
       const { updateReminderRule } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-email-test", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-email-test", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       mockContext.cloudflare.env = {
@@ -1211,7 +1212,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
     it("logs hostile intent as 'other' (toSafeIntent)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-hostile-intent", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       mockContext.cloudflare.env = {
@@ -1268,7 +1269,7 @@ describe("Reminder Settings Route error logging (R2)", () => {
       } = await import("~/services/reminders.server");
       const { getRequestSql } = await import("~/lib/request-context.server");
 
-      mockSql.mockResolvedValueOnce([{ id: "shop-ok", timezone: "UTC" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-ok", timezone: "UTC", currency: "INR" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
       (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
         enabled: false,
@@ -1339,7 +1340,7 @@ describe("Reminder Settings Route - loader passthrough", () => {
     } = await import("~/services/reminder-status.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
-    mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "Asia/Kolkata" }]);
+    mockSql.mockResolvedValueOnce([{ id: "shop-123", timezone: "Asia/Kolkata", currency: "INR" }]);
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
     (getShopReminderSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
       enabled: true,
@@ -1969,8 +1970,8 @@ describe("Opted-out buyer helper text", () => {
     const html = renderToString(createElement(RemindersSettingsPage));
 
     // Check the VERBATIM helper text
-    expect(html).toContain("The buyer unsubscribed from reminder emails");
-    expect(html).toContain("Only you can turn reminders back on for them");
+    expect(html).toContain("These buyers unsubscribed from reminder emails");
+    expect(html).toContain("Only you can turn reminders back on for them, from the buyer");
   });
 
   it("renders the skippedOptedOut count in status section", async () => {

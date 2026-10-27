@@ -364,6 +364,127 @@ describe("webhooks.shop.update", () => {
     });
   });
 
+  describe("G1: Admin API failure and invalid response paths (#342)", () => {
+    let consoleSpy: { log: MockInstance; warn: MockInstance; error: MockInstance };
+
+    beforeEach(() => {
+      consoleSpy = {
+        log: vi.spyOn(console, "log").mockImplementation(() => {}),
+        warn: vi.spyOn(console, "warn").mockImplementation(() => {}),
+        error: vi.spyOn(console, "error").mockImplementation(() => {}),
+      };
+    });
+
+    afterEach(() => {
+      consoleSpy.log.mockRestore();
+      consoleSpy.warn.mockRestore();
+      consoleSpy.error.mockRestore();
+    });
+
+    function findLogWithEvent(eventKey: string): unknown[] | undefined {
+      const allLogCalls = [
+        ...consoleSpy.log.mock.calls,
+        ...consoleSpy.warn.mock.calls,
+        ...consoleSpy.error.mock.calls,
+      ];
+      return allLogCalls.find((call) => {
+        const msg = String(call[0] ?? "");
+        return msg.includes(eventKey);
+      });
+    }
+
+    it("G1a: Admin API failure (not no_session) logs api_failed, no metafield write, no DB update", async () => {
+      setupShopInDb("INR");
+      mockShopifyGraphQLQueue.mockResolvedValue({
+        success: false,
+        errorCode: "throttled",
+        retryable: true,
+      });
+
+      const { action } = await import("../webhooks.shop.update");
+      const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");
+      const args = createActionArgs(request);
+
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      await args._waitUntil.mock.calls[0][0];
+
+      expect(mockWriteShopConfigMetafield).not.toHaveBeenCalled();
+
+      const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+      expect(updateCalls.length).toBe(0);
+
+      const apiFailedLog = findLogWithEvent("shop_update_webhook_api_failed");
+      expect(apiFailedLog).toBeDefined();
+      const logJson = JSON.parse(String(apiFailedLog![0]));
+      expect(logJson.event).toBe("shop_update_webhook_api_failed");
+      expect(logJson.shopHash).toBeDefined();
+      expect(logJson.err).toBe("throttled");
+
+      const invalidResponseLog = findLogWithEvent("shop_update_webhook_invalid_response");
+      expect(invalidResponseLog).toBeUndefined();
+    });
+
+    it("G1b: success response with missing currencyCode logs invalid_response, no metafield write, no DB update", async () => {
+      setupShopInDb("INR");
+      mockShopifyGraphQLQueue.mockResolvedValue({
+        success: true,
+        data: { shop: { id: TEST_SHOP_GID } },
+        retryable: false,
+      });
+
+      const { action } = await import("../webhooks.shop.update");
+      const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");
+      const args = createActionArgs(request);
+
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      await args._waitUntil.mock.calls[0][0];
+
+      expect(mockWriteShopConfigMetafield).not.toHaveBeenCalled();
+
+      const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+      expect(updateCalls.length).toBe(0);
+
+      const invalidResponseLog = findLogWithEvent("shop_update_webhook_invalid_response");
+      expect(invalidResponseLog).toBeDefined();
+      const logJson = JSON.parse(String(invalidResponseLog![0]));
+      expect(logJson.event).toBe("shop_update_webhook_invalid_response");
+      expect(logJson.shopHash).toBeDefined();
+    });
+
+    it("G1c: success response with missing shop.id logs invalid_response, no metafield write, no DB update", async () => {
+      setupShopInDb("INR");
+      mockShopifyGraphQLQueue.mockResolvedValue({
+        success: true,
+        data: { shop: { currencyCode: "USD" } },
+        retryable: false,
+      });
+
+      const { action } = await import("../webhooks.shop.update");
+      const request = createMockRequest({ id: TEST_SHOP_GID }, "shop/update");
+      const args = createActionArgs(request);
+
+      const response = await action(args);
+      expect(response.status).toBe(200);
+
+      await args._waitUntil.mock.calls[0][0];
+
+      expect(mockWriteShopConfigMetafield).not.toHaveBeenCalled();
+
+      const updateCalls = sqlCalls.filter((c) => c.query.includes("UPDATE") && c.query.includes("currency"));
+      expect(updateCalls.length).toBe(0);
+
+      const invalidResponseLog = findLogWithEvent("shop_update_webhook_invalid_response");
+      expect(invalidResponseLog).toBeDefined();
+      const logJson = JSON.parse(String(invalidResponseLog![0]));
+      expect(logJson.event).toBe("shop_update_webhook_invalid_response");
+      expect(logJson.shopHash).toBeDefined();
+    });
+  });
+
   describe("uninstalled shop handling", () => {
     it("uninstalled shop (no_session) is a no-op", async () => {
       setupShopInDb("INR");

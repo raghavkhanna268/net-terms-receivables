@@ -65,7 +65,7 @@ This plan verifies that:
 ## 4. Protected customer data, scopes and data minimization (DPDP)
 - **PCD-1:** Only Level 1 plus customer **Email and Name** (`email`, `displayName`) may be read, and only when `CUSTOMER_PII_FIELDS=1`. **Phone, addresses, firstName, lastName and defaultAddress are a fail.** Any new GraphQL query must pass `validateNoForbiddenFields()` / the allowed-field check in `customer-fields.server.ts`.
 - **PCD-2:** The `credit_status` metafield value contains no PII (schema `additionalProperties: false`, with reason codes only).
-- **SCOPE-1:** `shopify.app.toml` `scopes` and the `wrangler.jsonc` `SCOPES` var remain exactly the 11 production scopes. **No `write_payment_terms` and no `write_draft_orders`.** `scripts/check-scope-sync.ts` passes in CI.
+- **SCOPE-1:** `shopify.app.toml` `scopes` and the `wrangler.jsonc` `SCOPES` var remain exactly the 9 production scopes. **No `write_payment_terms` and no `write_draft_orders`.** `scripts/check-scope-sync.ts` passes in CI.
 - **SCOPE-2:** `metafieldsSet` works with the existing `write_companies` / `write_customers`. Any `ACCESS_DENIED` is a fail, not a reason to add scopes.
 - **DPDP-1:** AuditEvents store ids, amounts and reason codes only. No email or name is copied into audit rows or logs.
 - **DPDP-2:** Logs (`console.*` spy) print GIDs and codes only.

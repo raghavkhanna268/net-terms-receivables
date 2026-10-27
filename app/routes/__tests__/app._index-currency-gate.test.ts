@@ -158,7 +158,7 @@ describe("#292 currency gate on /app loader", () => {
     }
   }
 
-  it("USD shop: notSupported=true, no money fields in payload, money queries not run", async () => {
+  it("USD shop: storeSetupStatus=not_supported, no money fields in payload, money queries not run", async () => {
     setupSqlMock("USD");
 
     const { loader } = await import("../app._index");
@@ -167,6 +167,7 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("not_supported");
     expect(result.shopCurrency).toBe("USD");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
@@ -180,7 +181,7 @@ describe("#292 currency gate on /app loader", () => {
     expect(mockGetBuyerLedger).not.toHaveBeenCalled();
   });
 
-  it("XXX (unknown) shop: notSupported=true, no money fields, fail-closed", async () => {
+  it("XXX (unknown) shop: storeSetupStatus=setting_up, no money fields, fail-closed", async () => {
     setupSqlMock("XXX");
 
     const { loader } = await import("../app._index");
@@ -189,6 +190,7 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("setting_up");
     expect(result.shopCurrency).toBe("XXX");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
@@ -200,7 +202,7 @@ describe("#292 currency gate on /app loader", () => {
     expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
   });
 
-  it("NULL currency: notSupported=true, no money fields, fail-closed", async () => {
+  it("NULL currency: storeSetupStatus=setting_up, no money fields, fail-closed", async () => {
     setupSqlMock(null);
 
     const { loader } = await import("../app._index");
@@ -209,6 +211,7 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("setting_up");
     expect(result.shopCurrency).toBe("XXX");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
@@ -237,7 +240,7 @@ describe("#292 currency gate on /app loader", () => {
     expect(mockGetBuyerLedger).toHaveBeenCalled();
   });
 
-  it("no Shop row: notSupported=true, fail-closed with XXX sentinel", async () => {
+  it("no Shop row: storeSetupStatus=setting_up, fail-closed with XXX sentinel", async () => {
     // Simulate no shop row found
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
@@ -255,9 +258,10 @@ describe("#292 currency gate on /app loader", () => {
     const dataResponse = await loader(createLoaderArgs());
     const result = dataResponse.data as Record<string, unknown>;
 
-    // Fail-closed: no Shop row triggers currency gate with XXX sentinel
+    // Fail-closed: no Shop row triggers setting_up state
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("setting_up");
     expect(result.shopCurrency).toBe("XXX");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
@@ -268,5 +272,90 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
     expect(mockGetBuyerLedger).not.toHaveBeenCalled();
+  });
+
+  it("currency not-supported wins over onboarding redirect (decision order preserved)", async () => {
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([
+          { id: TEST_SHOP_ID, currency: "USD", timezone: "America/New_York" },
+        ]);
+      }
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgs());
+    const result = dataResponse.data as Record<string, unknown>;
+
+    expect(result.notSupported).toBe(true);
+    expect(result.currencySupported).toBe(false);
+    expect(result.shopCurrency).toBe("USD");
+    expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
+    expect(mockGetBuyerLedger).not.toHaveBeenCalled();
+  });
+
+  it("onboarding redirect does NOT happen when currency is unsupported (no redirect thrown)", async () => {
+    let redirectCalled = false;
+    
+    function createLoaderArgsWithRedirectTracking(): LoaderFunctionArgs {
+      const url = new URL("https://example.com/app");
+      return {
+        request: new Request(url.toString()),
+        context: {
+          shopify: {
+            authenticate: {
+              admin: vi.fn().mockResolvedValue({
+                session: { shop: TEST_SHOP },
+                sessionToken: "test-token",
+                redirect: vi.fn((path: string) => {
+                  redirectCalled = true;
+                  throw new Response(null, { status: 302, headers: { Location: path } });
+                }),
+                admin: { graphql: vi.fn() },
+              }),
+            },
+          },
+          cloudflare: {
+            env: {},
+            ctx: { waitUntil: vi.fn() },
+          },
+        },
+        params: {},
+      } as unknown as LoaderFunctionArgs;
+    }
+
+    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+
+      if (query.includes("SELECT id, currency, timezone FROM")) {
+        return Promise.resolve([
+          { id: TEST_SHOP_ID, currency: "EUR", timezone: "Europe/London" },
+        ]);
+      }
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
+      }
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL")) {
+        return Promise.resolve([{ count: "0" }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const { loader } = await import("../app._index");
+    const dataResponse = await loader(createLoaderArgsWithRedirectTracking());
+    const result = dataResponse.data as Record<string, unknown>;
+
+    expect(redirectCalled).toBe(false);
+    expect(result.notSupported).toBe(true);
+    expect(result.currencySupported).toBe(false);
   });
 });

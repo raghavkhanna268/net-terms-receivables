@@ -17,6 +17,9 @@ import type {
 import { useLoaderData, useNavigation, Form } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import {
   getShopReminderSettings,
   getShopReminderRules,
@@ -42,6 +45,7 @@ import type {
   DelayedReminder,
 } from "~/services/reminder-status.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { pluralizeWithCount } from "~/lib/copy-helpers";
 
 const VALID_INTENTS = ["toggle_enabled", "update_rule", "create_rule", "delete_rule"] as const;
 type ReminderIntent = (typeof VALID_INTENTS)[number];
@@ -63,13 +67,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; timezone: string }[]>`
-    SELECT id, timezone FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; timezone: string; currency: string | null }[]>`
+    SELECT id, timezone, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
+  const storeSetupStatus = getStoreSetupStatus(shop);
+
+  if (storeSetupStatus !== "supported") {
     return {
-      error: "Shop not found",
+      error: null,
       settings: null,
       rules: [],
       logs: [],
@@ -78,10 +84,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 } as ReminderStatusCounts,
       delayedReminders: [] as DelayedReminder[],
       shopSentToday: 0,
+      settingUp: storeSetupStatus === "setting_up",
+      notSupported: storeSetupStatus === "not_supported",
+      storeSetupStatus,
     };
   }
 
-  // Ensure default rules exist (idempotent, only seeds when shop has no rules)
+  // Create settings row if missing; seed default rules only on first visit
+  // (no settings row, no ReminderLog, and no existing ReminderRule rows).
   await ensureDefaultReminderRules(sql, shop.id);
 
   const [settings, rules, logs, statusCounts, delayedReminders, shopSentToday] = await Promise.all([
@@ -107,6 +117,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     statusCounts,
     delayedReminders,
     shopSentToday,
+    settingUp: false,
+    notSupported: false,
+    storeSetupStatus: "supported" as const,
   };
 };
 
@@ -116,16 +129,27 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
-    return { success: false, error: "Shop not found" };
-  }
+  const storeSetupStatus = getStoreSetupStatus(shop);
 
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
+
+  if (intent === "toggle_enabled") {
+    if (storeSetupStatus === "setting_up") {
+      return { success: false, error: "Your store is still being set up. Please wait a moment and try again." };
+    }
+    if (storeSetupStatus === "not_supported") {
+      return { success: false, error: "Only INR currency is supported" };
+    }
+  }
+
+  if (storeSetupStatus !== "supported") {
+    return { success: false, error: "Shop not found" };
+  }
 
   const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM?: string } } })
     .cloudflare?.env;
@@ -140,7 +164,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         if (enabled && !providerConfigured) {
           return {
             success: false,
-            error: "Email reminders will be available once the email provider is configured",
+            error: "Email reminders aren't available yet",
           };
         }
         await updateShopReminderSettings(sql, shop.id, enabled);
@@ -243,11 +267,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
 function RuleOffsetLabel({ offsetDays }: { offsetDays: number }) {
   if (offsetDays < 0) {
-    return <>{Math.abs(offsetDays)} days before due</>;
+    return <>{pluralizeWithCount(Math.abs(offsetDays), "day")} before due</>;
   } else if (offsetDays === 0) {
     return <>On due date</>;
   } else {
-    return <>{offsetDays} days overdue</>;
+    return <>{pluralizeWithCount(offsetDays, "day")} overdue</>;
   }
 }
 
@@ -381,11 +405,35 @@ export default function RemindersSettingsPage() {
     statusCounts,
     delayedReminders,
     shopSentToday,
+    settingUp,
+    notSupported,
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
   const remindersEnabled = settings?.enabled ?? false;
+
+  if (settingUp) {
+    return (
+      <s-page heading="Payment Reminders">
+        <s-section>
+          <StoreSettingUpBanner />
+        </s-section>
+      </s-page>
+    );
+  }
+
+  if (notSupported) {
+    return (
+      <s-page heading="Payment Reminders">
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
 
   return (
     <s-page heading="Payment Reminders">
@@ -400,10 +448,9 @@ export default function RemindersSettingsPage() {
       {/* Provider Status Banner */}
       {!providerConfigured && (
         <s-section>
-          <s-banner tone="warning" heading="Email sending not configured yet">
+          <s-banner tone="warning" heading="Email reminders aren't available yet">
             <s-text>
-              Payment reminder emails are not yet enabled. This feature will be
-              available once the email provider is configured. You can still
+              Payment reminder emails are not yet available. You can still
               configure your reminder settings below.
             </s-text>
           </s-banner>
@@ -577,8 +624,7 @@ export default function RemindersSettingsPage() {
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
-          Each reminder is sent only once per invoice, even if the job runs
-          multiple times.
+          Each reminder is sent only once per invoice.
         </s-paragraph>
       </s-section>
 
@@ -593,8 +639,8 @@ export default function RemindersSettingsPage() {
 
       <s-section slot="aside" heading="Opted-Out Buyers">
         <s-paragraph>
-          The buyer unsubscribed from reminder emails. Only you can turn
-          reminders back on for them.
+          These buyers unsubscribed from reminder emails. Only you can turn
+          reminders back on for them, from the buyer&apos;s account page.
         </s-paragraph>
       </s-section>
 

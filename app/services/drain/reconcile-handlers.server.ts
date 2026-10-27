@@ -1,9 +1,9 @@
 /**
  * Reconcile handlers for S10b + S8.
  *
- * Handles RECONCILE_COMPANIES, RECONCILE_CUSTOMERS, and RECONCILE_ORDERS
- * messages by starting bulk exports via the Admin API. Also provides the
- * order refetch null metric recording function.
+ * Handles RECONCILE_COMPANIES, RECONCILE_CUSTOMERS, RECONCILE_ORDERS, and
+ * RECONCILE_DRAFT_ORDERS messages by starting bulk exports via the Admin API.
+ * Also provides the order refetch null metric recording function.
  *
  * Flow:
  * 1. pg_cron calls /jobs/drain?reconcile=true at 02:00 UTC daily
@@ -15,10 +15,13 @@
  * 7. Customers reconcile runs (skipped if no tag rules)
  * 8. After customers complete, handleBulkOperationsFinish enqueues RECONCILE_ORDERS
  * 9. Orders reconcile runs similarly
+ * 10. After orders complete, handleBulkOperationsFinish enqueues RECONCILE_DRAFT_ORDERS
+ * 11. Draft orders reconcile runs for pending credit exposure tracking
  *
- * Sequential design: companies → customers → orders
+ * Sequential design: companies → customers → orders → draft_orders
  * - Companies must complete before customers (B2B contacts check)
  * - Customers must complete before orders (tagged customer buyer account existence)
+ * - Orders must complete before draft_orders (buyer account existence)
  *
  * Customers stage skip: If a shop has no tag rules, the customers stage is
  * skipped entirely (no bulk op started) and the chain continues to orders.
@@ -33,6 +36,7 @@ import { adminGraphQL } from "./admin-client.server";
 import {
   getBulkCompaniesQuery,
   BULK_ORDERS_QUERY,
+  BULK_DRAFT_ORDERS_QUERY,
   parseBulkOperationResult,
   registerBulkOperation,
 } from "~/services/sync/bulk-operations.server";
@@ -241,7 +245,8 @@ export async function purgeOldReconcileClaims(sql: Sql): Promise<number> {
  * have the same bulk operation GID (unlikely but defensive).
  *
  * Looks up any reconcile stage topic (RECONCILE_COMPANIES, RECONCILE_CUSTOMERS,
- * RECONCILE_ORDERS) since the manual key is consistent across all stages.
+ * RECONCILE_ORDERS, RECONCILE_DRAFT_ORDERS) since the manual key is consistent
+ * across all stages.
  *
  * @param sql - postgres.js SQL client
  * @param bulkOperationId - The bulk operation GID
@@ -258,7 +263,7 @@ export async function getManualKeyForBulkOp(
     SELECT webhook_id
     FROM s6_processed_webhooks
     WHERE resource_gid = ${bulkOperationId}
-      AND topic IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS')
+      AND topic IN ('RECONCILE_COMPANIES', 'RECONCILE_CUSTOMERS', 'RECONCILE_ORDERS', 'RECONCILE_DRAFT_ORDERS')
       AND left(webhook_id, length(${prefix})) = ${prefix}
     LIMIT 1
   `;
@@ -301,12 +306,16 @@ async function buildReconcileMutation(
     return BULK_ORDERS_QUERY;
   }
 
+  if (kind === "draft_orders") {
+    return BULK_DRAFT_ORDERS_QUERY;
+  }
+
   if (kind === "customers") {
     const [shopRow] = await sql<{ id: string }[]>`
       SELECT id FROM "Shop" WHERE domain = ${shop}
     `;
     if (!shopRow) {
-      return null;
+      return "shop_not_found";
     }
 
     const tagRules = await getTagRules(sql, shopRow.id);
@@ -395,6 +404,18 @@ export async function startReconcileBulkOperation(
   }
 
   const mutation = await buildReconcileMutation(sql, shop, kind);
+
+  if (mutation === "shop_not_found") {
+    if (chainKey) {
+      await releaseReconcileStageClaim(sql, chainKey, kind, shop);
+    }
+    return {
+      success: false,
+      action: "skipped",
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
+    };
+  }
 
   if (!mutation) {
     // Release claim since we're skipping (no mutation to run)
@@ -528,7 +549,7 @@ export async function startReconcileBulkOperation(
  *
  * @param sql - postgres.js SQL client
  * @param shop - Shop domain
- * @param stage - Stage to enqueue (customers or orders)
+ * @param stage - Stage to enqueue (customers, orders, or draft_orders)
  * @param manualKey - Optional manual key base from previous stage
  * @param prevBulkOperationId - Optional bulk operation ID of the previous stage
  * @returns Whether the message was enqueued (false if shop doesn't exist, uninstalled, or prev op closed)
@@ -536,7 +557,7 @@ export async function startReconcileBulkOperation(
 export async function enqueueReconcileStage(
   sql: Sql,
   shop: string,
-  stage: "customers" | "orders",
+  stage: "customers" | "orders" | "draft_orders",
   manualKey?: string,
   prevBulkOperationId?: string
 ): Promise<boolean> {
@@ -628,13 +649,18 @@ export async function enqueueReconcileOrders(
 export async function incrementOrderRefetchNull(
   sql: Sql,
   shop: string
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO s10b_order_refetch_null (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, 1)
+    SELECT ${shop}, CURRENT_DATE, 1
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = s10b_order_refetch_null.count + 1
   `;
+  return result.count > 0;
 }
 
 /**
@@ -653,14 +679,19 @@ export async function incrementOrderOutstandingMissing(
   sql: Sql,
   shop: string,
   n: number = 1
-): Promise<void> {
-  if (n <= 0) return;
-  await sql`
+): Promise<boolean> {
+  if (n <= 0) return false;
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO order_outstanding_missing (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, ${n})
+    SELECT ${shop}, CURRENT_DATE, ${n}
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = order_outstanding_missing.count + ${n}
   `;
+  return result.count > 0;
 }
 
 /**

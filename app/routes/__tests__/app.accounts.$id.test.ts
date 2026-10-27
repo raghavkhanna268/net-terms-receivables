@@ -31,10 +31,19 @@ vi.mock("~/services/gating.server", () => ({
   }),
 }));
 
-vi.mock("~/services/credit-status.server", () => ({
-  getCreditStatusDisplay: vi.fn(),
-  getCompanyTotals: vi.fn(),
-  updateCreditStatus: vi.fn(),
+vi.mock("~/services/credit-status.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/credit-status.server")>();
+  return {
+    ...actual,
+    getCreditStatusDisplay: vi.fn(),
+    getCompanyTotals: vi.fn(),
+    updateCreditStatus: vi.fn(),
+  };
+});
+
+vi.mock("@shopify/shopify-app-react-router/server", () => ({
+  boundary: { headers: vi.fn(() => ({})) },
+  ApiVersion: { October26: "2026-10" },
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
@@ -248,7 +257,7 @@ describe("app.accounts.$id loader syncState", () => {
 
       expect(result.creditStatus?.syncState).toBe("needs_attention");
       expect(result.creditStatus?.syncErrorInfo?.category).toBe("session");
-      expect(result.creditStatus?.syncErrorInfo?.message).toContain("reopen the app or reinstall");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("Reopen the app, or reinstall");
       expect(result.creditStatus?.syncErrorInfo?.message).not.toContain("no_session");
     });
 
@@ -307,7 +316,7 @@ describe("app.accounts.$id loader syncState", () => {
 
       expect(result.creditStatus?.syncState).toBe("needs_attention");
       expect(result.creditStatus?.syncErrorInfo?.category).toBe("generic");
-      expect(result.creditStatus?.syncErrorInfo?.message).toContain("multiple failures");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("multiple attempts");
     });
 
     it("synced state shows no banner (syncErrorInfo is null)", async () => {
@@ -355,7 +364,7 @@ describe("app.accounts.$id loader syncState", () => {
 
       expect(result.creditStatus?.syncErrorInfo).not.toBeNull();
       expect(result.creditStatus?.syncErrorInfo?.category).toBe("session");
-      expect(result.creditStatus?.syncErrorInfo?.message).toContain("reopen the app or reinstall");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("Reopen the app, or reinstall");
     });
 
     it("returns session category for invalid_grant error", async () => {
@@ -450,7 +459,7 @@ describe("app.accounts.$id loader syncState", () => {
       const result = await loader(createLoaderArgs());
 
       expect(result.creditStatus?.syncErrorInfo?.category).toBe("generic");
-      expect(result.creditStatus?.syncErrorInfo?.message).toContain("multiple failures");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("multiple attempts");
     });
 
     it("returns null syncErrorInfo when synced state", async () => {
@@ -650,7 +659,7 @@ describe("app.accounts.$id loader syncState", () => {
       expect(result.account?.isGated).toBe(true);
       expect(result.creditStatus?.syncState).toBe("needs_attention");
       expect(result.creditStatus?.syncErrorInfo?.category).toBe("session");
-      expect(result.creditStatus?.syncErrorInfo?.message).toContain("reopen the app or reinstall");
+      expect(result.creditStatus?.syncErrorInfo?.message).toContain("Reopen the app, or reinstall");
       
       mockIsGatingEnforced.mockReturnValue(false);
     });

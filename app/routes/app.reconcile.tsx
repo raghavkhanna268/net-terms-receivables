@@ -19,9 +19,10 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useNavigation, Form } from "react-router";
+import { useLoaderData, useActionData, useNavigation, Form } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
+import { parsePageParam } from "~/lib/parse-page-param";
 import {
   getUnmatchedPayments,
   getSuggestedMatches,
@@ -110,6 +111,51 @@ interface MatchSummary {
   reasons: unknown;
   state: string;
   buyerName: string;
+  buyerAccountId?: string;
+}
+
+/**
+ * Label map for match reason types.
+ * Maps internal reason codes to merchant-friendly labels.
+ */
+export const MATCH_REASON_LABELS: Record<string, string> = {
+  amount_exact: "Exact amount",
+  amount_overpayment: "Overpayment",
+  amount_partial: "Partial payment",
+  invoice_ref: "Invoice/Order ref",
+  order_ref: "Invoice/Order ref",
+  payer_alias: "Confirmed alias",
+  payer_name: "Payer name",
+  email_match: "Email match",
+  multi_invoice: "Multiple invoices",
+};
+
+/**
+ * Get a merchant-friendly label for a match reason type.
+ * Falls back to a readable version of the code for unknown types.
+ */
+export function getMatchReasonLabel(type: string): string {
+  return MATCH_REASON_LABELS[type] ?? type.replace(/_/g, " ");
+}
+
+/**
+ * Label map for match states.
+ * Maps internal state values to merchant-friendly labels.
+ */
+export const MATCH_STATE_LABELS: Record<string, string> = {
+  suggested: "Suggested",
+  confirmed: "Confirmed",
+  pushing: "Applying…",
+  pushed: "Recorded in Shopify",
+  unmatched: "Not matched",
+};
+
+/**
+ * Get a merchant-friendly label for a match state.
+ * Falls back to Title Case for unknown states.
+ */
+export function getMatchStateLabel(state: string): string {
+  return MATCH_STATE_LABELS[state] ?? state.charAt(0).toUpperCase() + state.slice(1);
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
@@ -119,7 +165,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shopDomain = session.shop;
 
   const url = new URL(request.url);
-  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
+  const page = parsePageParam(url.searchParams.get("page"));
   const view = url.searchParams.get("view") ?? "suggested";
   const selectedPaymentId = url.searchParams.get("payment") ?? null;
 
@@ -275,6 +321,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         reasons: m.reasons,
         state: m.state,
         buyerName: m.buyerName,
+        buyerAccountId: m.buyerAccountId,
       }));
       totalCount = result.totalCount;
     } else if (view === "pushing") {
@@ -295,6 +342,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         reasons: m.reasons,
         state: m.state,
         buyerName: m.buyerName,
+        buyerAccountId: m.buyerAccountId,
       }));
       totalCount = result.totalCount;
     } else {
@@ -315,6 +363,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         reasons: m.reasons,
         state: m.state,
         buyerName: m.buyerName,
+        buyerAccountId: m.buyerAccountId,
       }));
       totalCount = result.totalCount;
     }
@@ -373,12 +422,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   `;
 
   if (!shop) {
-    return { success: false, error: "Shop not found" };
+    return { success: false, intent: null, error: "Shop not found" };
   }
 
   // #292/G7: Currency guard - refuse all reconcile actions for non-INR or unknown shops
   if (!isCurrencyGateOpen(shop.currency)) {
-    return { success: false, error: "Currency not supported" };
+    return { success: false, intent: null, error: "Currency not supported" };
   }
 
   const userId = session.onlineAccessInfo?.associatedUser?.id?.toString() ?? "system";
@@ -390,6 +439,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         const result = await runMatcher(sql, shop.id, { limit: MAX_PAYMENTS_PER_REQUEST });
         return {
           success: true,
+          intent: "run_matcher",
           message: `Processed ${result.paymentsProcessed} payments, created ${result.matchesCreated} matches (${result.highConfidenceMatches} high confidence)${result.hasMore ? " (more pending)" : ""}`,
         };
       }
@@ -397,12 +447,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "confirm": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "confirm", error: "Match ID required" };
         }
         const result = await confirmMatch(sql, shop.id, matchId, userId);
         // P2.6: Return generic error messages, details logged server-side
         return {
           success: result.success,
+          intent: "confirm",
           error: result.success ? null : "Failed to confirm match",
         };
       }
@@ -410,12 +461,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "reject": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "reject", error: "Match ID required" };
         }
         const result = await rejectMatch(sql, shop.id, matchId, userId);
         // P2.6: Return generic error messages, details logged server-side
         return {
           success: result.success,
+          intent: "reject",
           error: result.success ? null : "Failed to reject match",
         };
       }
@@ -425,11 +477,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "apply": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "apply", error: "Match ID required" };
         }
         const result = await applyMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
+          intent: "apply",
           error: result.success ? null : toHumanError(result.error) ?? "Failed to apply match",
         };
       }
@@ -439,11 +492,12 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       case "unmatch": {
         const matchId = formData.get("matchId") as string;
         if (!matchId) {
-          return { success: false, error: "Match ID required" };
+          return { success: false, intent: "unmatch", error: "Match ID required" };
         }
         const result = await unmatchMatch(sql, shop.id, matchId, userId);
         return {
           success: result.success,
+          intent: "unmatch",
           error: result.success ? null : toHumanError(result.error) ?? "Failed to unmatch",
         };
       }
@@ -453,7 +507,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           shopId: shop.id,
           action: toSafeIntent(intent),
         });
-        return { success: false, error: "Unknown action" };
+        return { success: false, intent: "unknown", error: "Unknown action" };
     }
   } catch (err) {
     safeLog("error", "reconcile_action_error", {
@@ -463,6 +517,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     });
     return {
       success: false,
+      intent: toSafeIntent(intent) as ReconcileIntent | "unknown",
       error: "Action failed",
     };
   }
@@ -494,7 +549,7 @@ function MatchReasons({ reasons }: { reasons: unknown }) {
     <s-stack>
       {reasons.map((reason, idx) => (
         <s-text key={idx}>
-          {reason.type}: +{reason.points} {reason.detail ? `(${reason.detail})` : ""}
+          {getMatchReasonLabel(reason.type)} +{reason.points}
         </s-text>
       ))}
     </s-stack>
@@ -563,7 +618,7 @@ function PaymentDetailView({
           <s-empty-state heading="No matches found">
             <s-text slot="subheading">
               No invoice matches were found for this payment. You can run the
-              matcher again or manually reconcile.
+              matcher again after new invoices are created.
             </s-text>
           </s-empty-state>
         ) : (
@@ -621,7 +676,7 @@ function PaymentDetailView({
                       <s-badge
                         tone={match.state === "confirmed" ? "success" : "critical"}
                       >
-                        {match.state}
+                        {getMatchStateLabel(match.state)}
                       </s-badge>
                     )}
                   </s-table-cell>
@@ -981,9 +1036,13 @@ function PushingMatchesView({
           {matches.map((match) => (
             <s-table-row key={match.id}>
               <s-table-cell>
-                <s-link href={`/app/invoices/${match.invoiceId}`}>
-                  {match.invoiceName}
-                </s-link>
+                {match.buyerAccountId ? (
+                  <s-link href={`/app/accounts/${match.buyerAccountId}`}>
+                    {match.invoiceName}
+                  </s-link>
+                ) : (
+                  <s-text>{match.invoiceName}</s-text>
+                )}
               </s-table-cell>
               <s-table-cell>{match.buyerName}</s-table-cell>
               <s-table-cell>
@@ -1028,6 +1087,13 @@ function PushingMatchesView({
   );
 }
 
+const ACTION_SUCCESS_MESSAGES: Record<string, string> = {
+  confirm: "Match confirmed.",
+  reject: "Match rejected.",
+  apply: "Payment applied to the invoice.",
+  unmatch: "Match removed.",
+};
+
 export default function ReconcilePage() {
   const loaderData = useLoaderData<typeof loader>();
   const {
@@ -1040,6 +1106,7 @@ export default function ReconcilePage() {
     error,
     tabCounts,
   } = loaderData;
+  const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
   const actionsDisabled = isSubmitting;
@@ -1064,6 +1131,20 @@ export default function ReconcilePage() {
           <s-banner tone="critical" heading="Error">
             {error}
           </s-banner>
+        </s-section>
+      )}
+
+      {actionData && (
+        <s-section>
+          {actionData.success ? (
+            <s-banner tone="success">
+              {actionData.message ?? (actionData.intent && ACTION_SUCCESS_MESSAGES[actionData.intent]) ?? "Action completed."}
+            </s-banner>
+          ) : (
+            <s-banner tone="critical">
+              {actionData.error ?? "Something went wrong. Please try again."}
+            </s-banner>
+          )}
         </s-section>
       )}
 
@@ -1195,7 +1276,13 @@ export default function ReconcilePage() {
             <s-text type="strong">Partial/overpayment:</s-text> +10 points
           </s-list-item>
           <s-list-item>
-            <s-text type="strong">Payer name:</s-text> +10 points
+            <s-text type="strong">Confirmed alias:</s-text> +30 points
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Payer name:</s-text> +8 points
+          </s-list-item>
+          <s-list-item>
+            <s-text type="strong">Email match:</s-text> +6 points
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>

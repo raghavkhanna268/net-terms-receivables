@@ -60,8 +60,10 @@ const FIXTURES_DIR = join(process.cwd(), "tests/fixtures/banks/synthetic");
  * - Invoice #1001: ₹10,000.00 outstanding (matches row 1 exactly)
  * - Invoice #1002: ₹6,000.00 outstanding (for partial/name suggestion on row 2)
  *
- * Due dates are set to November 2026 to be in the same window as the statement dates.
- * Clock is pinned to 2026-10-20 via vi.setSystemTime for deterministic behavior.
+ * Statement credits are dated 22-24 Oct 2026 (in the past, after the reviewer-demo
+ * invoices are issued). The matcher has no date window, so due dates only affect
+ * oldest-first ordering. Clock is pinned to 2026-10-26 via vi.setSystemTime for
+ * deterministic behavior.
  */
 const SYNTHETIC_BUYER: BuyerForScoring = {
   id: "buyer-synthetic-review",
@@ -111,7 +113,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
 
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-10-20T00:00:00Z"));
+    vi.setSystemTime(new Date("2026-10-26T00:00:00Z"));
   });
 
   afterEach(() => {
@@ -221,9 +223,15 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       }
     });
 
-    it("parses dates as November 2026", () => {
+    it("parses dates as 22-25 October 2026 (past, inside app date bounds)", () => {
+      expect(parseResult.transactions.map((t) => t.date)).toEqual([
+        "2026-10-22",
+        "2026-10-23",
+        "2026-10-24",
+        "2026-10-25",
+      ]);
       for (const txn of parseResult.transactions) {
-        expect(txn.date).toMatch(/^2026-11-\d{2}$/);
+        expect(txn.valueDate ?? txn.date).toBe(txn.date);
       }
     });
 

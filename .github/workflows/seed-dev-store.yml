@@ -41,6 +41,11 @@ on:
 permissions:
   contents: read
 
+# Never cancel a running seed: queue overlapping dispatches instead.
+concurrency:
+  group: seed-dev-store
+  cancel-in-progress: false
+
 jobs:
   seed:
     name: Seed dev store
@@ -252,16 +257,16 @@ jobs:
           ARGS=()
           if [ "$INPUT_REPORT_DUPLICATES" = "true" ]; then
             # Read-only: seed.ts exits after the duplicate report, before reset/seed
-            npx tsx scripts/seed.ts --report-duplicates
+            npx tsx scripts/seed.ts --report-duplicates 2>&1 | bash scripts/ci/redact-seed-output.sh
             exit 0
           fi
           if [ "$INPUT_RESEED_HELD_CURRENCY" = "true" ]; then
             # In-place credit_status update on held seed fixtures only; DB reads are READ ONLY.
             # Prints counts/enums only. Never combined with --reset.
             if [ "$INPUT_DRY_RUN" = "true" ]; then
-              npx tsx scripts/seed.ts --reseed-held-currency --dry-run
+              npx tsx scripts/seed.ts --reseed-held-currency --dry-run 2>&1 | bash scripts/ci/redact-seed-output.sh
             else
-              npx tsx scripts/seed.ts --reseed-held-currency
+              npx tsx scripts/seed.ts --reseed-held-currency 2>&1 | bash scripts/ci/redact-seed-output.sh
             fi
             exit 0
           fi
@@ -271,4 +276,6 @@ jobs:
           if [ "$INPUT_RESET" = "true" ]; then
             ARGS+=("--reset")
           fi
-          npx tsx scripts/seed.ts "${ARGS[@]}"
+          # Public logs: redact GIDs, seed externalIds, company names, order names,
+          # amounts, emails and domains (pipefail keeps seed.ts's exit code).
+          npx tsx scripts/seed.ts "${ARGS[@]}" 2>&1 | bash scripts/ci/redact-seed-output.sh

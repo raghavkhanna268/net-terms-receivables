@@ -141,13 +141,18 @@ export async function fetchCustomerWithFallback(
 export async function incrementCustomerPiiAccessDeniedFallback(
   sql: Sql,
   shop: string
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const result = await sql`
+    WITH shop_check AS (
+      SELECT 1 FROM "Shop" WHERE domain = ${shop} FOR SHARE
+    )
     INSERT INTO s10b_customer_pii_fallback (shop, day, count)
-    VALUES (${shop}, CURRENT_DATE, 1)
+    SELECT ${shop}, CURRENT_DATE, 1
+    WHERE EXISTS (SELECT 1 FROM shop_check)
     ON CONFLICT (shop, day)
     DO UPDATE SET count = s10b_customer_pii_fallback.count + 1
   `;
+  return result.count > 0;
 }
 
 /**

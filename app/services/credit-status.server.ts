@@ -132,6 +132,7 @@ export const CREDIT_STATUS_SOURCES = [
   "daily_sweep",
   "manual",
   "sync",
+  "draft_change",
   "unknown",
 ] as const;
 
@@ -582,6 +583,97 @@ async function writeMetafield(
 }
 
 /**
+ * Parse a credit limit string, normalizing Indian number formats.
+ * 
+ * Strips:
+ * - ASCII commas (,)
+ * - All whitespace (including non-breaking spaces U+00A0 and thin spaces U+2009)
+ * - Rupee sign (₹ U+20B9)
+ * 
+ * Accepts Indian formats like '1,00,000' (lakh) and Western '100,000'.
+ * 
+ * @param input - Raw string input from form
+ * @returns Parsed result with normalized number or error
+ */
+export function parseCreditLimitString(
+  input: string | null | undefined
+): { valid: true; value: number } | { valid: false; error: string } {
+  if (input === null || input === undefined) {
+    return {
+      valid: false,
+      error: "Credit limit cannot be empty. Check 'No credit limit' to allow unlimited credit.",
+    };
+  }
+
+  // Strip all whitespace (space, non-breaking space U+00A0, thin space U+2009, etc.), commas, and ₹ sign
+  const normalized = input.replace(/[\s\u00A0\u2009,₹]/g, "");
+
+  if (normalized === "") {
+    return {
+      valid: false,
+      error: "Credit limit cannot be empty. Check 'No credit limit' to allow unlimited credit.",
+    };
+  }
+
+  // Reject negatives (must check after stripping whitespace but before parsing)
+  if (normalized.startsWith("-")) {
+    return {
+      valid: false,
+      error: "Credit limit must be non-negative.",
+    };
+  }
+
+  // Reject letters (including Rs, e for scientific notation)
+  if (/[a-zA-Z]/.test(normalized)) {
+    return {
+      valid: false,
+      error: "Invalid credit limit format. Use a number with up to 2 decimal places (e.g., 1,00,000 or ₹1,00,000.50).",
+    };
+  }
+
+  // Reject multiple dots
+  if ((normalized.match(/\./g) || []).length > 1) {
+    return {
+      valid: false,
+      error: "Invalid credit limit format. Use a number with up to 2 decimal places (e.g., 1,00,000 or ₹1,00,000.50).",
+    };
+  }
+
+  // Validate format: digits with optional single decimal point and up to 2 decimal places
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
+    return {
+      valid: false,
+      error: "Invalid credit limit format. Use a number with up to 2 decimal places (e.g., 1,00,000 or ₹1,00,000.50).",
+    };
+  }
+
+  const parsed = Number(normalized);
+
+  if (!Number.isFinite(parsed)) {
+    return {
+      valid: false,
+      error: "Credit limit must be a valid number (not Infinity or NaN)",
+    };
+  }
+
+  if (parsed < 0) {
+    return {
+      valid: false,
+      error: "Credit limit must be non-negative.",
+    };
+  }
+
+  if (parsed > MAX_CREDIT_LIMIT_AMOUNT) {
+    return {
+      valid: false,
+      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString("en-IN")}`,
+    };
+  }
+
+  return { valid: true, value: parsed };
+}
+
+/**
  * Validate credit limit amount.
  */
 function validateCreditLimit(amount: number | null | undefined, noLimit: boolean): 
@@ -619,7 +711,7 @@ function validateCreditLimit(amount: number | null | undefined, noLimit: boolean
   if (amount > MAX_CREDIT_LIMIT_AMOUNT) {
     return { 
       valid: false, 
-      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString()}` 
+      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString("en-IN")}` 
     };
   }
 

@@ -1,0 +1,113 @@
+# Import the synthetic HDFC review statement into Imports on the throwaway e2e
+# store (INR), so Reconcile's Suggested tab fills. Never confirms a match.
+#
+# SECURITY / SAFETY CONSTRAINTS (do not weaken):
+# - Manual dispatch only, and the job runs only on refs/heads/main
+# - The only input is the boolean dry_run (default true). There is NO shop,
+#   domain or file input: the store comes only from the E2E_SHOP repo secret and
+#   the file is fixed to tests/fixtures/banks/synthetic/hdfc-review-synthetic.csv
+# - scripts/ci/e2e-shop-guard.sh masks E2E_SHOP and fails closed if it is empty,
+#   not a *.myshopify.com domain, or equal to the main dev store
+#   (ALLOWED_DEV_STORE secret); SHOP and ALLOWED_DEV_STORE both = E2E_SHOP
+# - scripts/e2e-bank-import.ts fails closed (non-zero, before any write) on a
+#   missing DATABASE_URL / SHOP, SHOP != ALLOWED_DEV_STORE, no Shop row, or a
+#   Shop currency that is not INR
+# - Before any write (dry run and live) it prints the read-only count
+#   reviewer_demo_invoices_present=<0-2>: how many invoices named #1001 / #1002
+#   exist for the e2e shop (count only, never names, ids or amounts)
+# - Uses the app's real path: parseBankStatement -> mapCreditsForImport ->
+#   validateImportRequest + date bounds -> insertBankImportRows (shared with
+#   the Imports action) -> runMatcher (creates 'suggested' matches only).
+#   No confirm / reject / apply / alias function is imported, no Shopify token
+#   is loaded, and the run rolls back if any match is not 'suggested', any
+#   statement line is not 'unmatched', or PayerAlias / invoice outstanding /
+#   match.confirmed audit counts change
+# - Re-run is a no-op: if the fixture file was already imported for the shop it
+#   prints already_imported=true and writes nothing
+# - dry_run=true runs the whole import + matcher in one transaction and ROLLS
+#   IT BACK, so the printed counts are real but nothing persists
+# - Output is counts, booleans and enums only, piped through
+#   scripts/ci/e2e-bank-import-filter.sh (allowlisted key=value lines only).
+#   Nothing derived from CSV rows, no ids and no domains are printed, including
+#   in errors (error_code=<enum>)
+#
+# ROLLBACK (manual; needs Raghav's explicit yes to the exact rows first).
+# Find the single import id with a read-only query (BankImport where shopId is
+# the e2e shop and fileName = 'hdfc-review-synthetic.csv'), then in ONE
+# transaction, aborting if any Match for these payments is not 'suggested':
+#   DELETE FROM "Match" WHERE "paymentId" IN
+#     (SELECT id FROM "Payment" WHERE "importId" = :id) AND state = 'suggested';
+#   DELETE FROM "Payment" WHERE "importId" = :id;
+#   DELETE FROM "BankImport" WHERE id = :id;
+# (rejected_matches rows cascade from Payment; this workflow never creates any.)
+# PayerAlias, Invoice and Shopify are untouched by this workflow, so there is
+# nothing else to undo.
+#
+# Run via GitHub Actions UI: Actions > E2E Bank Import > Run workflow (on main)
+
+name: E2E Bank Import
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (import + matcher in a rolled-back transaction; nothing persists)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-bank-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    name: Import synthetic HDFC statement (e2e store)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # SHOP is NOT set here: step env headers are printed in public logs.
+      # It is resolved from the E2E_SHOP secret and masked.
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve, mask and guard e2e-store domain
+        env:
+          # Secrets, so the env header prints ***.
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
+          MAIN_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+        # Masks first; fails closed on empty / bad format / equal to main dev store.
+        # On success writes SHOP and ALLOWED_DEV_STORE (= E2E_SHOP) to GITHUB_ENV.
+        run: bash scripts/ci/e2e-shop-guard.sh
+
+      - name: Setup Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run e2e bank import
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+        run: |
+          set -euo pipefail
+          if [ "$INPUT_DRY_RUN" = "false" ]; then
+            export DRY_RUN=false
+          else
+            export DRY_RUN=true
+          fi
+          # Counts/booleans/enums only; the filter drops every other line
+          # (pipefail keeps the script's exit code).
+          npx tsx scripts/e2e-bank-import.ts 2>&1 | bash scripts/ci/e2e-bank-import-filter.sh

@@ -34,6 +34,7 @@ interface ValidationNode {
   };
   title: string;
   enabled: boolean;
+  blockOnFailure: boolean;
 }
 
 interface ValidationsQueryResult {
@@ -78,6 +79,7 @@ const VALIDATIONS_QUERY = `#graphql
           }
           title
           enabled
+          blockOnFailure
         }
       }
     }
@@ -108,9 +110,9 @@ const VALIDATION_CREATE_MUTATION = `#graphql
   }
 `;
 
-const VALIDATION_UPDATE_MUTATION = `#graphql
-  mutation ValidationUpdate($id: ID!, $title: String!) {
-    validationUpdate(id: $id, validation: { title: $title }) {
+export const VALIDATION_UPDATE_MUTATION = `#graphql
+  mutation ValidationUpdate($id: ID!, $title: String!, $enable: Boolean!, $blockOnFailure: Boolean!) {
+    validationUpdate(id: $id, validation: { title: $title, enable: $enable, blockOnFailure: $blockOnFailure }) {
       validation {
         id
         title
@@ -118,6 +120,7 @@ const VALIDATION_UPDATE_MUTATION = `#graphql
       userErrors {
         field
         message
+        code
       }
     }
   }
@@ -133,10 +136,11 @@ interface ValidationUpdateResult {
       userErrors?: Array<{
         field?: string[];
         message: string;
+        code?: string;
       }>;
     };
   };
-  errors?: Array<{ message: string }>;
+  errors?: Array<{ message: string; extensions?: { code?: string } }>;
 }
 
 export type TitleUpdateOutcome = "updated" | "skipped" | "failed";
@@ -149,25 +153,31 @@ export interface EnsureValidationResult {
 }
 
 /**
- * Try to update the validation title. Logs failures via safeLog.
+ * Try to update the validation title, preserving the current enabled and blockOnFailure state.
+ * Logs failures via safeLog.
  */
 async function tryUpdateTitle(
   admin: AdminGraphqlClient,
-  id: string,
+  node: ValidationNode,
 ): Promise<{ outcome: TitleUpdateOutcome; errCode?: string }> {
   let errCode: string | undefined;
 
   try {
     const updateResult = await admin.graphql(VALIDATION_UPDATE_MUTATION, {
-      variables: { id, title: VALIDATION_TITLE },
+      variables: {
+        id: node.id,
+        title: VALIDATION_TITLE,
+        enable: node.enabled,
+        blockOnFailure: node.blockOnFailure,
+      },
     });
     const updateData = (await updateResult.json()) as ValidationUpdateResult;
 
     if (updateData.errors?.length) {
-      errCode = toErrorCode({ message: updateData.errors[0].message });
+      errCode = toErrorCode({ code: updateData.errors[0].extensions?.code });
     } else if (updateData.data?.validationUpdate?.userErrors?.length) {
       errCode = toErrorCode({
-        message: updateData.data.validationUpdate.userErrors[0].message,
+        code: updateData.data.validationUpdate.userErrors[0].code,
       });
     } else if (updateData.data?.validationUpdate?.validation) {
       return { outcome: "updated" };
@@ -185,8 +195,9 @@ async function tryUpdateTitle(
 /**
  * Ensures the credit check validation function is registered for the shop.
  * This is idempotent - if the validation already exists (matched by handle), it returns the existing one.
- * If an existing validation has a different title, updates only the title (does not change enabled state,
- * blockOnFailure, or metafields). Update failures do not block the ensure flow.
+ * If an existing validation has a different title, updates the title while explicitly preserving the
+ * current enabled and blockOnFailure state (metafields are not touched). Update failures do not block
+ * the ensure flow.
  *
  * @param admin - The Shopify Admin API context
  * @returns The validation ID, creation flag, title update outcome, and error code if failed
@@ -214,7 +225,7 @@ export async function ensureValidation(
       return { id: node.id, created: false, titleUpdate: "skipped" };
     }
 
-    const { outcome, errCode } = await tryUpdateTitle(admin, node.id);
+    const { outcome, errCode } = await tryUpdateTitle(admin, node);
     return { id: node.id, created: false, titleUpdate: outcome, errCode };
   }
 

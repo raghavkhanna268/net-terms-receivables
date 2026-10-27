@@ -152,24 +152,25 @@ Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 4.
 
 ## Privacy Policy URL
 
-**[OWNER]** Host privacy policy at a public URL (the app's `/privacy` route once `docs/privacy.md` TBDs are filled).
+Privacy policy URL: <APP_URL>/privacy (live)
 
-Spec: URL must be accessible without authentication. Fill all TBD items in `docs/privacy.md`, then deploy.
+Spec: URL must be accessible without authentication.
 Ref: https://shopify.dev/docs/apps/launch/app-requirements-checklist (section 5, "Privacy policy")
 
 ---
 
 ## Permissions and Data Access
 
-### OAuth Scopes (8 total)
+### OAuth Scopes (9 total)
 
 Write scopes imply read access per [Shopify Access Scopes](https://shopify.dev/docs/api/usage/access-scopes).
 
-#### Read Scopes (2)
+#### Read Scopes (3)
 
 | Scope | Purpose |
 |-------|---------|
 | `read_draft_orders` | View draft orders to calculate pending credit exposure |
+| `read_all_orders` | Access orders older than 60 days for invoice and receivables ageing |
 | `read_payment_terms` | View payment terms on orders and company locations |
 
 #### Write Scopes (6)
@@ -185,7 +186,7 @@ Write scopes imply read access per [Shopify Access Scopes](https://shopify.dev/d
 
 ### Protected Customer Data
 
-The app accesses **Level 1 + Name + Email** protected customer fields.
+The app accesses **Level 2 (protected customer fields: Name, Email only)**.
 
 | Field | Accessed | Purpose |
 |-------|----------|---------|
