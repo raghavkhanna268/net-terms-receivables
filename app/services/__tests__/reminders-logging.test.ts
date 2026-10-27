@@ -37,6 +37,7 @@ vi.mock("luxon", async () => {
     mock.startOf = vi.fn().mockReturnValue(mock);
     mock.plus = vi.fn().mockReturnValue(mock);
     mock.setZone = vi.fn().mockReturnValue({ ...mock, hour: 12 });
+    mock.setLocale = vi.fn().mockReturnValue(mock);
     return mock;
   };
   return {

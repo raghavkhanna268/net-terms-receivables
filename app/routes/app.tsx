@@ -145,10 +145,25 @@ export function ErrorBoundary() {
   const rootData = useRouteLoaderData<{ apiKey?: string }>("root");
   const apiKey = rootData?.apiKey ?? "";
 
+  // (a) #532: status 200 with string data renders embedded re-auth HTML
+  if (
+    isRouteErrorResponse(error) &&
+    error.status === 200 &&
+    typeof error.data === "string"
+  ) {
+    return (
+      <div
+        dangerouslySetInnerHTML={{ __html: error.data || "Handling response" }}
+      />
+    );
+  }
+
+  // (b) #567: other sub-400 or 401 responses delegate to boundary.error
   if (isRouteErrorResponse(error) && (error.status < 400 || error.status === 401)) {
     return boundary.error(error);
   }
 
+  // (c) #567: in-app fallback for remaining errors
   return (
     <AppProvider apiKey={apiKey}>
       <s-page heading="Something went wrong">

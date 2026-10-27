@@ -28,6 +28,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -44,6 +45,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -61,6 +63,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -100,6 +103,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -116,6 +120,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -133,6 +138,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -148,6 +154,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -164,6 +171,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -180,6 +188,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 

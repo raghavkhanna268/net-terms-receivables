@@ -65,9 +65,25 @@ function extractBearerToken(authHeader: string | null): string | null {
 }
 
 /**
- * Parse drain configuration from query parameters.
+ * Parse maxPasses from DRAIN_MAX_PASSES env var.
+ *
+ * Default 1 = today's single-pass behavior.
+ * Clamped to 1..4 (MAX_DRAIN_PASSES ceiling).
+ * Invalid values (0, negative, garbage like 'abc', '', '2.5x') → 1.
  */
-function parseConfig(url: URL): Partial<DrainConfig> {
+function parseMaxPasses(envValue: string | undefined): number {
+  if (!envValue) return 1;
+  // Only accept pure integer strings (no decimals, no trailing chars)
+  if (!/^-?\d+$/.test(envValue)) return 1;
+  const parsed = parseInt(envValue, 10);
+  if (isNaN(parsed) || parsed < 1) return 1;
+  return Math.min(parsed, 4); // MAX_DRAIN_PASSES ceiling
+}
+
+/**
+ * Parse drain configuration from query parameters and env vars.
+ */
+function parseConfig(url: URL, env: { DRAIN_MAX_PASSES?: string }): Partial<DrainConfig> {
   const config: Partial<DrainConfig> = {};
 
   const batchSize = url.searchParams.get("batchSize");
@@ -86,6 +102,8 @@ function parseConfig(url: URL): Partial<DrainConfig> {
     }
   }
 
+  config.maxPasses = parseMaxPasses(env.DRAIN_MAX_PASSES);
+
   return config;
 }
 
@@ -96,7 +114,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
   }
 
   // Get the secret from environment
-  const env = (context as { cloudflare: { env: { JOBS_DRAIN_SECRET?: string } } }).cloudflare.env;
+  const env = (context as { cloudflare: { env: { JOBS_DRAIN_SECRET?: string; DRAIN_MAX_PASSES?: string } } }).cloudflare.env;
   const expectedSecret = env.JOBS_DRAIN_SECRET;
 
   // If secret is not configured, reject all requests
@@ -156,7 +174,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
     }
   }
 
-  const config = parseConfig(url);
+  const config = parseConfig(url, env);
 
   // Run the drain
   const sql = getRequestSql();

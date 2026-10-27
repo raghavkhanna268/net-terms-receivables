@@ -96,6 +96,7 @@ function buildLoaderData(overrides: {
     invoices: { rows: [], totalCount: 0 },
     gatingEnforced,
     reminderOptOut: null,
+    shopTimezone: "Asia/Kolkata",
     newAccountsPausedBanner,
     error: null,
   };
@@ -348,6 +349,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
         gatingEnforced: false,
         reminderOptOut: null,
         upgradeUrl: null,
+        shopTimezone: "Asia/Kolkata",
         newAccountsPausedBanner: {
           show: false,
           heading: "",

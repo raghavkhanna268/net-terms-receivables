@@ -38,7 +38,7 @@ describe("app.tsx ErrorBoundary", () => {
   }
 
   describe("delegates to boundary.error for status < 400 and 401", () => {
-    it("delegates status 200 ErrorResponse to boundary.error (Shopify bootstrap)", async () => {
+    it("renders status 200 + string data as HTML without calling boundary.error", async () => {
       const mockBoundaryError = vi.fn().mockReturnValue(null);
 
       vi.doMock("@shopify/shopify-app-react-router/server", async () => {
@@ -52,15 +52,17 @@ describe("app.tsx ErrorBoundary", () => {
         };
       });
 
-      const errorResponse = new ErrorResponseImpl(200, "OK", "<html>bootstrap</html>");
+      const errorResponse = new ErrorResponseImpl(200, "OK", "<script>window.shopify.reload()</script>");
       setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
 
-      renderToString(createElement(ErrorBoundary));
+      const html = renderToString(createElement(ErrorBoundary));
 
-      expect(mockBoundaryError).toHaveBeenCalledWith(errorResponse);
+      expect(html).toContain("window.shopify.reload()");
+      expect(html).not.toContain("s-page");
+      expect(mockBoundaryError).not.toHaveBeenCalled();
     });
 
     it("delegates status 302 ErrorResponse to boundary.error", async () => {

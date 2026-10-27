@@ -1,5 +1,7 @@
 # S24 Scope Audit: Production OAuth scope verification
 
+> **Note (2026-10-27):** production has had 9 scopes since #289; the counts below are historical and kept as recorded.
+
 ---
 
 ## 2026-10-25: Scope reduction 11 → 8

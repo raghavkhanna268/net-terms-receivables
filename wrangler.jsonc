@@ -52,7 +52,7 @@
     // Plan selection redirect. Set to the exact string "true" to enable.
     // When ON: Merchants without an active subscription are redirected to the plan page.
     // When OFF (default): No redirect; merchants land on the app without plan selection.
-    "PLAN_SELECTION_REDIRECT_ENABLED": "false",
+    "PLAN_SELECTION_REDIRECT_ENABLED": "true",
     // S18: Sender address for reminder and data-request emails (non-secret).
     // The domain must be verified in Resend. Sending also requires the
     // RESEND_API_KEY secret, and the RESEND_TEST_RECIPIENTS allowlist guard
