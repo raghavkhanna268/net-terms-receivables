@@ -782,7 +782,7 @@ describeWithDb("Email Content Suite", () => {
       expect(res.sent).toBe(true);
 
       const { body } = capturedResend();
-      const shopName = SHOP1_DOMAIN.replace(".myshopify.com", "");
+      const shopName = SHOP1_DOMAIN.split(".")[0];
       const expectedUrl = `https://admin.shopify.com/store/${shopName}/apps/${APP_HANDLE}/app/data-requests`;
       expect(typeof body.text).toBe("string");
       expect(body.text).toContain(expectedUrl);
