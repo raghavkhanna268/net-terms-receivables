@@ -672,7 +672,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 describeWithDb("activeAccountFragment DB integration", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-gating";
+  const TEST_SUFFIX = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8) + "-gating";
   const TEST_SHOP_ID = `shop-gating-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `gating-test-${TEST_SUFFIX}.myshopify.com`;
 
@@ -812,7 +812,7 @@ describeWithDb("activeAccountFragment DB integration", () => {
  */
 describeWithDb("countActiveAccounts inactive-tag exclusion DB integration", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-inactivetag";
+  const TEST_SUFFIX = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8) + "-inactivetag";
   const TEST_SHOP_ID = `shop-inactivetag-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `inactivetag-test-${TEST_SUFFIX}.myshopify.com`;
   const TEST_CUSTOMER_ID_INACTIVE = `cust-inactive-${TEST_SUFFIX}`;
@@ -935,7 +935,7 @@ describeWithDb("countActiveAccounts inactive-tag exclusion DB integration", () =
  */
 describeWithDb("decideNewAccountGate flag-off inertness DB integration", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-flagoff";
+  const TEST_SUFFIX = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8) + "-flagoff";
   const TEST_SHOP_ID = `shop-flagoff-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `flagoff-test-${TEST_SUFFIX}.myshopify.com`;
 
