@@ -235,6 +235,7 @@ export default defineConfig({
       SHOPIFY_APP_URL: "https://example.com",
     } as Record<string, string>,
     unstubEnvs: true,
+    setupFiles: ["./tests/helpers/scrub-inherited-secrets.ts"],
     projects: [
       {
         test: {

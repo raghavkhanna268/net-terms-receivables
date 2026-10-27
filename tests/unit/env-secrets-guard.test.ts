@@ -3,7 +3,8 @@
  *
  * Ensures:
  * 1. All listed secret vars are set to fake values during tests
- * 2. No undeclared secret-looking vars exist in app/ source code
+ * 2. No inherited secret-looking vars remain in process.env at runtime
+ * 3. No undeclared secret-looking vars exist in app/ source code
  *
  * This is a non-DB test that runs in the Parallel project.
  */
@@ -45,6 +46,28 @@ describe("env-secrets-guard", () => {
         }
       }
       expect(unset).toEqual([]);
+    });
+  });
+
+  describe("no inherited secret-like vars at runtime", () => {
+    it("process.env has no secret-like vars outside SECRET_VAR_NAMES", () => {
+      const leaked: string[] = [];
+      for (const key of Object.keys(process.env)) {
+        if (SECRET_NAME_PATTERN.test(key) && !SECRET_VAR_NAMES.has(key)) {
+          const value = process.env[key];
+          if (value && value.length > 0 && !isFakeValue(value)) {
+            leaked.push(key);
+          }
+        }
+      }
+      if (leaked.length > 0) {
+        expect.fail(
+          `Found ${leaked.length} inherited secret-like env var(s) that should have been scrubbed:\n` +
+            `  ${leaked.join(", ")}\n\n` +
+            "These vars match SECRET_NAME_PATTERN but are not in SECRET_VAR_NAMES.\n" +
+            "The scrub-inherited-secrets.ts setup should have removed them."
+        );
+      }
     });
   });
 
