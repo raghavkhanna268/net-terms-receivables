@@ -989,7 +989,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("cross-shop: B's token cannot affect A's buyer (shopId mismatch)", async () => {
+    it("valid B token for B's own buyer leaves A's buyer unchanged", async () => {
       expect.hasAssertions();
       const tokenForBuyerB = generateUnsubscribeToken(SHOP_B_ID, BUYER_B_ID, UNSUBSCRIBE_SECRET);
       expect(tokenForBuyerB).not.toBeNull();
