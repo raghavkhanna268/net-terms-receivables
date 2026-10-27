@@ -44,7 +44,7 @@ import {
   bulkUpsertInvoices,
   type InvoiceData,
 } from "./order.server";
-import { processBulkCustomer, deactivateMissingTaggedCustomers, type CustomerPiiMode } from "./customer.server";
+import { processBulkCustomer, deactivateMissingTaggedCustomers, type CustomerPiiMode, type DeactivateMissingResult } from "./customer.server";
 import { processBulkDraftOrder, bulkUpsertDraftOrders, getAccountsWithDraftExposure, closeMissingDraftOrders } from "./draft-order.server";
 import { flagAccountsForRecompute } from "~/services/credit-status-recompute.server";
 import { captureExceptionWithTags } from "~/lib/sentry";
@@ -248,16 +248,18 @@ async function handleReconcileDeleteMissing(
         });
       }
     } else if (reconcileStage === "customers") {
-      const deactivatedCount = await deactivateMissingTaggedCustomers(
+      const { deactivatedCount, skippedCount } = await deactivateMissingTaggedCustomers(
         sql,
         shopId,
+        shop,
         bulkOperationId
       );
-      if (deactivatedCount > 0) {
+      if (deactivatedCount > 0 || skippedCount > 0) {
         const hash = await shopHash(shop);
         safeLog("info", "reconcile_customers_deactivated_missing", {
           shopHash: hash,
           count: deactivatedCount,
+          skipped: skippedCount,
         });
       }
     }

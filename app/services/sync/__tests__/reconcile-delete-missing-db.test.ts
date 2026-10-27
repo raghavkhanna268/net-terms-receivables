@@ -303,9 +303,174 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
   });
 
-  describe("deactivateMissingTaggedCustomers", () => {
-    it("deactivates customers with a different last_seen_bulk_op_id", async () => {
-      const customerMissing = `gid://shopify/Customer/missing-cust-${TEST_SUFFIX}`;
+  describe("deactivateMissingTaggedCustomers (conservative)", () => {
+    function mockAdminGraphQL(existingIds: string[]) {
+      const existingSet = new Set(existingIds);
+      return vi.fn().mockImplementation(async (_shop: string, _query: string, vars: { ids: string[] }) => ({
+        success: true,
+        data: {
+          nodes: vars.ids.map((id) => (existingSet.has(id) ? { id } : null)),
+        },
+      }));
+    }
+
+    function mockAdminGraphQLFailure() {
+      return vi.fn().mockResolvedValue({
+        success: false,
+        error: "Network error",
+        retryable: true,
+      });
+    }
+
+    it("deactivates customers gone from Shopify (nodes returns null)", async () => {
+      const customerGone = `gid://shopify/Customer/gone-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${customerGone}, '["net-terms"]'::jsonb, true,
+          NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount, skippedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
+
+      expect(deactivatedCount).toBe(1);
+      expect(skippedCount).toBe(0);
+
+      const [row] = await sql<{ tag_active: boolean; tag_deactivated_at: Date | null }[]>`
+        SELECT tag_active, tag_deactivated_at FROM s8_tagged_customers WHERE customer_id = ${customerGone}
+      `;
+      expect(row.tag_active).toBe(false);
+      expect(row.tag_deactivated_at).not.toBeNull();
+    });
+
+    it("does NOT deactivate customers still in Shopify but no longer matching tag rule", async () => {
+      const customerStillExists = `gid://shopify/Customer/still-exists-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${customerStillExists}, '["net-terms"]'::jsonb, true,
+          NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      const adminMock = mockAdminGraphQL([customerStillExists]);
+      const { deactivatedCount, skippedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
+
+      expect(deactivatedCount).toBe(0);
+      expect(skippedCount).toBe(0);
+
+      const [row] = await sql<{ tag_active: boolean }[]>`
+        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerStillExists}
+      `;
+      expect(row.tag_active).toBe(true);
+    });
+
+    it("does NOT deactivate gone customer with outstanding balance (open invoice)", async () => {
+      const customerWithBalance = `gid://shopify/Customer/has-balance-${TEST_SUFFIX}`;
+      const accountId = `account-has-balance-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "customerId", name, "createdAt", "updatedAt"
+        ) VALUES (
+          ${accountId}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${customerWithBalance}, 'Customer With Balance',
+          NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, status, "issuedAt", "createdAt", "updatedAt"
+        ) VALUES (
+          ${"inv-balance-" + TEST_SUFFIX}, ${TEST_SHOP_ID}, ${accountId}, ${"gid://shopify/Order/balance-" + TEST_SUFFIX},
+          '#INV-BALANCE', 1000.00, 500.00, 'open', NOW(), NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${customerWithBalance}, '["net-terms"]'::jsonb, true,
+          NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount, skippedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
+
+      expect(deactivatedCount).toBe(0);
+      expect(skippedCount).toBe(1);
+
+      const [row] = await sql<{ tag_active: boolean }[]>`
+        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerWithBalance}
+      `;
+      expect(row.tag_active).toBe(true);
+
+      await sql`DELETE FROM "Invoice" WHERE id = ${"inv-balance-" + TEST_SUFFIX}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${accountId}`;
+    });
+
+    it("does NOT deactivate gone customer with open draft orders", async () => {
+      const customerWithDraft = `gid://shopify/Customer/has-draft-${TEST_SUFFIX}`;
+      const accountId = `account-has-draft-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "customerId", name, "createdAt", "updatedAt"
+        ) VALUES (
+          ${accountId}, ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${customerWithDraft}, 'Customer With Draft',
+          NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${"gid://shopify/DraftOrder/draft-skip-" + TEST_SUFFIX}, ${accountId}, '#DRAFT-SKIP', '500.00',
+          true, 'open', NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${customerWithDraft}, '["net-terms"]'::jsonb, true,
+          NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount, skippedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
+
+      expect(deactivatedCount).toBe(0);
+      expect(skippedCount).toBe(1);
+
+      const [row] = await sql<{ tag_active: boolean }[]>`
+        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerWithDraft}
+      `;
+      expect(row.tag_active).toBe(true);
+
+      await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${"gid://shopify/DraftOrder/draft-skip-" + TEST_SUFFIX}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${accountId}`;
+    });
+
+    it("Shopify read failure deactivates nothing", async () => {
+      const customerMissing = `gid://shopify/Customer/api-fail-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
           shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
@@ -315,15 +480,18 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = mockAdminGraphQLFailure();
+      const { deactivatedCount, skippedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
 
-      expect(deactivatedCount).toBe(1);
+      expect(deactivatedCount).toBe(0);
+      expect(skippedCount).toBe(0);
 
-      const [row] = await sql<{ tag_active: boolean; tag_deactivated_at: Date | null }[]>`
-        SELECT tag_active, tag_deactivated_at FROM s8_tagged_customers WHERE customer_id = ${customerMissing}
+      const [row] = await sql<{ tag_active: boolean }[]>`
+        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerMissing}
       `;
-      expect(row.tag_active).toBe(false);
-      expect(row.tag_deactivated_at).not.toBeNull();
+      expect(row.tag_active).toBe(true);
     });
 
     it("does NOT deactivate customers with matching last_seen_bulk_op_id (seen in current run)", async () => {
@@ -337,9 +505,13 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
 
       expect(deactivatedCount).toBe(0);
+      expect(adminMock).not.toHaveBeenCalled();
 
       const [row] = await sql<{ tag_active: boolean }[]>`
         SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerSeen}
@@ -358,9 +530,13 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
 
       expect(deactivatedCount).toBe(0);
+      expect(adminMock).not.toHaveBeenCalled();
 
       const [row] = await sql<{ tag_active: boolean }[]>`
         SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerWebhook}
@@ -379,9 +555,13 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
 
       expect(deactivatedCount).toBe(0);
+      expect(adminMock).not.toHaveBeenCalled();
 
       const [row] = await sql<{ tag_active: boolean }[]>`
         SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerShopB}
@@ -400,9 +580,13 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
 
       expect(deactivatedCount).toBe(0);
+      expect(adminMock).not.toHaveBeenCalled();
 
       const [row] = await sql<{ tag_active: boolean }[]>`
         SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerRedacted}
@@ -421,7 +605,10 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
           (${TEST_SHOP_ID}, ${customerInactive}, '["net-terms"]'::jsonb, false, NOW(), NOW(), ${OLD_BULK_OP_ID})
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = mockAdminGraphQL([]);
+      const { deactivatedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
 
       expect(deactivatedCount).toBe(1);
 
@@ -450,7 +637,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       `;
 
       const beforeDeactivation = new Date();
-      await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = mockAdminGraphQL([]);
+      await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock);
 
       const [row] = await sql<{ tag_deactivated_at: Date; updated_at: Date }[]>`
         SELECT tag_deactivated_at, updated_at FROM s8_tagged_customers WHERE customer_id = ${customerMissing}
@@ -496,10 +684,14 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
     it("handles empty tables gracefully", async () => {
       const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const adminMock = vi.fn().mockResolvedValue({ success: true, data: { nodes: [] } });
+      const { deactivatedCount, skippedCount } = await deactivateMissingTaggedCustomers(
+        sql, TEST_SHOP_ID, TEST_SHOP_DOMAIN, CURRENT_BULK_OP_ID, adminMock
+      );
 
       expect(closedCount).toBe(0);
       expect(deactivatedCount).toBe(0);
+      expect(skippedCount).toBe(0);
     });
   });
 

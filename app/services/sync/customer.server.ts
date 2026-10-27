@@ -982,11 +982,42 @@ export async function redactShopData(
 }
 
 /**
- * Deactivate tagged customers that were not seen during a COMPLETE reconcile run.
+ * Result of deactivateMissingTaggedCustomers.
+ */
+export interface DeactivateMissingResult {
+  /** Number of customers deactivated (gone from Shopify, no outstanding balance) */
+  deactivatedCount: number;
+  /** Number of customers skipped (gone from Shopify but have outstanding balance) */
+  skippedCount: number;
+}
+
+/**
+ * Query to batch-check customer existence in Shopify.
+ * Uses nodes(ids:) to fetch up to 250 customers at once.
+ * Returns only the id for customers that exist; missing customers return null.
+ */
+const CUSTOMERS_EXIST_QUERY = `
+  query CustomersExist($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Customer {
+        id
+      }
+    }
+  }
+`;
+
+/**
+ * Deactivate tagged customers that genuinely no longer exist in Shopify.
  *
- * v1.1 delete-missing: After a complete RECONCILE_CUSTOMERS bulk operation,
- * set tag_active=false on local s8_tagged_customers rows that were NOT seen
- * in this run.
+ * v1.1 delete-missing (CONSERVATIVE): After a complete RECONCILE_CUSTOMERS bulk
+ * operation, check candidates (not seen in export) against Shopify to confirm
+ * they are actually deleted before deactivating.
+ *
+ * Conservative behavior:
+ * - Only deactivates customers that are GONE from Shopify (nodes query returns null)
+ * - Customers still in Shopify but no longer matching tag rules are NOT deactivated
+ * - Customers with outstanding balance or open invoices are NOT deactivated (skipped)
+ * - If Shopify read fails for any reason, deactivates NOTHING
  *
  * Detection: Uses last_seen_bulk_op_id column. Rows with a non-null value that
  * differs from the current operation ID were seen in a previous reconcile but
@@ -1003,19 +1034,23 @@ export async function redactShopData(
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Internal shop ID
+ * @param shopDomain - Shop domain for Shopify API calls
  * @param bulkOperationId - The completed bulk operation ID
- * @returns Count of tagged customers deactivated
+ * @param adminGraphQLFn - Admin GraphQL function (injectable for testing)
+ * @returns Deactivated and skipped counts
  */
 export async function deactivateMissingTaggedCustomers(
   sql: Sql,
   shopId: string,
-  bulkOperationId: string
-): Promise<number> {
+  shopDomain: string,
+  bulkOperationId: string,
+  adminGraphQLFn?: typeof import("~/services/drain/admin-client.server").adminGraphQL
+): Promise<DeactivateMissingResult> {
   const redactedInfix = "_redacted_";
 
-  const result = await sql`
-    UPDATE s8_tagged_customers
-    SET tag_active = false, tag_deactivated_at = NOW(), updated_at = NOW()
+  const candidates = await sql<{ id: string; customer_id: string }[]>`
+    SELECT id, customer_id
+    FROM s8_tagged_customers
     WHERE shop_id = ${shopId}
       AND tag_active = true
       AND last_seen_bulk_op_id IS NOT NULL
@@ -1023,5 +1058,94 @@ export async function deactivateMissingTaggedCustomers(
       AND strpos(customer_id, ${redactedInfix}) = 0
   `;
 
-  return result.count;
+  if (candidates.length === 0) {
+    return { deactivatedCount: 0, skippedCount: 0 };
+  }
+
+  const { adminGraphQL } = adminGraphQLFn
+    ? { adminGraphQL: adminGraphQLFn }
+    : await import("~/services/drain/admin-client.server");
+
+  const goneCustomerIds = new Set<string>();
+  const customerIdToRowId = new Map<string, string>();
+  for (const c of candidates) {
+    customerIdToRowId.set(c.customer_id, c.id);
+  }
+
+  const BATCH_SIZE = 250;
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE);
+    const batchIds = batch.map((c) => c.customer_id);
+
+    const result = await adminGraphQL<{ nodes: ({ id: string } | null)[] }>(
+      shopDomain,
+      CUSTOMERS_EXIST_QUERY,
+      { ids: batchIds }
+    );
+
+    if (!result.success) {
+      return { deactivatedCount: 0, skippedCount: 0 };
+    }
+
+    const existingIds = new Set(
+      (result.data?.nodes ?? [])
+        .filter((n): n is { id: string } => n !== null && n.id !== undefined)
+        .map((n) => n.id)
+    );
+
+    for (const customerId of batchIds) {
+      if (!existingIds.has(customerId)) {
+        goneCustomerIds.add(customerId);
+      }
+    }
+  }
+
+  if (goneCustomerIds.size === 0) {
+    return { deactivatedCount: 0, skippedCount: 0 };
+  }
+
+  const goneRowIds = [...goneCustomerIds].map((cid) => customerIdToRowId.get(cid)!);
+  const goneCustomerIdsList = [...goneCustomerIds];
+
+  const accountsWithBalance = await sql<{ customerId: string }[]>`
+    SELECT DISTINCT ba."customerId"
+    FROM "BuyerAccount" ba
+    WHERE ba."shopId" = ${shopId}
+      AND ba."customerId" IN ${sql(goneCustomerIdsList)}
+      AND ba.kind = 'TAGGED_CUSTOMER'
+      AND (
+        EXISTS (
+          SELECT 1 FROM "Invoice" i
+          WHERE i."buyerAccountId" = ba.id
+            AND i.status = 'open'
+            AND i.outstanding > 0
+        )
+        OR EXISTS (
+          SELECT 1 FROM s8_draft_orders d
+          WHERE d.buyer_account_id = ba.id
+            AND d.has_payment_terms = true
+            AND d.status IN ('open', 'invoice_sent')
+        )
+      )
+  `;
+
+  const skipCustomerIds = new Set(accountsWithBalance.map((r) => r.customerId));
+  const toDeactivateRowIds = goneRowIds.filter((rowId) => {
+    const customerId = [...customerIdToRowId.entries()].find(([, rid]) => rid === rowId)?.[0];
+    return customerId && !skipCustomerIds.has(customerId);
+  });
+
+  const skippedCount = goneRowIds.length - toDeactivateRowIds.length;
+
+  if (toDeactivateRowIds.length === 0) {
+    return { deactivatedCount: 0, skippedCount };
+  }
+
+  const updateResult = await sql`
+    UPDATE s8_tagged_customers
+    SET tag_active = false, tag_deactivated_at = NOW(), updated_at = NOW()
+    WHERE id IN ${sql(toDeactivateRowIds)}
+  `;
+
+  return { deactivatedCount: updateResult.count, skippedCount };
 }
