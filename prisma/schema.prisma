@@ -734,7 +734,7 @@ model S6ReconcileStageClaim {
 /// - When tag re-added: set tag_active=true, clear tag_deactivated_at
 ///
 /// Reserved PII fields (email, displayName):
-/// - Requires Protected Customer Data approval (Level 1 + Email/Name fields)
+/// - Requires Protected Customer Data approval (Level 2 + Email/Name fields)
 /// - Gated by CUSTOMER_PII_FIELDS env var (default: off)
 /// - Always NULL until approval is granted and flag is enabled
 ///

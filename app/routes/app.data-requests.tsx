@@ -100,8 +100,8 @@ export default function DataRequestsPage() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : "Download failed");
+    } catch {
+      setDownloadError("Download failed. Please try again.");
     } finally {
       setDownloadingId(null);
     }
@@ -124,7 +124,7 @@ export default function DataRequestsPage() {
 
         {downloadError && (
           <s-paragraph>
-            <s-text>Download error: {downloadError}</s-text>
+            <s-text>{downloadError}</s-text>
           </s-paragraph>
         )}
 

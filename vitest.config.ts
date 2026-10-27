@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (95 total, counting expanded globs):
+ * Files included (96 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -47,13 +47,14 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
  *
- * Sync DB tests:
+ * Sync DB tests (7 files):
  * - app/services/sync/__tests__/company-location.test.ts
  * - app/services/sync/__tests__/customer.test.ts
  * - app/services/sync/__tests__/order.test.ts
  * - app/services/sync/__tests__/draft-order.test.ts
  * - app/services/sync/__tests__/draft-order-bulk-db.test.ts
  * - app/services/sync/__tests__/bulk-empty-result-db.test.ts
+ * - app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts
  *
  * Route DB tests:
  * - app/routes/__tests__/app.imports.test.ts
@@ -139,6 +140,7 @@ const DB_TEST_PATTERNS = [
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
+  "app/services/compliance/__tests__/redact-customer-queues-db.test.ts",
   "app/services/__tests__/customer-data-redaction-completeness-db.test.ts",
 
   // Sync DB tests (these use TEST_DATABASE_URL)
@@ -148,6 +150,7 @@ const DB_TEST_PATTERNS = [
   "app/services/sync/__tests__/draft-order.test.ts",
   "app/services/sync/__tests__/draft-order-bulk-db.test.ts",
   "app/services/sync/__tests__/bulk-empty-result-db.test.ts",
+  "app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts",
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
@@ -164,6 +167,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/tenant-isolation.test.ts",
 
   // Lib DB tests
+  "app/lib/__tests__/billing-plan-db.test.ts",
   "app/lib/__tests__/after-auth-db.test.ts",
   "app/lib/__tests__/after-auth-syncshopinfo-db.test.ts",
   "app/lib/__tests__/aging-reconcile.test.ts",
@@ -179,6 +183,9 @@ const DB_TEST_PATTERNS = [
   "app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts",
 
   // Script DB tests
+  // G4 fixture (and any future scripts/__tests__ DB test): runs sequentially
+  // against the real Postgres/pgmq like the other DB-backed suites.
+  "scripts/__tests__/*-db.test.ts",
   "scripts/__tests__/seed.test.ts",
   "scripts/__tests__/backstop-backfill.test.ts",
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
@@ -208,6 +215,9 @@ const DB_TEST_PATTERNS = [
 
   // Embedded admin scale and N+1 tests
   "tests/integration/embedded-admin-scale-db.test.ts",
+
+  // Cross-shop (tenant) isolation DB tests
+  "tests/integration/tenant-isolation-db.test.ts",
 ];
 
 export default defineConfig({
