@@ -164,6 +164,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/tenant-isolation.test.ts",
 
   // Lib DB tests
+  "app/lib/__tests__/billing-plan-db.test.ts",
   "app/lib/__tests__/after-auth-db.test.ts",
   "app/lib/__tests__/after-auth-syncshopinfo-db.test.ts",
   "app/lib/__tests__/aging-reconcile.test.ts",
