@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (113 total, counting expanded globs):
+ * Files included (114 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -73,6 +73,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/routes/__tests__/webhooks.compliance.customers.test.ts
  * - app/routes/__tests__/admin-render-smoke.test.tsx
  * - app/routes/__tests__/tenant-isolation.test.ts
+ * - app/routes/__tests__/account-href-loader-db.test.ts
  *
  * Lib DB tests:
  * - app/lib/__tests__/after-auth-db.test.ts

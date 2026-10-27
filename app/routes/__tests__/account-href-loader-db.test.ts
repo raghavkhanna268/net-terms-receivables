@@ -102,7 +102,7 @@ describeWithDb("account-href loader DB test", () => {
   const TEST_SUFFIX = Date.now().toString(36) + "-href";
 
   const SHOP_ID = `shop-href-${TEST_SUFFIX}`;
-  const SHOP_DOMAIN = `href-${TEST_SUFFIX}.myshopify.com`;
+  const SHOP_DOMAIN = `test-href-${TEST_SUFFIX}.myshopify.com`;
   const ACCOUNT_ID = `${TEST_ID_WITH_SLASHES}-${TEST_SUFFIX}`;
   const COMPANY_ID = `company-href-${TEST_SUFFIX}`;
   const LOCATION_ID = `location-href-${TEST_SUFFIX}`;
