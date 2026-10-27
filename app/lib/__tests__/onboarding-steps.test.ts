@@ -232,7 +232,7 @@ describe("onboarding-steps", () => {
     it("returns incomplete state when no steps are done", () => {
       const state = computeOnboardingState(baseInputs);
       expect(state.isComplete).toBe(false);
-      expect(state.steps).toHaveLength(4);
+      expect(state.steps).toHaveLength(5);
     });
 
     it("returns complete state when all required steps are done", () => {
@@ -254,6 +254,8 @@ describe("onboarding-steps", () => {
         },
         emailSendingConfigured: false, // coming_soon doesn't block completion
         remindersEnabled: false,
+        planStatus: "active",
+        planSelectionUrl: "https://example.com/pricing",
       };
 
       const state = computeOnboardingState(inputs);
@@ -297,10 +299,11 @@ describe("onboarding-steps", () => {
       dismissedAt: null,
     };
 
-    it("v1 step list contains exactly 4 steps in order: buyer-setup, checkout-validation, payment-customization, reminders", () => {
+    it("v1 step list contains exactly 5 steps in order: choose-plan, buyer-setup, checkout-validation, payment-customization, reminders", () => {
       const state = computeOnboardingState(freshShopInputs);
       const stepIds = state.steps.map((s) => s.id);
       expect(stepIds).toEqual([
+        "choose-plan",
         "buyer-setup",
         "checkout-validation",
         "payment-customization",
@@ -308,10 +311,10 @@ describe("onboarding-steps", () => {
       ]);
     });
 
-    it("fresh shop yields 1 of 4 completed (reminders is coming_soon)", () => {
+    it("fresh shop yields 1 of 5 completed (reminders is coming_soon)", () => {
       const state = computeOnboardingState(freshShopInputs);
       expect(state.completedCount).toBe(1);
-      expect(state.totalCount).toBe(4);
+      expect(state.totalCount).toBe(5);
     });
 
     it("defaultTermsDays being set does not change the step list or count", () => {
@@ -322,13 +325,14 @@ describe("onboarding-steps", () => {
       const state = computeOnboardingState(inputsWithTerms);
       const stepIds = state.steps.map((s) => s.id);
       expect(stepIds).toEqual([
+        "choose-plan",
         "buyer-setup",
         "checkout-validation",
         "payment-customization",
         "reminders",
       ]);
       expect(state.completedCount).toBe(1);
-      expect(state.totalCount).toBe(4);
+      expect(state.totalCount).toBe(5);
     });
 
     it("defaultTermsDays being unset does not change the step list or count", () => {
@@ -339,13 +343,14 @@ describe("onboarding-steps", () => {
       const state = computeOnboardingState(inputsWithoutTerms);
       const stepIds = state.steps.map((s) => s.id);
       expect(stepIds).toEqual([
+        "choose-plan",
         "buyer-setup",
         "checkout-validation",
         "payment-customization",
         "reminders",
       ]);
       expect(state.completedCount).toBe(1);
-      expect(state.totalCount).toBe(4);
+      expect(state.totalCount).toBe(5);
     });
   });
 
@@ -406,12 +411,14 @@ describe("onboarding-steps", () => {
         emailSendingConfigured: true,
         remindersEnabled: true,
         dismissedAt: null,
+        planStatus: "active",
+        planSelectionUrl: "https://example.com/pricing",
       };
 
       const state = computeOnboardingState(inputs);
       const ids = state.steps.map((s) => s.id);
       const uniqueIds = [...new Set(ids)];
-      expect(uniqueIds).toHaveLength(4);
+      expect(uniqueIds).toHaveLength(5);
       expect(uniqueIds).toHaveLength(ids.length);
     });
   });

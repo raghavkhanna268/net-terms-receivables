@@ -53,6 +53,7 @@ vi.mock("~/services/gating.server", () => ({
     importsThisMonth: { current: 0, limit: 1 },
   }),
   isGatingEnforced: vi.fn().mockReturnValue(false),
+  isPlanSelectionRedirectEnabled: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
