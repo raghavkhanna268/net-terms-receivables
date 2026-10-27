@@ -1891,7 +1891,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
     it("(ii) processBulkOperation E2E multi-chunk (N>chunk): at least 2 progress saves, lines_processed == objectCount, unseen closed", async () => {
       const { adminGraphQL } = await import("../../drain/admin-client.server");
-      const { processBulkOperation, DEFAULT_CHUNK_SIZE } = await import("../bulk-jsonl-processor.server");
+      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
       const { processBulkDraftOrder } = await import("../draft-order.server");
       const mockAdminGraphQL = vi.mocked(adminGraphQL);
       const mockProcessBulkDraftOrder = vi.mocked(processBulkDraftOrder);
@@ -1938,8 +1938,6 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const jsonlContent = lines.join("\n");
       const jsonlBytes = new TextEncoder().encode(jsonlContent);
 
-      const smallChunkSize = Math.floor(jsonlBytes.length / 3);
-
       mockAdminGraphQL.mockResolvedValue({
         success: true,
         data: {
@@ -1969,16 +1967,13 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       });
 
       const originalFetch = global.fetch;
-      let fetchCallCount = 0;
-      global.fetch = vi.fn().mockImplementation((url: string, options: RequestInit) => {
-        fetchCallCount++;
+      global.fetch = vi.fn().mockImplementation((_url: string, options: RequestInit) => {
         const rangeHeader = (options.headers as Record<string, string>)?.Range || "";
         const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d+)/);
         const start = rangeMatch ? parseInt(rangeMatch[1], 10) : 0;
         const requestedEnd = rangeMatch ? parseInt(rangeMatch[2], 10) : jsonlBytes.length - 1;
         const actualEnd = Math.min(requestedEnd, jsonlBytes.length - 1);
         const chunk = jsonlBytes.slice(start, actualEnd + 1);
-        const isEof = actualEnd >= jsonlBytes.length - 1;
 
         return Promise.resolve({
           status: 206,
