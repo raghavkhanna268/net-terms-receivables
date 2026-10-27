@@ -614,10 +614,12 @@ mod tests {
     }
 
     #[test]
-    fn test_b2b_bypass_passes() {
+    fn test_b2b_no_headroom_hides() {
+        // v1.1: Bypass accounts (over limit) now hide deferred due to no remaining headroom
         let input = make_b2b_input(Some(bypass_metafield()), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Bypass account should pass");
+        // Old behaviour: show all (bypass). New: hide deferred (no headroom).
+        assert!(!result.operations.is_empty(), "v1.1: no headroom hides deferred");
     }
 
     #[test]
@@ -628,19 +630,23 @@ mod tests {
     }
 
     #[test]
-    fn test_b2b_invalid_schema_version_passes() {
+    fn test_b2b_invalid_schema_version_hides() {
+        // v1.1: Invalid schema version now hides deferred (Indeterminate)
         let metafield = r#"{"schemaVersion": 999, "hold": true}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Unknown schema version should pass (fail-open)");
+        // Old behaviour: show all (fail-open). New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: invalid schema hides deferred");
     }
 
     #[test]
-    fn test_b2b_malformed_metafield_passes() {
+    fn test_b2b_malformed_metafield_hides() {
+        // v1.1: Malformed metafield now hides deferred (Indeterminate)
         let metafield = r#"{"notARealField": "garbage"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Malformed metafield should pass (fail-open)");
+        // Old behaviour: show all (fail-open). New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: malformed metafield hides deferred");
     }
 
     // =========================================================================
@@ -684,10 +690,12 @@ mod tests {
     }
 
     #[test]
-    fn test_customer_bypass_passes() {
+    fn test_customer_no_headroom_hides() {
+        // v1.1: Customer accounts with no headroom (over limit) now hide deferred
         let input = make_customer_input(Some(bypass_metafield()), &default_payment_methods(), None);
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Bypass account should pass");
+        // Old behaviour: show all (bypass). New: hide deferred (no headroom).
+        assert!(!result.operations.is_empty(), "v1.1: customer no headroom hides deferred");
     }
 
     #[test]
@@ -758,11 +766,12 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_object_metafield_shows_all_payment_methods() {
-        // Empty object {} should fail-open (no schemaVersion = not held)
+    fn test_empty_object_metafield_hides() {
+        // v1.1: Empty object {} now hides deferred (Indeterminate - missing hold)
         let input = make_b2b_input(Some("{}"), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Empty object metafield must show all payment methods (fail-open)");
+        // Old behaviour: show all (fail-open). New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: empty object hides deferred");
     }
 
     // =========================================================================
@@ -798,7 +807,7 @@ mod tests {
 
     #[test]
     fn test_deferred_payment_pattern_matching() {
-        let patterns = DEFAULT_DEFERRED_PATTERNS.to_vec();
+        let patterns: Vec<String> = DEFAULT_DEFERRED_PATTERNS.iter().map(|s| s.to_string()).collect();
         assert!(matches_deferred_patterns("Deferred Payment", &patterns));
         assert!(matches_deferred_patterns("Net Terms (30 days)", &patterns));
         assert!(matches_deferred_patterns("net-terms", &patterns));
@@ -922,10 +931,12 @@ mod tests {
     }
 
     #[test]
-    fn test_s11_exact_fixture_bypass() {
+    fn test_s11_exact_fixture_no_headroom_hides() {
+        // v1.1: S11 bypass metafield (over limit) now hides deferred due to no headroom
         let input = make_b2b_input(Some(s11_exact_bypass_metafield()), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "S11 exact bypass metafield should pass (hold:false)");
+        // Old behaviour: show all (hold:false). New: hide deferred (no headroom).
+        assert!(!result.operations.is_empty(), "v1.1: S11 bypass hides deferred (no headroom)");
     }
 
     #[test]
@@ -988,7 +999,7 @@ mod tests {
 
     #[test]
     fn test_b2b_custom_patterns_via_config() {
-        // Custom patterns that don't match default patterns
+        // v1.1: Custom patterns ADD to defaults instead of replacing
         let config = r#"{"deferredPaymentPatterns": ["credit line", "30 days"]}"#;
         let methods = vec![
             ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Credit Card"),
@@ -999,9 +1010,31 @@ mod tests {
         let input = make_b2b_input_with_config(Some(held_metafield()), &methods, Some(config));
         let result = run_test(&input).unwrap();
         
-        // With custom patterns, should only hide method 2 (matches "30 days" and "credit line")
-        // Net Terms should NOT be hidden because it's not in custom patterns
-        assert_eq!(result.operations.len(), 1, "Should only hide method matching custom patterns");
+        // v1.1: Custom patterns ADD to defaults
+        // Now hides method 2 (matches "30 days" and "credit line") AND method 3 (matches default "net terms")
+        // Old behaviour: custom patterns replace defaults. New: custom patterns add to defaults.
+        assert_eq!(result.operations.len(), 2, "v1.1: custom patterns add to defaults");
+        let hidden_ids: Vec<_> = result.operations.iter().map(|op| {
+            match op { schema::Operation::PaymentMethodHide(h) => h.payment_method_id.clone() }
+        }).collect();
+        assert!(hidden_ids.iter().any(|id| id.contains("2")), "Should hide 30 Days Credit Line");
+        assert!(hidden_ids.iter().any(|id| id.contains("3")), "Should also hide Net Terms (default pattern)");
+    }
+
+    #[test]
+    fn test_b2b_custom_patterns_via_config_add_only() {
+        // Test that custom patterns ADD new patterns beyond defaults
+        let config = r#"{"deferredPaymentPatterns": ["credit line", "30 days"]}"#;
+        let methods = vec![
+            ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Credit Card"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/2", "30 Days Credit Line"),
+        ];
+        
+        let input = make_b2b_input_with_config(Some(held_metafield()), &methods, Some(config));
+        let result = run_test(&input).unwrap();
+        
+        // Method 2 matches custom "30 days" and "credit line"
+        assert_eq!(result.operations.len(), 1, "Should hide method matching custom patterns");
         match &result.operations[0] {
             schema::Operation::PaymentMethodHide(hide_op) => {
                 assert!(
@@ -1388,11 +1421,11 @@ mod tests {
         assert_eq!(result.operations.len(), 2, "Unparseable shop_config (string value) with USD cart must hide deferred (fail-closed)");
     }
 
-    /// #292 G2: Truly unparseable shop_config (string, not object) with INR cart passes.
-    /// INR carts must never panic or error on malformed shop_config.
+    /// v1.1: Incomplete credit_status metafield now hides deferred (Indeterminate).
+    /// The metafield is missing required fields (currencyCode, limitPaise, exposurePaise).
     #[test]
-    fn test_unparseable_shop_config_inr_cart_passes() {
-        // When jsonValue is a string instead of an object, from_json_value returns default
+    fn test_incomplete_credit_status_hides() {
+        // v1.1: Incomplete credit_status (missing currencyCode, limitPaise, exposurePaise) hides deferred
         let input = r#"
         {
             "cart": {
@@ -1419,7 +1452,9 @@ mod tests {
         }
         "#;
         let result = run_test(input).unwrap();
-        assert!(result.operations.is_empty(), "Unparseable shop_config (string value) with INR cart must pass without error");
+        // v1.1: Incomplete credit_status (missing fields) is Indeterminate → hide deferred
+        // Old behaviour: pass (fail-open). New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: incomplete credit_status hides deferred");
     }
 
     // =========================================================================
@@ -1524,12 +1559,14 @@ mod tests {
     }
 
     #[test]
-    fn test_hold_false_shows_all_methods_even_when_overlimit() {
+    fn test_no_headroom_hides_even_when_not_held() {
+        // v1.1: No remaining headroom (exposure >= limit) now hides deferred even if not held
         let overlimit_not_held = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "99000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let pms = &[(301, "Net Terms"), (302, "Pay Later"), (303, "COD")];
         let input = make_b2b_input_runtime_ids(Some(overlimit_not_held), pms);
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "hold=false shows all methods regardless of exposure vs limit");
+        // Old behaviour: show all (hold=false). New: hide deferred (no headroom).
+        assert_eq!(result.operations.len(), 2, "v1.1: no headroom hides Net Terms and Pay Later");
     }
 
     #[test]
@@ -1677,117 +1714,143 @@ mod tests {
     // Edge-Case Tests: Metafield parsing and type coercion
     // =========================================================================
 
-    /// Empty string metafield (not a JSON object).
+    /// Empty string metafield (not a JSON object) - stricter parsing hides deferred.
     #[test]
-    fn test_metafield_empty_string() {
+    fn test_metafield_empty_string_hides() {
         let input = make_b2b_input(Some(r#""""#), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield empty string");
+        // v1.1: non-object metafield is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: non-object metafield hides deferred");
     }
 
-    /// Array metafield (not a JSON object).
+    /// Array metafield (not a JSON object) - stricter parsing hides deferred.
     #[test]
-    fn test_metafield_array() {
+    fn test_metafield_array_hides() {
         let input = make_b2b_input(Some(r#"[1, 2, 3]"#), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield array");
+        // v1.1: non-object metafield is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: array metafield hides deferred");
     }
 
-    /// Number metafield (not a JSON object).
+    /// Number metafield (not a JSON object) - stricter parsing hides deferred.
     #[test]
-    fn test_metafield_number() {
+    fn test_metafield_number_hides() {
         let input = make_b2b_input(Some(r#"12345"#), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield number");
+        // v1.1: non-object metafield is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: number metafield hides deferred");
     }
 
-    /// Boolean metafield (not a JSON object).
+    /// Boolean metafield (not a JSON object) - stricter parsing hides deferred.
     #[test]
-    fn test_metafield_boolean() {
+    fn test_metafield_boolean_hides() {
         let input = make_b2b_input(Some(r#"true"#), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield boolean");
+        // v1.1: non-object metafield is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: boolean metafield hides deferred");
     }
 
-    /// hold field as string "true" instead of boolean.
+    /// hold field as string "true" - stricter parsing hides deferred.
     #[test]
-    fn test_hold_string_true() {
+    fn test_status_with_string_hold_hides() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "true", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as string true");
+        // v1.1: non-boolean hold is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: string hold hides deferred");
     }
 
-    /// hold field as string "HOLD".
+    /// hold field as string "HOLD" - stricter parsing hides deferred.
     #[test]
-    fn test_hold_string_hold() {
+    fn test_status_with_string_hold_value_hides() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "HOLD", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as string HOLD");
+        // v1.1: non-boolean hold is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: string HOLD hides deferred");
     }
 
-    /// hold field as empty string.
+    /// hold field as empty string - stricter parsing hides deferred.
     #[test]
-    fn test_hold_empty_string() {
+    fn test_status_with_empty_hold_hides() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as empty string");
+        // v1.1: non-boolean hold is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: empty hold hides deferred");
     }
 
-    /// hold field as number 1.
+    /// hold field as number 1 - stricter parsing hides deferred.
     #[test]
-    fn test_hold_number() {
+    fn test_status_with_numeric_hold_hides() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": 1, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as number");
+        // v1.1: non-boolean hold is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: numeric hold hides deferred");
     }
 
-    /// schemaVersion field as string "1" instead of number.
+    /// schemaVersion field as string "1" - stricter parsing hides deferred.
     #[test]
-    fn test_schema_version_string() {
+    fn test_status_with_string_schema_hides() {
         let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion as string");
+        // v1.1: non-integer schemaVersion is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: string schemaVersion hides deferred");
     }
 
-    /// schemaVersion field as 0.
+    /// schemaVersion field as 0 - stricter parsing hides deferred.
     #[test]
-    fn test_schema_version_zero() {
+    fn test_status_with_zero_schema_hides() {
         let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion zero");
+        // v1.1: schemaVersion != 1 is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: schemaVersion 0 hides deferred");
     }
 
-    /// schemaVersion field as -1.
+    /// schemaVersion field as -1 - stricter parsing hides deferred.
     #[test]
-    fn test_schema_version_negative() {
+    fn test_status_with_negative_schema_hides() {
         let metafield = r#"{"schemaVersion": -1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion negative");
+        // v1.1: schemaVersion != 1 is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: negative schemaVersion hides deferred");
     }
 
-    /// schemaVersion field as very large number.
+    /// schemaVersion field as very large number - stricter parsing hides deferred.
     #[test]
-    fn test_schema_version_very_large() {
+    fn test_status_with_large_schema_hides() {
         let metafield = r#"{"schemaVersion": 999999, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_b2b_input(Some(metafield), &default_payment_methods());
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion very large");
+        // v1.1: schemaVersion != 1 is Indeterminate → hide deferred
+        // Old behaviour: show all. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: large schemaVersion hides deferred");
     }
 
     // =========================================================================
     // Edge-Case Tests: shop_config parsing
     // =========================================================================
 
-    /// Empty string shop_config with INR cart.
+    /// v1.1: Incomplete credit_status with empty shop_config hides deferred.
+    /// The credit_status is missing required fields (currencyCode, limitPaise, exposurePaise).
     #[test]
-    fn test_empty_string_shop_config_inr_cart() {
+    fn test_incomplete_status_empty_shop_config_inr_cart_hides() {
+        // v1.1: Credit_status missing required fields is Indeterminate → hide
         let input = r#"
         {
             "cart": {
@@ -1807,7 +1870,9 @@ mod tests {
         }
         "#;
         let result = run_test(input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: empty string shop_config with INR cart");
+        // v1.1: Incomplete credit_status (missing currencyCode, limitPaise, exposurePaise) is Indeterminate
+        // Old behaviour: pass. New: hide deferred.
+        assert!(!result.operations.is_empty(), "v1.1: incomplete credit_status hides deferred");
     }
 
     /// Empty string shop_config with USD cart.

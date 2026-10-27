@@ -486,11 +486,13 @@ mod tests {
     }
 
     #[test]
-    fn test_fixtures_valid_usd_currency_mismatch_passes() {
+    fn test_fixtures_valid_usd_currency_mismatch_blocks() {
         let fixture = load_fixture("valid.usdCurrency");
         let input = make_input("1000.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "USD fixture with INR cart should fail-open (currency mismatch)");
+        // v1.1: non-INR status with INR cart now blocks
+        // Old behaviour: pass (currency mismatch). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-INR status with INR cart blocks");
     }
 
     #[test]
@@ -508,36 +510,43 @@ mod tests {
     }
 
     #[test]
-    fn test_fixtures_invalid_wrong_schema_version_not_held_passes() {
-        // Non-held buyer with wrong schemaVersion should fail-open (pass)
+    fn test_fixtures_invalid_wrong_schema_version_not_held_blocks() {
+        // v1.1: Non-held buyer with wrong schemaVersion now blocks (Indeterminate)
         let fixture = load_fixture("invalid.wrongSchemaVersionNotHeld");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "invalid.wrongSchemaVersionNotHeld should fail-open");
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: wrong schemaVersion blocks");
     }
 
     #[test]
-    fn test_fixtures_invalid_missing_fields_passes() {
+    fn test_fixtures_invalid_missing_fields_blocks() {
+        // v1.1: Missing required fields now blocks (Indeterminate)
         let fixture = load_fixture("invalid.missingFields");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "invalid.missingFields should fail-open");
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: missing fields blocks");
     }
 
     #[test]
-    fn test_fixtures_invalid_paise_passes() {
+    fn test_fixtures_invalid_paise_blocks() {
+        // v1.1: Invalid paise format now blocks (Indeterminate)
         let fixture = load_fixture("invalid.invalidPaise");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "invalid.invalidPaise should fail-open");
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: invalid paise blocks");
     }
 
     #[test]
-    fn test_fixtures_invalid_malformed_passes() {
+    fn test_fixtures_invalid_malformed_blocks() {
+        // v1.1: Malformed JSON now blocks (Indeterminate)
         let fixture = load_fixture("invalid.malformed");
         let input = make_input("100.00", "INR", Some(&fixture), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "invalid.malformed should fail-open");
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: malformed metafield blocks");
     }
 
     #[test]
@@ -742,7 +751,8 @@ mod tests {
     }
 
     #[test]
-    fn test_malformed_json_passes() {
+    fn test_malformed_json_blocks() {
+        // v1.1: Malformed JSON (missing required fields) now blocks
         let input = make_input(
             "100.00",
             "INR",
@@ -751,7 +761,8 @@ mod tests {
             "CHECKOUT_COMPLETION"
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Malformed JSON should pass (fail-open)");
+        // Old behaviour: pass (fail-open). New: block (Indeterminate).
+        assert_eq!(result.operations.len(), 1, "v1.1: malformed JSON blocks");
     }
 
     #[test]
@@ -834,8 +845,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_schema_version_not_held_passes() {
-        // #292: Non-held buyer with unknown schemaVersion should fail-open (pass)
+    fn test_unknown_schema_version_not_held_blocks() {
+        // v1.1: Non-held buyer with unknown schemaVersion now blocks (Indeterminate)
         let input = make_input(
             "100.00",
             "INR",
@@ -844,7 +855,8 @@ mod tests {
             "CHECKOUT_COMPLETION"
         );
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Unknown schema version (not held) should fail-open");
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: unknown schemaVersion blocks");
     }
 
     #[test]
@@ -867,7 +879,8 @@ mod tests {
     }
 
     #[test]
-    fn test_b2b_location_no_metafield_passes() {
+    fn test_b2b_location_no_metafield_falls_back_to_customer() {
+        // v1.1: When B2B location has no metafield, fall back to customer for hold check
         let input = r#"
         {
             "cart": {
@@ -909,7 +922,14 @@ mod tests {
         }
         "#;
         let result = run_test(input).unwrap();
-        assert!(result.operations.is_empty(), "B2B with no location metafield should pass (not a net-terms location)");
+        // v1.1: B2B with no location metafield falls back to customer for hold check
+        // Old behaviour: pass (no location metafield = not net-terms). New: block (customer is held).
+        assert_eq!(result.operations.len(), 1, "v1.1: B2B falls back to customer hold status");
+        match &result.operations[0] {
+            schema::Operation::ValidationAdd(op) => {
+                assert!(op.errors[0].message.contains("on hold"));
+            }
+        }
     }
 
     // =========================================================================
@@ -945,11 +965,12 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_object_metafield_allows_checkout() {
-        // Empty object {} should fail-open (no schemaVersion)
+    fn test_empty_object_metafield_blocks() {
+        // v1.1: Empty object {} now blocks (Indeterminate - missing hold field)
         let input = make_input("100.00", "INR", Some("{}"), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "Empty object metafield must ALLOW (fail-open)");
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: empty object metafield blocks");
     }
 
     /// #292: Both credit_status AND shop_config missing must ALLOW (fail-open).
@@ -1502,72 +1523,88 @@ mod tests {
     // Edge-Case Tests: Metafield parsing and type coercion
     // =========================================================================
 
-    /// Empty string metafield (not a JSON object).
+    /// Empty string metafield (not a JSON object) - stricter parsing now blocks.
     #[test]
     fn test_metafield_empty_string() {
         let input = make_input("100.00", "INR", Some(r#""""#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield empty string");
+        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
     }
 
-    /// Array metafield (not a JSON object).
+    /// Array metafield (not a JSON object) - stricter parsing now blocks.
     #[test]
     fn test_metafield_array() {
         let input = make_input("100.00", "INR", Some(r#"[1, 2, 3]"#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield array");
+        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
     }
 
-    /// Number metafield (not a JSON object).
+    /// Number metafield (not a JSON object) - stricter parsing now blocks.
     #[test]
     fn test_metafield_number() {
         let input = make_input("100.00", "INR", Some(r#"12345"#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield number");
+        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
     }
 
-    /// Boolean metafield (not a JSON object).
+    /// Boolean metafield (not a JSON object) - stricter parsing now blocks.
     #[test]
     fn test_metafield_boolean() {
         let input = make_input("100.00", "INR", Some(r#"true"#), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: metafield boolean");
+        // v1.1: stricter parsing - non-object metafield is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-object metafield blocks");
     }
 
-    /// hold field as string "true" instead of boolean, under limit.
+    /// hold field as string "true" instead of boolean - stricter parsing now blocks.
     #[test]
-    fn test_hold_string_true_under_limit() {
+    fn test_status_with_non_boolean_hold_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "true", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as string true, under limit");
+        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-boolean hold blocks");
     }
 
-    /// hold field as string "HOLD", under limit.
+    /// hold field as string "HOLD" - stricter parsing now blocks.
     #[test]
-    fn test_hold_string_hold_under_limit() {
+    fn test_status_with_string_hold_value_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "HOLD", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as string HOLD, under limit");
+        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: string hold value blocks");
     }
 
-    /// hold field as empty string, under limit.
+    /// hold field as empty string - stricter parsing now blocks.
     #[test]
-    fn test_hold_empty_string_under_limit() {
+    fn test_status_with_empty_string_hold_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as empty string, under limit");
+        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: empty string hold blocks");
     }
 
-    /// hold field as number 1, under limit.
+    /// hold field as number 1 - stricter parsing now blocks.
     #[test]
-    fn test_hold_number_under_limit() {
+    fn test_status_with_numeric_hold_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": 1, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: hold as number, under limit");
+        // v1.1: stricter parsing - hold not a bool is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: numeric hold blocks");
     }
 
     /// schemaVersion field as string "1" with hold=true.
@@ -1579,134 +1616,160 @@ mod tests {
         assert_eq!(result.operations.len(), 1, "pinned behaviour: schemaVersion string with hold true");
     }
 
-    /// schemaVersion field as string "1", not held, under limit.
+    /// schemaVersion field as string "1", not held - stricter parsing now blocks.
     #[test]
-    fn test_schema_version_string_not_held() {
+    fn test_status_with_string_schema_version_blocks() {
         let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion string, not held");
+        // v1.1: stricter parsing - schemaVersion not integer is Indeterminate → Block
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: string schemaVersion blocks");
     }
 
-    /// schemaVersion as 0 with hold=true.
+    /// schemaVersion as 0 with hold=true - held always blocks.
     #[test]
     fn test_schema_version_zero_with_hold_true() {
         let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert_eq!(result.operations.len(), 1, "pinned behaviour: schemaVersion zero with hold true");
+        assert_eq!(result.operations.len(), 1, "held with any schemaVersion still blocks");
     }
 
-    /// schemaVersion as 0, not held, under limit.
+    /// schemaVersion as 0, not held - stricter parsing now blocks.
     #[test]
-    fn test_schema_version_zero_not_held() {
+    fn test_status_with_zero_schema_version_blocks() {
         let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion zero, not held");
+        // v1.1: stricter parsing - schemaVersion != 1 is Indeterminate → Block
+        // Old behaviour: pass (fail-open). New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: schemaVersion 0 blocks");
     }
 
-    /// schemaVersion as -1, not held, under limit.
+    /// schemaVersion as -1, not held - stricter parsing now blocks.
     #[test]
-    fn test_schema_version_negative_not_held() {
+    fn test_status_with_negative_schema_version_blocks() {
         let metafield = r#"{"schemaVersion": -1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion negative, not held");
+        // v1.1: stricter parsing - schemaVersion != 1 is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: negative schemaVersion blocks");
     }
 
-    /// currencyCode field missing, under limit.
+    /// currencyCode field missing - stricter parsing now blocks.
     #[test]
-    fn test_currency_code_missing_under_limit() {
+    fn test_status_with_missing_currency_blocks() {
         let metafield = r#"{"schemaVersion": 1, "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: currencyCode missing, under limit");
+        // v1.1: stricter parsing - missing currencyCode is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: missing currencyCode blocks");
     }
 
-    /// currencyCode as number, under limit.
+    /// currencyCode as number - stricter parsing now blocks.
     #[test]
-    fn test_currency_code_number_under_limit() {
+    fn test_status_with_numeric_currency_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": 356, "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: currencyCode as number, under limit");
+        // v1.1: stricter parsing - non-string currencyCode is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: numeric currencyCode blocks");
     }
 
-    /// limitPaise as empty string.
+    /// limitPaise as empty string - stricter parsing now blocks.
     #[test]
-    fn test_limit_paise_empty_string() {
+    fn test_status_with_empty_limit_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise empty string");
+        // v1.1: stricter parsing - empty limitPaise is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: empty limitPaise blocks");
     }
 
-    /// limitPaise as number instead of string.
+    /// limitPaise as number instead of string - stricter parsing now blocks.
     #[test]
-    fn test_limit_paise_number() {
+    fn test_status_with_numeric_limit_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": 10000000, "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise as number");
+        // v1.1: stricter parsing - non-string limitPaise is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: numeric limitPaise blocks");
     }
 
-    /// limitPaise as non-numeric string "abc".
+    /// limitPaise as non-numeric string "abc" - stricter parsing now blocks.
     #[test]
-    fn test_limit_paise_non_numeric() {
+    fn test_status_with_non_ascii_limit_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "abc", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise non-numeric");
+        // v1.1: stricter parsing - non-ASCII-digit limitPaise is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-ASCII limitPaise blocks");
     }
 
-    /// exposurePaise as empty string.
+    /// exposurePaise as empty string - stricter parsing now blocks.
     #[test]
-    fn test_exposure_paise_empty_string() {
+    fn test_status_with_empty_exposure_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise empty string");
+        // v1.1: stricter parsing - empty exposurePaise is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: empty exposurePaise blocks");
     }
 
-    /// exposurePaise as number instead of string.
+    /// exposurePaise as number instead of string - stricter parsing now blocks.
     #[test]
-    fn test_exposure_paise_number() {
+    fn test_status_with_numeric_exposure_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": 5000000, "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise as number");
+        // v1.1: stricter parsing - non-string exposurePaise is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: numeric exposurePaise blocks");
     }
 
-    /// exposurePaise as non-numeric string "abc".
+    /// exposurePaise as non-numeric string "abc" - stricter parsing now blocks.
     #[test]
-    fn test_exposure_paise_non_numeric() {
+    fn test_status_with_non_ascii_exposure_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "abc", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise non-numeric");
+        // v1.1: stricter parsing - non-ASCII-digit exposurePaise is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: non-ASCII exposurePaise blocks");
     }
 
     // =========================================================================
     // Edge-Case Tests: Boundary amounts
     // =========================================================================
 
-    /// Negative limitPaise string (parse_paise only accepts unsigned integers).
+    /// Negative limitPaise string - stricter parsing now blocks.
     #[test]
-    fn test_limit_paise_negative() {
+    fn test_status_with_negative_limit_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "-10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise negative");
+        // v1.1: stricter parsing - negative limitPaise (contains '-') is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: negative limitPaise blocks");
     }
 
-    /// Negative exposurePaise string.
+    /// Negative exposurePaise string - stricter parsing now blocks.
     #[test]
-    fn test_exposure_paise_negative() {
+    fn test_status_with_negative_exposure_blocks() {
         let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "-5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
         let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
         let result = run_test(&input).unwrap();
-        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise negative");
+        // v1.1: stricter parsing - negative exposurePaise (contains '-') is Indeterminate → Block
+        // Old behaviour: pass. New: block.
+        assert_eq!(result.operations.len(), 1, "v1.1: negative exposurePaise blocks");
     }
 
     /// Very large limitPaise (near u64 max).
