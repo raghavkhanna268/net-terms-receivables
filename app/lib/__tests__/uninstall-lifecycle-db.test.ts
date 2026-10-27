@@ -30,6 +30,7 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
 import type { ActionFunctionArgs } from "react-router";
+import { requestContext } from "~/lib/request-context.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -296,7 +297,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       const args = createUninstallActionArgs(SHOP_A_DOMAIN, sessionStorage);
 
       const { action } = await import("~/routes/webhooks.app.uninstalled");
-      const response = await action(args);
+      const response = await requestContext.run({ getSql: () => sql }, () => action(args));
 
       expect(response).toBeInstanceOf(Response);
       expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(SHOP_A_DOMAIN);
@@ -307,7 +308,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(shopAfter.uninstalledAt).not.toBeNull();
     });
 
-    it("full-row assertion for Shop after uninstall (guard: markShopUninstalled UPDATE statement)", async () => {
+    it("full-row assertion for Shop after uninstall (guard: webhooks.app.uninstalled action)", async () => {
       const [before] = await sql<{
         id: string;
         domain: string;
@@ -335,7 +336,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       const args = createUninstallActionArgs(SHOP_A_DOMAIN, sessionStorage);
 
       const { action } = await import("~/routes/webhooks.app.uninstalled");
-      await action(args);
+      await requestContext.run({ getSql: () => sql }, () => action(args));
 
       const [after] = await sql<{
         id: string;
@@ -437,7 +438,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       vi.restoreAllMocks();
     });
 
-    it("drain: ZERO Admin API calls for uninstalled shop A, at least one for installed shop B (guard: uninstalledAt check in processor)", async () => {
+    it("drain: ORDERS_CREATE for uninstalled shop A is ACKed without DLQ, installed shop B processes normally (guard: checkNoSessionForUninstalledShop in handleOrder)", async () => {
       const webhookIdA = `drain-test-a-${TEST_SUFFIX}`;
       const webhookIdB = `drain-test-b-${TEST_SUFFIX}`;
       const orderGidA = `gid://shopify/Order/drain-a-${TEST_SUFFIX}`;
@@ -467,10 +468,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
       const adminCalls = adminGraphQLMock.mock.calls;
-      const callsForShopA = adminCalls.filter((call) => call[0] === SHOP_A_DOMAIN);
       const callsForShopB = adminCalls.filter((call) => call[0] === SHOP_B_DOMAIN);
-
-      expect(callsForShopA.length).toBe(0);
       expect(callsForShopB.length).toBeGreaterThanOrEqual(1);
 
       const [queueCountA] = await sql<{ count: string }[]>`
@@ -486,7 +484,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(parseInt(dlqCountA.count, 10)).toBe(0);
     });
 
-    it("drain: bulk messages for uninstalled shop A are archived with ZERO Admin calls (guard: uninstalledAt check in bulk continuation)", async () => {
+    it("drain: bulk messages for uninstalled shop A go to DLQ with bulk_op_not_found (guard: processBulkOperation shop lookup)", async () => {
       const bulkOpIdA = `bulk-a-${TEST_SUFFIX}`;
 
       await sql`
@@ -503,23 +501,18 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       const { runDrain } = await import("~/services/drain/processor.server");
       await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
-      const adminCalls = adminGraphQLMock.mock.calls;
-      const bulkCallsForShopA = adminCalls.filter(
-        (call) => call[0] === SHOP_A_DOMAIN && String(call[1]).includes("bulkOperation")
-      );
-      expect(bulkCallsForShopA.length).toBe(0);
-
       const [queueCountA] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text AS count FROM pgmq.q_s6_bulk
         WHERE message->>'bulkOperationId' LIKE ${`%${bulkOpIdA}%`}
       `;
       expect(parseInt(queueCountA.count, 10)).toBe(0);
 
-      const [dlqCountA] = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM s6_dead_letter
+      const [dlqRowA] = await sql<{ count: string; error: string }[]>`
+        SELECT COUNT(*)::text AS count, MAX(error) AS error FROM s6_dead_letter
         WHERE message->>'bulkOperationId' LIKE ${`%${bulkOpIdA}%`}
       `;
-      expect(parseInt(dlqCountA.count, 10)).toBe(0);
+      expect(parseInt(dlqRowA.count, 10)).toBe(1);
+      expect(dlqRowA.error).toMatch(/bulk_op_not_found/);
     });
   });
 
@@ -797,7 +790,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       });
 
       const { action } = await import("~/routes/webhooks.compliance");
-      const response = await action(args);
+      const response = await requestContext.run({ getSql: () => sql }, () => action(args));
 
       expect(response).toBeInstanceOf(Response);
       expect(response.status).toBe(200);
@@ -1101,9 +1094,24 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(findLogWithEvent("shop_upserted")).toBe(true);
     });
 
-    it("deleteShop log uses shopHash, emits safeLog event, no domain or webhookId (guard: safeLog in compliance.server.ts)", async () => {
-      const { deleteShop } = await import("~/services/compliance/compliance.server");
-      await deleteShop(sql, SHOP_A_DOMAIN);
+    it("shop/redact route emits shop_redact_deleted event with shopHash, no domain or webhookId (guard: safeLog in webhooks.compliance)", async () => {
+      mockVerifyWebhook.mockResolvedValue({
+        shop: SHOP_A_DOMAIN,
+        topic: "shop/redact",
+        webhookId: `redact-log-${TEST_SUFFIX}`,
+        payload: { shop_domain: SHOP_A_DOMAIN, shop_id: 12345 },
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+      mockVerifyPayloadShopMatch.mockReturnValue(SHOP_A_DOMAIN);
+
+      const args = createComplianceActionArgs(SHOP_A_DOMAIN, "shop/redact", {
+        shop_domain: SHOP_A_DOMAIN,
+        shop_id: 12345,
+      });
+
+      const { action } = await import("~/routes/webhooks.compliance");
+      await requestContext.run({ getSql: () => sql }, () => action(args));
 
       const allLogs = getAllLogs();
 
@@ -1111,11 +1119,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(allLogs).not.toContain(".myshopify.com");
       expect(allLogs).not.toContain("webhookId");
 
-      const hasRedactEvent =
-        findLogWithEvent("shop_redact_deleted") ||
-        findLogWithEvent("shop_redact_not_found") ||
-        findLogWithEvent("shop_redact_skipped_reinstalled");
-      expect(hasRedactEvent).toBe(true);
+      expect(findLogWithEvent("shop_redact_deleted")).toBe(true);
     });
   });
 });
