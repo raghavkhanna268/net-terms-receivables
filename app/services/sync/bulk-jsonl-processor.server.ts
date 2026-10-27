@@ -64,6 +64,8 @@ import {
   incrementBulkOperationFailureCount,
   resetBulkOperationFailureCount,
 } from "./bulk-operations.server";
+import { normalizeScheduleDueAt } from "~/lib/due-date";
+import { validateTimezone } from "~/lib/aging-dates.server";
 
 /**
  * Default chunk size in bytes (512KB).
@@ -592,15 +594,23 @@ export async function processOrderLines(
     `;
     const invoiceByOrderId = new Map(existingOrphanInvoices.map((i) => [i.orderId, i.id]));
 
+    // Fetch shop timezone once for the batch (normalize date-only midnight UTC dueAt)
+    const [shopRow] = await sql<{ timezone: string | null }[]>`
+      SELECT timezone FROM "Shop" WHERE id = ${shopId}
+    `;
+    const shopTimezone = validateTimezone(shopRow?.timezone);
+
     // Build rows for batched UPDATE using jsonb_to_recordset (fetch_types:false compatible)
     const updateRows: { id: string; dueAt: string; dueReason: string }[] = [];
 
     for (const schedule of orphanSchedules) {
       const invoiceId = invoiceByOrderId.get(schedule.__parentId);
       if (invoiceId && schedule.dueAt) {
+        const parsedDueAt = new Date(schedule.dueAt);
+        const normalizedDueAt = normalizeScheduleDueAt(parsedDueAt, shopTimezone);
         updateRows.push({
           id: invoiceId,
-          dueAt: schedule.dueAt,
+          dueAt: normalizedDueAt.toISOString(),
           dueReason: "Payment schedule from Shopify (orphan reconcile)",
         });
       }
