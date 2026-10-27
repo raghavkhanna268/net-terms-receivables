@@ -41,6 +41,8 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
   const TAGGED_DISPLAY = "Tagged Buyer";
 
   const FIXED_MONTH_STR = "2026-10";
+  const FIXED_TODAY = "2026-10-15";
+  const FIXED_TODAY_IST = { year: 2026, month: 10, day: 15, hour: 12, minute: 0 };
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -167,12 +169,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#B2B-DUE', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-b2b-due" }) });
 
@@ -232,12 +234,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#B2B-OVERDUE', 15000.00, 15000.00, 'open',
-          NOW() - INTERVAL '14 days', NOW() - INTERVAL '7 days', NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '14 days', ${FIXED_TODAY}::DATE - INTERVAL '7 days', NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-b2b-overdue" }) });
 
@@ -291,12 +293,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#B2B-NOEMAIL', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -348,12 +350,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#B2B-OPTOUT', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -399,12 +401,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#B2B-PARTIAL', 10000.00, 3000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-partial" }) });
 
@@ -448,12 +450,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#B2B-PAID', 10000.00, 0.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -501,14 +503,14 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES 
           (${b2bInvoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${b2bOrderId},
            '#MIXED-B2B', 10000.00, 10000.00, 'open',
-           NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()),
+           ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()),
           (${taggedInvoiceId}, ${TEST_SHOP_ID}, ${TAGGED_ACCOUNT_ID}, ${taggedOrderId},
            '#MIXED-TAG', 15000.00, 15000.00, 'open',
-           NOW() - INTERVAL '5 days', NOW(), NOW(), NOW())
+           ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW())
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-mixed" }) });
 
@@ -582,12 +584,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#B2B-GATED', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -657,12 +659,12 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
           '#PII-LEAK', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       mockFetch.mockResolvedValueOnce({

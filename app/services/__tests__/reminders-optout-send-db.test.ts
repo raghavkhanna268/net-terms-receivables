@@ -36,6 +36,8 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
   const OTHER_CUSTOMER_ID = `gid://shopify/Customer/other-${TEST_SUFFIX}`;
 
   const FIXED_MONTH_STR = "2026-10";
+  const FIXED_TODAY = "2026-10-15";
+  const FIXED_TODAY_IST = { year: 2026, month: 10, day: 15, hour: 12, minute: 0 };
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -167,7 +169,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#OPTOUT-SEND', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
@@ -178,7 +180,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -240,12 +242,12 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#NOT-OPTOUT', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-not-optout" }) });
 
@@ -300,13 +302,13 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#CATCHUP-OPTOUT', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '2 days', NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE - INTERVAL '2 days', NOW(), NOW()
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '2 days')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${FIXED_TODAY}::DATE - INTERVAL '2 days')
       `;
 
       await sql`
@@ -316,7 +318,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -372,7 +374,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#REENABLE', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
@@ -384,7 +386,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
       await clearBuyerOptOut(sql, TEST_SHOP_ID, TEST_ACCOUNT_ID);
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -427,7 +429,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#ENQUEUE-SKIP', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
@@ -472,12 +474,12 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#NO-SECRET', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -526,17 +528,17 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#CATCHUP-NO-SECRET', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '2 days', NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE - INTERVAL '2 days', NOW(), NOW()
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '2 days')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${FIXED_TODAY}::DATE - INTERVAL '2 days')
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -590,12 +592,12 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#HEADERS', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-headers" }) });
 
@@ -648,17 +650,17 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#CATCHUP-HEADERS', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '2 days', NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE - INTERVAL '2 days', NOW(), NOW()
         )
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '2 days')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${FIXED_TODAY}::DATE - INTERVAL '2 days')
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-catchup-headers" }) });
 
@@ -727,10 +729,10 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
         VALUES 
           (${invoiceIdA}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderIdA},
            '#SHOP-A', 10000.00, 10000.00, 'open',
-           NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()),
+           ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()),
           (${invoiceIdB}, ${OTHER_SHOP_ID}, ${OTHER_ACCOUNT_ID}, ${orderIdB},
            '#SHOP-B', 10000.00, 10000.00, 'open',
-           NOW() - INTERVAL '5 days', NOW(), NOW(), NOW())
+           ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW())
       `;
 
       await sql`
@@ -740,7 +742,7 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-shop-b" }) });
 
