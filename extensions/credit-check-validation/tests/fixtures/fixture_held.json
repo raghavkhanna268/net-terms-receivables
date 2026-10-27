@@ -1,0 +1,39 @@
+{
+  "cart": {
+    "cost": {
+      "totalAmount": {
+        "amount": "100.00",
+        "currencyCode": "INR"
+      }
+    },
+    "buyerIdentity": {
+      "customer": null,
+      "purchasingCompany": {
+        "location": {
+          "metafield": {
+            "jsonValue": {
+              "schemaVersion": 1,
+              "currencyCode": "INR",
+              "hold": true,
+              "holdReasonCode": "MANUAL_HOLD",
+              "limitPaise": "10000000",
+              "exposurePaise": "0",
+              "updatedAt": "2026-10-15T00:00:00.000Z"
+            }
+          }
+        }
+      }
+    }
+  },
+  "buyerJourney": {
+    "step": "CHECKOUT_COMPLETION"
+  },
+  "shop": {
+    "metafield": {
+      "jsonValue": {
+        "schemaVersion": 1,
+        "currencyCode": "INR"
+      }
+    }
+  }
+}

@@ -173,6 +173,7 @@ const DB_TEST_PATTERNS = [
   "app/lib/__tests__/offline-token.test.ts",
   "app/lib/__tests__/reinstall-sync-reset-db.test.ts",
   "app/lib/__tests__/schema-trigger-guard-db.test.ts",
+  "app/lib/__tests__/uninstall-lifecycle-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
   // Bank import edge-case DB tests
@@ -205,6 +206,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm concurrency lock DB tests
   "tests/integration/confirm-concurrency-lock-db.test.ts",
+
+  // Embedded admin scale and N+1 tests
+  "tests/integration/embedded-admin-scale-db.test.ts",
 ];
 
 export default defineConfig({

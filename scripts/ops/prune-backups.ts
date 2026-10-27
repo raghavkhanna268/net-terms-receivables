@@ -1,15 +1,23 @@
 /**
  * Prune old database backups from R2 with 30-day rolling retention.
  *
- * Safety invariants:
+ * Safety invariants (all fail closed: when in doubt, nothing is deleted):
  * - ONLY operates on bucket `ntr-db-backups`, prefix `db/`
  * - Strict prefix guard: exits non-zero if any listed key doesn't start with `db/`
- * - Always keeps the newest 7 backups regardless of age
+ * - Listing guard: exits non-zero if the listing fails, is truncated, or has
+ *   any entry without a string Key and a parseable LastModified
+ * - Always keeps the newest 7 backups regardless of age, and re-checks the
+ *   deletion plan independently of the selection (checkDeletionPlan) right
+ *   before any delete call
  * - Deletes only objects older than 30 days
+ * - Refuses any deletion when fewer than 7 objects are listed
  * - Sanity floor: refuses to delete if total < 8, if eligible would leave < 7,
  *   or if newest backup > 48h old (signals stalled backup job)
- * - Dry-run is default: prints counts only, never prints keys or sizes
- * - Exit non-zero if deleted < eligible in delete mode (partial failure)
+ * - Unknown PRUNE_MODE values exit non-zero; an unset PRUNE_MODE is dry_run.
+ *   The workflow passes `delete` only for scheduled runs and for a manual
+ *   dispatch with an explicit dry_run=false; otherwise `dry_run`.
+ * - Output is counts only, never keys or sizes
+ * - Stops at the first failed delete and exits non-zero (deleted < eligible)
  *
  * Usage:
  *   node --experimental-strip-types scripts/ops/prune-backups.ts
@@ -36,6 +44,8 @@ export const MAX_NEWEST_AGE_HOURS = 48;
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
+export type PruneMode = "dry_run" | "delete";
+
 export interface S3Object {
   Key: string;
   LastModified: string;
@@ -57,6 +67,45 @@ export interface SanityCheckResult {
 // ─────────────────────────────────────────────────────────────────────────────
 // Selection logic (exported for testing)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolves PRUNE_MODE. Unset/empty -> dry_run (the safe default when the
+ * script runs outside the workflow). Any value other than dry_run/delete is
+ * rejected (null) so a typo can never be mistaken for either mode.
+ */
+export function resolvePruneMode(raw: string | undefined): PruneMode | null {
+  if (raw === undefined || raw === "") {
+    return "dry_run";
+  }
+  if (raw === "dry_run" || raw === "delete") {
+    return raw;
+  }
+  return null;
+}
+
+/**
+ * Validates the shape of a listing: every entry needs a string Key and a
+ * parseable LastModified. Unparseable dates would break newest-first ordering
+ * and therefore keep-newest-7, so they fail the whole run.
+ */
+export function validateListing(objects: unknown): objects is S3Object[] {
+  if (!Array.isArray(objects)) {
+    return false;
+  }
+  for (const obj of objects) {
+    if (obj === null || typeof obj !== "object") {
+      return false;
+    }
+    const { Key, LastModified } = obj as Record<string, unknown>;
+    if (typeof Key !== "string" || Key.length === 0) {
+      return false;
+    }
+    if (typeof LastModified !== "string" || Number.isNaN(new Date(LastModified).getTime())) {
+      return false;
+    }
+  }
+  return true;
+}
 
 /**
  * Validates that all objects have keys starting with the required prefix.
@@ -200,6 +249,72 @@ export function selectForDeletion(
   return eligible;
 }
 
+/**
+ * Independent re-check of a deletion plan, run right before any delete call.
+ * It does not trust selectForDeletion: it recomputes the newest keepNewest
+ * keys itself and refuses the plan if
+ * - fewer than keepNewest objects are listed and anything would be deleted,
+ * - the plan would leave fewer than keepNewest objects,
+ * - any planned key is one of the newest keepNewest (even if it is old),
+ * - any planned key is outside the prefix, not in the listing, duplicated,
+ * - any planned key is not older than the retention cutoff.
+ */
+export function checkDeletionPlan(
+  objects: S3Object[],
+  toDelete: string[],
+  prefix: string,
+  retentionDays: number,
+  keepNewest: number,
+  nowMs: number
+): SanityCheckResult {
+  if (toDelete.length === 0) {
+    return { ok: true };
+  }
+  if (objects.length < keepNewest) {
+    return { ok: false, reason: "total_below_keep_newest total=" + objects.length + " min=" + keepNewest };
+  }
+  if (objects.length - toDelete.length < keepNewest) {
+    return {
+      ok: false,
+      reason: "plan_leaves_below_keep_newest after=" + (objects.length - toDelete.length) + " min=" + keepNewest,
+    };
+  }
+
+  const byKey = new Map<string, number>();
+  for (const obj of objects) {
+    byKey.set(obj.Key, new Date(obj.LastModified).getTime());
+  }
+  const newest = new Set(
+    [...objects]
+      .sort((a, b) => new Date(b.LastModified).getTime() - new Date(a.LastModified).getTime())
+      .slice(0, keepNewest)
+      .map((o) => o.Key)
+  );
+  const cutoffMs = nowMs - retentionDays * 24 * 60 * 60 * 1000;
+  const seen = new Set<string>();
+
+  for (const key of toDelete) {
+    if (!key.startsWith(prefix)) {
+      return { ok: false, reason: "plan_prefix_violation" };
+    }
+    if (seen.has(key)) {
+      return { ok: false, reason: "plan_duplicate_key" };
+    }
+    seen.add(key);
+    const ms = byKey.get(key);
+    if (ms === undefined) {
+      return { ok: false, reason: "plan_key_not_listed" };
+    }
+    if (newest.has(key)) {
+      return { ok: false, reason: "plan_hits_keep_newest" };
+    }
+    if (!(ms < cutoffMs)) {
+      return { ok: false, reason: "plan_not_past_retention" };
+    }
+  }
+  return { ok: true };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AWS CLI wrapper
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,7 +342,7 @@ function runAwsCommand(args: string[], endpoint: string): { success: boolean; st
   };
 }
 
-function listObjects(bucket: string, prefix: string, endpoint: string): S3Object[] | null {
+function listObjects(bucket: string, prefix: string, endpoint: string): unknown[] | null {
   const result = runAwsCommand(
     ["s3api", "list-objects-v2", "--bucket", bucket, "--prefix", prefix, "--output", "json"],
     endpoint
@@ -239,7 +354,15 @@ function listObjects(bucket: string, prefix: string, endpoint: string): S3Object
 
   try {
     const data = JSON.parse(result.stdout);
-    return (data.Contents ?? []) as S3Object[];
+    if (data === null || typeof data !== "object") {
+      return null;
+    }
+    // The CLI auto-paginates; a leftover token means the listing is partial.
+    if (data.NextToken || data.IsTruncated === true) {
+      return null;
+    }
+    const contents = data.Contents ?? [];
+    return Array.isArray(contents) ? contents : null;
   } catch {
     return null;
   }
@@ -258,8 +381,12 @@ function deleteObject(bucket: string, key: string, endpoint: string): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function main(): Promise<number> {
-  // Read mode from environment (set by workflow), default to dry_run
-  const pruneMode = process.env.PRUNE_MODE ?? "dry_run";
+  // Read mode from environment (set by workflow); unset -> dry_run, unknown -> refuse
+  const pruneMode = resolvePruneMode(process.env.PRUNE_MODE);
+  if (pruneMode === null) {
+    console.log("prune_error=true reason=invalid_mode");
+    return 1;
+  }
   const deleteMode = pruneMode === "delete";
 
   // Check required environment variables
@@ -278,12 +405,19 @@ export async function main(): Promise<number> {
   }
 
   // List objects in the prefix
-  const objects = listObjects(bucket, PREFIX, endpoint);
+  const listed = listObjects(bucket, PREFIX, endpoint);
 
-  if (objects === null) {
+  if (listed === null) {
     console.log("prune_error=true reason=list_failed");
     return 1;
   }
+
+  // Listing shape guard (Key + parseable LastModified on every entry)
+  if (!validateListing(listed)) {
+    console.log("prune_error=true reason=invalid_listing");
+    return 1;
+  }
+  const objects: S3Object[] = listed;
 
   // Strict prefix validation
   if (!validatePrefix(objects, PREFIX)) {
@@ -305,6 +439,21 @@ export async function main(): Promise<number> {
   };
 
   if (deleteMode) {
+    // Fewer than KEEP_NEWEST listed: refuse to delete anything (no-op, exit 0
+    // so the nightly stays green while the bucket fills up).
+    if (result.totalCount < KEEP_NEWEST) {
+      console.log(
+        "prune_mode=delete" +
+          " prune_refused=true" +
+          " reason=total_below_keep_newest" +
+          " total=" + result.totalCount +
+          " eligible=" + result.eligibleCount +
+          " deleted=0" +
+          " newest_age_hours=" + result.newestAgeHours
+      );
+      return 0;
+    }
+
     // Sanity floor check before deletion (skipped only when nothing is eligible)
     const sanity = !requiresSanityFloor(result.eligibleCount)
       ? { ok: true as const }
@@ -329,11 +478,25 @@ export async function main(): Promise<number> {
       return 1;
     }
 
-    // Delete eligible objects
+    // Independent re-check of the plan (keep-newest-7, prefix, age)
+    const plan = checkDeletionPlan(objects, toDelete, PREFIX, RETENTION_DAYS, KEEP_NEWEST, nowMs);
+    if (!plan.ok) {
+      console.log(
+        "prune_mode=delete" +
+          " prune_blocked=true" +
+          " reason=" + plan.reason +
+          " total=" + result.totalCount +
+          " eligible=" + result.eligibleCount
+      );
+      return 1;
+    }
+
+    // Delete eligible objects; stop at the first failure (fail closed)
     for (const key of toDelete) {
-      if (deleteObject(bucket, key, endpoint)) {
-        result.deletedCount++;
+      if (!deleteObject(bucket, key, endpoint)) {
+        break;
       }
+      result.deletedCount++;
     }
 
     // Structured output: counts only (no keys, sizes, or shop data)
