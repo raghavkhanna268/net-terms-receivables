@@ -111,23 +111,76 @@ function detectRail(textUpper: string): PaymentRail {
 function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarration {
   const result: ParsedNarration = { rail: "UPI" };
 
-  // First, try to find VPA in the entire text (handles hyphenated VPAs)
-  // Pattern: alphanumeric/dots/hyphens @ alphanumeric handle
-  // Must be bounded by non-VPA-like characters (allow hyphen as delimiter for HDFC dash-format)
-  const fullVpaMatch = text.match(/(?:^|[^a-zA-Z0-9._])([a-zA-Z0-9._]+(?:-\d+)?@[a-zA-Z0-9]+)(?:[^a-zA-Z0-9]|$)/);
-  if (fullVpaMatch) {
-    result.upiId = fullVpaMatch[1].toLowerCase();
+  // VPA extraction is segment-aware per bank format
+  // HDFC: `-` separated, format: UPI-<name>-<vpa parts>-<ifsc>-<rrn>-<note>
+  // ICICI: `/` separated, format: UPI/CR/<rrn>/<vpa>/<name>/<bank>/...
+
+  const isHdfcDashFormat = textUpper.startsWith("UPI-");
+  const isIciciSlashFormat = textUpper.startsWith("UPI/");
+  const hasSlash = text.includes("/");
+
+  if (isHdfcDashFormat && !isIciciSlashFormat) {
+    // HDFC dash format: UPI-NAME-vpa@handle-IFSC-RRN-note
+    // OR for phone VPAs: UPI-9000000000-1@handle-NAME-IFSC-RRN-note
+    const dashParts = text.split("-");
+    if (dashParts.length >= 3) {
+      // Find the segment containing @ (VPA end)
+      let atSegmentIdx = -1;
+      for (let i = 1; i < dashParts.length; i++) {
+        if (dashParts[i].includes("@")) {
+          atSegmentIdx = i;
+          break;
+        }
+      }
+      if (atSegmentIdx >= 1) {
+        // Determine VPA start: work backwards from @ segment
+        // to find where VPA starts (after the name, which contains uppercase letters)
+        // Do NOT extend across all-digit segments (they may be reference numbers)
+        // Exception: phone format (10 digits + 1-3 digit suffix)
+        let vpaStartIdx = atSegmentIdx;
+        const atSegmentPart = dashParts[atSegmentIdx].split("@")[0];
+        for (let i = atSegmentIdx - 1; i >= 1; i--) {
+          const seg = dashParts[i];
+          // If segment has ANY uppercase letter, it's likely a name (UPPERCASE or Title-case)
+          // VPA parts are typically all lowercase or all digits
+          if (/[A-Z]/.test(seg)) {
+            break;
+          }
+          // All-digit segments are NOT part of VPA unless it's phone format
+          // Phone format: preceding segment is 10 digits AND at-segment part is 1-3 digits
+          if (/^\d+$/.test(seg)) {
+            // Only extend for phone format
+            if (/^\d{10}$/.test(seg) && /^\d{1,3}$/.test(atSegmentPart)) {
+              vpaStartIdx = i;
+            }
+            break;
+          }
+          // If segment is all lowercase alphanumeric (not all digits), could be VPA part
+          if (/^[a-z0-9._]+$/.test(seg)) {
+            vpaStartIdx = i;
+          } else {
+            break;
+          }
+        }
+        // Join segments from vpaStartIdx to atSegmentIdx (inclusive) to form VPA
+        const vpaParts = dashParts.slice(vpaStartIdx, atSegmentIdx + 1);
+        const vpaCandidate = vpaParts.join("-");
+        // Validate it looks like a VPA
+        if (/^[a-zA-Z0-9._-]+@[a-zA-Z0-9]+$/.test(vpaCandidate)) {
+          result.upiId = vpaCandidate.toLowerCase();
+        }
+      }
+    }
   }
-  
-  // Split by separators for further analysis
-  const parts = text.split(/[/-]/);
-  
-  // If no VPA found, try to find segment containing @ (simpler VPAs)
-  if (!result.upiId) {
-    for (const part of parts) {
+
+  // Slash-separated format (ICICI and generic): find segment containing @
+  if (!result.upiId && hasSlash) {
+    const slashParts = text.split("/");
+    for (const part of slashParts) {
       const trimmed = part.trim();
       if (trimmed.includes("@")) {
-        const vpaMatch = trimmed.match(/^([a-zA-Z0-9._]+@[a-zA-Z0-9]+)$/);
+        // Check if it's a valid VPA (may have hyphens in local part)
+        const vpaMatch = trimmed.match(/^([a-zA-Z0-9._-]+@[a-zA-Z0-9]+)$/);
         if (vpaMatch) {
           result.upiId = vpaMatch[1].toLowerCase();
           break;
@@ -135,7 +188,96 @@ function parseUpi(text: string, textUpper: string, bank?: BankId): ParsedNarrati
       }
     }
   }
-  
+
+  // Fallback: regex-based VPA extraction for non-standard formats
+  // Handles cases like "PAYMENT UPI-SYNT-9000000000-1@oksynt-DONE" where the
+  // narration contains UPI but doesn't start with UPI- or UPI/
+  //
+  // Extension rules for hyphenated VPAs:
+  // - Always take the segment directly before @ (the "at-segment")
+  // - Extend backwards across '-' only when safe:
+  //   1. Phone format: at-segment is 1-3 digits AND preceding is exactly 10 digits (9000000000-1@)
+  //   2. Mixed-case text AND earlier segment is lowercase alphanumeric/dots/underscores: extend
+  // - Do NOT extend across arbitrary digit sequences (they may be reference numbers)
+  // Ambiguity: in all-caps text, "SYNT-VENDOR@OKSYNT" extracts as "vendor@oksynt" because
+  // we can't distinguish a hyphenated VPA from a name-VPA boundary.
+  if (!result.upiId) {
+    const atIdx = text.indexOf("@");
+    if (atIdx > 0) {
+      const afterAt = text.slice(atIdx + 1);
+      // Handle must end at '-', '/', whitespace, or end of string
+      const handleMatch = afterAt.match(/^([a-zA-Z0-9]+)(?:[-/\s]|$)/);
+      if (handleMatch) {
+        const handle = handleMatch[1].toLowerCase();
+        const beforeAt = text.slice(0, atIdx);
+
+        // Find hard boundary: last slash or whitespace before @
+        // Use backward loop instead of regex to avoid O(n^2) backtracking
+        let boundaryIdx = 0;
+        for (let i = beforeAt.length - 1; i >= 0; i--) {
+          const ch = beforeAt[i];
+          // Match /\s/ semantics (space, tab, newline, etc.) or '/'
+          if (ch === "/" || /\s/.test(ch)) {
+            boundaryIdx = i + 1;
+            break;
+          }
+        }
+        const localPartRaw = beforeAt.slice(boundaryIdx);
+
+        // Split by '-' and process segments
+        const segments = localPartRaw.split("-");
+        const atSegment = segments[segments.length - 1];
+
+        // Validate at-segment: must be alphanumeric with dots/underscores
+        if (atSegment && /^[a-zA-Z0-9._]+$/.test(atSegment)) {
+          // Track start index for VPA segments to avoid O(n^2) unshift operations
+          let vpaStartIdx = segments.length - 1;
+
+          // Check if narration is all-uppercase (affects extension rules)
+          const isAllCaps = text === text.toUpperCase();
+
+          // Phone format extension: at-segment is 1-3 digits, preceding is exactly 10 digits
+          // This is the only case where we extend across digit segments
+          let extendedForPhone = false;
+          if (segments.length >= 2) {
+            const prevSeg = segments[segments.length - 2];
+            if (
+              /^\d{1,3}$/.test(atSegment) &&
+              prevSeg &&
+              /^\d{10}$/.test(prevSeg)
+            ) {
+              vpaStartIdx = segments.length - 2;
+              extendedForPhone = true;
+            }
+          }
+
+          // For mixed-case text, extend backwards across lowercase segments
+          // (only if we haven't already extended for phone format)
+          // Do NOT extend across all-digit segments (they may be reference numbers)
+          if (!isAllCaps && !extendedForPhone) {
+            for (let i = segments.length - 2; i >= 0; i--) {
+              const seg = segments[i];
+              if (!seg) break;
+              // Must be lowercase alphanumeric/dots/underscores, but NOT all digits
+              if (/^[a-z0-9._]+$/.test(seg) && !/^\d+$/.test(seg)) {
+                vpaStartIdx = i;
+              } else {
+                break;
+              }
+            }
+          }
+
+          // Join segments from vpaStartIdx to end (O(n) slice + join, no unshift)
+          const localPart = segments.slice(vpaStartIdx).join("-").toLowerCase();
+          result.upiId = `${localPart}@${handle}`;
+        }
+      }
+    }
+  }
+
+  // Split by separators for further analysis
+  const parts = text.split(/[/-]/);
+
   // ICICI: VPA may be without '@' - check segment index 2 only
   // Format: UPI/CR/vpa-id/SENDER NAME/BANK NAME (index 2 = VPA ID, index 4 = bank)
   if (!result.upiId && bank === "ICICI" && parts.length > 2) {

@@ -330,6 +330,330 @@ describe("narration-parser", () => {
         expect(result.payerBank).toBe("SYNT BANK");
       });
     });
+
+    describe("VPA hyphen segment handling (#334)", () => {
+      // Issue #334 exact example: synt-vendor@oksynt was truncated to vendor@oksynt
+      it("extracts synt-vendor@oksynt without truncation (#334 issue example)", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-synt-vendor@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-vendor@oksynt");
+      });
+
+      // HDFC dash format: alphabetic hyphenated VPA
+      it("extracts alphabetic hyphenated VPA in HDFC dash format", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-test-abc-xyz@okicici-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("test-abc-xyz@okicici");
+      });
+
+      // ICICI slash format: alphabetic hyphenated VPA
+      it("extracts alphabetic hyphenated VPA in ICICI slash format", () => {
+        const result = parseNarration(
+          "UPI/CR/600000000002/test-abc-xyz@okicici/SYNT VENDOR/SYNT BANK"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("test-abc-xyz@okicici");
+      });
+
+      // Bank parameter: HDFC
+      it("extracts alphabetic hyphenated VPA when bank is HDFC", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-test-abc-xyz@okicici-SYNT0000001-600000000001-UPI",
+          "HDFC"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("test-abc-xyz@okicici");
+      });
+
+      // Bank parameter: ICICI
+      it("extracts alphabetic hyphenated VPA when bank is ICICI", () => {
+        const result = parseNarration(
+          "UPI/CR/600000000002/test-abc-xyz@okicici/SYNT VENDOR/SYNT BANK",
+          "ICICI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("test-abc-xyz@okicici");
+      });
+
+      // Numeric hyphenated VPA
+      it("extracts numeric hyphenated VPA (9000000000-1@oksynt)", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-9000000000-1@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      // Mixed hyphenated VPA
+      it("extracts mixed hyphenated VPA (synt1-pay@examplebank)", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-synt1-pay@examplebank-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt1-pay@examplebank");
+      });
+
+      // Multi-hyphen VPA
+      it("extracts multi-hyphen VPA (synt-pay-01@oksynt)", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-synt-pay-01@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-pay-01@oksynt");
+      });
+
+      // Negative: segment separator hyphen must NOT be swallowed into VPA
+      // e.g. UPI-SYNTVENDOR-synt@oksynt-... must extract synt@oksynt, not syntvendor-synt@oksynt
+      it("does NOT swallow segment separator hyphen into non-hyphenated VPA", () => {
+        const result = parseNarration(
+          "UPI-SYNTVENDOR-synt@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt@oksynt");
+      });
+
+      // Negative: reference number must not be glued to VPA
+      it("does NOT swallow reference number into VPA", () => {
+        const result = parseNarration(
+          "UPI-SYNT VENDOR-600000000099-test@oksynt-SYNT0000001-600000000001-UPI"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("test@oksynt");
+      });
+    });
+
+    describe("VPA fallback path (fallback extraction)", () => {
+      // Fallback path: UPI detected but narration doesn't start with UPI- or UPI/
+      // e.g. "PAYMENT UPI-SYNT-vpa@handle-DONE"
+
+      it("extracts numeric-dash VPA on fallback path", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-9000000000-1@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      it("extracts alphabetic-hyphen VPA on fallback path", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-synt-vendor@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-vendor@oksynt");
+      });
+
+      it("does NOT swallow uppercase segment separator on fallback path", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNTVENDOR-synt@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // Must be synt@oksynt, NOT syntvendor-synt@oksynt
+        expect(result.upiId).toBe("synt@oksynt");
+      });
+
+      it("extracts multi-segment VPA on fallback path", () => {
+        const result = parseNarration(
+          "CREDIT UPI-PAYEE-synt-pay-01@oksynt-REF"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt-pay-01@oksynt");
+      });
+
+      // Regression tests for all-caps narrations
+      it("extracts all-caps single-segment VPA", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNTVENDOR@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("syntvendor@oksynt");
+      });
+
+      it("extracts all-caps numeric-dash VPA", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-9000000000-1@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // Digits extend even in all-caps text (phone format)
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      it("extracts all-caps alpha-hyphen VPA (ambiguous case)", () => {
+        // In all-caps text, we can't tell if SYNT-VENDOR is a name or VPA
+        // We conservatively take only the segment directly before @
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-VENDOR@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("vendor@oksynt");
+      });
+
+      it("extracts VPA with underscore in local part", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-synt_vendor@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt_vendor@oksynt");
+      });
+
+      it("respects slash as boundary before VPA", () => {
+        const result = parseNarration(
+          "UPI/CR/synt@oksynt/SYNT VENDOR"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt@oksynt");
+      });
+
+      it("respects space as boundary before VPA", () => {
+        const result = parseNarration(
+          "UPI SYNT VENDOR synt@oksynt REF123"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("synt@oksynt");
+      });
+
+      // Handle must end at separator or end of string
+      it("rejects handle with trailing non-separator chars", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-synt@oksynt.extra-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // Handle 'oksynt.extra' has a dot, so no valid VPA
+        expect(result.upiId).toBeUndefined();
+      });
+
+      // Reference number before VPA must not be swallowed
+      it("does NOT swallow ref number before VPA (mixed-case)", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-600000000001-9000000000@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        // 600000000001 is a ref number, not part of VPA
+        expect(result.upiId).toBe("9000000000@oksynt");
+      });
+
+      it("does NOT swallow ref number before VPA (all-caps)", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-600000000001-9000000000@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000@oksynt");
+      });
+
+      // Phone format: 10-digit prefix + 1-3 digit suffix
+      it("extends for phone format in mixed-case", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-9000000000-1@oksynt-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+
+      it("extends for phone format in all-caps", () => {
+        const result = parseNarration(
+          "PAYMENT UPI-SYNT-9000000000-1@OKSYNT-DONE"
+        );
+        expect(result.rail).toBe("UPI");
+        expect(result.upiId).toBe("9000000000-1@oksynt");
+      });
+    });
+
+    describe("performance (ReDoS prevention)", () => {
+      // These tests verify O(n) complexity, not O(n^2) backtracking
+      // Using 200ms cap as generous bound (actual should be <10ms)
+
+      it("handles 50k-char separator-free narration in linear time", () => {
+        const longInput = "PAYMENTUPI-" + "a".repeat(50000) + "@oksynt";
+        const start = performance.now();
+        const result = parseNarration(longInput);
+        const elapsed = performance.now() - start;
+
+        expect(result.rail).toBe("UPI");
+        // No separator before @, so VPA is the entire 50k 'a' string
+        expect(result.upiId).toBe("a".repeat(50000) + "@oksynt");
+        expect(elapsed).toBeLessThan(200);
+      });
+
+      it("handles 50k-char input with many dash segments in linear time", () => {
+        // 'a-'.repeat(25000) = 50k chars with 25k segments
+        const longInput = "PAYMENTUPI-" + "a-".repeat(25000) + "vpa@oksynt";
+        const start = performance.now();
+        const result = parseNarration(longInput);
+        const elapsed = performance.now() - start;
+
+        expect(result.rail).toBe("UPI");
+        // All segments are lowercase 'a', so they extend backwards
+        // Result is all 'a' segments joined with '-', plus 'vpa'
+        const expectedLocal = "a-".repeat(25000) + "vpa";
+        expect(result.upiId).toBe(expectedLocal + "@oksynt");
+        expect(elapsed).toBeLessThan(200);
+      });
+
+      it("handles 100k segments (200k chars) in linear time", () => {
+        // 'a-'.repeat(100000) = 200k chars with 100k segments
+        const longInput = "PAYMENTUPI-" + "a-".repeat(100000) + "x@oksynt";
+        const start = performance.now();
+        const result = parseNarration(longInput);
+        const elapsed = performance.now() - start;
+
+        expect(result.rail).toBe("UPI");
+        // All segments are lowercase 'a', so they extend backwards
+        // Result is all 'a' segments joined with '-', plus 'x'
+        const expectedLocal = "a-".repeat(100000) + "x";
+        expect(result.upiId).toBe(expectedLocal + "@oksynt");
+        expect(elapsed).toBeLessThan(200);
+      });
+
+      it("boundary finder equivalence: matches old regex behavior", () => {
+        // Old regex: /.*[\s/]/ - finds last slash or whitespace
+        // New loop: backward scan for first '/' or /\s/ char
+        const oldRegexBoundary = (str: string): number => {
+          const match = str.match(/.*[\s/]/);
+          return match ? match[0].length : 0;
+        };
+
+        const testCases = [
+          // [input, description]
+          ["noslash", "no separator"],
+          ["with/slash", "single slash"],
+          ["with space", "single space"],
+          ["with\ttab", "single tab"],
+          ["multi/slashes/here", "multiple slashes"],
+          ["spaces in text here", "multiple spaces"],
+          ["mixed/ /sep", "mixed separators"],
+          ["/leading", "leading slash"],
+          [" leading", "leading space"],
+          ["trailing/", "trailing slash"],
+          ["trailing ", "trailing space"],
+          ["a/b c/d e", "alternating separators"],
+          ["", "empty string"],
+          ["abc", "short no separator"],
+        ];
+
+        for (const [input, desc] of testCases) {
+          // Compute boundary using old regex (only safe on short inputs)
+          const expectedBoundaryIdx = oldRegexBoundary(input);
+
+          // Compute boundary using new loop (same logic as in parser)
+          let actualBoundaryIdx = 0;
+          for (let i = input.length - 1; i >= 0; i--) {
+            const ch = input[i];
+            if (ch === "/" || /\s/.test(ch)) {
+              actualBoundaryIdx = i + 1;
+              break;
+            }
+          }
+
+          expect(
+            actualBoundaryIdx,
+            `Boundary mismatch for "${desc}": input="${input}"`
+          ).toBe(expectedBoundaryIdx);
+        }
+      });
+    });
   });
 
   describe("extractUtrForDedupe", () => {
@@ -381,6 +705,37 @@ describe("narration-parser", () => {
 
       it("returns null when ref is all zeros and narration has no RRN", () => {
         expect(extractUtrForDedupe("some narration without RRN", "UPI", "0000000000000000")).toBeNull();
+      });
+
+      // #334: hyphenated VPA must NOT affect dedupe key (RRN-based, not VPA-based)
+      it("extracts RRN correctly from hyphenated VPA narration (HDFC format)", () => {
+        expect(
+          extractUtrForDedupe("UPI-SYNT VENDOR-synt-vendor@oksynt-SYNT0000001-600000000001-UPI", "UPI", undefined)
+        ).toBe("600000000001");
+      });
+
+      it("extracts RRN correctly from non-hyphenated VPA with segment separator", () => {
+        expect(
+          extractUtrForDedupe("UPI-SYNTVENDOR-synt@oksynt-SYNT0000001-600000000002-UPI", "UPI", undefined)
+        ).toBe("600000000002");
+      });
+
+      it("extracts RRN correctly from ICICI hyphenated VPA format", () => {
+        expect(
+          extractUtrForDedupe("UPI/600000000003/synt-pay@oksynt/SYNT VENDOR/SYNT BANK", "UPI", undefined)
+        ).toBe("600000000003");
+      });
+
+      it("extracts RRN correctly from alphabetic hyphenated VPA (HDFC)", () => {
+        expect(
+          extractUtrForDedupe("UPI-SYNT VENDOR-test-abc-xyz@okicici-SYNT0000001-600000000001-UPI", "UPI", undefined)
+        ).toBe("600000000001");
+      });
+
+      it("extracts RRN correctly from alphabetic hyphenated VPA (ICICI)", () => {
+        expect(
+          extractUtrForDedupe("UPI/CR/600000000002/test-abc-xyz@okicici/SYNT VENDOR/SYNT BANK", "UPI", undefined)
+        ).toBe("600000000002");
       });
     });
 
