@@ -53,6 +53,8 @@ export interface ReminderSendMessage {
   timezone?: string;
   webhookId: string;
   enqueuedAt: string;
+  nextMorning?: boolean;
+  originalDate?: string;
 }
 
 /**
@@ -145,6 +147,11 @@ export async function handleReminderSend(
     ? validateTimezone(message.timezone) 
     : DEFAULT_TIMEZONE;
 
+  // Build next-morning flag if present (Part 5 catch-up)
+  const nextMorningFlag = message.nextMorning && message.originalDate
+    ? { nextMorning: true, originalDate: message.originalDate }
+    : undefined;
+
   const env = getRequestEnv() ?? {};
   const result = await sendPaymentReminder(
     sql,
@@ -153,7 +160,9 @@ export async function handleReminderSend(
     ruleId,
     offsetDays,
     timezone,
-    env as { RESEND_API_KEY?: string; RESEND_FROM?: string }
+    env as { RESEND_API_KEY?: string; RESEND_FROM?: string },
+    {},
+    nextMorningFlag
   );
 
   if (result.success) {

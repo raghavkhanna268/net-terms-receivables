@@ -294,17 +294,46 @@ export function isWithinSendWindow(timezone: string): boolean {
 }
 
 /**
+ * Next-morning catch-up flag for messages enqueued by Part 5.
+ * nextMorning: true indicates the message is a D+1 rescue.
+ * originalDate: the original reminder date (YYYY-MM-DD) for validation.
+ */
+export interface NextMorningFlag {
+  nextMorning: boolean;
+  originalDate: string;
+}
+
+/**
  * Check if today (in shop's timezone) is the right day for a reminder.
+ *
+ * For standard messages (no nextMorningFlag or nextMorning: false):
+ *   Returns true only if reminderDate === today.
+ *
+ * For next-morning catch-up messages (nextMorning: true):
+ *   Returns true only if:
+ *   - reminderDate === yesterday (D+1 only)
+ *   - originalDate matches the computed reminderDate
  */
 export function isReminderDueToday(
   dueAt: Date,
   offsetDays: number,
-  timezone: string
+  timezone: string,
+  nextMorningFlag?: NextMorningFlag
 ): boolean {
   const validTz = validateTimezone(timezone);
   const today = DateTime.now().setZone(validTz).startOf("day");
   const dueDate = DateTime.fromJSDate(dueAt, { zone: validTz }).startOf("day");
   const reminderDate = dueDate.plus({ days: offsetDays });
+
+  if (nextMorningFlag?.nextMorning) {
+    const yesterday = today.minus({ days: 1 });
+    if (!reminderDate.hasSame(yesterday, "day")) {
+      return false;
+    }
+    const computedDateStr = reminderDate.toISODate();
+    return computedDateStr === nextMorningFlag.originalDate;
+  }
+
   return reminderDate.hasSame(today, "day");
 }
 
@@ -925,6 +954,33 @@ export function getReminderLabel(offsetDays: number): string {
 }
 
 /**
+ * Compute actual reminder label based on send date vs invoice due date.
+ * Used for next-morning catch-up sends where the stage's original date
+ * may differ from the actual send date.
+ *
+ * @param dueAt - Invoice due date
+ * @param timezone - Shop's IANA timezone
+ * @returns Label based on actual days difference from send date
+ */
+export function getActualReminderLabel(dueAt: Date, timezone: string): string {
+  const validTz = validateTimezone(timezone);
+  const today = DateTime.now().setZone(validTz).startOf("day");
+  const dueDate = DateTime.fromJSDate(dueAt, { zone: validTz }).startOf("day");
+  const daysDiff = Math.round(today.diff(dueDate, "days").days);
+
+  if (daysDiff < 0) {
+    const days = Math.abs(daysDiff);
+    return `Payment due in ${days} day${days !== 1 ? "s" : ""}`;
+  } else if (daysDiff === 0) {
+    return "Payment due today";
+  } else if (daysDiff === 1) {
+    return "Payment was due yesterday";
+  } else {
+    return `Payment ${daysDiff} day${daysDiff !== 1 ? "s" : ""} overdue`;
+  }
+}
+
+/**
  * Send a payment reminder email via Resend.
  *
  * This function:
@@ -955,7 +1011,8 @@ export async function sendPaymentReminder(
   offsetDays: number,
   timezone: string,
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
-  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
+  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {},
+  nextMorningFlag?: NextMorningFlag
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1045,7 +1102,8 @@ export async function sendPaymentReminder(
   }
 
   // Gate 7: Re-check if this is the right day in shop's timezone
-  if (!isReminderDueToday(invoice.dueAt, offsetDays, invoice.shopTimezone)) {
+  // For next-morning catch-up messages (Part 5), accepts D+1 if originalDate matches
+  if (!isReminderDueToday(invoice.dueAt, offsetDays, invoice.shopTimezone, nextMorningFlag)) {
     return {
       success: true,
       action: "skipped",
@@ -1202,18 +1260,24 @@ export async function sendPaymentReminder(
     const replyTo = merchantInfo.contactEmail ?? undefined;
     const storeDisplayName = merchantInfo.name ?? invoice.shopName;
 
+    // For next-morning catch-up sends, compute actual label based on send date
+    // (e.g., a pre-due stage landing on due day says "due today", not "due in 1 day")
+    const reminderLabel = nextMorningFlag?.nextMorning
+      ? getActualReminderLabel(invoice.dueAt, invoice.shopTimezone)
+      : getReminderLabel(offsetDays);
+
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
       buyerName: invoice.buyerName ?? "Customer",
       amount: formatAmount(invoice.outstanding, invoice.currency),
       dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
       merchantName: invoice.shopName,
-      reminderType: getReminderLabel(offsetDays),
+      reminderType: reminderLabel,
       storeDisplayName,
       hasReplyTo: !!replyTo,
     });
 
-    const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
+    const subject = `${reminderLabel} - Invoice ${invoice.invoiceName}`;
     const idempotencyKey = `s18_${invoiceId}_${ruleId}`;
 
     // Build RFC 8058 unsubscribe headers (appUrl validated in Gate 10c)

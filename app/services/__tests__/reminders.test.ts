@@ -979,6 +979,98 @@ describe("Payment Reminders (S18)", () => {
     });
   });
 
+  describe("getActualReminderLabel", () => {
+    it("formats pre-due N days correctly", async () => {
+      const { getActualReminderLabel } = await import("../reminders.server");
+      const { DateTime } = await import("luxon");
+
+      const tz = "Asia/Kolkata";
+      const now = DateTime.now().setZone(tz);
+      const dueDateIn3Days = now.plus({ days: 3 }).toJSDate();
+      const dueDateIn1Day = now.plus({ days: 1 }).toJSDate();
+
+      vi.spyOn(DateTime, "now").mockReturnValue(now as ReturnType<typeof DateTime.now>);
+
+      expect(getActualReminderLabel(dueDateIn3Days, tz)).toBe("Payment due in 3 days");
+      expect(getActualReminderLabel(dueDateIn1Day, tz)).toBe("Payment due in 1 day");
+    });
+
+    it("formats due today correctly", async () => {
+      const { getActualReminderLabel } = await import("../reminders.server");
+      const { DateTime } = await import("luxon");
+
+      const tz = "Asia/Kolkata";
+      const now = DateTime.now().setZone(tz);
+      const dueToday = now.toJSDate();
+
+      vi.spyOn(DateTime, "now").mockReturnValue(now as ReturnType<typeof DateTime.now>);
+
+      expect(getActualReminderLabel(dueToday, tz)).toBe("Payment due today");
+    });
+
+    it("formats 1 day overdue as 'was due yesterday'", async () => {
+      const { getActualReminderLabel } = await import("../reminders.server");
+      const { DateTime } = await import("luxon");
+
+      const tz = "Asia/Kolkata";
+      const now = DateTime.now().setZone(tz);
+      const dueYesterday = now.minus({ days: 1 }).toJSDate();
+
+      vi.spyOn(DateTime, "now").mockReturnValue(now as ReturnType<typeof DateTime.now>);
+
+      expect(getActualReminderLabel(dueYesterday, tz)).toBe("Payment was due yesterday");
+    });
+
+    it("formats N days overdue correctly", async () => {
+      const { getActualReminderLabel } = await import("../reminders.server");
+      const { DateTime } = await import("luxon");
+
+      const tz = "Asia/Kolkata";
+      const now = DateTime.now().setZone(tz);
+      const due7DaysAgo = now.minus({ days: 7 }).toJSDate();
+      const due2DaysAgo = now.minus({ days: 2 }).toJSDate();
+
+      vi.spyOn(DateTime, "now").mockReturnValue(now as ReturnType<typeof DateTime.now>);
+
+      expect(getActualReminderLabel(due7DaysAgo, tz)).toBe("Payment 7 days overdue");
+      expect(getActualReminderLabel(due2DaysAgo, tz)).toBe("Payment 2 days overdue");
+    });
+
+    it("next-morning send for 'due in 1 day' stage on due date shows 'due today'", async () => {
+      const { getActualReminderLabel, getReminderLabel } = await import("../reminders.server");
+      const { DateTime } = await import("luxon");
+
+      const tz = "Asia/Kolkata";
+      const now = DateTime.now().setZone(tz);
+      const dueToday = now.toJSDate();
+
+      vi.spyOn(DateTime, "now").mockReturnValue(now as ReturnType<typeof DateTime.now>);
+
+      // Stage offsetDays=-1 (due in 1 day) but caught up on the actual due date
+      // Original label would be "Payment due in 1 day"
+      expect(getReminderLabel(-1)).toBe("Payment due in 1 day");
+      // Actual label based on send date is "Payment due today"
+      expect(getActualReminderLabel(dueToday, tz)).toBe("Payment due today");
+    });
+
+    it("next-morning send for 'due today' stage on D+1 shows 'was due yesterday'", async () => {
+      const { getActualReminderLabel, getReminderLabel } = await import("../reminders.server");
+      const { DateTime } = await import("luxon");
+
+      const tz = "Asia/Kolkata";
+      const now = DateTime.now().setZone(tz);
+      const dueYesterday = now.minus({ days: 1 }).toJSDate();
+
+      vi.spyOn(DateTime, "now").mockReturnValue(now as ReturnType<typeof DateTime.now>);
+
+      // Stage offsetDays=0 (due today) but caught up the next morning
+      // Original label would be "Payment due today"
+      expect(getReminderLabel(0)).toBe("Payment due today");
+      // Actual label based on send date is "Payment was due yesterday"
+      expect(getActualReminderLabel(dueYesterday, tz)).toBe("Payment was due yesterday");
+    });
+  });
+
   describe("cap constants", () => {
     it("DAILY_SEND_CAP is 100 per Resend free tier", async () => {
       const { DAILY_SEND_CAP } = await import("../reminders.server");
