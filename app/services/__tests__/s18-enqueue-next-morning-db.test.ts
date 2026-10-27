@@ -1019,10 +1019,11 @@ describeDedupeWithDb("Dedupe: at most ONE reminder email per invoice per local d
 
   describe("c) Regular stage already sent before catch-up: 0 extra emails", () => {
     it("SQL Part 5 does NOT enqueue catch-up when invoice already has sent ReminderLog today", async () => {
-      // Create invoice due YESTERDAY (so pre-due stage with offsetDays=-1 was due 2 days ago)
-      const { invoiceId } = await createBuyerAndInvoice("c1", -1);
+      // Create invoice due TODAY
+      // With offsetDays=-1 rule, stage date = today + (-1) = yesterday ✓ (Part 5 eligible)
+      const { invoiceId } = await createBuyerAndInvoice("c1", 0);
 
-      // Create pre-due rule only (no due-day rule)
+      // Create pre-due rule (offsetDays=-1, so stage date was YESTERDAY)
       const preRule = `rule-predue-c-${DEDUPE_SUFFIX}`;
 
       await sql`
@@ -1030,17 +1031,19 @@ describeDedupeWithDb("Dedupe: at most ONE reminder email per invoice per local d
         VALUES (${preRule}, ${DEDUPE_SHOP_ID}, -1, 'email'::"ReminderChannel", true, NOW(), NOW())
       `;
 
-      // Insert a 'sent' ReminderLog row for TODAY (simulating a regular send already happened)
-      // Note: using a different rule to test cross-rule dedupe
-      const otherRule = `rule-other-c-${DEDUPE_SUFFIX}`;
+      // Insert a 'sent' ReminderLog row for TODAY via a LOWER offsetDays rule
+      // Using offsetDays=-3 (LOWER than -1) to avoid "Latest stage wins" guard
+      // which blocks when there's a ReminderLog for a rule with HIGHER offsetDays.
+      // This tests ONLY the already-sent-today guard.
+      const olderRule = `rule-older-c-${DEDUPE_SUFFIX}`;
       await sql`
         INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
-        VALUES (${otherRule}, ${DEDUPE_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+        VALUES (${olderRule}, ${DEDUPE_SHOP_ID}, -3, 'email'::"ReminderChannel", true, NOW(), NOW())
       `;
 
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
-        VALUES (gen_random_uuid()::TEXT, ${DEDUPE_SHOP_ID}, ${otherRule}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW())
+        VALUES (gen_random_uuid()::TEXT, ${DEDUPE_SHOP_ID}, ${olderRule}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW())
       `;
 
       await sql`SELECT public.s18_enqueue_reminders()`;
@@ -1054,7 +1057,8 @@ describeDedupeWithDb("Dedupe: at most ONE reminder email per invoice per local d
           AND message->>'invoiceId' = ${invoiceId}
       `;
 
-      // Part 5 should NOT enqueue catch-up (already sent today)
+      // Part 5 should NOT enqueue catch-up (already sent today via different rule)
+      // The already-sent-today guard should block it
       expect(messages).toHaveLength(0);
     });
   });
@@ -1090,6 +1094,179 @@ describeDedupeWithDb("Dedupe: at most ONE reminder email per invoice per local d
       expect(catchupMsgs).toHaveLength(1);
       expect(catchupMsgs[0].ruleId).toBe(preRule);
       expect(catchupMsgs[0].originalDate).toBeDefined();
+    });
+  });
+
+  describe("b) Catch-up and regular message BOTH in queue: exactly 1 email", () => {
+    it("drain processes both messages but only 1 sent ReminderLog row for the invoice", async () => {
+      const { hasReminderSentToday, claimReminderSlot, acquireInvoiceLock } = await import("../reminders.server");
+
+      // Create invoice due TODAY
+      const { invoiceId } = await createBuyerAndInvoice("b1", 0);
+
+      // Create two rules: pre-due (offset -1) and due-today (offset 0)
+      const preRule = `rule-predue-b-${DEDUPE_SUFFIX}`;
+      const todayRule = `rule-today-b-${DEDUPE_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES 
+          (${preRule}, ${DEDUPE_SHOP_ID}, -1, 'email'::"ReminderChannel", true, NOW(), NOW()),
+          (${todayRule}, ${DEDUPE_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      // Manually insert BOTH messages into queue (simulating both enqueued)
+      // Part 3 would enqueue the today-rule, Part 5 the pre-rule (if Part 3 didn't block it)
+      // We force both to be in queue to test the TS dedupe at drain time
+      await sql`
+        SELECT pgmq.send('s6_sync', ${sql.json({
+          topic: 'REMINDER_SEND',
+          shop: DEDUPE_SHOP_DOMAIN,
+          shopId: DEDUPE_SHOP_ID,
+          invoiceId: invoiceId,
+          ruleId: todayRule,
+          offsetDays: 0,
+          timezone: dedupeTimezone,
+          webhookId: `s18_${invoiceId}_${todayRule}_today`,
+          enqueuedAt: new Date().toISOString()
+        })})
+      `;
+
+      await sql`
+        SELECT pgmq.send('s6_sync', ${sql.json({
+          topic: 'REMINDER_SEND',
+          shop: DEDUPE_SHOP_DOMAIN,
+          shopId: DEDUPE_SHOP_ID,
+          invoiceId: invoiceId,
+          ruleId: preRule,
+          offsetDays: -1,
+          timezone: dedupeTimezone,
+          webhookId: `s18_nextmorn_${invoiceId}_${preRule}_yesterday`,
+          originalDate: 'yesterday',
+          nextMorning: true,
+          enqueuedAt: new Date().toISOString()
+        })})
+      `;
+
+      // Verify both messages are in queue
+      const queuedBefore = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}
+          AND message->>'invoiceId' = ${invoiceId}
+      `;
+      expect(parseInt(queuedBefore[0].count)).toBe(2);
+
+      // First drain attempt should claim and "send"
+      // claimReminderSlot inserts the 'sent' row directly
+      // Then second should be blocked by hasReminderSentToday
+      const claimResult = await sql.begin(async (tx) => {
+        await acquireInvoiceLock(tx, invoiceId);
+        const alreadySent = await hasReminderSentToday(tx, DEDUPE_SHOP_ID, invoiceId, dedupeTimezone);
+        if (alreadySent) {
+          return { claimed: false, reason: "already_sent" };
+        }
+        // claimReminderSlot inserts ReminderLog with status='sent'
+        const claimed = await claimReminderSlot(tx, DEDUPE_SHOP_ID, todayRule, invoiceId);
+        return { claimed };
+      });
+
+      expect(claimResult.claimed).toBe(true);
+
+      // Now try to claim for the catch-up message - should be blocked
+      const catchupClaim = await sql.begin(async (tx) => {
+        await acquireInvoiceLock(tx, invoiceId);
+        const alreadySent = await hasReminderSentToday(tx, DEDUPE_SHOP_ID, invoiceId, dedupeTimezone);
+        if (alreadySent) {
+          return { claimed: false, reason: "already_sent" };
+        }
+        const claimed = await claimReminderSlot(tx, DEDUPE_SHOP_ID, preRule, invoiceId);
+        return { claimed };
+      });
+
+      expect(catchupClaim.claimed).toBe(false);
+      expect(catchupClaim.reason).toBe("already_sent");
+
+      // Verify exactly 1 sent row
+      const sentRows = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "ReminderLog"
+        WHERE "shopId" = ${DEDUPE_SHOP_ID}
+          AND "invoiceId" = ${invoiceId}
+          AND status = 'sent'::"ReminderLogStatus"
+      `;
+      expect(parseInt(sentRows[0].count)).toBe(1);
+    });
+  });
+
+  describe("Concurrency: two drains on same tick → exactly 1 email", () => {
+    it("concurrent claim attempts with invoice lock serialize to exactly 1 sent", async () => {
+      const { hasReminderSentToday, claimReminderSlot, acquireInvoiceLock } = await import("../reminders.server");
+
+      // Create invoice due TODAY
+      const { invoiceId } = await createBuyerAndInvoice("conc1", 0);
+
+      const ruleId = `rule-conc-${DEDUPE_SUFFIX}`;
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${ruleId}, ${DEDUPE_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      // Simulate two concurrent drain attempts
+      const attemptClaim = async () => {
+        return sql.begin(async (tx) => {
+          await acquireInvoiceLock(tx, invoiceId);
+          const alreadySent = await hasReminderSentToday(tx, DEDUPE_SHOP_ID, invoiceId, dedupeTimezone);
+          if (alreadySent) {
+            return { claimed: false, reason: "already_sent" };
+          }
+          const claimed = await claimReminderSlot(tx, DEDUPE_SHOP_ID, ruleId, invoiceId);
+          if (claimed) {
+            // Simulate sending by inserting sent row
+            await tx`
+              INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
+              VALUES (gen_random_uuid()::TEXT, ${DEDUPE_SHOP_ID}, ${ruleId}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW())
+              ON CONFLICT ("ruleId", "invoiceId") DO NOTHING
+            `;
+          }
+          return { claimed };
+        });
+      };
+
+      // Run two claims concurrently
+      const [result1, result2] = await Promise.all([attemptClaim(), attemptClaim()]);
+
+      // Exactly one should succeed
+      const successes = [result1, result2].filter(r => r.claimed).length;
+      expect(successes).toBe(1);
+
+      // Verify exactly 1 sent row
+      const sentRows = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "ReminderLog"
+        WHERE "shopId" = ${DEDUPE_SHOP_ID}
+          AND "invoiceId" = ${invoiceId}
+          AND status = 'sent'::"ReminderLogStatus"
+      `;
+      expect(parseInt(sentRows[0].count)).toBe(1);
+    });
+  });
+
+  describe("Wording: pre-due catch-up on due date shows 'Payment due today'", () => {
+    it("getActualReminderLabel returns 'Payment due today' for invoice due today", async () => {
+      const { getActualReminderLabel, getReminderLabel } = await import("../reminders.server");
+
+      // Create invoice due TODAY
+      const { invoiceId } = await createBuyerAndInvoice("word1", 0);
+
+      // Get the invoice's dueAt
+      const [inv] = await sql<{ dueAt: Date }[]>`
+        SELECT "dueAt" FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      // getReminderLabel(-1) would give "Payment due in 1 day" (stale)
+      expect(getReminderLabel(-1)).toBe("Payment due in 1 day");
+
+      // But getActualReminderLabel should give "Payment due today" based on actual date
+      const actualLabel = getActualReminderLabel(inv.dueAt, dedupeTimezone);
+      expect(actualLabel).toBe("Payment due today");
     });
   });
 

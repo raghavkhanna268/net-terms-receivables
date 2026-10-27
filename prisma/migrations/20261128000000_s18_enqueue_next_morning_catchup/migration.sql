@@ -351,13 +351,12 @@ BEGIN
                 AND (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r_today."offsetDays"
                     = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
           )
-          -- Exclude invoices that already have a reminder sent today (any rule)
-          -- This prevents catch-up from sending if regular stage was already sent
+          -- At most ONE reminder email per invoice per local day
           AND NOT EXISTS (
               SELECT 1 FROM public."ReminderLog" rl_today
               WHERE rl_today."invoiceId" = i.id
                 AND rl_today."shopId" = i."shopId"
-                AND rl_today.status = 'sent'::"ReminderLogStatus"
+                AND rl_today.status = 'sent'::public."ReminderLogStatus"
                 AND (rl_today."sentAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
                     = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
           )
