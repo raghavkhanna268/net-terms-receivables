@@ -422,7 +422,7 @@ async function executeBackstop(
 
     if (backstopResult.applied) {
       console.log(
-        `[backstop] Applied (${context.toLowerCase()}) to ${orderGid}: ${backstopResult.fulfillmentOrdersHeld} FOs held`
+        `[backstop] Applied (${context.toLowerCase()}): ${backstopResult.fulfillmentOrdersHeld} FOs held`
       );
     }
 
@@ -475,7 +475,7 @@ async function runBackstopOnly(sql: Sql, message: SyncMessage): Promise<SyncResu
     // No invoice found - this order may not be a net-terms order
     // Return success to avoid infinite retries for non-net-terms orders
     console.log(
-      `[backstop] Redelivery skipped - no invoice found for ${message.resourceGid} (not a net-terms order?)`
+      "[backstop] Redelivery skipped - no invoice found (not a net-terms order?)"
     );
     return {
       success: true,

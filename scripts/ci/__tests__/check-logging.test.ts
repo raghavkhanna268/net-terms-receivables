@@ -2016,4 +2016,28 @@ export function test() { safeLog("info", "test", { msg: "wh=abc" }); }`
       });
     });
   });
+
+  // =========================================================================
+  // resource-gid: GID literals / interpolations in log statements
+  // =========================================================================
+  describe("resource-gid rule", () => {
+    it("fails for console.log interpolating a resource GID identifier", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `export function test(resourceGid: string) { console.log(\`Enqueued \${resourceGid}\`); }`
+      );
+      const { exitCode, output } = runGuard();
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain("resource-gid");
+    });
+
+    it("does NOT flag a gid:// literal in ordinary non-log code", () => {
+      fs.writeFileSync(
+        path.join(appDir, "test.ts"),
+        `const gid = "gid://shopify/Order/1";\nexport function test(): string { return gid; }`
+      );
+      const { exitCode } = runGuard();
+      expect(exitCode).toBe(0);
+    });
+  });
 });
