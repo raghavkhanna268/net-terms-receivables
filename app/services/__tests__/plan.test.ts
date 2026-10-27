@@ -738,13 +738,19 @@ describe("Plan Resolution Service", () => {
         { json: vi.fn((v) => v) }
       );
       
-      adminGraphQL.mockResolvedValueOnce({
-        success: true,
-        data: {
-          currentAppInstallation: {
-            activeSubscriptions: [],
+      // Use a delayed resolution to ensure we can catch the in-flight state
+      // before the promise settles. Immediate resolution can complete before
+      // assertions run due to microtask scheduling.
+      adminGraphQL.mockImplementationOnce(async () => {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return {
+          success: true,
+          data: {
+            currentAppInstallation: {
+              activeSubscriptions: [],
+            },
           },
-        },
+        };
       });
       
       const store: RequestStore = {

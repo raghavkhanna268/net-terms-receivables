@@ -19,7 +19,6 @@ const createMockSqlFn = () =>
 const mockSqlBase = Object.assign(createMockSqlFn(), {
   json: vi.fn((v: unknown) => v),
   array: vi.fn((arr: unknown[]) => arr),
-  unsafe: vi.fn((s: string) => s),
   begin: vi.fn().mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
     const txSql = Object.assign(createMockSqlFn(), {
       json: vi.fn((v: unknown) => v),
@@ -39,12 +38,6 @@ vi.mock("~/lib/request-context.server", () => ({
 const mockAdminGraphQL = vi.fn();
 vi.mock("../drain/admin-client.server", () => ({
   adminGraphQL: (shop: string, query: string) => mockAdminGraphQL(shop, query),
-}));
-
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  toErrorCode: vi.fn((e) => String(e)),
-  shopHash: vi.fn().mockResolvedValue("hashed"),
 }));
 
 vi.mock("~/lib/sentry", () => ({

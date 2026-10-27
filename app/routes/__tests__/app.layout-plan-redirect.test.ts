@@ -26,7 +26,6 @@ const createMockSqlFn = () =>
 const mockSql = Object.assign(createMockSqlFn(), {
   json: vi.fn((v: unknown) => v),
   array: vi.fn((arr: unknown[]) => arr),
-  unsafe: vi.fn((s: string) => s),
   begin: vi.fn().mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
     const txSql = Object.assign(createMockSqlFn(), {
       json: vi.fn((v: unknown) => v),
@@ -115,10 +114,9 @@ describe("app.tsx plan selection redirect", () => {
     vi.resetModules();
     mockIsPlanSelectionRedirectEnabled.mockReturnValue(false);
     mockGetAppHandle.mockReturnValue(TEST_APP_HANDLE);
-    mockBuildPlanSelectionUrl.mockImplementation((shop: string, handle: string) => {
-      const storeHandle = shop.replace(".myshopify.com", "");
-      return `https://admin.shopify.com/store/${storeHandle}/charges/${handle}/pricing_plans`;
-    });
+    mockBuildPlanSelectionUrl.mockReturnValue(
+      "https://admin.shopify.com/store/test-shop/charges/test-app-handle/pricing_plans"
+    );
     mockResolvePlanWithStatus.mockResolvedValue({
       plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
       status: "none",
@@ -194,11 +192,11 @@ describe("app.tsx plan selection redirect", () => {
     expect(mockResolvePlanWithStatus).not.toHaveBeenCalled();
   });
 
-  it("flag on, plan_handle present (non-empty): no redirect", async () => {
+  it("flag on, plan_handle present (non-empty): no redirect, forces cache refresh", async () => {
     mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
     mockResolvePlanWithStatus.mockResolvedValue({
-      plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
-      status: "none",
+      plan: { plan: { key: "starter" }, subscriptionId: "gid://shopify/AppSubscription/123", fromCache: false },
+      status: "active",
     });
 
     const { loader } = await import("../app");
@@ -206,14 +204,14 @@ describe("app.tsx plan selection redirect", () => {
 
     expect(result).toBeDefined();
     expect(result.data).toHaveProperty("apiKey");
-    expect(mockResolvePlanWithStatus).not.toHaveBeenCalled();
+    expect(mockResolvePlanWithStatus).toHaveBeenCalledWith(expect.anything(), TEST_SHOP, true);
   });
 
-  it("flag on, plan_handle present but EMPTY: no redirect (return from welcome flow)", async () => {
+  it("flag on, plan_handle present but EMPTY: no redirect, forces cache refresh", async () => {
     mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
     mockResolvePlanWithStatus.mockResolvedValue({
-      plan: { plan: { key: "none" }, subscriptionId: null, fromCache: true },
-      status: "none",
+      plan: { plan: { key: "starter" }, subscriptionId: "gid://shopify/AppSubscription/123", fromCache: false },
+      status: "active",
     });
 
     const { loader } = await import("../app");
@@ -221,14 +219,14 @@ describe("app.tsx plan selection redirect", () => {
 
     expect(result).toBeDefined();
     expect(result.data).toHaveProperty("apiKey");
-    expect(mockResolvePlanWithStatus).not.toHaveBeenCalled();
+    expect(mockResolvePlanWithStatus).toHaveBeenCalledWith(expect.anything(), TEST_SHOP, true);
   });
 
-  it("flag on, /app/onboarding with empty plan_handle and charge_id: no redirect", async () => {
+  it("flag on, /app/onboarding with empty plan_handle and charge_id: no redirect, forces cache refresh", async () => {
     mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
     mockResolvePlanWithStatus.mockResolvedValue({
-      plan: { plan: { key: "none" }, subscriptionId: null, fromCache: true },
-      status: "none",
+      plan: { plan: { key: "starter" }, subscriptionId: "gid://shopify/AppSubscription/123", fromCache: false },
+      status: "active",
     });
 
     const { loader } = await import("../app");
@@ -236,14 +234,14 @@ describe("app.tsx plan selection redirect", () => {
 
     expect(result).toBeDefined();
     expect(result.data).toHaveProperty("apiKey");
-    expect(mockResolvePlanWithStatus).not.toHaveBeenCalled();
+    expect(mockResolvePlanWithStatus).toHaveBeenCalledWith(expect.anything(), TEST_SHOP, true);
   });
 
-  it("flag on, charge_id present (non-empty): no redirect", async () => {
+  it("flag on, charge_id present (non-empty): no redirect, forces cache refresh", async () => {
     mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
     mockResolvePlanWithStatus.mockResolvedValue({
-      plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
-      status: "none",
+      plan: { plan: { key: "starter" }, subscriptionId: "gid://shopify/AppSubscription/123", fromCache: false },
+      status: "active",
     });
 
     const { loader } = await import("../app");
@@ -251,7 +249,7 @@ describe("app.tsx plan selection redirect", () => {
 
     expect(result).toBeDefined();
     expect(result.data).toHaveProperty("apiKey");
-    expect(mockResolvePlanWithStatus).not.toHaveBeenCalled();
+    expect(mockResolvePlanWithStatus).toHaveBeenCalledWith(expect.anything(), TEST_SHOP, true);
   });
 
   it("flag on, APP_HANDLE unset: no redirect", async () => {
@@ -345,4 +343,99 @@ describe("app.tsx plan selection redirect", () => {
     expect(result.data).toHaveProperty("apiKey");
     expect(mockResolvePlanWithStatus).not.toHaveBeenCalled();
   });
+
+  describe("cache revalidation on redirect", () => {
+    it("cached none then fresh active: no redirect (subscription confirmed)", async () => {
+      mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
+      mockResolvePlanWithStatus
+        .mockResolvedValueOnce({
+          plan: { plan: { key: "none" }, subscriptionId: null, fromCache: true },
+          status: "none",
+        })
+        .mockResolvedValueOnce({
+          plan: { plan: { key: "starter" }, subscriptionId: "gid://shopify/AppSubscription/123", fromCache: false },
+          status: "active",
+        });
+
+      const { loader } = await import("../app");
+      const result = await loader(createLoaderArgs("/app"));
+
+      expect(result).toBeDefined();
+      expect(result.data).toHaveProperty("apiKey");
+      expect(mockResolvePlanWithStatus).toHaveBeenCalledTimes(2);
+      expect(mockResolvePlanWithStatus).toHaveBeenNthCalledWith(1, expect.anything(), TEST_SHOP);
+      expect(mockResolvePlanWithStatus).toHaveBeenNthCalledWith(2, expect.anything(), TEST_SHOP, true);
+    });
+
+    it("cached none then fresh error: no redirect (cannot confirm state)", async () => {
+      mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
+      mockResolvePlanWithStatus
+        .mockResolvedValueOnce({
+          plan: { plan: { key: "none" }, subscriptionId: null, fromCache: true },
+          status: "none",
+        })
+        .mockResolvedValueOnce({
+          plan: { plan: { key: "none" }, subscriptionId: null, fromCache: true },
+          status: "error",
+        });
+
+      const { loader } = await import("../app");
+      const result = await loader(createLoaderArgs("/app"));
+
+      expect(result).toBeDefined();
+      expect(result.data).toHaveProperty("apiKey");
+      expect(mockResolvePlanWithStatus).toHaveBeenCalledTimes(2);
+      expect(mockResolvePlanWithStatus).toHaveBeenNthCalledWith(2, expect.anything(), TEST_SHOP, true);
+    });
+
+    it("cached none then fresh none: redirects (confirmed no subscription)", async () => {
+      mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
+      mockResolvePlanWithStatus
+        .mockResolvedValueOnce({
+          plan: { plan: { key: "none" }, subscriptionId: null, fromCache: true },
+          status: "none",
+        })
+        .mockResolvedValueOnce({
+          plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+          status: "none",
+        });
+
+      const { loader } = await import("../app");
+      const args = createLoaderArgs("/app");
+
+      try {
+        await loader(args);
+        expect.fail("Expected redirect to be thrown");
+      } catch (e) {
+        const response = e as Response & { __redirectCaptured?: { url: string; options?: { target?: string } } };
+        expect(response).toBeInstanceOf(Response);
+        expect(response.status).toBe(302);
+        expect(response.__redirectCaptured?.url).toBe(EXPECTED_PRICING_URL);
+      }
+      expect(mockResolvePlanWithStatus).toHaveBeenCalledTimes(2);
+      expect(mockResolvePlanWithStatus).toHaveBeenNthCalledWith(2, expect.anything(), TEST_SHOP, true);
+    });
+
+    it("fresh none (not from cache): redirects without second lookup", async () => {
+      mockIsPlanSelectionRedirectEnabled.mockReturnValue(true);
+      mockResolvePlanWithStatus.mockResolvedValue({
+        plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+        status: "none",
+      });
+
+      const { loader } = await import("../app");
+      const args = createLoaderArgs("/app");
+
+      try {
+        await loader(args);
+        expect.fail("Expected redirect to be thrown");
+      } catch (e) {
+        const response = e as Response & { __redirectCaptured?: { url: string; options?: { target?: string } } };
+        expect(response).toBeInstanceOf(Response);
+        expect(response.status).toBe(302);
+      }
+      expect(mockResolvePlanWithStatus).toHaveBeenCalledTimes(1);
+    });
+  });
+
 });

@@ -38,27 +38,48 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     // and its forced refresh may not have completed yet.
     const isWelcomePath = pathname === "/app/welcome" || pathname.startsWith("/app/welcome/");
 
-    // Skip redirect when plan_handle or charge_id key is PRESENT in URL (even if empty).
+    // Check if plan_handle or charge_id key is PRESENT in URL (even if empty).
     // After picking a plan, merchants land on /app?plan_handle=&charge_id= or
     // /app/onboarding?plan_handle=&charge_id= with empty values. The presence of
     // these keys indicates a return from the plan selection flow.
     const hasPlanParams = url.searchParams.has("plan_handle") || url.searchParams.has("charge_id");
 
-    // Only redirect when all conditions are met
-    if (!isWelcomePath && !hasPlanParams) {
+    if (!isWelcomePath) {
       const appHandle = getAppHandle();
 
-      // Only redirect when APP_HANDLE is configured
+      // Only proceed when APP_HANDLE is configured
       if (appHandle) {
         const sql = getRequestSql();
-        const { status } = await resolvePlanWithStatus(sql, session.shop);
 
-        // Only redirect when status is confirmed "none" (no active subscription).
-        // Do NOT redirect on "error" (lookup failed) or "active" (has subscription).
-        if (status === "none") {
-          const pricingUrl = buildPlanSelectionUrl(session.shop, appHandle);
-          if (pricingUrl) {
-            throw shopifyRedirect(pricingUrl, { target: "_top" });
+        if (hasPlanParams) {
+          // Return from plan selection flow: force refresh to update cache.
+          // Never redirect - the merchant just completed plan selection.
+          await resolvePlanWithStatus(sql, session.shop, true);
+        } else {
+          // Normal navigation: check subscription status
+          const { plan, status } = await resolvePlanWithStatus(sql, session.shop);
+
+          // Only redirect when status is confirmed "none" (no active subscription).
+          // Do NOT redirect on "error" (lookup failed) or "active" (has subscription).
+          if (status === "none") {
+            // If result came from cache, revalidate to avoid redirecting a subscribed
+            // merchant whose webhook hasn't arrived yet.
+            if (plan.fromCache) {
+              const fresh = await resolvePlanWithStatus(sql, session.shop, true);
+              // Only redirect if fresh lookup still confirms no subscription
+              if (fresh.status === "none") {
+                const pricingUrl = buildPlanSelectionUrl(session.shop, appHandle);
+                if (pricingUrl) {
+                  throw shopifyRedirect(pricingUrl, { target: "_top" });
+                }
+              }
+            } else {
+              // Fresh result already - redirect without second lookup
+              const pricingUrl = buildPlanSelectionUrl(session.shop, appHandle);
+              if (pricingUrl) {
+                throw shopifyRedirect(pricingUrl, { target: "_top" });
+              }
+            }
           }
         }
       }
