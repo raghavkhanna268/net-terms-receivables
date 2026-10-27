@@ -1,12 +1,19 @@
 /**
  * Parse a page query parameter and return a safe positive integer.
- * Returns 1 for invalid values (NaN, non-finite, zero, negative, decimal).
+ * Returns 1 for invalid values (NaN, non-finite, zero, negative, decimal,
+ * non-safe-integer, leading zeros, exponent notation).
+ * Caps at MAX_PAGE (10000), returning the cap for values above.
  */
+const MAX_PAGE = 10000;
+
 export function parsePageParam(value: string | null | undefined): number {
   if (!value) return 1;
-  const parsed = parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1 || parsed !== Number(value)) {
+  const asNumber = Number(value);
+  if (!Number.isSafeInteger(asNumber) || asNumber < 1) {
     return 1;
   }
-  return parsed;
+  if (asNumber > MAX_PAGE) {
+    return MAX_PAGE;
+  }
+  return asNumber;
 }
