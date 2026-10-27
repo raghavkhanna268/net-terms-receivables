@@ -520,12 +520,6 @@ describe("Generate Function Fixtures", () => {
         path.join(HIDE_TERMS_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`),
         JSON.stringify(hideTermsFixture, null, 2) + "\n"
       );
-
-      console.log(`Generated: ${fixtureCase.name} (updatedAt: ${creditStatusValue.updatedAt})`);
     }
-
-    console.log("\nFixtures written to:");
-    console.log(`  ${CREDIT_CHECK_FIXTURES_DIR}`);
-    console.log(`  ${HIDE_TERMS_FIXTURES_DIR}`);
   });
 });
