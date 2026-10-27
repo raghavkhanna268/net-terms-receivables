@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (96 total, counting expanded globs):
+ * Files included (97 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -47,7 +47,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
  *
- * Sync DB tests (7 files):
+ * Sync DB tests (8 files):
  * - app/services/sync/__tests__/company-location.test.ts
  * - app/services/sync/__tests__/customer.test.ts
  * - app/services/sync/__tests__/order.test.ts
@@ -55,6 +55,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/sync/__tests__/draft-order-bulk-db.test.ts
  * - app/services/sync/__tests__/bulk-empty-result-db.test.ts
  * - app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts
+ * - app/services/sync/__tests__/due-date-normalize-db.test.ts
  *
  * Route DB tests:
  * - app/routes/__tests__/app.imports.test.ts
@@ -136,6 +137,7 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
   "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
   "app/services/drain/__tests__/drain-guard-db.test.ts",
+  "app/services/drain/__tests__/multipass-drain-db.test.ts",
   "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
   "app/services/drain/__tests__/company-location-pii-db.test.ts",
 
@@ -152,6 +154,7 @@ const DB_TEST_PATTERNS = [
   "app/services/sync/__tests__/draft-order-bulk-db.test.ts",
   "app/services/sync/__tests__/bulk-empty-result-db.test.ts",
   "app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts",
+  "app/services/sync/__tests__/due-date-normalize-db.test.ts",
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
