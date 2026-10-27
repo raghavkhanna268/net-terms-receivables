@@ -44,7 +44,7 @@ import {
   bulkUpsertInvoices,
   type InvoiceData,
 } from "./order.server";
-import { processBulkCustomer, deactivateMissingTaggedCustomers, type CustomerPiiMode, type DeactivateMissingResult } from "./customer.server";
+import { processBulkCustomer, deactivateMissingTaggedCustomers, type CustomerPiiMode } from "./customer.server";
 import { processBulkDraftOrder, bulkUpsertDraftOrders, getAccountsWithDraftExposure, closeMissingDraftOrders } from "./draft-order.server";
 import { flagAccountsForRecompute } from "~/services/credit-status-recompute.server";
 import { captureExceptionWithTags } from "~/lib/sentry";
@@ -1132,7 +1132,7 @@ export async function saveBulkOperationProgress(
   bulkOperationId: string,
   byteOffset: number,
   leaseToken: string,
-  linesInChunk: number,
+  linesInChunk: number = 0,
   chunkSize?: number
 ): Promise<{ rowUpdated: boolean }> {
   let result;

@@ -758,7 +758,6 @@ describe("Bulk JSONL Processor", () => {
         "gid://shopify/BulkOperation/123",
         1024,
         "test-lease-token",
-        10, // linesInChunk
         2097152 // 2MB chunk size
       );
 

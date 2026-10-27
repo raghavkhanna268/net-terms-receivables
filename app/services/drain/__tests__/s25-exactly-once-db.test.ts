@@ -451,12 +451,10 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const leaseToken = await acquireProcessingLease(sql, bulkOpId, TEST_SHOP_DOMAIN);
       expect(leaseToken).not.toBeNull();
 
-      // linesInChunk=10 for first update, testing forward progress
-      const { rowUpdated: updated1 } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!, 10);
+      const { rowUpdated: updated1 } = await saveBulkOperationProgress(sql, bulkOpId, 2000, leaseToken!);
       expect(updated1).toBe(true);
 
-      // linesInChunk=5 for backwards update (should fail due to byte_offset check)
-      const { rowUpdated: updated2 } = await saveBulkOperationProgress(sql, bulkOpId, 1500, leaseToken!, 5);
+      const { rowUpdated: updated2 } = await saveBulkOperationProgress(sql, bulkOpId, 1500, leaseToken!);
       expect(updated2).toBe(false);
 
       const [row] = await sql<{ byte_offset: string }[]>`
@@ -478,8 +476,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       `;
 
       // Even with correct token, should not update completed operations
-      // linesInChunk=0 since we're testing completed_at check
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, testToken, 0);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 2000, testToken);
       expect(rowUpdated).toBe(false);
     });
   });
@@ -3934,9 +3931,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(tokenB).not.toBeNull();
 
       // A (stale processor with wrong token) tries to save progress
-      // linesInChunk=10 but should fail due to wrong token
       const staleTokenA = "stale-token-A";
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, staleTokenA, 10);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, staleTokenA);
 
       // Should update 0 rows (owner check fails)
       expect(rowUpdated).toBe(false);
@@ -4017,8 +4013,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(tokenB).not.toBeNull();
 
       // With the CORRECT token, progress save should succeed
-      // linesInChunk=10 for this update
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, tokenB!, 10);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 1000, tokenB!);
       expect(rowUpdated).toBe(true);
 
       const [row] = await sql<{ byte_offset: string | null }[]>`
@@ -4098,8 +4093,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       // A (with its old token) calls saveBulkOperationProgress WITH chunkSize
       // This hits the production branch at ~:909
-      // linesInChunk=20 but should fail due to wrong token, chunkSize=2000
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 5000, tokenA!, 20, 2000);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 5000, tokenA!, 2000);
 
       // Should update 0 rows (owner check at :909 fails)
       expect(rowUpdated).toBe(false);
@@ -4179,8 +4173,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       expect(bState.processing_lease_token).toBe(tokenB);
 
       // A (with its old expired token) tries to save progress WITH chunkSize
-      // linesInChunk=30 but should fail due to wrong token, chunkSize=3000
-      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 9999, tokenA!, 30, 3000);
+      const { rowUpdated } = await saveBulkOperationProgress(sql, bulkOpId, 9999, tokenA!, 3000);
 
       // Should update 0 rows
       expect(rowUpdated).toBe(false);
