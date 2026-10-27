@@ -202,6 +202,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm-only reconcile flow DB tests
   "tests/integration/confirm-only-reconcile-db.test.ts",
+
+  // Confirm concurrency lock DB tests
+  "tests/integration/confirm-concurrency-lock-db.test.ts",
 ];
 
 export default defineConfig({
