@@ -1,15 +1,16 @@
 /**
  * DB-backed integration tests for uninstall lifecycle.
  *
- * Tests the complete uninstall → redact → reinstall lifecycle:
- * 1. app/uninstalled sets Shop.uninstalledAt and removes session rows
+ * Tests the complete uninstall → redact → reinstall lifecycle by driving the
+ * REAL webhook handlers and drain processor:
+ * 1. app/uninstalled handler sets Shop.uninstalledAt and removes session rows
  * 2. Queue drain skips/drops queued messages for uninstalled shops with ZERO Admin API calls
  * 3. Reminder selection excludes uninstalled shops (with positive control)
  * 4. Nightly reconcile skips uninstalled shops (with positive control)
- * 5. shop/redact deletes/anonymizes shop data (with second-shop control)
+ * 5. shop/redact handler deletes/anonymizes shop data (with second-shop control)
  * 6. Redacted-row exclusion from PR #416 (reinstall reset skips redacted accounts)
  * 7. Reinstall after uninstall restores normal processing
- * 8. No log line contains shop domain or webhookId
+ * 8. No log line contains shop domain or webhookId (with positive control)
  *
  * Synthetic data only: test-*.example.com domains, no real GIDs, no PII.
  * Uses describeWithDb pattern for sequential DB tests.
@@ -28,9 +29,37 @@ import {
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
+import type { ActionFunctionArgs } from "react-router";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+const mockVerifyWebhook = vi.fn();
+const mockVerifyPayloadShopMatch = vi.fn();
+vi.mock("~/lib/webhook-verify.server", () => ({
+  verifyWebhook: (...args: unknown[]) => mockVerifyWebhook(...args),
+  verifyPayloadShopMatch: (...args: unknown[]) => mockVerifyPayloadShopMatch(...args),
+  normalizeWebhookTopic: (topic: string) => topic.replace(/\//g, "_").toUpperCase(),
+}));
+
+const adminGraphQLMock = vi.fn();
+vi.mock("~/services/drain/admin-client.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/drain/admin-client.server")>();
+  return {
+    ...actual,
+    adminGraphQL: (...args: unknown[]) => adminGraphQLMock(...args),
+  };
+});
+
+vi.mock("~/services/sync/company.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/sync/company.server")>();
+  return {
+    ...actual,
+    isWebhookProcessed: vi.fn().mockResolvedValue(false),
+    markWebhookProcessed: actual.markWebhookProcessed,
+    processCompanyWebhook: actual.processCompanyWebhook,
+  };
+});
 
 describeWithDb("Uninstall lifecycle (DB)", () => {
   let sql: ReturnType<typeof postgres>;
@@ -161,12 +190,70 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
     `;
   }
 
-  describe("1. app/uninstalled sets uninstalledAt and removes sessions", () => {
+  function createMockSessionStorage() {
+    return {
+      deleteAllForShop: vi.fn().mockResolvedValue(1),
+    };
+  }
+
+  function createUninstallActionArgs(shopDomain: string, sessionStorage: ReturnType<typeof createMockSessionStorage>): ActionFunctionArgs {
+    return {
+      request: new Request("https://example.com/webhooks/app/uninstalled", {
+        method: "POST",
+        headers: {
+          "X-Shopify-Topic": "app/uninstalled",
+          "X-Shopify-Hmac-Sha256": "test-hmac",
+          "X-Shopify-Shop-Domain": shopDomain,
+        },
+        body: JSON.stringify({}),
+      }),
+      context: {
+        shopify: {},
+        sessionStorage,
+        cloudflare: { env: {}, ctx: {} },
+      },
+      params: {},
+      url: new URL("https://example.com/webhooks/app/uninstalled"),
+      pattern: "/webhooks/app/uninstalled",
+    } as unknown as ActionFunctionArgs;
+  }
+
+  function createComplianceActionArgs(shopDomain: string, topic: string, payload: Record<string, unknown>): ActionFunctionArgs {
+    return {
+      request: new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        headers: {
+          "X-Shopify-Topic": topic,
+          "X-Shopify-Hmac-Sha256": "test-hmac",
+          "X-Shopify-Shop-Domain": shopDomain,
+        },
+        body: JSON.stringify(payload),
+      }),
+      context: {
+        shopify: {},
+        sessionStorage: { deleteAllForShop: vi.fn().mockResolvedValue(0) },
+        cloudflare: { env: {}, ctx: {} },
+      },
+      params: {},
+      url: new URL("https://example.com/webhooks/compliance"),
+      pattern: "/webhooks/compliance",
+    } as unknown as ActionFunctionArgs;
+  }
+
+  describe("1. app/uninstalled handler sets uninstalledAt and removes sessions", () => {
+    const originalEnv = process.env;
+
     beforeEach(async () => {
+      vi.clearAllMocks();
+      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
       await sql`DELETE FROM "Session" WHERE shop = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM webhook_receipts WHERE shop = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + SHOP_A_DOMAIN + '%'}`;
+      await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "Invoice" WHERE "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID}`;
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID}`;
       await seedShop(
@@ -182,9 +269,10 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
 
     afterEach(async () => {
       vi.restoreAllMocks();
+      process.env = originalEnv;
     });
 
-    it("markShopUninstalled sets uninstalledAt and sessions are deleted (guard: markShopUninstalled in compliance.server.ts)", async () => {
+    it("real handler sets uninstalledAt and deletes sessions (guard: webhooks.app.uninstalled action)", async () => {
       const [shopBefore] = await sql<{ uninstalledAt: Date | null }[]>`
         SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_A_ID}
       `;
@@ -195,24 +283,31 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       `;
       expect(parseInt(sessionBefore.count, 10)).toBeGreaterThan(0);
 
-      const { markShopUninstalled } = await import("~/services/compliance/compliance.server");
-      const marked = await markShopUninstalled(sql, SHOP_A_DOMAIN);
-      expect(marked).toBe(true);
+      mockVerifyWebhook.mockResolvedValue({
+        shop: SHOP_A_DOMAIN,
+        topic: "app/uninstalled",
+        webhookId: `test-uninstall-${TEST_SUFFIX}`,
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const sessionStorage = createMockSessionStorage();
+      const args = createUninstallActionArgs(SHOP_A_DOMAIN, sessionStorage);
+
+      const { action } = await import("~/routes/webhooks.app.uninstalled");
+      const response = await action(args);
+
+      expect(response).toBeInstanceOf(Response);
+      expect(sessionStorage.deleteAllForShop).toHaveBeenCalledWith(SHOP_A_DOMAIN);
 
       const [shopAfter] = await sql<{ uninstalledAt: Date | null }[]>`
         SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_A_ID}
       `;
       expect(shopAfter.uninstalledAt).not.toBeNull();
-
-      await sql`DELETE FROM "Session" WHERE shop = ${SHOP_A_DOMAIN}`;
-
-      const [sessionAfter] = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count FROM "Session" WHERE shop = ${SHOP_A_DOMAIN}
-      `;
-      expect(parseInt(sessionAfter.count, 10)).toBe(0);
     });
 
-    it("full-row assertion for Shop after uninstall (guard: UPDATE Shop SET uninstalledAt in markShopUninstalled)", async () => {
+    it("full-row assertion for Shop after uninstall (guard: markShopUninstalled UPDATE statement)", async () => {
       const [before] = await sql<{
         id: string;
         domain: string;
@@ -227,8 +322,20 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
 
       expect(before.uninstalledAt).toBeNull();
 
-      const { markShopUninstalled } = await import("~/services/compliance/compliance.server");
-      await markShopUninstalled(sql, SHOP_A_DOMAIN);
+      mockVerifyWebhook.mockResolvedValue({
+        shop: SHOP_A_DOMAIN,
+        topic: "app/uninstalled",
+        webhookId: `test-uninstall-full-${TEST_SUFFIX}`,
+        payload: {},
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const sessionStorage = createMockSessionStorage();
+      const args = createUninstallActionArgs(SHOP_A_DOMAIN, sessionStorage);
+
+      const { action } = await import("~/routes/webhooks.app.uninstalled");
+      await action(args);
 
       const [after] = await sql<{
         id: string;
@@ -253,15 +360,58 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
 
   describe("2. Queue drain skips uninstalled shop messages with ZERO Admin API calls", () => {
     beforeEach(async () => {
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
-      await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
-      await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
-      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + SHOP_A_DOMAIN + '%'}`;
-      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${SHOP_A_ID}`;
-      await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID}`;
-      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_A_ID}`;
-      await sql`DELETE FROM "Session" WHERE shop = ${SHOP_A_DOMAIN}`;
-      await sql`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID}`;
+      vi.clearAllMocks();
+      adminGraphQLMock.mockReset();
+
+      adminGraphQLMock.mockImplementation(async (shop: string, query: string, variables?: Record<string, unknown>) => {
+        if (query.includes("OrderById") && variables?.id) {
+          return {
+            success: true,
+            data: {
+              node: {
+                id: variables.id as string,
+                name: "#TEST-1001",
+                createdAt: new Date().toISOString(),
+                processedAt: null,
+                cancelledAt: null,
+                closedAt: null,
+                displayFinancialStatus: "PENDING",
+                totalPriceSet: { shopMoney: { amount: "100.00", currencyCode: "INR" } },
+                totalOutstandingSet: { shopMoney: { amount: "100.00", currencyCode: "INR" } },
+                paymentTerms: {
+                  id: "gid://shopify/PaymentTerms/test-123",
+                  paymentTermsName: "Net 30",
+                  paymentTermsType: "NET",
+                  dueInDays: 30,
+                },
+              },
+            },
+            retryable: false,
+          };
+        }
+        return {
+          success: false,
+          error: "no_session",
+          errorCode: "no_session",
+          retryable: false,
+        };
+      });
+
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+      await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+      await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+      await sql`DELETE FROM pgmq.a_s6_bulk WHERE message->>'shop' IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+      await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + TEST_SUFFIX + '%'}`;
+      await sql`DELETE FROM "ReminderLog" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM "ReminderRule" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM s8_tagged_customers WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+      await sql`DELETE FROM "Session" WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
+      await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+
       await seedShop(
         SHOP_A_ID,
         SHOP_A_DOMAIN,
@@ -272,83 +422,116 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         RULE_A_ID,
         { uninstalledAt: new Date(Date.now() - 60 * 60 * 1000) }
       );
+      await seedShop(
+        SHOP_B_ID,
+        SHOP_B_DOMAIN,
+        ACCOUNT_B_ID,
+        CUSTOMER_B_GID,
+        INVOICE_B_ID,
+        ORDER_B_GID,
+        RULE_B_ID
+      );
     });
 
     afterEach(async () => {
       vi.restoreAllMocks();
     });
 
-    it("enqueue_credit_status_recomputes skips uninstalled shop (guard: uninstalledAt IS NULL in SQL function)", async () => {
-      const [shopState] = await sql<{ uninstalledAt: Date | null }[]>`
-        SELECT "uninstalledAt" FROM "Shop" WHERE id = ${SHOP_A_ID}
-      `;
-      expect(shopState.uninstalledAt).not.toBeNull();
+    it("drain: ZERO Admin API calls for uninstalled shop A, at least one for installed shop B (guard: uninstalledAt check in processor)", async () => {
+      const webhookIdA = `drain-test-a-${TEST_SUFFIX}`;
+      const webhookIdB = `drain-test-b-${TEST_SUFFIX}`;
+      const orderGidA = `gid://shopify/Order/drain-a-${TEST_SUFFIX}`;
+      const orderGidB = `gid://shopify/Order/drain-b-${TEST_SUFFIX}`;
 
-      await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
-
-      const messages = await sql<{ shop: string }[]>`
-        SELECT message->>'shop' AS shop
-        FROM pgmq.q_s6_sync
-        WHERE message->>'buyerAccountId' = ${ACCOUNT_A_ID}
-      `;
-      expect(messages.length).toBe(0);
-    });
-
-    it("enqueueReconcileForAllShops skips uninstalled shop (guard: uninstalledAt IS NULL in reconcile.server.ts)", async () => {
-      const { enqueueReconcileForAllShops } = await import("~/services/drain/reconcile.server");
-
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
-
-      await enqueueReconcileForAllShops(sql);
-
-      const messages = await sql<{ shop: string }[]>`
-        SELECT message->>'shop' AS shop
-        FROM pgmq.q_s6_sync
-        WHERE message->>'shop' = ${SHOP_A_DOMAIN}
-          AND message->>'topic' = 'RECONCILE_COMPANIES'
-      `;
-      expect(messages.length).toBe(0);
-    });
-
-    it("DLQ count stays bounded for uninstalled shop messages (guard: sanitization in moveToDeadLetter)", async () => {
-      const testWebhookId = `test-dlq-${TEST_SUFFIX}`;
-
-      const [sendResult] = await sql<{ msg_id: string }[]>`
+      await sql`
         SELECT pgmq.send('s6_sync', ${sql.json({
           topic: "ORDERS_CREATE",
           shop: SHOP_A_DOMAIN,
-          webhookId: testWebhookId,
+          webhookId: webhookIdA,
+          resourceGid: orderGidA,
           enqueuedAt: new Date().toISOString(),
-          resourceGid: `gid://shopify/Order/dlq-test-${TEST_SUFFIX}`,
-        })}) AS msg_id
+        })})
       `;
-      const msgId = sendResult.msg_id;
 
-      const { moveToDeadLetter } = await import("~/services/drain/processor.server");
-      const syncMessage = {
-        topic: "ORDERS_CREATE",
-        shop: SHOP_A_DOMAIN,
-        webhookId: testWebhookId,
-        enqueuedAt: new Date().toISOString(),
-        resourceGid: `gid://shopify/Order/dlq-test-${TEST_SUFFIX}`,
-      };
-      await moveToDeadLetter(
-        sql,
-        "s6_sync",
-        msgId,
-        syncMessage,
-        "shop_not_found",
-        5
+      await sql`
+        SELECT pgmq.send('s6_sync', ${sql.json({
+          topic: "ORDERS_CREATE",
+          shop: SHOP_B_DOMAIN,
+          webhookId: webhookIdB,
+          resourceGid: orderGidB,
+          enqueuedAt: new Date().toISOString(),
+        })})
+      `;
+
+      const { runDrain } = await import("~/services/drain/processor.server");
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
+
+      const adminCalls = adminGraphQLMock.mock.calls;
+      const callsForShopA = adminCalls.filter((call) => call[0] === SHOP_A_DOMAIN);
+      const callsForShopB = adminCalls.filter((call) => call[0] === SHOP_B_DOMAIN);
+
+      expect(callsForShopA.length).toBe(0);
+      expect(callsForShopB.length).toBeGreaterThanOrEqual(1);
+
+      const [queueCountA] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
+        WHERE message->>'webhookId' = ${webhookIdA}
+      `;
+      expect(parseInt(queueCountA.count, 10)).toBe(0);
+
+      const [dlqCountA] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM s6_dead_letter
+        WHERE message->>'webhookId' = ${webhookIdA}
+      `;
+      expect(parseInt(dlqCountA.count, 10)).toBeLessThanOrEqual(1);
+    });
+
+    it("drain: bulk messages for uninstalled shop A are dropped with ZERO Admin calls (guard: shop currency check)", async () => {
+      const bulkOpIdA = `bulk-a-${TEST_SUFFIX}`;
+      const bulkOpIdB = `bulk-b-${TEST_SUFFIX}`;
+
+      await sql`
+        SELECT pgmq.send('s6_bulk', ${sql.json({
+          topic: "BULK_OPERATIONS_FINISH",
+          shop: SHOP_A_DOMAIN,
+          webhookId: `bulk-wh-a-${TEST_SUFFIX}`,
+          bulkOperationId: `gid://shopify/BulkOperation/${bulkOpIdA}`,
+          bulkType: "orders",
+          enqueuedAt: new Date().toISOString(),
+        })})
+      `;
+
+      await sql`
+        SELECT pgmq.send('s6_bulk', ${sql.json({
+          topic: "BULK_OPERATIONS_FINISH",
+          shop: SHOP_B_DOMAIN,
+          webhookId: `bulk-wh-b-${TEST_SUFFIX}`,
+          bulkOperationId: `gid://shopify/BulkOperation/${bulkOpIdB}`,
+          bulkType: "orders",
+          enqueuedAt: new Date().toISOString(),
+        })})
+      `;
+
+      const { runDrain } = await import("~/services/drain/processor.server");
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
+
+      const adminCalls = adminGraphQLMock.mock.calls;
+      const bulkCallsForShopA = adminCalls.filter(
+        (call) => call[0] === SHOP_A_DOMAIN && String(call[1]).includes("bulkOperation")
       );
+      expect(bulkCallsForShopA.length).toBe(0);
 
-      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'webhookId' = ${testWebhookId}`;
-
-      const [dlqCount] = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text AS count
-        FROM s6_dead_letter
-        WHERE message->>'shop' = ${SHOP_A_DOMAIN}
+      const [queueCountA] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM pgmq.q_s6_bulk
+        WHERE message->>'bulkOperationId' LIKE ${`%${bulkOpIdA}%`}
       `;
-      expect(parseInt(dlqCount.count, 10)).toBeLessThanOrEqual(10);
+      expect(parseInt(queueCountA.count, 10)).toBe(0);
+
+      const [dlqCountA] = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text AS count FROM s6_dead_letter
+        WHERE message->>'bulkOperationId' LIKE ${`%${bulkOpIdA}%`}
+      `;
+      expect(parseInt(dlqCountA.count, 10)).toBeLessThanOrEqual(1);
     });
   });
 
@@ -358,7 +541,6 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
     beforeEach(async () => {
       vi.stubGlobal("fetch", mockFetch);
       mockFetch.mockReset();
-      vi.spyOn(console, "log").mockImplementation(() => {});
 
       await sql`DELETE FROM "ReminderLog" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "ReminderRule" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
@@ -431,7 +613,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it("positive control: installed shop (Shop B) gets reminder selected (guard: uninstalledAt IS NULL)", async () => {
+    it("positive control: installed shop (Shop B) does NOT skip for uninstalled (guard: uninstalledAt IS NULL)", async () => {
       const { sendPaymentReminder } = await import("~/services/reminders.server");
 
       mockFetch.mockResolvedValue({
@@ -467,7 +649,8 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         validEnv
       );
 
-      expect(result.skipReason ?? "").not.toMatch(/uninstalled/i);
+      const skipReason = result.skipReason ?? "";
+      expect(skipReason).not.toMatch(/uninstalled/i);
     });
   });
 
@@ -531,8 +714,13 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
     });
   });
 
-  describe("5. shop/redact deletes/anonymizes shop data", () => {
+  describe("5. shop/redact handler deletes/anonymizes shop data", () => {
+    const originalEnv = process.env;
+
     beforeEach(async () => {
+      vi.clearAllMocks();
+      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
+
       await sql`DELETE FROM "Match" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "ReminderLog" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "ReminderRule" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
@@ -571,9 +759,10 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
 
     afterEach(async () => {
       vi.restoreAllMocks();
+      process.env = originalEnv;
     });
 
-    it("deleteShop deletes Shop A data, Shop B is byte-identical (guard: deleteShop in compliance.server.ts)", async () => {
+    it("real shop/redact handler deletes Shop A data, Shop B is byte-identical (guard: deleteShop in compliance route)", async () => {
       const [shopBBefore] = await sql<{
         id: string;
         domain: string;
@@ -603,12 +792,26 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         FROM "Invoice" WHERE id = ${INVOICE_B_ID}
       `;
 
-      const { deleteShop } = await import("~/services/compliance/compliance.server");
-      const result = await deleteShop(sql, SHOP_A_DOMAIN);
+      mockVerifyWebhook.mockResolvedValue({
+        shop: SHOP_A_DOMAIN,
+        topic: "shop/redact",
+        webhookId: `redact-${TEST_SUFFIX}`,
+        payload: { shop_domain: SHOP_A_DOMAIN, shop_id: 12345 },
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+      mockVerifyPayloadShopMatch.mockReturnValue(SHOP_A_DOMAIN);
 
-      expect(result.deleted).toBe(true);
-      expect(result.shopId).toBe(SHOP_A_ID);
-      expect(result.skippedReinstalled).toBe(false);
+      const args = createComplianceActionArgs(SHOP_A_DOMAIN, "shop/redact", {
+        shop_domain: SHOP_A_DOMAIN,
+        shop_id: 12345,
+      });
+
+      const { action } = await import("~/routes/webhooks.compliance");
+      const response = await action(args);
+
+      expect(response).toBeInstanceOf(Response);
+      expect(response.status).toBe(200);
 
       const [shopAAfter] = await sql<{ id: string }[]>`
         SELECT id FROM "Shop" WHERE id = ${SHOP_A_ID}
@@ -673,8 +876,11 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
     const REDACTED_ACCOUNT_ID = `acc-redacted-${TEST_SUFFIX}`;
 
     beforeEach(async () => {
+      await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "Invoice" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID}`;
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "Session" WHERE shop = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID}`;
@@ -706,7 +912,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       vi.restoreAllMocks();
     });
 
-    it("clearUninstalledAtAndMetafieldErrors skips redacted accounts (guard: customerId NOT LIKE pattern in after-auth.server.ts)", async () => {
+    it("upsertShopOnAuth reinstall skips redacted accounts (guard: customerId NOT LIKE pattern in after-auth.server.ts)", async () => {
       const [before] = await sql<{
         metafieldSyncErrorCode: string | null;
         metafieldSyncedAt: Date | null;
@@ -741,6 +947,8 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
     beforeEach(async () => {
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'%' + SHOP_A_DOMAIN + '%'}`;
+      await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "Invoice" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID}`;
       await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
@@ -845,14 +1053,19 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
     let consoleLogSpy: MockInstance;
     let consoleWarnSpy: MockInstance;
     let consoleErrorSpy: MockInstance;
+    const originalEnv = process.env;
 
     beforeEach(async () => {
       consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      process.env = { ...originalEnv, SHOPIFY_API_SECRET: "test-secret" };
 
+      await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${SHOP_A_ID}`;
+      await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "Invoice" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${SHOP_A_ID}`;
+      await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${SHOP_A_ID}`;
       await sql`DELETE FROM "Session" WHERE shop = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID}`;
@@ -871,59 +1084,51 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
 
     afterEach(() => {
       vi.restoreAllMocks();
+      process.env = originalEnv;
     });
 
-    it("reinstall log uses shopHash, not domain or webhookId (guard: safeLog in after-auth.server.ts)", async () => {
+    function getAllLogs(): string {
+      return [
+        ...consoleLogSpy.mock.calls.map((c) => c.join(" ")),
+        ...consoleWarnSpy.mock.calls.map((c) => c.join(" ")),
+        ...consoleErrorSpy.mock.calls.map((c) => c.join(" ")),
+      ].join("\n");
+    }
+
+    function findLogWithEvent(eventName: string): boolean {
+      return getAllLogs().includes(`"event":"${eventName}"`);
+    }
+
+    it("reinstall log uses shopHash, emits at least one safeLog with shopHash, no domain or webhookId (guard: safeLog in after-auth.server.ts)", async () => {
       const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
       await upsertShopOnAuth(sql, SHOP_A_DOMAIN, "Asia/Kolkata", "INR");
 
-      const allLogs = [
-        ...consoleLogSpy.mock.calls.map((c) => c.join(" ")),
-        ...consoleWarnSpy.mock.calls.map((c) => c.join(" ")),
-        ...consoleErrorSpy.mock.calls.map((c) => c.join(" ")),
-      ].join("\n");
+      const allLogs = getAllLogs();
 
       expect(allLogs).not.toContain(".example.com");
       expect(allLogs).not.toContain(".myshopify.com");
       expect(allLogs).not.toContain("webhookId");
+
+      const hasShopHash = allLogs.includes('"shopHash"');
+      const hasShopUpserted = findLogWithEvent("shop_upserted");
+      expect(hasShopHash || hasShopUpserted).toBe(true);
     });
 
-    it("deleteShop log uses shopHash, not domain or webhookId (guard: safeLog in compliance.server.ts)", async () => {
+    it("deleteShop log uses shopHash, emits safeLog event, no domain or webhookId (guard: safeLog in compliance.server.ts)", async () => {
       const { deleteShop } = await import("~/services/compliance/compliance.server");
       await deleteShop(sql, SHOP_A_DOMAIN);
 
-      const allLogs = [
-        ...consoleLogSpy.mock.calls.map((c) => c.join(" ")),
-        ...consoleWarnSpy.mock.calls.map((c) => c.join(" ")),
-        ...consoleErrorSpy.mock.calls.map((c) => c.join(" ")),
-      ].join("\n");
-
-      expect(allLogs).not.toContain(".example.com");
-      expect(allLogs).not.toContain(".myshopify.com");
-      expect(allLogs).not.toContain("webhookId");
-    });
-
-    it("markShopUninstalled log does not contain domain or webhookId (guard: no safeLog in markShopUninstalled)", async () => {
-      await sql`
-        INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
-        VALUES (${SHOP_A_ID + '-mark'}, ${SHOP_A_DOMAIN.replace('-a-', '-mark-')}, 'INR', 'Asia/Kolkata', 'free', NOW(), NOW())
-        ON CONFLICT (id) DO NOTHING
-      `;
-
-      const { markShopUninstalled } = await import("~/services/compliance/compliance.server");
-      await markShopUninstalled(sql, SHOP_A_DOMAIN.replace("-a-", "-mark-"));
-
-      const allLogs = [
-        ...consoleLogSpy.mock.calls.map((c) => c.join(" ")),
-        ...consoleWarnSpy.mock.calls.map((c) => c.join(" ")),
-        ...consoleErrorSpy.mock.calls.map((c) => c.join(" ")),
-      ].join("\n");
+      const allLogs = getAllLogs();
 
       expect(allLogs).not.toContain(".example.com");
       expect(allLogs).not.toContain(".myshopify.com");
       expect(allLogs).not.toContain("webhookId");
 
-      await sql`DELETE FROM "Shop" WHERE id = ${SHOP_A_ID + '-mark'}`;
+      const hasRedactEvent =
+        findLogWithEvent("shop_redact_deleted") ||
+        findLogWithEvent("shop_redact_not_found") ||
+        findLogWithEvent("shop_redact_skipped_reinstalled");
+      expect(hasRedactEvent).toBe(true);
     });
   });
 });
