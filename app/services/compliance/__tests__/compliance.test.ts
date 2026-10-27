@@ -212,21 +212,29 @@ describe("compliance.server", () => {
   describe("redactCustomer", () => {
     it("deletes s8_tagged_customers, s8_draft_orders, s22_data_requests, and PayerAlias", async () => {
       // Transaction operations use mockTx
-      // 1. DELETE s8_tagged_customers
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      // 1. SELECT Shop (to get domain for queue cleanup)
+      mockTx.mockResolvedValueOnce([{ domain: "test.myshopify.com" }]);
+      // 2. DELETE pgmq.q_s6_sync (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s8_draft_orders
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 4. DELETE s22_data_requests
+      // 3. DELETE pgmq.a_s6_sync (customer-scoped)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s6_dead_letter (customer-scoped)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 5. SELECT buyerAccount
-      mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
-      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 7. DELETE PayerAlias
+      // 6. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 7. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 8. UPDATE BuyerAccount
+      // 8. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+      // 9. SELECT buyerAccount
+      mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
+      // 10. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
+      // 11. DELETE PayerAlias
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
+      // 12. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -242,25 +250,36 @@ describe("compliance.server", () => {
       expect(result.buyerAccountAnonymized).toBe(true);
       expect(result.paymentsRedacted).toBe(3);
       expect(result.b2bMainContactsRedacted).toBe(0);
+      expect(result.pgmqSyncQueuePurged).toBe(0);
+      expect(result.pgmqSyncArchivePurged).toBe(0);
+      expect(result.deadLetterPurged).toBe(0);
     });
 
     it("redacts payments and deletes PayerAlias via Match→Invoice→BuyerAccount", async () => {
       // Transaction operations use mockTx
-      // 1. DELETE s8_tagged_customers
+      // 1. SELECT Shop (to get domain for queue cleanup)
+      mockTx.mockResolvedValueOnce([{ domain: "test.myshopify.com" }]);
+      // 2. DELETE pgmq.q_s6_sync (customer-scoped)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 3. DELETE pgmq.a_s6_sync (customer-scoped)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s6_dead_letter (customer-scoped)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      // 6. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s8_draft_orders
+      // 7. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. DELETE s22_data_requests
+      // 8. DELETE s22_data_requests
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 5. SELECT buyerAccount
+      // 9. SELECT buyerAccount
       mockTx.mockResolvedValueOnce([{ id: "ba-1" }]);
-      // 6. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
+      // 10. UPDATE Payment (via Match→Invoice→BuyerAccount) - now before alias delete
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 7. DELETE PayerAlias
+      // 11. DELETE PayerAlias
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 8. UPDATE BuyerAccount
+      // 12. UPDATE BuyerAccount
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
 
       const result = await redactCustomer(
@@ -277,15 +296,23 @@ describe("compliance.server", () => {
 
     it("handles customer with no data gracefully", async () => {
       // Transaction operations use mockTx
-      // 1. DELETE s8_tagged_customers
+      // 1. SELECT Shop (to get domain for queue cleanup)
+      mockTx.mockResolvedValueOnce([{ domain: "test.myshopify.com" }]);
+      // 2. DELETE pgmq.q_s6_sync (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      // 3. DELETE pgmq.a_s6_sync (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s8_draft_orders
+      // 4. DELETE s6_dead_letter (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. DELETE s22_data_requests
+      // 5. DELETE s8_tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 5. SELECT buyerAccount (not found)
+      // 6. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 7. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 8. DELETE s22_data_requests
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 9. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -305,15 +332,23 @@ describe("compliance.server", () => {
 
     it("deletes data requests for the customer", async () => {
       // Transaction operations use mockTx
-      // 1. DELETE s8_tagged_customers
+      // 1. SELECT Shop (to get domain for queue cleanup)
+      mockTx.mockResolvedValueOnce([{ domain: "test.myshopify.com" }]);
+      // 2. DELETE pgmq.q_s6_sync (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      // 3. DELETE pgmq.a_s6_sync (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 3. DELETE s8_draft_orders
+      // 4. DELETE s6_dead_letter (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. DELETE s22_data_requests - 3 requests exist
+      // 5. DELETE s8_tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 6. UPDATE BuyerAccount B2B main contact fields (where mainContactCustomerId matches)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 7. DELETE s8_draft_orders
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 8. DELETE s22_data_requests - 3 requests exist
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-      // 5. SELECT buyerAccount (not found)
+      // 9. SELECT buyerAccount (not found)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
@@ -329,6 +364,10 @@ describe("compliance.server", () => {
 
     it("runs all operations in a single transaction", async () => {
       // Setup: customer has data to redact
+      mockTx.mockResolvedValueOnce([{ domain: "test.myshopify.com" }]); // Shop lookup
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.q_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.a_s6_sync
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_dead_letter
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // tagged_customers
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // b2b main contact update
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 })); // draft_orders
@@ -346,15 +385,23 @@ describe("compliance.server", () => {
 
     it("redacts B2B main contacts when mainContactCustomerId matches", async () => {
       // Transaction operations use mockTx
-      // 1. DELETE s8_tagged_customers
+      // 1. SELECT Shop (to get domain for queue cleanup)
+      mockTx.mockResolvedValueOnce([{ domain: "test.myshopify.com" }]);
+      // 2. DELETE pgmq.q_s6_sync (customer-scoped)
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 2. UPDATE BuyerAccount B2B main contact fields - 2 company locations have this contact
+      // 3. DELETE pgmq.a_s6_sync (customer-scoped)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 4. DELETE s6_dead_letter (customer-scoped)
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 5. DELETE s8_tagged_customers
+      mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
+      // 6. UPDATE BuyerAccount B2B main contact fields - 2 company locations have this contact
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-      // 3. DELETE s8_draft_orders
+      // 7. DELETE s8_draft_orders
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 4. DELETE s22_data_requests
+      // 8. DELETE s22_data_requests
       mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-      // 5. SELECT buyerAccount (not found - this is a contact, not a tagged customer)
+      // 9. SELECT buyerAccount (not found - this is a contact, not a tagged customer)
       mockTx.mockResolvedValueOnce([]);
 
       const result = await redactCustomer(
