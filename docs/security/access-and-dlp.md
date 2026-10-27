@@ -91,7 +91,7 @@ scopes = "read_draft_orders,read_payment_terms,write_companies,write_customers,w
 The `safeLog()` function (lines 325-347) provides structured logging with automatic PII redaction:
 
 - **Allowlisted keys** (lines 20-82): Only these fields pass through unredacted:
-  - IDs: `shopId`, `shopHash`, `requestId`, `webhookId`, `jobId`, `matchId`, `buyerAccountId`, `orderGid`, `invoiceId`, `customerId`, `companyId`, `locationId`, `sessionId`, `operationId`, `messageId`, `msgId`, and patterns `*Id`, `*Gid`
+  - IDs: `shopId`, `shopHash`, `requestId`, `jobId`, `matchId`, `buyerAccountId`, `orderGid`, `invoiceId`, `customerId`, `companyId`, `locationId`, `sessionId`, `operationId`, `messageId`, `msgId`, and patterns `*Id`, `*Gid` (`webhookId` is banned per #332)
   - Operational: `topic`, `status`, `reason`, `reasonCode`, `code`, `err`, `errorCode`, `httpStatus`, `pgCode`, `*Count`, `count`, `durationMs`, `elapsedMs`, timestamps, booleans
 
 - **Sensitive value patterns** (lines 88-96): These are always redacted:
@@ -125,7 +125,7 @@ The Sentry configuration includes multiple layers of PII protection:
    - Replaces `exception.value` with error code via `toErrorCode()`
    - Redacts `event.message` via `redactString()`
    - Deletes `event.breadcrumbs` entirely
-   - Scrubs `event.extra`, `event.tags`, `event.contexts` to allowlist only: `shopId`, `code`, `requestId`, `webhookId`, `jobId`, `topic`, `status`, `errorCode`
+   - Scrubs `event.extra`, `event.tags`, `event.contexts` to allowlist only: `shopId`, `code`, `requestId`, `jobId`, `topic`, `status`, `errorCode`
 
 3. **Hostname enrichment disabled** (line 193): `enhanceFetchErrorMessages: false` prevents shop domains from appearing in fetch error messages.
 

@@ -92,8 +92,21 @@ const SENSITIVE_VALUE_PATTERNS: RegExp[] = [
   /^shpat_/i,
   /^shpua_/i,
   /^shpss_/i,
+  /^shpca_/i,
+  /^shppa_/i,
+  /\b[a-f0-9]{64}\b/i,
+  /\b[a-f0-9]{40}\b/i,
+  /[A-Za-z0-9+/]{43}=/,
   /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/,
 ];
+
+/**
+ * Identifier keys (e.g. orderGid, paymentCustomizationId, subscriptionId) that
+ * legitimately carry `gid://` resource identifiers. Their values pass through
+ * rather than having the gid scrubbed as free text; domains, emails, tokens,
+ * and hash/HMAC values are still redacted via isSensitiveValue.
+ */
+const IDENTIFIER_VALUE_KEY_PATTERN = /(?:Id|Gid)$/;
 
 const REDACTED = "<redacted>";
 
@@ -197,6 +210,12 @@ function redactValue(value: unknown, key: string): unknown {
     if (isAllowedKey(key)) {
       if (isSensitiveValue(value)) {
         return REDACTED;
+      }
+      // Identifier keys may legitimately carry gid:// resource identifiers, so
+      // keep those; every other redaction (tokens anywhere in the value, HMAC,
+      // emails, domains, ...) still applies.
+      if (IDENTIFIER_VALUE_KEY_PATTERN.test(key)) {
+        return applyStringRedactions(value, { redactGid: false });
       }
       return redactString(value);
     }
@@ -303,15 +322,35 @@ function redactFields(fields: Record<string, unknown>): Record<string, unknown> 
  * Redact a string, replacing sensitive patterns.
  * Used for error messages and other free-text strings.
  */
-export function redactString(str: string): string {
+/**
+ * Apply the string-value redaction rules.
+ *
+ * @param str - The string to redact.
+ * @param redactGid - When false, `gid://` identifiers are left intact (used for
+ *   identifier keys that legitimately carry resource gids). All other rules
+ *   (tokens anywhere in the value, HMAC, emails, domains, ...) always apply.
+ */
+function applyStringRedactions(str: string, { redactGid }: { redactGid: boolean }): string {
   let result = str;
   result = result.replace(/[a-z0-9-]+\.myshopify\.com/gi, REDACTED);
   result = result.replace(/Bearer\s+\S+/gi, REDACTED);
   result = result.replace(/shpat_\S+/gi, REDACTED);
   result = result.replace(/shpua_\S+/gi, REDACTED);
   result = result.replace(/shpss_\S+/gi, REDACTED);
+  result = result.replace(/shpca_\S+/gi, REDACTED);
+  result = result.replace(/shppa_\S+/gi, REDACTED);
+  if (redactGid) {
+    result = result.replace(/gid:\/\/\S+/gi, REDACTED);
+  }
+  result = result.replace(/\b[a-f0-9]{64}\b/gi, REDACTED);
+  result = result.replace(/\b[a-f0-9]{40}\b/gi, REDACTED);
+  result = result.replace(/[A-Za-z0-9+/]{43}=/g, REDACTED);
   result = result.replace(/[^\s"']+@[^\s"']+/g, REDACTED);
   return result;
+}
+
+export function redactString(str: string): string {
+  return applyStringRedactions(str, { redactGid: true });
 }
 
 export type LogLevel = "debug" | "info" | "warn" | "error";

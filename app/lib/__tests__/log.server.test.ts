@@ -179,6 +179,78 @@ describe("log.server", () => {
         safeLog("info", "test", { reason: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" });
         expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
       });
+
+      it("redacts shpca_ tokens in context", () => {
+        safeLog("info", "test", { reason: "token " + "shpca_" + "x".repeat(32) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"token <redacted>"');
+      });
+
+      it("redacts shppa_ tokens in context", () => {
+        safeLog("info", "test", { reason: "token " + "shppa_" + "x".repeat(32) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"token <redacted>"');
+      });
+
+      it("redacts gid:// resource identifiers in free-text fields", () => {
+        const gid = "gid:" + "//shopify/Order/1";
+        safeLog("info", "test", { reason: gid });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts 64-char hex digests (SHA-256 / HMAC-hex)", () => {
+        safeLog("info", "test", { reason: "a".repeat(64) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts 40-char hex digests (SHA-1)", () => {
+        safeLog("info", "test", { reason: "a".repeat(40) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts 44-char base64 HMAC values (x-shopify-hmac-sha256)", () => {
+        safeLog("info", "test", { reason: "A".repeat(43) + "=" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("does not redact a normal free-text value", () => {
+        safeLog("info", "test", { reason: "plan refresh scheduled" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"plan refresh scheduled"');
+      });
+
+      it("does not redact the logger's own shopHash output", async () => {
+        const hash = await shopHash("test-shop.myshopify.com");
+        safeLog("info", "test", { shopHash: hash });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain(`"shopHash":"${hash}"`);
+        expect(output).not.toContain("<redacted>");
+      });
+    });
+
+    describe("identifier keys preserve gid:// but still redact other secrets", () => {
+      const GID_PREFIX = "gid:" + "//shopify";
+
+      it("redacts a token embedded in an identifier-key value", () => {
+        const token = "shpat_" + "x".repeat(32);
+        safeLog("info", "test", { orderGid: GID_PREFIX + "/Order/" + token });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain("<redacted>");
+        expect(output).not.toContain(token);
+      });
+
+      it("passes a plain gid:// value under an identifier key through unchanged", () => {
+        const gid = GID_PREFIX + "/Order/1";
+        safeLog("info", "test", { orderGid: gid });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain(`"orderGid":"${gid}"`);
+      });
+
+      it("redacts the token but keeps the gid when a value mixes both", () => {
+        const token = "shpca_" + "y".repeat(32);
+        const gid = GID_PREFIX + "/Order/1";
+        safeLog("info", "test", { invoiceId: gid + " " + token });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain(gid);
+        expect(output).not.toContain(token);
+        expect(output).toContain("<redacted>");
+      });
     });
 
     describe("nested values", () => {

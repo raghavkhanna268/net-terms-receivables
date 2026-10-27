@@ -45,6 +45,8 @@ const ALLOWLISTED_MESSAGES = new Set([
   "Unhandled rejection",
   "Network error",
   "Unknown error",
+  "plan_fetch_failed",
+  "unknown_subscription_name",
 ]);
 
 /**

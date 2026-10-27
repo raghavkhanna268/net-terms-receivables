@@ -472,6 +472,18 @@ describe("sentry.ts", () => {
         const result = beforeSend(event, {});
         expect(result?.message).toBe("Unhandled error");
       });
+
+      it("passes plan_fetch_failed through unscrubbed", () => {
+        const event = { message: "plan_fetch_failed" };
+        const result = beforeSend(event, {});
+        expect(result?.message).toBe("plan_fetch_failed");
+      });
+
+      it("passes unknown_subscription_name through unscrubbed", () => {
+        const event = { message: "unknown_subscription_name" };
+        const result = beforeSend(event, {});
+        expect(result?.message).toBe("unknown_subscription_name");
+      });
     });
 
     describe("breadcrumbs scrubbing", () => {
