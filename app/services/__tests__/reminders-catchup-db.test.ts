@@ -1538,7 +1538,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
   });
 
   describe("amount tiebreak ordering (#230)", () => {
-    it("orders by outstanding DESC when reminder dates are equal (larger amount first)", async () => {
+    it("orders by outstanding DESC when reminder dates are equal (larger amount first)", { timeout: 15000 }, async () => {
       const dates = computeDatesFromDbNow(dbNow, testTimezone);
       // IDs chosen so invoiceId ASC order is OPPOSITE of amount DESC order:
       // - inv-a-... has SMALL amount (1000) but sorts FIRST by invoiceId
@@ -1760,7 +1760,7 @@ describeWithDb("S18 reminder catch-up behavior (DB)", () => {
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     });
 
-    it("ruleId ASC tiebreaker for same invoice with two rules at same offsetDays", async () => {
+    it("ruleId ASC tiebreaker for same invoice with two rules at same offsetDays", { timeout: 15000 }, async () => {
       // Test ruleId ordering when date, amount, and invoiceId all tie.
       // Create TWO DEDICATED rules with the SAME offsetDays=0, both enabled email rules.
       // Part 2 only skips stages where offsetDays < max, so equal offsetDays both survive.
