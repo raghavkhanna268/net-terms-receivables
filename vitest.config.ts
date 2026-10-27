@@ -139,6 +139,7 @@ const DB_TEST_PATTERNS = [
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
+  "app/services/__tests__/customer-data-redaction-completeness-db.test.ts",
 
   // Sync DB tests (these use TEST_DATABASE_URL)
   "app/services/sync/__tests__/company-location.test.ts",
@@ -197,6 +198,9 @@ const DB_TEST_PATTERNS = [
 
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
+
+  // Confirm-only reconcile flow DB tests
+  "tests/integration/confirm-only-reconcile-db.test.ts",
 ];
 
 export default defineConfig({
