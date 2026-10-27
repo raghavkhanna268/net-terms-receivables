@@ -180,6 +180,9 @@ const DB_TEST_PATTERNS = [
   "app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts",
 
   // Script DB tests
+  // G4 fixture (and any future scripts/__tests__ DB test): runs sequentially
+  // against the real Postgres/pgmq like the other DB-backed suites.
+  "scripts/__tests__/*-db.test.ts",
   "scripts/__tests__/seed.test.ts",
   "scripts/__tests__/backstop-backfill.test.ts",
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
