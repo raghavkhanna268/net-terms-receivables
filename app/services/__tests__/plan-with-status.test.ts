@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Sql } from "postgres";
 
 /**
  * Tests for resolvePlanWithStatus in plan.server.ts.
@@ -15,7 +16,7 @@ const TEST_SHOP_ID = "shop-123";
 const createMockSqlFn = () =>
   vi.fn().mockImplementation(() => Promise.resolve([]));
 
-const mockSql = Object.assign(createMockSqlFn(), {
+const mockSqlBase = Object.assign(createMockSqlFn(), {
   json: vi.fn((v: unknown) => v),
   array: vi.fn((arr: unknown[]) => arr),
   unsafe: vi.fn((s: string) => s),
@@ -27,6 +28,8 @@ const mockSql = Object.assign(createMockSqlFn(), {
     return cb(txSql);
   }),
 });
+
+const mockSql = mockSqlBase as unknown as Sql & typeof mockSqlBase;
 
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
@@ -54,7 +57,7 @@ describe("resolvePlanWithStatus", () => {
     vi.clearAllMocks();
     vi.resetModules();
 
-    mockSql.mockImplementation((strings: TemplateStringsArray) => {
+    mockSqlBase.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
 
       if (query.includes("SELECT id FROM") && query.includes("Shop")) {
@@ -132,7 +135,7 @@ describe("resolvePlanWithStatus", () => {
     });
 
     it("returns status 'error' when shop not found", async () => {
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSqlBase.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
 
         if (query.includes("SELECT id FROM") && query.includes("Shop")) {
@@ -162,7 +165,7 @@ describe("resolvePlanWithStatus", () => {
 
   describe("cache behavior", () => {
     it("returns status 'active' from fresh cache with subscriptionId", async () => {
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSqlBase.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
 
         if (query.includes("SELECT id FROM") && query.includes("Shop")) {
@@ -191,7 +194,7 @@ describe("resolvePlanWithStatus", () => {
     });
 
     it("returns status 'none' from fresh cache without subscriptionId", async () => {
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSqlBase.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
 
         if (query.includes("SELECT id FROM") && query.includes("Shop")) {
@@ -220,7 +223,7 @@ describe("resolvePlanWithStatus", () => {
     });
 
     it("returns status 'error' when fetch fails and using stale cache", async () => {
-      mockSql.mockImplementation((strings: TemplateStringsArray) => {
+      mockSqlBase.mockImplementation((strings: TemplateStringsArray) => {
         const query = strings.join("?");
 
         if (query.includes("SELECT id FROM") && query.includes("Shop")) {
