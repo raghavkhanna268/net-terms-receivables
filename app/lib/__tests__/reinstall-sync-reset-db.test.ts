@@ -230,11 +230,13 @@ describeWithDb("reinstall sync reset (DB-backed)", () => {
           "~/services/sync/bulk-jsonl-processor.server"
         );
         // Pass a dummy lease token - the update should fail because closed_at IS NOT NULL
+        // linesInChunk=0 since we're testing ownership check failure, not line counting
         const { rowUpdated } = await saveBulkOperationProgress(
           sql2,
           bulkOpId,
           1000,
-          "stale-processor-token"
+          "stale-processor-token",
+          0
         );
         expect(rowUpdated).toBe(false);
 

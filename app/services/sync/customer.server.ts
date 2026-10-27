@@ -987,8 +987,10 @@ export async function redactShopData(
 export interface DeactivateMissingResult {
   /** Number of customers deactivated (gone from Shopify, no outstanding balance) */
   deactivatedCount: number;
-  /** Number of customers skipped (gone from Shopify but have outstanding balance) */
-  skippedCount: number;
+  /** Number of customers skipped because they still exist in Shopify (tag-rule mismatch) */
+  skippedMismatchCount: number;
+  /** Number of customers skipped because they have outstanding balance or open invoices */
+  skippedOutstandingCount: number;
 }
 
 /**
@@ -1059,7 +1061,7 @@ export async function deactivateMissingTaggedCustomers(
   `;
 
   if (candidates.length === 0) {
-    return { deactivatedCount: 0, skippedCount: 0 };
+    return { deactivatedCount: 0, skippedMismatchCount: 0, skippedOutstandingCount: 0 };
   }
 
   const { adminGraphQL } = adminGraphQLFn
@@ -1084,7 +1086,7 @@ export async function deactivateMissingTaggedCustomers(
     );
 
     if (!result.success) {
-      return { deactivatedCount: 0, skippedCount: 0 };
+      return { deactivatedCount: 0, skippedMismatchCount: 0, skippedOutstandingCount: 0 };
     }
 
     const existingIds = new Set(
@@ -1100,8 +1102,10 @@ export async function deactivateMissingTaggedCustomers(
     }
   }
 
+  const skippedMismatchCount = candidates.length - goneCustomerIds.size;
+
   if (goneCustomerIds.size === 0) {
-    return { deactivatedCount: 0, skippedCount: 0 };
+    return { deactivatedCount: 0, skippedMismatchCount, skippedOutstandingCount: 0 };
   }
 
   const goneRowIds = [...goneCustomerIds].map((cid) => customerIdToRowId.get(cid)!);
@@ -1135,10 +1139,10 @@ export async function deactivateMissingTaggedCustomers(
     return customerId && !skipCustomerIds.has(customerId);
   });
 
-  const skippedCount = goneRowIds.length - toDeactivateRowIds.length;
+  const skippedOutstandingCount = goneRowIds.length - toDeactivateRowIds.length;
 
   if (toDeactivateRowIds.length === 0) {
-    return { deactivatedCount: 0, skippedCount };
+    return { deactivatedCount: 0, skippedMismatchCount, skippedOutstandingCount };
   }
 
   const updateResult = await sql`
@@ -1147,5 +1151,5 @@ export async function deactivateMissingTaggedCustomers(
     WHERE id IN ${sql(toDeactivateRowIds)}
   `;
 
-  return { deactivatedCount: updateResult.count, skippedCount };
+  return { deactivatedCount: updateResult.count, skippedMismatchCount, skippedOutstandingCount };
 }

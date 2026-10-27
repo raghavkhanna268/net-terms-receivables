@@ -36,3 +36,6 @@ ALTER TABLE s6_bulk_operations
 
 COMMENT ON COLUMN s6_bulk_operations.lines_processed IS 
   'Total JSONL lines processed (set once at EOF). Used with objectCount for completeness check.';
+
+-- Add lines_read to s6_bulk_operations for running line count during processing
+ALTER TABLE s6_bulk_operations ADD COLUMN IF NOT EXISTS lines_read BIGINT;

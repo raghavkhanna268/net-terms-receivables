@@ -700,6 +700,8 @@ model S6BulkOperation {
   nextStageEnqueuedAt DateTime? @map("next_stage_enqueued_at") @db.Timestamptz(6)
   /// Total JSONL lines processed (set once at EOF). Used with objectCount for completeness check.
   linesProcessed      BigInt?   @map("lines_processed")
+  /// Running count of JSONL lines read during processing. Updated atomically with byte_offset.
+  linesRead           BigInt?   @map("lines_read")
 
   @@map("s6_bulk_operations")
 }
