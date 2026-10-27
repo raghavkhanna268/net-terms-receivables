@@ -294,17 +294,46 @@ export function isWithinSendWindow(timezone: string): boolean {
 }
 
 /**
+ * Next-morning catch-up flag for messages enqueued by Part 5.
+ * nextMorning: true indicates the message is a D+1 rescue.
+ * originalDate: the original reminder date (YYYY-MM-DD) for validation.
+ */
+export interface NextMorningFlag {
+  nextMorning: boolean;
+  originalDate: string;
+}
+
+/**
  * Check if today (in shop's timezone) is the right day for a reminder.
+ *
+ * For standard messages (no nextMorningFlag or nextMorning: false):
+ *   Returns true only if reminderDate === today.
+ *
+ * For next-morning catch-up messages (nextMorning: true):
+ *   Returns true only if:
+ *   - reminderDate === yesterday (D+1 only)
+ *   - originalDate matches the computed reminderDate
  */
 export function isReminderDueToday(
   dueAt: Date,
   offsetDays: number,
-  timezone: string
+  timezone: string,
+  nextMorningFlag?: NextMorningFlag
 ): boolean {
   const validTz = validateTimezone(timezone);
   const today = DateTime.now().setZone(validTz).startOf("day");
   const dueDate = DateTime.fromJSDate(dueAt, { zone: validTz }).startOf("day");
   const reminderDate = dueDate.plus({ days: offsetDays });
+
+  if (nextMorningFlag?.nextMorning) {
+    const yesterday = today.minus({ days: 1 });
+    if (!reminderDate.hasSame(yesterday, "day")) {
+      return false;
+    }
+    const computedDateStr = reminderDate.toISODate();
+    return computedDateStr === nextMorningFlag.originalDate;
+  }
+
   return reminderDate.hasSame(today, "day");
 }
 
@@ -955,7 +984,8 @@ export async function sendPaymentReminder(
   offsetDays: number,
   timezone: string,
   env: { RESEND_API_KEY?: string; RESEND_FROM?: string; REMINDER_UNSUBSCRIBE_SECRET?: string; SHOPIFY_APP_URL?: string; RESEND_TEST_RECIPIENTS?: string; RESEND_RECIPIENT_ALLOWLIST_ENFORCED?: string } = {},
-  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {}
+  deps: { reserveGlobalSendSlot?: typeof reserveGlobalSendSlot } = {},
+  nextMorningFlag?: NextMorningFlag
 ): Promise<ReminderSendResult> {
   const resendKey = env.RESEND_API_KEY ?? process.env.RESEND_API_KEY;
   const fromEmail = getResendFrom(env);
@@ -1045,7 +1075,8 @@ export async function sendPaymentReminder(
   }
 
   // Gate 7: Re-check if this is the right day in shop's timezone
-  if (!isReminderDueToday(invoice.dueAt, offsetDays, invoice.shopTimezone)) {
+  // For next-morning catch-up messages (Part 5), accepts D+1 if originalDate matches
+  if (!isReminderDueToday(invoice.dueAt, offsetDays, invoice.shopTimezone, nextMorningFlag)) {
     return {
       success: true,
       action: "skipped",
