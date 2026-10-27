@@ -92,10 +92,26 @@ vi.mock("../shopify-client.server", async (importOriginal) => {
   };
 });
 
+const waitUntilCollector = vi.hoisted(() => ({
+  promises: [] as Promise<unknown>[],
+  reset() { this.promises = []; },
+  collect(p: Promise<unknown>) { this.promises.push(p); },
+  async flush() { await Promise.all(this.promises); },
+}));
+
+vi.mock("~/lib/request-context.server", async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    getRequestWaitUntil: () => (p: Promise<unknown>) => waitUntilCollector.collect(p),
+  };
+});
+
 import { applyMatch, unmatchMatch } from "../apply.server";
 import { confirmMatch } from "../matcher.server";
 import { recomputeCreditStatus } from "../credit-status-recompute.server";
 import { recordBackstopFailure } from "../backstop.server";
+import { recordAccess } from "../access-log.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -159,6 +175,7 @@ describeWithDb("AuditEvent contains no buyer name or email", () => {
 
   beforeEach(async () => {
     mockShopifyGraphQLRequest.mockClear();
+    waitUntilCollector.reset();
 
     await sql`
       UPDATE "BuyerAccount"
@@ -192,16 +209,7 @@ describeWithDb("AuditEvent contains no buyer name or email", () => {
 
   describe("access-log.server.ts (recordAccess)", () => {
     it("access.* events contain no buyer name or email", async () => {
-      const capturedPromises: Promise<unknown>[] = [];
-      const mockWaitUntil = (p: Promise<unknown>) => { capturedPromises.push(p); };
-
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestWaitUntil: () => mockWaitUntil,
-      }));
-
-      const { recordAccess: realRecordAccess } = await import("../access-log.server");
-
-      realRecordAccess(sql, {
+      recordAccess(sql, {
         shopId: TEST_SHOP_ID,
         actor: "12345",
         action: "accounts_detail",
@@ -209,7 +217,7 @@ describeWithDb("AuditEvent contains no buyer name or email", () => {
         recordId: TEST_ACCOUNT_ID,
       });
 
-      realRecordAccess(sql, {
+      recordAccess(sql, {
         shopId: TEST_SHOP_ID,
         actor: "67890",
         action: "data_requests_list",
@@ -217,7 +225,7 @@ describeWithDb("AuditEvent contains no buyer name or email", () => {
         count: 5,
       });
 
-      await Promise.all(capturedPromises);
+      await waitUntilCollector.flush();
       await assertNoPiiInAuditEvents(2);
     });
   });
@@ -503,26 +511,27 @@ describeWithDb("AuditEvent contains no buyer name or email", () => {
 
       await recordBackstopFailure(sql, TEST_SHOP_ID, TEST_ORDER_GID, TEST_ACCOUNT_ID, "test_error");
 
-      const capturedPromises: Promise<unknown>[] = [];
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestWaitUntil: () => (p: Promise<unknown>) => capturedPromises.push(p),
-      }));
-      const { recordAccess: realRecordAccess } = await import("../access-log.server");
-      realRecordAccess(sql, {
+      recordAccess(sql, {
         shopId: TEST_SHOP_ID,
         actor: "99999",
         action: "dashboard",
         recordType: "BuyerAccount",
         count: 10,
       });
-      await Promise.all(capturedPromises);
+      await waitUntilCollector.flush();
+
+      const dashboardEvents = await sql<{ count: string }[]>`
+        SELECT COUNT(*)::text as count FROM "AuditEvent"
+        WHERE "shopId" = ${TEST_SHOP_ID} AND type = 'access.dashboard'
+      `;
+      expect(parseInt(dashboardEvents[0].count, 10)).toBeGreaterThanOrEqual(1);
 
       const totalEvents = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text as count FROM "AuditEvent" WHERE "shopId" = ${TEST_SHOP_ID}
       `;
-      expect(parseInt(totalEvents[0].count, 10)).toBeGreaterThanOrEqual(4);
+      expect(parseInt(totalEvents[0].count, 10)).toBeGreaterThanOrEqual(5);
 
-      await assertNoPiiInAuditEvents(4);
+      await assertNoPiiInAuditEvents(5);
     });
   });
 });
