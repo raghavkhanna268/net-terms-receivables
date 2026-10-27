@@ -26,8 +26,10 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import { pluralizeWithCount } from "~/lib/copy-helpers";
-import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
@@ -441,7 +443,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
-  const currencySupported = isCurrencyGateOpen(shopCurrency);
+  const storeSetupStatus = getStoreSetupStatus(shop ? { currency: shopCurrency } : null);
+  const currencySupported = storeSetupStatus === "supported";
   if (!currencySupported) {
     timing.endPhase("loader_total");
     timing.logAllPhases();
@@ -453,6 +456,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     const notSupportedStoreHandle = shopDomain.replace(".myshopify.com", "");
     return data({
       notSupported: true,
+      storeSetupStatus,
       shopName: notSupportedStoreHandle,
       shopDomain,
       storeHandle: notSupportedStoreHandle,
@@ -1116,6 +1120,7 @@ function DashboardContent({
 }
 
 export default function Index() {
+  const loaderData = useLoaderData<typeof loader>();
   const {
     upgradeUrl,
     gatingEnforced,
@@ -1125,9 +1130,19 @@ export default function Index() {
     currencySupported,
     currencyFlipBlocked,
     dashboardData,
-  } = useLoaderData<typeof loader>();
+  } = loaderData;
 
   if (!currencySupported) {
+    const storeSetupStatus = "storeSetupStatus" in loaderData ? loaderData.storeSetupStatus : "not_supported";
+    if (storeSetupStatus === "setting_up") {
+      return (
+        <s-page heading="Termwise: Net Terms & Credit">
+          <s-section>
+            <StoreSettingUpBanner />
+          </s-section>
+        </s-page>
+      );
+    }
     return (
       <s-page heading="Termwise: Net Terms & Credit">
         <s-section>

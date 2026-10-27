@@ -83,6 +83,17 @@ import {
   type HeldFixtureRow,
   type OwnerMetafield,
 } from "./lib/held-fixture-currency";
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  assertAllowlistEnforced,
+  formatG4CleanupOutput,
+  formatG4WriteOutput,
+  readAllowlistEnforcedFromWrangler,
+  resolveG4Recipient,
+  runG4Cleanup,
+  runG4Write,
+} from "./lib/g4-fixture";
 
 // -- Types --
 
@@ -4133,7 +4144,16 @@ export function isReviewerDemoEnabled(argv: string[], env: Record<string, string
   return false;
 }
 
-function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; reportDuplicatesMode: boolean; reseedHeldCurrencyMode: boolean; reviewerDemo: boolean } {
+function parseArgs(): {
+  dryRun: boolean;
+  reset: boolean;
+  resetApply: boolean;
+  reportDuplicatesMode: boolean;
+  reseedHeldCurrencyMode: boolean;
+  reviewerDemo: boolean;
+  g4ReminderFixture: boolean;
+  g4ReminderFixtureCleanup: boolean;
+} {
   const args = process.argv.slice(2);
   return {
     dryRun: args.includes("--dry-run"),
@@ -4142,7 +4162,135 @@ function parseArgs(): { dryRun: boolean; reset: boolean; resetApply: boolean; re
     reportDuplicatesMode: args.includes("--report-duplicates"),
     reseedHeldCurrencyMode: args.includes("--reseed-held-currency"),
     reviewerDemo: isReviewerDemoEnabled(args, process.env),
+    g4ReminderFixture: args.includes("--g4-reminder-fixture"),
+    g4ReminderFixtureCleanup: args.includes("--g4-reminder-fixture-cleanup"),
   };
+}
+
+/**
+ * The G4 fixture modes are mutually exclusive with each other and with every
+ * other mode flag (reset, report-duplicates, reseed-held-currency).
+ */
+export function isG4FixtureBadArgs(a: {
+  reset: boolean;
+  reportDuplicatesMode: boolean;
+  reseedHeldCurrencyMode: boolean;
+  g4ReminderFixture: boolean;
+  g4ReminderFixtureCleanup: boolean;
+}): boolean {
+  if (!a.g4ReminderFixture && !a.g4ReminderFixtureCleanup) return false;
+  if (a.g4ReminderFixture && a.g4ReminderFixtureCleanup) return true;
+  return a.reset || a.reportDuplicatesMode || a.reseedHeldCurrencyMode;
+}
+
+/**
+ * Injectable dependencies for the allowlist / deploy-SHA drift guard, so the
+ * wiring can be unit tested without touching the filesystem or git.
+ */
+export interface G4AllowlistGuardDeps {
+  /** Read the checked-out wrangler.jsonc text. */
+  readWrangler: () => string;
+  /** Read the deployed commit's wrangler.jsonc text (git show <sha>:wrangler.jsonc). */
+  readDeployedWrangler: (sha: string) => string;
+  /** The last successful deploy SHA (G4_DEPLOY_SHA), or undefined. */
+  deploySha?: string;
+  /** The dispatch checkout SHA (GITHUB_SHA), or undefined. */
+  checkoutSha?: string;
+}
+
+/**
+ * Verify the allowlist enforcement value in the checked-out wrangler.jsonc is
+ * absent or exactly "true", plus the deployed-vs-checkout drift check: when a
+ * deploy SHA differs from the checkout, the deployed config must pass the same
+ * guard. Throws a fixed g4_* code; the recipient is never read. Pure over its
+ * injected deps (no fs/git/process access of its own) so it is unit testable.
+ */
+export function assertG4AllowlistGuardWith(deps: G4AllowlistGuardDeps): void {
+  assertAllowlistEnforced(readAllowlistEnforcedFromWrangler(deps.readWrangler()));
+
+  const deploySha = deps.deploySha?.trim();
+  const checkoutSha = deps.checkoutSha?.trim();
+  if (deploySha && checkoutSha && deploySha !== checkoutSha) {
+    let deployedText: string;
+    try {
+      deployedText = deps.readDeployedWrangler(deploySha);
+    } catch {
+      throw new Error("g4_deploy_sha_mismatch");
+    }
+    try {
+      assertAllowlistEnforced(readAllowlistEnforcedFromWrangler(deployedText));
+    } catch {
+      throw new Error("g4_deploy_sha_mismatch");
+    }
+  }
+}
+
+/** Production wiring: read from the filesystem and git, SHAs from the env. */
+function assertG4AllowlistGuard(): void {
+  assertG4AllowlistGuardWith({
+    readWrangler: () => readFileSync("wrangler.jsonc", "utf8"),
+    readDeployedWrangler: (sha) =>
+      execFileSync("git", ["show", `${sha}:wrangler.jsonc`], { encoding: "utf8" }),
+    deploySha: process.env.G4_DEPLOY_SHA,
+    checkoutSha: process.env.GITHUB_SHA,
+  });
+}
+
+/**
+ * Orchestrate a G4 fixture run (write or cleanup). Prints counts/enums only and
+ * fixed g4_* error codes; never amounts, emails, domains, ids, or tokens.
+ * Returns the process exit code.
+ */
+export async function runG4Fixture(state: SeedState, mode: "write" | "cleanup"): Promise<number> {
+  try {
+    if (state.currencyCode !== "INR") {
+      throw new Error("g4_store_not_inr");
+    }
+    if (!state.databaseUrl) {
+      throw new Error("g4_no_database");
+    }
+
+    // The allowlist guard (and deploy-SHA drift check) gate sends; cleanup only
+    // restores/clears and must always be able to run.
+    if (mode === "write") {
+      assertG4AllowlistGuard();
+    }
+
+    const sql = postgres(state.databaseUrl, { max: 1 });
+    try {
+      if (mode === "write") {
+        const recipient = resolveG4Recipient(process.env);
+        const result = await runG4Write(sql, {
+          shopDomain: state.shop,
+          recipient,
+          dryRun: state.dryRun,
+        });
+        for (const line of formatG4WriteOutput(result)) console.log(line);
+      } else {
+        const result = await runG4Cleanup(sql, {
+          shopDomain: state.shop,
+          dryRun: state.dryRun,
+        });
+        for (const line of formatG4CleanupOutput(result)) console.log(line);
+      }
+    } finally {
+      await sql.end();
+    }
+    return 0;
+  } catch (err) {
+    const code = err instanceof Error && /^g4_[a-z_]+$/.test(err.message) ? err.message : null;
+    if (code) {
+      console.error(`g4_fixture mode=${mode} error=${code}`);
+    } else {
+      // DB/unknown error: print SQLSTATE only, never message/detail.
+      const sqlstate =
+        err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string"
+          ? (err as { code: string }).code
+          : "unknown";
+      console.error(`g4_fixture mode=${mode} error=g4_db_error code=${sqlstate}`);
+    }
+    return 1;
+  }
 }
 
 /**
@@ -4266,7 +4414,30 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
-  const { dryRun, reset, resetApply, reportDuplicatesMode, reseedHeldCurrencyMode, reviewerDemo } = parseArgs();
+  const {
+    dryRun,
+    reset,
+    resetApply,
+    reportDuplicatesMode,
+    reseedHeldCurrencyMode,
+    reviewerDemo,
+    g4ReminderFixture,
+    g4ReminderFixtureCleanup,
+  } = parseArgs();
+
+  if (
+    isG4FixtureBadArgs({
+      reset,
+      reportDuplicatesMode,
+      reseedHeldCurrencyMode,
+      g4ReminderFixture,
+      g4ReminderFixtureCleanup,
+    })
+  ) {
+    console.error("g4_fixture error=g4_fixture_bad_args");
+    process.exit(1);
+  }
+
   const env = validateEnv();
 
   if (!env) {
@@ -4317,6 +4488,13 @@ export async function main(): Promise<void> {
   const devStoreOk = await checkDevStore(state);
   if (!devStoreOk) {
     process.exit(1);
+  }
+
+  // G4 reminder delivery fixture: runs after the dev-store guard, before the
+  // normal seeding path, and exits. Writes are gated by a non-dry-run choice.
+  if (g4ReminderFixture || g4ReminderFixtureCleanup) {
+    const code = await runG4Fixture(state, g4ReminderFixtureCleanup ? "cleanup" : "write");
+    process.exit(code);
   }
 
   const b2bOk = await checkB2BSupport(state);

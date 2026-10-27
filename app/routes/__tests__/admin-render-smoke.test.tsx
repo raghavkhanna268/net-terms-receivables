@@ -245,13 +245,13 @@ const APP_ROUTES: RouteTestConfig[] = [
     name: "app.settings.reminders",
     importPath: "../app.settings.reminders",
     urlPath: "/app/settings/reminders",
-    currencyGate: { exempt: "Reminder settings are configuration-only and do not display monetary amounts" },
+    currencyGate: "gated",
   },
   {
     name: "app.tag-rules",
     importPath: "../app.tag-rules",
     urlPath: "/app/tag-rules",
-    currencyGate: { exempt: "Tag rules are configuration-only and do not display monetary amounts" },
+    currencyGate: "gated",
   },
   {
     name: "app.data-requests",
@@ -278,6 +278,13 @@ const APP_ROUTES: RouteTestConfig[] = [
     urlPath: "/app/data-requests/REQ_ID/download",
     resourceOnly: true,
     resourceOnlyReason: "Resource-only download handler route with no default export component",
+  },
+  {
+    name: "app.$",
+    importPath: "../app.$",
+    urlPath: "/app/unknown-path",
+    resourceOnly: true,
+    resourceOnlyReason: "Catch-all 404 route that throws in loader and renders ErrorBoundary",
   },
 ];
 
@@ -515,9 +522,10 @@ describeWithDb("Admin Render Smoke Tests", () => {
         ).toBeTruthy();
       }
 
-      expect(RESOURCE_ONLY_ROUTES.length).toBe(3);
+      expect(RESOURCE_ONLY_ROUTES.length).toBe(4);
       expect(RESOURCE_ONLY_ROUTES.map((r) => r.name).sort()).toEqual([
         "app",
+        "app.$",
         "app.data-requests.$id.download",
         "app.welcome",
       ]);

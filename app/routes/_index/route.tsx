@@ -50,8 +50,8 @@ export default function App() {
             credit holds when limits are exceeded.
           </li>
           <li>
-            <strong>Payment Matching</strong>. Match Indian bank transfers (NEFT/RTGS/IMPS/UPI/CMS)
-            back to orders automatically.
+            <strong>Payment Matching</strong>. Import Indian bank transfers (NEFT/RTGS/IMPS/UPI/CMS)
+            and get suggested matches to orders for you to confirm.
           </li>
         </ul>
       </div>
