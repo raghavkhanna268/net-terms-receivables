@@ -954,6 +954,33 @@ export function getReminderLabel(offsetDays: number): string {
 }
 
 /**
+ * Compute actual reminder label based on send date vs invoice due date.
+ * Used for next-morning catch-up sends where the stage's original date
+ * may differ from the actual send date.
+ *
+ * @param dueAt - Invoice due date
+ * @param timezone - Shop's IANA timezone
+ * @returns Label based on actual days difference from send date
+ */
+export function getActualReminderLabel(dueAt: Date, timezone: string): string {
+  const validTz = validateTimezone(timezone);
+  const today = DateTime.now().setZone(validTz).startOf("day");
+  const dueDate = DateTime.fromJSDate(dueAt, { zone: validTz }).startOf("day");
+  const daysDiff = Math.round(today.diff(dueDate, "days").days);
+
+  if (daysDiff < 0) {
+    const days = Math.abs(daysDiff);
+    return `Payment due in ${days} day${days !== 1 ? "s" : ""}`;
+  } else if (daysDiff === 0) {
+    return "Payment due today";
+  } else if (daysDiff === 1) {
+    return "Payment was due yesterday";
+  } else {
+    return `Payment ${daysDiff} day${daysDiff !== 1 ? "s" : ""} overdue`;
+  }
+}
+
+/**
  * Send a payment reminder email via Resend.
  *
  * This function:
@@ -1233,18 +1260,24 @@ export async function sendPaymentReminder(
     const replyTo = merchantInfo.contactEmail ?? undefined;
     const storeDisplayName = merchantInfo.name ?? invoice.shopName;
 
+    // For next-morning catch-up sends, compute actual label based on send date
+    // (e.g., a pre-due stage landing on due day says "due today", not "due in 1 day")
+    const reminderLabel = nextMorningFlag?.nextMorning
+      ? getActualReminderLabel(invoice.dueAt, invoice.shopTimezone)
+      : getReminderLabel(offsetDays);
+
     const emailHtml = renderPaymentReminderEmail({
       invoiceName: invoice.invoiceName,
       buyerName: invoice.buyerName ?? "Customer",
       amount: formatAmount(invoice.outstanding, invoice.currency),
       dueDate: formatDate(invoice.dueAt, invoice.shopTimezone),
       merchantName: invoice.shopName,
-      reminderType: getReminderLabel(offsetDays),
+      reminderType: reminderLabel,
       storeDisplayName,
       hasReplyTo: !!replyTo,
     });
 
-    const subject = `${getReminderLabel(offsetDays)} - Invoice ${invoice.invoiceName}`;
+    const subject = `${reminderLabel} - Invoice ${invoice.invoiceName}`;
     const idempotencyKey = `s18_${invoiceId}_${ruleId}`;
 
     // Build RFC 8058 unsubscribe headers (appUrl validated in Gate 10c)

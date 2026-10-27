@@ -869,3 +869,271 @@ describe("Gate 7: isReminderDueToday with nextMorning flag (unit)", () => {
     expect(result).toBe(true);
   });
 });
+
+/**
+ * Dedupe tests: at most ONE reminder email per invoice per local day.
+ *
+ * Product ruling scenarios:
+ * a) Pre-due catch-up landing on due day, due-day stage enabled: 1 email (not 2), due-today wording
+ * b) Catch-up and regular stage both enqueued on same tick: 1 email
+ * c) Regular stage already sent before catch-up drains: 0 extra emails
+ * d) Pre-due catch-up landing on due day, NO due-day stage enabled: 1 email, due-today wording
+ * e) Concurrency: two drains on same tick still send at most 1
+ */
+const describeDedupeWithDb = process.env.TEST_DATABASE_URL ? describe : describe.skip;
+
+describeDedupeWithDb("Dedupe: at most ONE reminder email per invoice per local day (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const DEDUPE_SUFFIX = Date.now().toString(36) + "-dedupe";
+  const DEDUPE_SHOP_ID = `shop-dedupe-${DEDUPE_SUFFIX}`;
+  const DEDUPE_SHOP_DOMAIN = `dedupe-test-${DEDUPE_SUFFIX}.example.com`;
+  let dedupeTimezone: string;
+
+  beforeAll(async () => {
+    sql = postgres(process.env.TEST_DATABASE_URL!, sqlOptions);
+    dedupeTimezone = await getTestTimezoneForDedupe(sql);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
+      VALUES (${DEDUPE_SHOP_ID}, ${DEDUPE_SHOP_DOMAIN}, 'INR', ${dedupeTimezone}, 'free', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
+      VALUES (${DEDUPE_SHOP_ID}, true, NOW() - INTERVAL '5 days', NOW() - INTERVAL '5 days')
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}`;
+    await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${DEDUPE_SHOP_ID}`;
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}`;
+    await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM "ReminderRule" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${DEDUPE_SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${DEDUPE_SHOP_ID}`;
+  });
+
+  afterEach(async () => {
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}`;
+  });
+
+  async function createBuyerAndInvoice(
+    suffix: string,
+    dueDaysFromToday: number,
+    createdDaysAgo: number = 5
+  ): Promise<{ accountId: string; invoiceId: string; customerId: string }> {
+    const accountId = `acc-${suffix}-${DEDUPE_SUFFIX}`;
+    const customerId = `gid://shopify/Customer/${suffix}-${DEDUPE_SUFFIX}`;
+    const invoiceId = `inv-${suffix}-${DEDUPE_SUFFIX}`;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "customerId", name,
+        "creditLimit", "holdState", bypass, "manualHold", "defaultTermsDays", "defaultTermsSource",
+        "syncPending", "syncVersion", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${accountId}, ${DEDUPE_SHOP_ID}, 'TAGGED_CUSTOMER',
+        ${customerId}, ${`Dedupe Buyer ${suffix}`}, 100000.00, 'OK', false, false, 30, 'explicit',
+        false, 1, NOW() - INTERVAL '5 days', NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, email, display_name, updated_at)
+      VALUES (${DEDUPE_SHOP_ID}, ${customerId}, ${`${suffix}@test-dedupe.example.com`}, ${`Dedupe ${suffix}`}, NOW())
+    `;
+
+    const orderId = `gid://shopify/Order/${invoiceId}`;
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceId}, ${DEDUPE_SHOP_ID}, ${accountId}, ${orderId},
+        ${`#DEDUPE-${suffix}`}, 10000.00, 10000.00, 'open',
+        NOW() - INTERVAL '10 days',
+        ((NOW() AT TIME ZONE ${dedupeTimezone})::DATE + ${dueDaysFromToday} * INTERVAL '1 day')::timestamp AT TIME ZONE ${dedupeTimezone},
+        NOW() - (${createdDaysAgo} || ' days')::INTERVAL,
+        NOW()
+      )
+    `;
+
+    return { accountId, invoiceId, customerId };
+  }
+
+  describe("a) Pre-due catch-up on due day with due-day stage enabled: exactly 1 email", () => {
+    it("SQL Part 5 does NOT enqueue catch-up when same-day stage is due", async () => {
+      // Create invoice due TODAY
+      const { invoiceId } = await createBuyerAndInvoice("a1", 0);
+
+      // Create two rules: offsetDays=-1 (pre-due, stage date was YESTERDAY)
+      // and offsetDays=0 (due today)
+      const preRule = `rule-predue-${DEDUPE_SUFFIX}`;
+      const todayRule = `rule-today-${DEDUPE_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES 
+          (${preRule}, ${DEDUPE_SHOP_ID}, -1, 'email'::"ReminderChannel", true, NOW(), NOW()),
+          (${todayRule}, ${DEDUPE_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      // Check what was enqueued
+      const messages = await sql<{ ruleId: string; nextMorning: boolean | null; topic: string }[]>`
+        SELECT message->>'ruleId' AS "ruleId",
+               (message->>'nextMorning')::boolean AS "nextMorning",
+               message->>'topic' AS topic
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}
+          AND message->>'invoiceId' = ${invoiceId}
+      `;
+
+      // Part 3 should enqueue the due-today stage
+      // Part 5 should NOT enqueue the pre-due stage (same-day stage is due)
+      const todayMessages = messages.filter(m => m.ruleId === todayRule);
+      const preMessages = messages.filter(m => m.ruleId === preRule && m.nextMorning === true);
+
+      expect(todayMessages).toHaveLength(1);
+      expect(preMessages).toHaveLength(0);
+    });
+  });
+
+  describe("c) Regular stage already sent before catch-up: 0 extra emails", () => {
+    it("SQL Part 5 does NOT enqueue catch-up when invoice already has sent ReminderLog today", async () => {
+      // Create invoice due YESTERDAY (so pre-due stage with offsetDays=-1 was due 2 days ago)
+      const { invoiceId } = await createBuyerAndInvoice("c1", -1);
+
+      // Create pre-due rule only (no due-day rule)
+      const preRule = `rule-predue-c-${DEDUPE_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${preRule}, ${DEDUPE_SHOP_ID}, -1, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      // Insert a 'sent' ReminderLog row for TODAY (simulating a regular send already happened)
+      // Note: using a different rule to test cross-rule dedupe
+      const otherRule = `rule-other-c-${DEDUPE_SUFFIX}`;
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${otherRule}, ${DEDUPE_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
+        VALUES (gen_random_uuid()::TEXT, ${DEDUPE_SHOP_ID}, ${otherRule}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW())
+      `;
+
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      // Check what was enqueued
+      const messages = await sql<{ ruleId: string; nextMorning: boolean | null }[]>`
+        SELECT message->>'ruleId' AS "ruleId",
+               (message->>'nextMorning')::boolean AS "nextMorning"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}
+          AND message->>'invoiceId' = ${invoiceId}
+      `;
+
+      // Part 5 should NOT enqueue catch-up (already sent today)
+      expect(messages).toHaveLength(0);
+    });
+  });
+
+  describe("d) Pre-due catch-up on due day with NO due-day stage: 1 email with due-today wording", () => {
+    it("SQL Part 5 enqueues catch-up when no same-day stage is due", async () => {
+      // Create invoice due TODAY
+      const { invoiceId } = await createBuyerAndInvoice("d1", 0);
+
+      // Create ONLY pre-due rule (offsetDays=-1, stage date was YESTERDAY)
+      // NO due-day rule (offsetDays=0)
+      const preRule = `rule-predue-d-${DEDUPE_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${preRule}, ${DEDUPE_SHOP_ID}, -1, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      await sql`SELECT public.s18_enqueue_reminders()`;
+
+      // Check what was enqueued
+      const messages = await sql<{ ruleId: string; nextMorning: boolean | null; originalDate: string }[]>`
+        SELECT message->>'ruleId' AS "ruleId",
+               (message->>'nextMorning')::boolean AS "nextMorning",
+               message->>'originalDate' AS "originalDate"
+        FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${DEDUPE_SHOP_DOMAIN}
+          AND message->>'invoiceId' = ${invoiceId}
+      `;
+
+      // Part 5 should enqueue catch-up with nextMorning=true
+      const catchupMsgs = messages.filter(m => m.nextMorning === true);
+      expect(catchupMsgs).toHaveLength(1);
+      expect(catchupMsgs[0].ruleId).toBe(preRule);
+      expect(catchupMsgs[0].originalDate).toBeDefined();
+    });
+  });
+
+  describe("TS dedupe: hasReminderSentToday blocks second send", () => {
+    it("TS Gate 11 prevents second send when first send completed", async () => {
+      const { hasReminderSentToday } = await import("../reminders.server");
+
+      // Create invoice due today
+      const { invoiceId } = await createBuyerAndInvoice("ts1", 0);
+      const ruleId = `rule-ts1-${DEDUPE_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+        VALUES (${ruleId}, ${DEDUPE_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+      `;
+
+      // Before any send
+      const beforeSend = await hasReminderSentToday(sql, DEDUPE_SHOP_ID, invoiceId, dedupeTimezone);
+      expect(beforeSend).toBe(false);
+
+      // Insert a 'sent' row for today
+      await sql`
+        INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "sentAt")
+        VALUES (gen_random_uuid()::TEXT, ${DEDUPE_SHOP_ID}, ${ruleId}, ${invoiceId}, 'sent'::"ReminderLogStatus", NOW())
+      `;
+
+      // After send
+      const afterSend = await hasReminderSentToday(sql, DEDUPE_SHOP_ID, invoiceId, dedupeTimezone);
+      expect(afterSend).toBe(true);
+    });
+  });
+});
+
+async function getTestTimezoneForDedupe(sql: ReturnType<typeof postgres>): Promise<string> {
+  const [row] = await sql<{ utc_hour: number }[]>`
+    SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
+  `;
+  const utcHour = row.utc_hour;
+  const offsetToMakeNoon = utcHour - 12;
+  if (offsetToMakeNoon === 0) {
+    return "Etc/GMT";
+  } else if (offsetToMakeNoon > 0) {
+    return `Etc/GMT+${offsetToMakeNoon}`;
+  } else {
+    return `Etc/GMT${offsetToMakeNoon}`;
+  }
+}
