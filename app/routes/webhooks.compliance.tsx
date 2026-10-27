@@ -4,7 +4,7 @@ import {
   verifyPayloadShopMatch,
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
-import { getRequestSql } from "~/lib/request-context.server";
+import { getRequestSql, getRequestWaitUntil } from "~/lib/request-context.server";
 import {
   deleteShop,
   purgePgmqMessages,
@@ -17,8 +17,6 @@ import {
 import { getOfflineAdminContext } from "~/lib/offline-admin.server";
 import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 import type { Sql } from "~/lib/db-light.server";
-
-type WaitUntilFn = (promise: Promise<unknown>) => void;
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -85,11 +83,7 @@ async function fetchShopOwnerEmail(sql: Sql, shop: string): Promise<string | nul
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
  */
-export const action = async ({ request, context }: ActionFunctionArgs) => {
-  const cloudflare = (context as { cloudflare?: { ctx?: { waitUntil?: WaitUntilFn } } }).cloudflare;
-  const waitUntil: WaitUntilFn = cloudflare?.ctx?.waitUntil
-    ? (p) => cloudflare.ctx!.waitUntil!(p)
-    : () => {};
+export const action = async ({ request }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[Compliance] SHOPIFY_API_SECRET not configured");
@@ -163,44 +157,51 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
           `data request id=${id}`
       );
 
-      // Email notification runs in the background via waitUntil.
-      // This allows the webhook to return 200 immediately after persisting the export.
-      waitUntil(
-        (async () => {
-          try {
-            const shopOwnerEmail = await fetchShopOwnerEmail(sql, payloadShop);
+      // Email notification work: fetches shop owner email and sends notification.
+      const emailWork = async () => {
+        try {
+          const shopOwnerEmail = await fetchShopOwnerEmail(sql, payloadShop);
 
-            if (shopOwnerEmail) {
-              const emailResult = await sendDataRequestNotification(
-                payloadShop,
-                shopOwnerEmail,
-                requestId
-              );
-              if (emailResult.sent) {
-                console.log(
-                  "[Compliance] customers/data_request: Email notification sent"
-                );
-              } else if (emailResult.error) {
-                console.log(
-                  "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
-                );
-              }
-            } else {
+          if (shopOwnerEmail) {
+            const emailResult = await sendDataRequestNotification(
+              payloadShop,
+              shopOwnerEmail,
+              requestId
+            );
+            if (emailResult.sent) {
               console.log(
-                `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
+                "[Compliance] customers/data_request: Email notification sent"
+              );
+            } else if (emailResult.error) {
+              console.log(
+                "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
               );
             }
-          } catch (err) {
-            const hash = await shopHash(payloadShop);
-            safeLog("error", "data_request_email_failed", {
-              shopHash: hash,
-              requestId,
-              err: toErrorCode(err),
-            });
+          } else {
+            console.log(
+              `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
+            );
           }
-        })()
-      );
+        } catch (err) {
+          const hash = await shopHash(payloadShop);
+          safeLog("error", "data_request_email_failed", {
+            shopHash: hash,
+            requestId,
+            err: toErrorCode(err),
+          });
+        }
+      };
 
+      // If waitUntil is available, defer email work and return 200 immediately.
+      // Otherwise, await the email work inline before returning.
+      const waitUntil = getRequestWaitUntil();
+      if (waitUntil) {
+        waitUntil(emailWork());
+        return new Response(null, { status: 200 });
+      }
+
+      // Fallback: waitUntil unavailable, run email work inline
+      await emailWork();
       return new Response(null, { status: 200 });
     }
 

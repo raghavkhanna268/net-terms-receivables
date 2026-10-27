@@ -45,8 +45,11 @@ const mockSql = Object.assign(
   { json: vi.fn((v) => v) }
 );
 
+const mockGetRequestWaitUntil = vi.fn();
+
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: () => mockGetRequestWaitUntil(),
 }));
 
 const mockDeleteShop = vi.fn();
@@ -74,23 +77,33 @@ vi.mock("~/lib/offline-admin.server", () => ({
   getOfflineAdminContext: (...args: unknown[]) => mockGetOfflineAdminContext(...args),
 }));
 
-function createMockActionArgs(
-  request: Request,
-  waitUntilMock?: ReturnType<typeof vi.fn>
-): ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> } {
-  const mockWaitUntil = waitUntilMock ?? vi.fn();
+// Track waitUntil promises for tests to await
+let capturedWaitUntilPromises: Promise<unknown>[] = [];
+let currentWaitUntilMock: ReturnType<typeof vi.fn> | undefined;
+
+function setupWaitUntilMock(available: boolean = true) {
+  capturedWaitUntilPromises = [];
+  if (available) {
+    currentWaitUntilMock = vi.fn((p: Promise<unknown>) => { capturedWaitUntilPromises.push(p); });
+    mockGetRequestWaitUntil.mockReturnValue(currentWaitUntilMock);
+  } else {
+    currentWaitUntilMock = undefined;
+    mockGetRequestWaitUntil.mockReturnValue(undefined);
+  }
+}
+
+function createMockActionArgs(request: Request): ActionFunctionArgs {
   return {
     request,
     params: {},
     context: {
-      cloudflare: { env: {}, ctx: { waitUntil: mockWaitUntil } },
+      cloudflare: { env: {}, ctx: {} },
       shopify: {},
       sessionStorage: mockSessionStorage,
     },
     url: new URL(request.url),
     pattern: "/webhooks/compliance",
-    _waitUntil: mockWaitUntil,
-  } as unknown as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
+  } as unknown as ActionFunctionArgs;
 }
 
 import { action } from "../webhooks.compliance";
@@ -108,6 +121,8 @@ describe("webhooks.compliance", () => {
       SHOPIFY_API_KEY: "test-api-key",
       SHOPIFY_API_SECRET: "test-secret",
     };
+    // Default: waitUntil is available
+    setupWaitUntilMock(true);
     mockDeleteAllForShop.mockResolvedValue(0);
     mockRecordWebhookReceipt.mockResolvedValue(true);
     mockParseTriggeredAt.mockReturnValue(null);
@@ -465,8 +480,8 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
       
       // Email work runs in background via waitUntil
-      expect(args._waitUntil).toHaveBeenCalledTimes(1);
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      expect(currentWaitUntilMock).toHaveBeenCalledTimes(1);
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
         "test-shop.myshopify.com",
         "owner@shop.com",
@@ -504,8 +519,8 @@ describe("webhooks.compliance", () => {
       expect(response.status).toBe(200);
       
       // Email work runs in background via waitUntil
-      expect(args._waitUntil).toHaveBeenCalledTimes(1);
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      expect(currentWaitUntilMock).toHaveBeenCalledTimes(1);
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(mockGetOfflineAdminContext).toHaveBeenCalledWith(
         expect.anything(),
         "test-shop.myshopify.com",
@@ -553,7 +568,7 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
       
       // Email work runs in background via waitUntil
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
     });
 
     it("skips email when getOfflineAdminContext throws (DB/lock error)", async () => {
@@ -592,7 +607,7 @@ describe("webhooks.compliance", () => {
       
       // Email work runs in background via waitUntil
       // fetchShopOwnerEmail catches the error and returns null, so email is skipped
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("data_request_email_skipped")
@@ -633,7 +648,7 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
       
       // Email work runs in background via waitUntil
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("data_request_email_skipped")
@@ -688,15 +703,15 @@ describe("webhooks.compliance", () => {
       expect(mockPersistDataRequest).toHaveBeenCalled();
       
       // waitUntil should have been called with a promise
-      expect(args._waitUntil).toHaveBeenCalledTimes(1);
-      expect(args._waitUntil.mock.calls[0][0]).toBeInstanceOf(Promise);
+      expect(currentWaitUntilMock).toHaveBeenCalledTimes(1);
+      expect(capturedWaitUntilPromises[0]).toBeInstanceOf(Promise);
       
       // At this point, email lookup hasn't resolved yet
       expect(mockSendDataRequestNotification).not.toHaveBeenCalled();
       
       // Now resolve the email lookup and let the deferred work complete
       resolveEmailLookup();
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       
       // Now the email should have been sent
       expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
@@ -734,10 +749,10 @@ describe("webhooks.compliance", () => {
       const response = await action(args);
 
       expect(response.status).toBe(200);
-      expect(args._waitUntil).toHaveBeenCalledTimes(1);
+      expect(currentWaitUntilMock).toHaveBeenCalledTimes(1);
       
       // Let deferred work complete
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       
       // Assert email send was called once with expected args
       expect(mockSendDataRequestNotification).toHaveBeenCalledTimes(1);
@@ -782,10 +797,10 @@ describe("webhooks.compliance", () => {
 
       // Route returned 200 before the error happened
       expect(response.status).toBe(200);
-      expect(args._waitUntil).toHaveBeenCalledTimes(1);
+      expect(currentWaitUntilMock).toHaveBeenCalledTimes(1);
       
       // Let deferred work complete (it will catch and log the error)
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       
       // Error should be logged via safeLog("error", "data_request_email_failed", ...)
       // Verify using raw mock.calls - we're checking console.error was called with JSON containing the event
@@ -803,6 +818,51 @@ describe("webhooks.compliance", () => {
       expect(logJson.shopHash).toBeDefined(); // shopHash is 12 hex chars
       
       consoleErrorSpy.mockRestore();
+    });
+
+    it("fallback: when getRequestWaitUntil returns undefined, email work runs inline and response is still 200", async () => {
+      // Set up waitUntil as unavailable (returns undefined)
+      setupWaitUntilMock(false);
+      
+      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSendDataRequestNotification.mockResolvedValue({ sent: true });
+
+      const payload = {
+        shop_domain: "test-shop.myshopify.com",
+        customer: { id: 456 },
+        data_request: { id: 789 },
+      };
+
+      mockVerifyWebhook.mockResolvedValue({
+        shop: "test-shop.myshopify.com",
+        topic: "customers/data_request",
+        webhookId: "test-webhook",
+        payload,
+        apiVersion: "2026-10",
+        rawBody: new ArrayBuffer(0),
+      });
+
+      const request = new Request("https://example.com/webhooks/compliance", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      const response = await action(createMockActionArgs(request));
+
+      // Response is 200
+      expect(response.status).toBe(200);
+      
+      // waitUntil was not called (it was unavailable)
+      expect(currentWaitUntilMock).toBeUndefined();
+      expect(capturedWaitUntilPromises).toHaveLength(0);
+      
+      // Email work ran inline (synchronously), so it should already be called
+      expect(mockSendDataRequestNotification).toHaveBeenCalledTimes(1);
+      expect(mockSendDataRequestNotification).toHaveBeenCalledWith(
+        "test-shop.myshopify.com",
+        "owner@shop.com",
+        "789"
+      );
     });
   });
 
@@ -1297,7 +1357,7 @@ describe("webhooks.compliance", () => {
 
       const args = createMockActionArgs(request);
       const response = await action(args);
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(response.status).toBe(200);
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
     });
@@ -1329,7 +1389,7 @@ describe("webhooks.compliance", () => {
 
       const args = createMockActionArgs(request);
       const response = await action(args);
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(response.status).toBe(200);
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
     });
@@ -1363,7 +1423,7 @@ describe("webhooks.compliance", () => {
 
       const args = createMockActionArgs(request);
       const response = await action(args);
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(response.status).toBe(200);
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
 
@@ -1403,7 +1463,7 @@ describe("webhooks.compliance", () => {
 
       const args = createMockActionArgs(request);
       const response = await action(args);
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(response.status).toBe(200);
 
       // Must not leak the domain from the error message
@@ -1494,7 +1554,7 @@ describe("webhooks.compliance", () => {
 
       const args = createMockActionArgs(request);
       const response = await action(args);
-      await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+      await Promise.allSettled(capturedWaitUntilPromises);
       expect(response.status).toBe(200);
       expectNoShopDomainInLogs(consoleSpy, TEST_SHOP);
     });

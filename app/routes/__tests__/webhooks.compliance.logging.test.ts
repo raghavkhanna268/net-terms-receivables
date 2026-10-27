@@ -59,9 +59,21 @@ const mockSql = Object.assign(
   }
 );
 
+const mockGetRequestWaitUntil = vi.fn();
+
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: () => mockGetRequestWaitUntil(),
 }));
+
+// Track waitUntil promises for tests to await
+let capturedWaitUntilPromises: Promise<unknown>[] = [];
+
+function setupWaitUntilMock(): void {
+  capturedWaitUntilPromises = [];
+  const mockWaitUntil = vi.fn((p: Promise<unknown>) => { capturedWaitUntilPromises.push(p); });
+  mockGetRequestWaitUntil.mockReturnValue(mockWaitUntil);
+}
 
 const mockDeleteWebhookReceiptsForShop = vi.fn().mockResolvedValue(0);
 vi.mock("~/lib/webhook-receipts.server", () => ({
@@ -102,23 +114,18 @@ vi.mock("~/services/compliance", async (importOriginal) => {
 
 import { action } from "../webhooks.compliance";
 
-function createMockActionArgs(
-  request: Request,
-  waitUntilMock?: ReturnType<typeof vi.fn>
-): ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> } {
-  const mockWaitUntil = waitUntilMock ?? vi.fn();
+function createMockActionArgs(request: Request): ActionFunctionArgs {
   return {
     request,
     params: {},
     context: {
-      cloudflare: { env: {}, ctx: { waitUntil: mockWaitUntil } },
+      cloudflare: { env: {}, ctx: {} },
       shopify: {},
       sessionStorage: mockSessionStorage,
     },
     url: new URL(request.url),
     pattern: "/webhooks/compliance",
-    _waitUntil: mockWaitUntil,
-  } as unknown as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
+  } as unknown as ActionFunctionArgs;
 }
 
 describe("webhooks.compliance real logging (no log.server mock)", () => {
@@ -135,6 +142,8 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     process.env = { ...originalEnv, SHOPIFY_API_KEY: "test-api-key", SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
     // Reset mock to default for each test
     mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+    // Set up waitUntil mock
+    setupWaitUntilMock();
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
@@ -417,7 +426,7 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const args = createMockActionArgs(request);
     const response = await action(args);
     // Email work runs in background via waitUntil
-    await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+    await Promise.allSettled(capturedWaitUntilPromises);
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();
@@ -441,7 +450,7 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const args = createMockActionArgs(request);
     const response = await action(args);
     // Email work runs in background via waitUntil
-    await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+    await Promise.allSettled(capturedWaitUntilPromises);
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();
@@ -467,7 +476,7 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const args = createMockActionArgs(request);
     const response = await action(args);
     // Email work runs in background via waitUntil
-    await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
+    await Promise.allSettled(capturedWaitUntilPromises);
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();
