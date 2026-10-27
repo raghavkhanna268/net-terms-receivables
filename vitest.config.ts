@@ -201,6 +201,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm-only reconcile flow DB tests
   "tests/integration/confirm-only-reconcile-db.test.ts",
+
+  // Cross-shop (tenant) isolation DB tests
+  "tests/integration/tenant-isolation-db.test.ts",
 ];
 
 export default defineConfig({
