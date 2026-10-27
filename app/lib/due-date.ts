@@ -270,6 +270,38 @@ export function getEndOfDayInTimezone(utcInstant: Date, timezone: string): Date 
 }
 
 /**
+ * Normalize a Shopify PaymentSchedule dueAt value for timezone-correct storage.
+ *
+ * Date-only due dates from Shopify may arrive as exactly 00:00:00.000Z (midnight UTC),
+ * which for shops west of UTC converts to the previous calendar day when cast
+ * to local date. This function detects the exact-midnight case and converts it
+ * to 23:59:59.999 in the shop's local timezone for that UTC date.
+ *
+ * Non-midnight values pass through unchanged (existing contract preserved).
+ *
+ * @param dueAt - The dueAt Date from Shopify PaymentSchedule
+ * @param timezone - Shop's IANA timezone (validated/fallback handled by caller)
+ * @returns Normalized Date: end-of-local-day if exact midnight UTC, otherwise unchanged
+ */
+export function normalizeScheduleDueAt(dueAt: Date, timezone: string): Date {
+  const utcHours = dueAt.getUTCHours();
+  const utcMinutes = dueAt.getUTCMinutes();
+  const utcSeconds = dueAt.getUTCSeconds();
+  const utcMs = dueAt.getUTCMilliseconds();
+
+  if (utcHours === 0 && utcMinutes === 0 && utcSeconds === 0 && utcMs === 0) {
+    return endOfLocalDay(
+      dueAt.getUTCFullYear(),
+      dueAt.getUTCMonth() + 1,
+      dueAt.getUTCDate(),
+      timezone
+    );
+  }
+
+  return dueAt;
+}
+
+/**
  * Add calendar days to a date and return end-of-day in the specified timezone.
  */
 export function addDaysAndGetEndOfDay(
@@ -638,7 +670,7 @@ function inferFromPaymentTerms(
     const scheduleWithDue = schedules.find((s) => s.dueAt !== null);
     if (scheduleWithDue?.dueAt) {
       return {
-        dueAt: scheduleWithDue.dueAt,
+        dueAt: normalizeScheduleDueAt(scheduleWithDue.dueAt, timezone),
         dueSource: "schedule",
         basis: null,
         reason: "Payment due on receipt (Shopify schedule)",
@@ -660,7 +692,7 @@ function inferFromPaymentTerms(
     const scheduleWithDue = schedules.find((s) => s.dueAt !== null);
     if (scheduleWithDue?.dueAt) {
       return {
-        dueAt: scheduleWithDue.dueAt,
+        dueAt: normalizeScheduleDueAt(scheduleWithDue.dueAt, timezone),
         dueSource: "schedule",
         basis: null,
         reason: "Payment due on fulfillment (schedule set by Shopify)",
@@ -698,7 +730,7 @@ function inferFromPaymentTerms(
         s.dueAt!.getTime() < min.dueAt!.getTime() ? s : min
       );
       return {
-        dueAt: earliest.dueAt,
+        dueAt: normalizeScheduleDueAt(earliest.dueAt!, timezone),
         dueSource: "schedule",
         basis: null,
         reason:
@@ -717,7 +749,7 @@ function inferFromPaymentTerms(
         s.dueAt!.getTime() > max.dueAt!.getTime() ? s : max
       );
       return {
-        dueAt: latest.dueAt,
+        dueAt: normalizeScheduleDueAt(latest.dueAt!, timezone),
         dueSource: "schedule",
         basis: null,
         reason: "Latest payment schedule (all payments completed)",

@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (95 total, counting expanded globs):
+ * Files included (97 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -47,13 +47,15 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
  *
- * Sync DB tests:
+ * Sync DB tests (8 files):
  * - app/services/sync/__tests__/company-location.test.ts
  * - app/services/sync/__tests__/customer.test.ts
  * - app/services/sync/__tests__/order.test.ts
  * - app/services/sync/__tests__/draft-order.test.ts
  * - app/services/sync/__tests__/draft-order-bulk-db.test.ts
  * - app/services/sync/__tests__/bulk-empty-result-db.test.ts
+ * - app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts
+ * - app/services/sync/__tests__/due-date-normalize-db.test.ts
  *
  * Route DB tests:
  * - app/routes/__tests__/app.imports.test.ts
@@ -64,6 +66,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/routes/__tests__/app._index-overlimit-db.test.ts
  * - app/routes/__tests__/app.accounts.$id-db.test.ts
  * - app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts
+ * - app/routes/__tests__/ledger-account-link-journey-db.test.ts
  * - app/routes/__tests__/merchant-form-validation-db.test.ts
  * - app/routes/__tests__/webhooks.compliance.customers.test.ts
  * - app/routes/__tests__/admin-render-smoke.test.tsx
@@ -134,11 +137,13 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
   "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
   "app/services/drain/__tests__/drain-guard-db.test.ts",
+  "app/services/drain/__tests__/multipass-drain-db.test.ts",
   "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
   "app/services/drain/__tests__/company-location-pii-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
+  "app/services/compliance/__tests__/redact-customer-queues-db.test.ts",
   "app/services/__tests__/customer-data-redaction-completeness-db.test.ts",
 
   // Sync DB tests (these use TEST_DATABASE_URL)
@@ -148,6 +153,8 @@ const DB_TEST_PATTERNS = [
   "app/services/sync/__tests__/draft-order.test.ts",
   "app/services/sync/__tests__/draft-order-bulk-db.test.ts",
   "app/services/sync/__tests__/bulk-empty-result-db.test.ts",
+  "app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts",
+  "app/services/sync/__tests__/due-date-normalize-db.test.ts",
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
@@ -158,6 +165,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
   "app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts",
+  "app/routes/__tests__/ledger-account-link-journey-db.test.ts",
   "app/routes/__tests__/merchant-form-validation-db.test.ts",
   "app/routes/__tests__/webhooks.compliance.customers.test.ts",
   "app/routes/__tests__/admin-render-smoke.test.tsx",
@@ -180,6 +188,9 @@ const DB_TEST_PATTERNS = [
   "app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts",
 
   // Script DB tests
+  // G4 fixture (and any future scripts/__tests__ DB test): runs sequentially
+  // against the real Postgres/pgmq like the other DB-backed suites.
+  "scripts/__tests__/*-db.test.ts",
   "scripts/__tests__/seed.test.ts",
   "scripts/__tests__/backstop-backfill.test.ts",
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",

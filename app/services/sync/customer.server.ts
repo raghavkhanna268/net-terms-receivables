@@ -51,6 +51,25 @@ import { safeLog, shopHash } from "~/lib/log.server";
  */
 export type CustomerPiiMode = "fetched" | "fallback" | "disabled";
 
+/** Infix appended to customerId by redactCustomer to mark it as redacted. */
+const REDACTED_CUSTOMER_INFIX = "_redacted_";
+
+/**
+ * True if customers/redact anonymized a BuyerAccount for this customer in this shop
+ * (customerId rewritten to `<gid>_redacted_<epoch ms>` by redactCustomer).
+ * Anchored prefix compare with left(); no wildcards.
+ */
+export async function isCustomerRedacted(sql: Sql, shopId: string, customerGid: string): Promise<boolean> {
+  const prefix = `${customerGid}${REDACTED_CUSTOMER_INFIX}`;
+  const [row] = await sql<{ one: number }[]>`
+    SELECT 1 AS one FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId}
+      AND left("customerId", length(${prefix})) = ${prefix}
+    LIMIT 1
+  `;
+  return row !== undefined;
+}
+
 /**
  * Process a Customer webhook event.
  *
@@ -107,6 +126,11 @@ export async function processCustomerWebhook(
       action: "skipped",
       skipReason: "Customer deleted; BuyerAccount preserved for financial history",
     };
+  }
+
+  // Skip processing for redacted customers (no write, no markWebhookProcessed)
+  if (await isCustomerRedacted(sql, shopId, customer.id)) {
+    return { success: true, action: "skipped", skipReason: "Customer redacted" };
   }
 
   // Get tag rules for this shop
@@ -758,6 +782,11 @@ export async function processBulkCustomer(
       action: "skipped",
       skipReason: "Customer does not match any tag rule",
     };
+  }
+
+  // Skip processing for redacted customers (no write)
+  if (await isCustomerRedacted(sql, shopId, customer.id)) {
+    return { success: true, action: "skipped", skipReason: "Customer redacted" };
   }
 
   // Upsert tagged customer tracking record
