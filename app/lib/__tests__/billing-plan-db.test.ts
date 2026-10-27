@@ -1,23 +1,19 @@
 /**
- * Billing and Plan Coverage Tests (S21).
+ * Billing and Plan Coverage Tests (S21) - Additions beyond #481.
  *
- * Tests the Managed Pricing integration:
+ * Tests unique Managed Pricing features not covered by billing-plan-state-db.test.ts:
  * A. Plan handle redirect and currentAppInstallation query - table-driven
- * B. Plan cache update on webhook (ACTIVE, DECLINED, CANCELLED, EXPIRED, FROZEN) + reinstall #468
  * C. Plan handle to features mapping - table-driven
  * D. PLAN_GATING_ENFORCED behavior
  * E. Unknown/missing handle fails safe
- * F. Webhook HMAC failure - rejected with no plan or cache change
  * G. Log sanitization - no shop domain, gid://, or charge/subscription id
  *
- * Uses real DB rows (Sequential DB group via describeWithDb) and real route
- * handlers with correctly signed requests and mocked Admin GraphQL.
+ * Uses real DB rows (Sequential DB group via describeWithDb) and mocked Admin GraphQL.
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import postgres from "postgres";
 import crypto from "node:crypto";
-import type { ActionFunctionArgs } from "react-router";
 import { sqlOptions } from "~/lib/db-light.server";
 import {
   ALL_PLAN_KEYS,
@@ -38,58 +34,9 @@ function generateShopifyHmac(body: string, secret: string): string {
   return crypto.createHmac("sha256", secret).update(body, "utf8").digest("base64");
 }
 
-function createSignedWebhookRequest(
-  body: string,
-  topic: string,
-  secret: string,
-  options: {
-    shopDomain: string;
-    omitHmac?: boolean;
-    wrongHmac?: string;
-    webhookId?: string;
-  }
-): Request {
-  const hmac = options.wrongHmac ?? (options.omitHmac ? undefined : generateShopifyHmac(body, secret));
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-Shopify-API-Version": "2026-10",
-    "X-Shopify-Webhook-Id": options.webhookId ?? `billing-test-${Date.now()}`,
-    "X-Shopify-Topic": topic,
-    "X-Shopify-Shop-Domain": options.shopDomain,
-  };
-
-  if (hmac) {
-    headers["X-Shopify-Hmac-Sha256"] = hmac;
-  }
-
-  return new Request("https://example.com/webhooks/app/subscriptions_update", {
-    method: "POST",
-    headers,
-    body,
-  });
-}
-
-function createMockWebhookActionArgs(request: Request): ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> } {
-  const mockWaitUntil = vi.fn();
-  return {
-    request,
-    params: {},
-    context: {
-      cloudflare: {
-        env: {},
-        ctx: { waitUntil: mockWaitUntil },
-      },
-    },
-    url: new URL(request.url),
-    pattern: "/webhooks/app/subscriptions_update",
-    _waitUntil: mockWaitUntil,
-  } as unknown as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
-}
-
 describeWithDb("Billing and Plan Coverage (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-billingplan";
-  const _TEST_SHOP_DOMAIN = `test-shop-${TEST_SUFFIX}.myshopify.com`;
   const originalEnv = process.env;
 
   beforeAll(async () => {
@@ -243,156 +190,6 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
 
       vi.doUnmock("~/services/drain/admin-client.server");
       vi.doUnmock("~/lib/sentry");
-    });
-  });
-
-  /**
-   * B. Plan cache update on webhook + reinstall behavior (#468).
-   */
-  describe("B. Plan cache update on webhook (state transitions)", () => {
-    it("ACTIVE status sets paid plan and updates cache", async () => {
-      vi.resetModules();
-      const mockAdminGraphQL = vi.fn();
-      vi.doMock("~/services/drain/admin-client.server", () => ({
-        adminGraphQL: mockAdminGraphQL,
-      }));
-      vi.doMock("~/lib/sentry", () => ({
-        captureException: vi.fn(),
-        captureMessage: vi.fn(),
-        captureExceptionWithTags: vi.fn(),
-      }));
-
-      const shopDomain = `test-active-${TEST_SUFFIX}.myshopify.com`;
-
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-        VALUES (${shopDomain}, 'UTC', 'INR', 'none', NOW(), NOW())
-      `;
-
-      mockAdminGraphQL.mockResolvedValueOnce({
-        success: true,
-        data: {
-          currentAppInstallation: {
-            activeSubscriptions: [{
-              id: "gid://shopify/AppSubscription/active-sub",
-              name: "Growth",
-              status: "ACTIVE",
-              test: false,
-              lineItems: [],
-            }],
-          },
-        },
-      });
-
-      const { refreshPlanCache } = await import("~/services/plan.server");
-      await refreshPlanCache(sql, shopDomain);
-
-      const [shop] = await sql<{
-        plan_key: string;
-        subscription_id: string | null;
-        plan_cached_at: Date | null;
-      }[]>`
-        SELECT plan_key, subscription_id, plan_cached_at
-        FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-
-      expect(shop.plan_key).toBe("growth");
-      expect(shop.subscription_id).toBe("gid://shopify/AppSubscription/active-sub");
-      expect(shop.plan_cached_at).not.toBeNull();
-
-      vi.doUnmock("~/services/drain/admin-client.server");
-      vi.doUnmock("~/lib/sentry");
-    });
-
-    const NON_ACTIVE_STATUSES = ["DECLINED", "CANCELLED", "EXPIRED", "FROZEN"];
-
-    it.each(NON_ACTIVE_STATUSES)(
-      "%s status leaves no stale paid state (plan becomes none)",
-      async (status) => {
-        vi.resetModules();
-        const localMockAdminGraphQL = vi.fn();
-        vi.doMock("~/services/drain/admin-client.server", () => ({
-          adminGraphQL: localMockAdminGraphQL,
-        }));
-        vi.doMock("~/lib/sentry", () => ({
-          captureException: vi.fn(),
-          captureMessage: vi.fn(),
-          captureExceptionWithTags: vi.fn(),
-        }));
-
-        const shopDomain = `test-${status.toLowerCase()}-${TEST_SUFFIX}.myshopify.com`;
-
-        await sql`
-          INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, "createdAt", "updatedAt")
-          VALUES (${shopDomain}, 'UTC', 'INR', 'growth', 'gid://shopify/AppSubscription/old-sub', NOW(), NOW())
-        `;
-
-        localMockAdminGraphQL.mockResolvedValueOnce({
-          success: true,
-          data: {
-            currentAppInstallation: {
-              activeSubscriptions: [{
-                id: `gid://shopify/AppSubscription/${status.toLowerCase()}-sub`,
-                name: "Growth",
-                status,
-                test: false,
-                lineItems: [],
-              }],
-            },
-          },
-        });
-
-        const { refreshPlanCache } = await import("~/services/plan.server");
-        await refreshPlanCache(sql, shopDomain);
-
-        const [shop] = await sql<{ plan_key: string; subscription_id: string | null }[]>`
-          SELECT plan_key, subscription_id FROM "Shop" WHERE domain = ${shopDomain}
-        `;
-
-        expect(shop.plan_key).toBe("none");
-        expect(shop.subscription_id).toBeNull();
-
-        vi.doUnmock("~/services/drain/admin-client.server");
-        vi.doUnmock("~/lib/sentry");
-      }
-    );
-
-    it("reinstall clears plan_cached_at (#468) forcing fresh read", async () => {
-      const shopDomain = `test-reinstall-${TEST_SUFFIX}.myshopify.com`;
-      const planCachedAt = new Date("2026-10-01T12:00:00Z");
-
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, plan_cached_at, "createdAt", "updatedAt")
-        VALUES (${shopDomain}, 'UTC', 'INR', 'growth', ${planCachedAt}, NOW(), NOW())
-      `;
-
-      const [before] = await sql<{ plan_cached_at: Date | null }[]>`
-        SELECT plan_cached_at FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-      expect(before.plan_cached_at?.getTime()).toBe(planCachedAt.getTime());
-
-      const { markShopUninstalled } = await import("~/services/compliance");
-      await markShopUninstalled(sql, shopDomain);
-
-      const [afterUninstall] = await sql<{ plan_cached_at: Date | null; uninstalledAt: Date | null }[]>`
-        SELECT plan_cached_at, "uninstalledAt" FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-
-      expect(afterUninstall.uninstalledAt).not.toBeNull();
-      expect(afterUninstall.plan_cached_at).toBeNull();
-
-      const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
-      await upsertShopOnAuth(sql, shopDomain, "America/New_York", "INR");
-
-      const [afterReinstall] = await sql<{
-        plan_cached_at: Date | null;
-        uninstalledAt: Date | null;
-      }[]>`
-        SELECT plan_cached_at, "uninstalledAt" FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-
-      expect(afterReinstall.uninstalledAt).toBeNull();
-      expect(afterReinstall.plan_cached_at).toBeNull();
     });
   });
 
@@ -580,112 +377,6 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
   });
 
   /**
-   * F. Webhook HMAC failure - rejected with no plan or cache change.
-   */
-  describe("F. Webhook HMAC failure", () => {
-    it("bad HMAC returns 401 and leaves DB unchanged", async () => {
-      const shopDomain = `test-hmac-fail-${TEST_SUFFIX}.myshopify.com`;
-
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, subscription_id, subscription_name, is_test, plan_cached_at, "createdAt", "updatedAt")
-        VALUES (${shopDomain}, 'UTC', 'INR', 'growth', 'gid://shopify/AppSubscription/existing', 'Growth', false, NOW(), NOW(), NOW())
-      `;
-
-      const [before] = await sql<{
-        plan_key: string;
-        subscription_id: string | null;
-        subscription_name: string | null;
-        is_test: boolean;
-        plan_cached_at: Date | null;
-        updatedAt: Date;
-      }[]>`
-        SELECT plan_key, subscription_id, subscription_name, is_test, plan_cached_at, "updatedAt"
-        FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-
-      const payload = { app_subscription: { id: "gid://shopify/AppSubscription/attacker" } };
-      const body = JSON.stringify(payload);
-      const wrongHmac = generateShopifyHmac(body, "wrong-secret-not-real");
-
-      const request = createSignedWebhookRequest(body, "app_subscriptions/update", SYNTHETIC_TEST_SECRET, {
-        shopDomain,
-        wrongHmac,
-      });
-
-      const { action } = await import("~/routes/webhooks.app.subscriptions_update");
-
-      await expect(action(createMockWebhookActionArgs(request))).rejects.toMatchObject({
-        status: 401,
-      });
-
-      const [after] = await sql<{
-        plan_key: string;
-        subscription_id: string | null;
-        subscription_name: string | null;
-        is_test: boolean;
-        plan_cached_at: Date | null;
-        updatedAt: Date;
-      }[]>`
-        SELECT plan_key, subscription_id, subscription_name, is_test, plan_cached_at, "updatedAt"
-        FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-
-      expect(after.plan_key).toBe(before.plan_key);
-      expect(after.subscription_id).toBe(before.subscription_id);
-      expect(after.subscription_name).toBe(before.subscription_name);
-      expect(after.is_test).toBe(before.is_test);
-      expect(after.plan_cached_at?.getTime()).toBe(before.plan_cached_at?.getTime());
-      expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
-    });
-
-    it("missing HMAC header returns 401", async () => {
-      const shopDomain = `test-hmac-missing-${TEST_SUFFIX}.myshopify.com`;
-      const payload = { app_subscription: { id: "gid://shopify/AppSubscription/test" } };
-      const body = JSON.stringify(payload);
-
-      const request = createSignedWebhookRequest(body, "app_subscriptions/update", SYNTHETIC_TEST_SECRET, {
-        shopDomain,
-        omitHmac: true,
-      });
-
-      const { action } = await import("~/routes/webhooks.app.subscriptions_update");
-
-      await expect(action(createMockWebhookActionArgs(request))).rejects.toMatchObject({
-        status: 401,
-      });
-    });
-
-    it("tampered body with original HMAC returns 401", async () => {
-      const shopDomain = `test-hmac-tamper-${TEST_SUFFIX}.myshopify.com`;
-      const originalPayload = { app_subscription: { id: "gid://shopify/AppSubscription/original" } };
-      const originalBody = JSON.stringify(originalPayload);
-      const hmac = generateShopifyHmac(originalBody, SYNTHETIC_TEST_SECRET);
-
-      const tamperedPayload = { app_subscription: { id: "gid://shopify/AppSubscription/tampered" } };
-      const tamperedBody = JSON.stringify(tamperedPayload);
-
-      const request = new Request("https://example.com/webhooks/app/subscriptions_update", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Topic": "app_subscriptions/update",
-          "X-Shopify-Shop-Domain": shopDomain,
-          "X-Shopify-Hmac-Sha256": hmac,
-          "X-Shopify-Webhook-Id": "tamper-test-123",
-          "X-Shopify-API-Version": "2026-10",
-        },
-        body: tamperedBody,
-      });
-
-      const { action } = await import("~/routes/webhooks.app.subscriptions_update");
-
-      await expect(action(createMockWebhookActionArgs(request))).rejects.toMatchObject({
-        status: 401,
-      });
-    });
-  });
-
-  /**
    * G. Log sanitization - no shop domain, gid://, or charge/subscription id.
    */
   describe("G. Log sanitization", () => {
@@ -835,19 +526,41 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       const payload = { app_subscription: { id: `gid://shopify/AppSubscription/${syntheticSubId}` } };
       const body = JSON.stringify(payload);
 
-      const request = createSignedWebhookRequest(body, "app_subscriptions/update", SYNTHETIC_TEST_SECRET, {
-        shopDomain,
-        webhookId: "log-test-webhook-id",
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-Shopify-API-Version": "2026-10",
+        "X-Shopify-Webhook-Id": "log-test-webhook-id",
+        "X-Shopify-Topic": "app_subscriptions/update",
+        "X-Shopify-Shop-Domain": shopDomain,
+        "X-Shopify-Hmac-Sha256": generateShopifyHmac(body, SYNTHETIC_TEST_SECRET),
+      };
+
+      const request = new Request("https://example.com/webhooks/app/subscriptions_update", {
+        method: "POST",
+        headers,
+        body,
       });
 
-      const { action } = await import("~/routes/webhooks.app.subscriptions_update");
+      const mockWaitUntil = vi.fn();
+      const args = {
+        request,
+        params: {},
+        context: {
+          cloudflare: {
+            env: {},
+            ctx: { waitUntil: mockWaitUntil },
+          },
+        },
+        url: new URL(request.url),
+        pattern: "/webhooks/app/subscriptions_update",
+      };
 
-      const args = createMockWebhookActionArgs(request);
-      const response = await action(args);
+      const { action } = await import("~/routes/webhooks.app.subscriptions_update");
+      const response = await action(args as Parameters<typeof action>[0]);
       expect(response.status).toBe(200);
 
-      if (args._waitUntil.mock.calls.length > 0) {
-        await args._waitUntil.mock.calls[0][0];
+      if (mockWaitUntil.mock.calls.length > 0) {
+        await mockWaitUntil.mock.calls[0][0];
       }
 
       const allOutput = getAllConsoleOutput();
@@ -860,170 +573,6 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       vi.doUnmock("~/lib/sentry");
       vi.doUnmock("~/lib/request-context.server");
       vi.doUnmock("~/services/gating.server");
-    });
-
-    it("HMAC failure path logs contain no sensitive data", async () => {
-      const shopDomain = `test-log-hmac-fail-${TEST_SUFFIX}.myshopify.com`;
-      const syntheticSubId = "hmac-fail-log-sub";
-      const payload = { app_subscription: { id: `gid://shopify/AppSubscription/${syntheticSubId}` } };
-      const body = JSON.stringify(payload);
-      const wrongHmac = generateShopifyHmac(body, "wrong-secret");
-
-      const request = createSignedWebhookRequest(body, "app_subscriptions/update", SYNTHETIC_TEST_SECRET, {
-        shopDomain,
-        wrongHmac,
-      });
-
-      const { action } = await import("~/routes/webhooks.app.subscriptions_update");
-
-      try {
-        await action(createMockWebhookActionArgs(request));
-      } catch {
-        // Expected 401
-      }
-
-      const allOutput = getAllConsoleOutput();
-      expect(allOutput.length).toBeGreaterThan(0);
-      expect(allOutput.some(line => line.includes("401") || line.includes("HMAC") || line.includes("webhook"))).toBe(true);
-
-      assertNoSensitiveData(shopDomain, [syntheticSubId]);
-    });
-
-    it("gating check logs contain no sensitive data", async () => {
-      vi.stubEnv("PLAN_GATING_ENFORCED", "true");
-      vi.resetModules();
-
-      const shopDomain = `test-log-gating-${TEST_SUFFIX}.myshopify.com`;
-      const shopId = `shop-log-gating-${TEST_SUFFIX}`;
-
-      await sql`
-        INSERT INTO "Shop" (id, domain, timezone, currency, plan_key, plan_cached_at, "createdAt", "updatedAt")
-        VALUES (${shopId}, ${shopDomain}, 'UTC', 'INR', 'none', NOW(), NOW(), NOW())
-      `;
-
-      const { checkCompanyLimit } = await import("~/services/gating.server");
-      await checkCompanyLimit(sql, shopId);
-
-      const allOutput = getAllConsoleOutput();
-      expect(allOutput.length).toBeGreaterThan(0);
-      expect(allOutput.some(line => line.includes("company_limit_check") || line.includes("gating"))).toBe(true);
-
-      assertNoSensitiveData(shopDomain, []);
-    });
-  });
-
-  /**
-   * Additional: Test subscription test flag behavior.
-   */
-  describe("Additional: Test subscription flag", () => {
-    it("test:true from API is stored in is_test column", async () => {
-      vi.resetModules();
-      const mockAdminGraphQL = vi.fn();
-      vi.doMock("~/services/drain/admin-client.server", () => ({
-        adminGraphQL: mockAdminGraphQL,
-      }));
-      vi.doMock("~/lib/sentry", () => ({
-        captureException: vi.fn(),
-        captureMessage: vi.fn(),
-        captureExceptionWithTags: vi.fn(),
-      }));
-
-      const shopDomain = `test-flag-true-${TEST_SUFFIX}.myshopify.com`;
-
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
-        VALUES (${shopDomain}, 'UTC', 'INR', 'none', NOW(), NOW())
-      `;
-
-      mockAdminGraphQL.mockResolvedValueOnce({
-        success: true,
-        data: {
-          currentAppInstallation: {
-            activeSubscriptions: [{
-              id: "gid://shopify/AppSubscription/test-sub",
-              name: "Growth",
-              status: "ACTIVE",
-              test: true,
-              lineItems: [],
-            }],
-          },
-        },
-      });
-
-      const { refreshPlanCache, resolvePlan } = await import("~/services/plan.server");
-      await refreshPlanCache(sql, shopDomain);
-
-      const [shop] = await sql<{ is_test: boolean }[]>`
-        SELECT is_test FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-      expect(shop.is_test).toBe(true);
-
-      mockAdminGraphQL.mockResolvedValueOnce({
-        success: true,
-        data: {
-          currentAppInstallation: {
-            activeSubscriptions: [{
-              id: "gid://shopify/AppSubscription/test-sub",
-              name: "Growth",
-              status: "ACTIVE",
-              test: true,
-              lineItems: [],
-            }],
-          },
-        },
-      });
-
-      const resolved = await resolvePlan(sql, shopDomain, true);
-      expect(resolved.isTest).toBe(true);
-
-      vi.doUnmock("~/services/drain/admin-client.server");
-      vi.doUnmock("~/lib/sentry");
-    });
-
-    it("test:false from API is stored in is_test column", async () => {
-      vi.resetModules();
-      const mockAdminGraphQL = vi.fn();
-      vi.doMock("~/services/drain/admin-client.server", () => ({
-        adminGraphQL: mockAdminGraphQL,
-      }));
-      vi.doMock("~/lib/sentry", () => ({
-        captureException: vi.fn(),
-        captureMessage: vi.fn(),
-        captureExceptionWithTags: vi.fn(),
-      }));
-
-      const shopDomain = `test-flag-false-${TEST_SUFFIX}.myshopify.com`;
-
-      await sql`
-        INSERT INTO "Shop" (domain, timezone, currency, plan_key, is_test, "createdAt", "updatedAt")
-        VALUES (${shopDomain}, 'UTC', 'INR', 'none', true, NOW(), NOW())
-      `;
-
-      mockAdminGraphQL.mockResolvedValueOnce({
-        success: true,
-        data: {
-          currentAppInstallation: {
-            activeSubscriptions: [{
-              id: "gid://shopify/AppSubscription/prod-sub",
-              name: "Growth",
-              status: "ACTIVE",
-              test: false,
-              lineItems: [],
-            }],
-          },
-        },
-      });
-
-      const { refreshPlanCache } = await import("~/services/plan.server");
-      await refreshPlanCache(sql, shopDomain);
-
-      const [shop] = await sql<{ is_test: boolean }[]>`
-        SELECT is_test FROM "Shop" WHERE domain = ${shopDomain}
-      `;
-      expect(shop.is_test).toBe(false);
-
-      vi.doUnmock("~/services/drain/admin-client.server");
-      vi.doUnmock("~/lib/sentry");
     });
   });
 });
