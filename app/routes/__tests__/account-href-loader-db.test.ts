@@ -3,10 +3,15 @@
  *
  * Verifies that when React Router decodes a URL-encoded id (e.g. ids with
  * embedded path separators), the loader's DB lookup succeeds.
+ *
+ * Route config is derived from real app/routes/*.tsx filenames so the test
+ * breaks if route files are renamed or removed.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import postgres from "postgres";
 import { matchRoutes, type RouteObject } from "react-router";
+import { readdirSync } from "fs";
+import { resolve } from "path";
 import { sqlOptions } from "~/lib/db-light.server";
 import { accountHref } from "~/lib/account-href";
 
@@ -37,18 +42,57 @@ vi.mock("~/services/access-log.server", () => ({
 const TEST_ID_WITH_SLASHES = "seed-test-0000-example/part:9";
 
 /**
- * Build the route config that matches the app's flat routes under app/routes/.
+ * Convert a flatRoutes filename segment to a route path segment.
+ */
+function segmentToPath(segment: string): string | null {
+  if (segment === "_index") return null;
+  if (segment.startsWith("_")) return "";
+  if (segment === "$") return "*";
+  if (segment.startsWith("$")) return ":" + segment.slice(1);
+  return segment;
+}
+
+/**
+ * Build route config from real app/routes/*.tsx filenames.
  */
 function buildAppRouteConfig(): RouteObject[] {
+  const routesDir = resolve(__dirname, "../../routes");
+  const files = readdirSync(routesDir).filter(
+    (f) => f.startsWith("app.") && f.endsWith(".tsx") && f !== "app.tsx"
+  );
+
+  const children: RouteObject[] = [];
+  const catchAll: RouteObject[] = [];
+
+  for (const file of files) {
+    const name = file.replace(/\.tsx$/, "");
+    const id = `routes/${name}`;
+    const segments = name.split(".").slice(1);
+
+    if (segments.length === 1 && segments[0] === "_index") {
+      children.push({ id, index: true });
+      continue;
+    }
+
+    const pathParts = segments.map(segmentToPath).filter((p) => p !== null && p !== "");
+    const path = pathParts.join("/");
+
+    const route: RouteObject = { id, path: path || undefined };
+
+    if (path === "*") {
+      catchAll.push(route);
+    } else {
+      children.push(route);
+    }
+  }
+
+  children.push(...catchAll);
+
   return [
     {
       id: "routes/app",
       path: "app",
-      children: [
-        { id: "routes/app._index", index: true },
-        { id: "routes/app.accounts.$id", path: "accounts/:id" },
-        { id: "routes/app.$", path: "*" },
-      ],
+      children,
     },
   ];
 }

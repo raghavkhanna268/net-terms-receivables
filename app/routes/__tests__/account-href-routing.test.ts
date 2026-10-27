@@ -4,11 +4,16 @@
  * When buyer account ids contain '/' or ':' (e.g. seed ids with embedded
  * path separators), the href must be URL-encoded so React Router matches
  * the $id param route, not the catch-all.
+ *
+ * Route config is derived from real app/routes/*.tsx filenames so the test
+ * breaks if route files are renamed or removed.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToString } from "react-dom/server";
 import { createElement, type ReactNode } from "react";
 import { matchRoutes, type RouteObject } from "react-router";
+import { readdirSync } from "fs";
+import { resolve } from "path";
 import { accountHref } from "~/lib/account-href";
 
 const TEST_ID_WITH_SLASHES = "seed-test-0000-example/part:9";
@@ -53,31 +58,65 @@ import { useLoaderData } from "react-router";
 const mockUseLoaderData = vi.mocked(useLoaderData);
 
 /**
- * Build the route config that matches the app's flat routes under app/routes/.
+ * Convert a flatRoutes filename segment to a route path segment.
+ * - $param → :param (dynamic segment)
+ * - $ alone → * (catch-all splat)
+ * - _index → index route (returns null, handled separately)
+ * - _prefix → layout route (ignored in path)
+ */
+function segmentToPath(segment: string): string | null {
+  if (segment === "_index") return null;
+  if (segment.startsWith("_")) return "";
+  if (segment === "$") return "*";
+  if (segment.startsWith("$")) return ":" + segment.slice(1);
+  return segment;
+}
+
+/**
+ * Build route config from real app/routes/*.tsx filenames.
  *
- * This config mirrors the React Router file-based routing convention:
- * - app.accounts.$id.tsx → /app/accounts/:id
- * - app.$.tsx → /app/* (catch-all splat)
+ * Reads the filesystem and converts flatRoutes naming convention to
+ * React Router route objects. This ensures the test breaks if route
+ * files are renamed or removed.
  */
 function buildAppRouteConfig(): RouteObject[] {
+  const routesDir = resolve(__dirname, "../../routes");
+  const files = readdirSync(routesDir).filter(
+    (f) => f.startsWith("app.") && f.endsWith(".tsx") && f !== "app.tsx"
+  );
+
+  const children: RouteObject[] = [];
+  const catchAll: RouteObject[] = [];
+
+  for (const file of files) {
+    const name = file.replace(/\.tsx$/, "");
+    const id = `routes/${name}`;
+    const segments = name.split(".").slice(1);
+
+    if (segments.length === 1 && segments[0] === "_index") {
+      children.push({ id, index: true });
+      continue;
+    }
+
+    const pathParts = segments.map(segmentToPath).filter((p) => p !== null && p !== "");
+    const path = pathParts.join("/");
+
+    const route: RouteObject = { id, path: path || undefined };
+
+    if (path === "*") {
+      catchAll.push(route);
+    } else {
+      children.push(route);
+    }
+  }
+
+  children.push(...catchAll);
+
   return [
     {
       id: "routes/app",
       path: "app",
-      children: [
-        { id: "routes/app._index", index: true },
-        { id: "routes/app.accounts.$id", path: "accounts/:id" },
-        { id: "routes/app.reconcile", path: "reconcile" },
-        { id: "routes/app.imports", path: "imports" },
-        { id: "routes/app.settings.reminders", path: "settings/reminders" },
-        { id: "routes/app.tag-rules", path: "tag-rules" },
-        { id: "routes/app.onboarding", path: "onboarding" },
-        { id: "routes/app.welcome", path: "welcome" },
-        { id: "routes/app.plan", path: "plan" },
-        { id: "routes/app.data-requests", path: "data-requests" },
-        { id: "routes/app.data-requests.$id.download", path: "data-requests/:id/download" },
-        { id: "routes/app.$", path: "*" },
-      ],
+      children,
     },
   ];
 }

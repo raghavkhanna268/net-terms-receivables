@@ -2,8 +2,8 @@
  * Tests for account-href.ts encoding helper.
  *
  * Verifies that buyer account ids containing '/' and ':' (e.g. seed ids
- * like 'seed-account-shop-gid://shopify/CompanyLocation/123') are properly
- * encoded so they don't 404 into the catch-all route.
+ * with embedded path separators) are properly encoded so they don't 404
+ * into the catch-all route.
  */
 import { describe, it, expect } from "vitest";
 import { accountHref } from "../account-href";
@@ -24,11 +24,11 @@ describe("accountHref", () => {
     expect(href).not.toContain("/part");
   });
 
-  it("encodes a seed-style id with GID pattern", () => {
-    const seedId = "seed-account-shop123-gid://shopify/CompanyLocation/456";
+  it("encodes a seed-style id with multiple path separators", () => {
+    const seedId = "seed-account-shop123-loc://internal/location/456";
     const href = accountHref(seedId);
     expect(href).toBe(`/app/accounts/${encodeURIComponent(seedId)}`);
-    expect(href).not.toMatch(/\/shopify\//);
+    expect(href).not.toMatch(/\/internal\//);
   });
 
   it("returns a single path segment after /app/accounts/", () => {
