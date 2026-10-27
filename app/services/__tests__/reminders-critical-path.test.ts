@@ -138,7 +138,7 @@ function createMockSql() {
 const FAKE_RESEND_KEY = "re_test_FAKE_KEY_123";
 
 describe("Critical Path: Reminder Sending Gates", () => {
-  const originalEnv = process.env;
+  const originalEnv = { ...process.env };
   let mockSql: ReturnType<typeof createMockSql>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
@@ -1181,22 +1181,26 @@ describeWithDb("Critical Path: DB-backed tests", () => {
   const TEST_RULE_ID = `rule-critdb-${TEST_SUFFIX}`;
   const TEST_EMAIL = "critdb-buyer@example.com";
 
-  let globalSendsSnapshot: { dailyCount: number; monthlyCount: number; sendDate: Date; sendMonth: string } | null = null;
+  let globalSendsSnapshot: { dailyCount: number; monthlyCount: number; sendDate: Date; sendMonth: string }[] = [];
+
+  const ENV_VARS_TO_TRACK = ["RESEND_API_KEY", "RESEND_FROM", "REMINDER_UNSUBSCRIBE_SECRET", "SHOPIFY_APP_URL", "RESEND_TEST_RECIPIENTS"] as const;
+  let envBefore: Record<string, string | undefined>;
 
   beforeAll(async () => {
+    envBefore = Object.fromEntries(
+      ENV_VARS_TO_TRACK.map(k => [k, Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined])
+    );
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
-    const [existingGlobal] = await sql<{ daily_count: number; monthly_count: number; send_date: Date; send_month: string }[]>`
+    const existingRows = await sql<{ daily_count: number; monthly_count: number; send_date: Date; send_month: string }[]>`
       SELECT daily_count, monthly_count, send_date, send_month FROM s18_global_sends WHERE send_key = 'global'
     `;
-    if (existingGlobal) {
-      globalSendsSnapshot = {
-        dailyCount: existingGlobal.daily_count,
-        monthlyCount: existingGlobal.monthly_count,
-        sendDate: existingGlobal.send_date,
-        sendMonth: existingGlobal.send_month,
-      };
-    }
+    globalSendsSnapshot = existingRows.map(row => ({
+      dailyCount: row.daily_count,
+      monthlyCount: row.monthly_count,
+      sendDate: row.send_date,
+      sendMonth: row.send_month,
+    }));
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, timezone, plan_key, "createdAt", "updatedAt")
@@ -1244,20 +1248,41 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
 
-    if (globalSendsSnapshot) {
+    await sql`DELETE FROM s18_global_sends WHERE send_key = 'global'`;
+    for (const row of globalSendsSnapshot) {
       await sql`
-        UPDATE s18_global_sends
-        SET daily_count = ${globalSendsSnapshot.dailyCount},
-            monthly_count = ${globalSendsSnapshot.monthlyCount},
-            send_date = ${globalSendsSnapshot.sendDate},
-            send_month = ${globalSendsSnapshot.sendMonth}
-        WHERE send_key = 'global'
+        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+        VALUES (
+          'global',
+          ${row.sendDate},
+          ${row.sendMonth},
+          ${row.dailyCount},
+          ${row.monthlyCount},
+          NOW()
+        )
       `;
-    } else {
-      await sql`DELETE FROM s18_global_sends WHERE send_key = 'global'`;
+    }
+    const restoredRows = await sql<{ daily_count: number; monthly_count: number; send_date: Date; send_month: string }[]>`
+      SELECT daily_count, monthly_count, send_date, send_month FROM s18_global_sends WHERE send_key = 'global' ORDER BY send_date
+    `;
+    const snapshotSorted = [...globalSendsSnapshot].sort((a, b) => new Date(a.sendDate).getTime() - new Date(b.sendDate).getTime());
+    if (restoredRows.length !== snapshotSorted.length) {
+      throw new Error(`s18_global_sends restore failed: expected ${snapshotSorted.length} rows, got ${restoredRows.length}`);
+    }
+    for (let i = 0; i < snapshotSorted.length; i++) {
+      if (restoredRows[i].daily_count !== snapshotSorted[i].dailyCount || restoredRows[i].monthly_count !== snapshotSorted[i].monthlyCount) {
+        throw new Error(`s18_global_sends restore failed at row ${i}: expected ${JSON.stringify(snapshotSorted[i])}, got ${JSON.stringify(restoredRows[i])}`);
+      }
     }
 
     await sql.end();
+  });
+
+  afterAll(() => {
+    const envAfter = Object.fromEntries(
+      ENV_VARS_TO_TRACK.map(k => [k, Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined])
+    );
+    expect(envAfter).toEqual(envBefore);
   });
 
   afterEach(async () => {
@@ -1612,66 +1637,87 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
 
-    const originalEnv = process.env;
-    (process.env as Record<string, string | undefined>).RESEND_API_KEY = FAKE_RESEND_KEY;
-    (process.env as Record<string, string | undefined>).RESEND_FROM = "reminders@example.com";
-    (process.env as Record<string, string | undefined>).REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
-    (process.env as Record<string, string | undefined>).SHOPIFY_APP_URL = "https://test-app.example.com";
-    (process.env as Record<string, string | undefined>).RESEND_TEST_RECIPIENTS = TEST_EMAIL;
+    const savedResendKey = process.env.RESEND_API_KEY;
+    const savedResendFrom = process.env.RESEND_FROM;
+    const savedUnsubscribeSecret = process.env.REMINDER_UNSUBSCRIBE_SECRET;
+    const savedAppUrl = process.env.SHOPIFY_APP_URL;
+    const savedTestRecipients = process.env.RESEND_TEST_RECIPIENTS;
 
-    const { handleReminderSend } = await import("~/jobs/reminders");
-
-    const invoiceId = `inv-handler-${TEST_SUFFIX}`;
-    const orderId = `ord-handler-${TEST_SUFFIX}`;
-
-    await sql`
-      INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-        status, "issuedAt", "dueAt", "createdAt", "updatedAt"
-      )
-      VALUES (
-        ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
-        '#HANDLER-1', 10000.00, 10000.00, 'open',
-        NOW() - INTERVAL '5 days', ${new Date("2026-10-24T00:00:00+05:30")}, NOW(), NOW()
-      )
-    `;
-
-    mockFetch.mockReset();
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ id: "resend-handler-123" }),
-    });
-
-    const message = {
-      topic: "REMINDER_SEND" as const,
-      shop: TEST_SHOP_DOMAIN,
-      shopId: TEST_SHOP_ID,
-      invoiceId,
-      ruleId: TEST_RULE_ID,
-      offsetDays: 0,
-      timezone: "Asia/Kolkata",
-      webhookId: `s18_${invoiceId}_${TEST_RULE_ID}_2026-10-24`,
-      enqueuedAt: "2026-10-24T06:30:00Z",
+    const restoreEnv = () => {
+      const env = process.env as Record<string, string | undefined>;
+      if (savedResendKey === undefined) delete env.RESEND_API_KEY;
+      else env.RESEND_API_KEY = savedResendKey;
+      if (savedResendFrom === undefined) delete env.RESEND_FROM;
+      else env.RESEND_FROM = savedResendFrom;
+      if (savedUnsubscribeSecret === undefined) delete env.REMINDER_UNSUBSCRIBE_SECRET;
+      else env.REMINDER_UNSUBSCRIBE_SECRET = savedUnsubscribeSecret;
+      if (savedAppUrl === undefined) delete env.SHOPIFY_APP_URL;
+      else env.SHOPIFY_APP_URL = savedAppUrl;
+      if (savedTestRecipients === undefined) delete env.RESEND_TEST_RECIPIENTS;
+      else env.RESEND_TEST_RECIPIENTS = savedTestRecipients;
     };
 
-    const result1 = await handleReminderSend(sql, message);
-    expect(result1.success).toBe(true);
-    expect(result1.action).toBe("created");
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    try {
+      (process.env as Record<string, string | undefined>).RESEND_API_KEY = FAKE_RESEND_KEY;
+      (process.env as Record<string, string | undefined>).RESEND_FROM = "reminders@example.com";
+      (process.env as Record<string, string | undefined>).REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
+      (process.env as Record<string, string | undefined>).SHOPIFY_APP_URL = "https://test-app.example.com";
+      (process.env as Record<string, string | undefined>).RESEND_TEST_RECIPIENTS = TEST_EMAIL;
 
-    const result2 = await handleReminderSend(sql, message);
-    expect(result2.success).toBe(true);
-    expect(result2.action).toBe("skipped");
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+      const { handleReminderSend } = await import("~/jobs/reminders");
 
-    const logs = await sql<{ id: string; status: string }[]>`
-      SELECT id, status FROM "ReminderLog"
-      WHERE "shopId" = ${TEST_SHOP_ID} AND "ruleId" = ${TEST_RULE_ID} AND "invoiceId" = ${invoiceId}
-    `;
-    expect(logs.length).toBe(1);
-    expect(logs[0].status).toBe("sent");
+      const invoiceId = `inv-handler-${TEST_SUFFIX}`;
+      const orderId = `ord-handler-${TEST_SUFFIX}`;
 
-    process.env = originalEnv;
-    vi.useRealTimers();
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+          '#HANDLER-1', 10000.00, 10000.00, 'open',
+          NOW() - INTERVAL '5 days', ${new Date("2026-10-24T00:00:00+05:30")}, NOW(), NOW()
+        )
+      `;
+
+      mockFetch.mockReset();
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "resend-handler-123" }),
+      });
+
+      const message = {
+        topic: "REMINDER_SEND" as const,
+        shop: TEST_SHOP_DOMAIN,
+        shopId: TEST_SHOP_ID,
+        invoiceId,
+        ruleId: TEST_RULE_ID,
+        offsetDays: 0,
+        timezone: "Asia/Kolkata",
+        webhookId: `s18_${invoiceId}_${TEST_RULE_ID}_2026-10-24`,
+        enqueuedAt: "2026-10-24T06:30:00Z",
+      };
+
+      const result1 = await handleReminderSend(sql, message);
+      expect(result1.success).toBe(true);
+      expect(result1.action).toBe("created");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      const result2 = await handleReminderSend(sql, message);
+      expect(result2.success).toBe(true);
+      expect(result2.action).toBe("skipped");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      const logs = await sql<{ id: string; status: string }[]>`
+        SELECT id, status FROM "ReminderLog"
+        WHERE "shopId" = ${TEST_SHOP_ID} AND "ruleId" = ${TEST_RULE_ID} AND "invoiceId" = ${invoiceId}
+      `;
+      expect(logs.length).toBe(1);
+      expect(logs[0].status).toBe("sent");
+    } finally {
+      restoreEnv();
+      vi.useRealTimers();
+    }
   });
 });
