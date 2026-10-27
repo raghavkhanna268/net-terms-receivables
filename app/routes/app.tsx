@@ -23,6 +23,25 @@ export function isEmbeddedAuthBounce(
   );
 }
 
+export function isBlankOrAppBridgeOnly(content: string): boolean {
+  if (!content || content.trim() === "") {
+    return true;
+  }
+  const stripped = content.replace(/<!--[\s\S]*?-->/g, "").trim();
+  if (stripped === "") {
+    return true;
+  }
+  const withoutAppBridge = stripped
+    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
+    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*\/>/gi, "")
+    .replace(/<script[^>]*data-api-key="[^"]*"[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
+    .trim();
+  if (withoutAppBridge === "") {
+    return true;
+  }
+  return withoutAppBridge.replace(/\s+/g, "") === "";
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Read cold once for this request - index will get same value with same context object
   const cold = readColdOnce(context);
@@ -173,14 +192,18 @@ function ReloadingSpinner() {
 
 export function ErrorBoundary() {
   const error = useRouteError();
-  const [showFallback, setShowFallback] = useState(false);
-  const [isReloading, setIsReloading] = useState(false);
+  const [recoveryState, setRecoveryState] = useState<
+    "idle" | "reloading" | "fallback"
+  >("idle");
 
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
     if (!isEmbeddedAuthBounce(error)) {
+      return;
+    }
+    if (!isBlankOrAppBridgeOnly(error.data)) {
       return;
     }
 
@@ -194,46 +217,43 @@ export function ErrorBoundary() {
         lastReload = parseInt(stored, 10);
       }
     } catch {
-      setShowFallback(true);
+      setRecoveryState("fallback");
       return;
     }
 
     const now = Date.now();
     if (lastReload !== null && now - lastReload < RELOAD_GUARD_WINDOW_MS) {
-      setShowFallback(true);
+      setRecoveryState("fallback");
       return;
     }
 
     try {
       sessionStorage.setItem(guardKey, String(now));
     } catch {
-      setShowFallback(true);
+      setRecoveryState("fallback");
       return;
     }
 
-    setIsReloading(true);
+    setRecoveryState("reloading");
     window.location.reload();
   }, [error]);
 
   if (isEmbeddedAuthBounce(error)) {
-    if (typeof window !== "undefined") {
-      if (isReloading) {
-        return <ReloadingSpinner />;
-      }
-      if (showFallback) {
-        const handleReload = () => {
-          const pathname = window.location.pathname;
-          const guardKey = `${RELOAD_GUARD_KEY_PREFIX}${pathname}`;
-          try {
-            sessionStorage.removeItem(guardKey);
-          } catch {
-            // Ignore
-          }
-          window.location.reload();
-        };
-        return <AuthBounceReloadFallback onReload={handleReload} />;
-      }
+    if (recoveryState === "reloading") {
       return <ReloadingSpinner />;
+    }
+    if (recoveryState === "fallback") {
+      const handleReload = () => {
+        const pathname = window.location.pathname;
+        const guardKey = `${RELOAD_GUARD_KEY_PREFIX}${pathname}`;
+        try {
+          sessionStorage.removeItem(guardKey);
+        } catch {
+          // Ignore
+        }
+        window.location.reload();
+      };
+      return <AuthBounceReloadFallback onReload={handleReload} />;
     }
     return (
       <div

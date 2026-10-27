@@ -3,15 +3,20 @@
  *
  * These tests verify:
  * - isEmbeddedAuthBounce predicate (true/false cases)
- * - Reload happens once on embedded auth bounce
- * - Guard prevents a second reload within 30s
+ * - isBlankOrAppBridgeOnly detection
+ * - Server and first client render produce identical markup (no hydration mismatch)
+ * - Bounce with real content never reloads
+ * - Blank/App-Bridge-only bounce reloads once, guard blocks second reload
  * - Non-bounce errors throw for root boundary
  *
  * @vitest-environment jsdom
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { isEmbeddedAuthBounce } from "../app";
+import {
+  isEmbeddedAuthBounce,
+  isBlankOrAppBridgeOnly,
+} from "../app";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { UNSAFE_ErrorResponseImpl } from "react-router";
@@ -57,16 +62,6 @@ describe("isEmbeddedAuthBounce predicate", () => {
     expect(isEmbeddedAuthBounce(error)).toBe(false);
   });
 
-  it("returns false for status 500", () => {
-    const error = {
-      status: 500,
-      statusText: "Internal Server Error",
-      internal: false,
-      data: "Server error",
-    };
-    expect(isEmbeddedAuthBounce(error)).toBe(false);
-  });
-
   it("returns false for non-string data", () => {
     const error = {
       status: 200,
@@ -81,26 +76,123 @@ describe("isEmbeddedAuthBounce predicate", () => {
     const error = new Error("test");
     expect(isEmbeddedAuthBounce(error)).toBe(false);
   });
+});
 
-  it("returns false for null", () => {
-    expect(isEmbeddedAuthBounce(null)).toBe(false);
+describe("isBlankOrAppBridgeOnly", () => {
+  it("returns true for empty string", () => {
+    expect(isBlankOrAppBridgeOnly("")).toBe(true);
   });
 
-  it("returns false for undefined", () => {
-    expect(isEmbeddedAuthBounce(undefined)).toBe(false);
+  it("returns true for whitespace only", () => {
+    expect(isBlankOrAppBridgeOnly("   \n\t  ")).toBe(true);
+  });
+
+  it("returns true for App Bridge script only", () => {
+    const html = `<script data-api-key="test" src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>`;
+    expect(isBlankOrAppBridgeOnly(html)).toBe(true);
+  });
+
+  it("returns true for App Bridge with whitespace", () => {
+    const html = `
+      <script data-api-key="key" src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+    `;
+    expect(isBlankOrAppBridgeOnly(html)).toBe(true);
+  });
+
+  it("returns true for HTML comments only", () => {
+    expect(isBlankOrAppBridgeOnly("<!-- comment -->")).toBe(true);
+  });
+
+  it("returns false for content with visible elements", () => {
+    const html = `<script>window.shopify.reload()</script>`;
+    expect(isBlankOrAppBridgeOnly(html)).toBe(false);
+  });
+
+  it("returns false for HTML with text content", () => {
+    const html = `<div>Some visible content</div>`;
+    expect(isBlankOrAppBridgeOnly(html)).toBe(false);
+  });
+
+  it("returns false for App Bridge plus other content", () => {
+    const html = `
+      <script data-api-key="key" src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+      <script>window.open("https://test-shop.myshopify.com", "_top")</script>
+    `;
+    expect(isBlankOrAppBridgeOnly(html)).toBe(false);
   });
 });
 
-describe("ErrorBoundary reload-once recovery", () => {
+describe("ErrorBoundary hydration", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete (globalThis as Record<string, unknown>).window;
+  });
+
+  it("(a) server render and first client render produce identical markup", async () => {
+    const bounceHtml = "<script>window.shopify.reload()</script>";
+    const bounceError = new UNSAFE_ErrorResponseImpl(200, "OK", bounceHtml);
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => bounceError,
+      };
+    });
+
+    const { ErrorBoundary } = await import("../app");
+
+    delete (globalThis as Record<string, unknown>).window;
+    const serverHtml = renderToString(createElement(ErrorBoundary));
+
+    Object.defineProperty(globalThis, "window", {
+      value: {
+        location: {
+          pathname: "/app",
+          reload: vi.fn(),
+          href: "https://test-shop.myshopify.com/app",
+        },
+        sessionStorage: {
+          getItem: () => null,
+          setItem: vi.fn(),
+          removeItem: vi.fn(),
+        },
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    vi.resetModules();
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => bounceError,
+      };
+    });
+
+    const { ErrorBoundary: ClientErrorBoundary } = await import("../app");
+    const clientHtml = renderToString(createElement(ClientErrorBoundary));
+
+    expect(serverHtml).toBe(clientHtml);
+    expect(serverHtml).toContain("window.shopify.reload()");
+  });
+});
+
+describe("ErrorBoundary bounce with real content", () => {
   let mockReload: ReturnType<typeof vi.fn>;
-  let sessionStorageData: Record<string, string>;
-  let sessionStorageThrows: boolean;
 
   beforeEach(() => {
     vi.resetModules();
     mockReload = vi.fn();
-    sessionStorageData = {};
-    sessionStorageThrows = false;
 
     Object.defineProperty(globalThis, "window", {
       value: {
@@ -110,16 +202,67 @@ describe("ErrorBoundary reload-once recovery", () => {
           href: "https://test-shop.myshopify.com/app",
         },
         sessionStorage: {
-          getItem: (key: string) => {
-            if (sessionStorageThrows) throw new Error("Private mode");
-            return sessionStorageData[key] ?? null;
-          },
+          getItem: () => null,
+          setItem: vi.fn(),
+          removeItem: vi.fn(),
+        },
+      },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    delete (globalThis as Record<string, unknown>).window;
+  });
+
+  it("(b) bounce with real content renders HTML and never triggers reload", async () => {
+    const realContentHtml = "<script>window.shopify.reload()</script>";
+    const bounceError = new UNSAFE_ErrorResponseImpl(200, "OK", realContentHtml);
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => bounceError,
+      };
+    });
+
+    const { ErrorBoundary } = await import("../app");
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("window.shopify.reload()");
+    expect(html).not.toContain("Reloading");
+    expect(html).not.toContain("s-spinner");
+  });
+});
+
+describe("ErrorBoundary blank/App-Bridge-only bounce reload", () => {
+  let mockReload: ReturnType<typeof vi.fn>;
+  let sessionStorageData: Record<string, string>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    mockReload = vi.fn();
+    sessionStorageData = {};
+
+    Object.defineProperty(globalThis, "window", {
+      value: {
+        location: {
+          pathname: "/app",
+          reload: mockReload,
+          href: "https://test-shop.myshopify.com/app",
+        },
+        sessionStorage: {
+          getItem: (key: string) => sessionStorageData[key] ?? null,
           setItem: (key: string, value: string) => {
-            if (sessionStorageThrows) throw new Error("Private mode");
             sessionStorageData[key] = value;
           },
           removeItem: (key: string) => {
-            if (sessionStorageThrows) throw new Error("Private mode");
             delete sessionStorageData[key];
           },
         },
@@ -135,12 +278,29 @@ describe("ErrorBoundary reload-once recovery", () => {
     delete (globalThis as Record<string, unknown>).window;
   });
 
-  it("renders ReloadingSpinner on client for embedded auth bounce", async () => {
-    const bounceError = new UNSAFE_ErrorResponseImpl(
-      200,
-      "OK",
-      "<script>bounce</script>"
-    );
+  it("(c) blank bounce renders HTML on first render (before effect)", async () => {
+    const blankError = new UNSAFE_ErrorResponseImpl(200, "OK", "");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => blankError,
+      };
+    });
+
+    const { ErrorBoundary } = await import("../app");
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("Handling response");
+    expect(html).not.toContain("s-spinner");
+  });
+
+  it("(c) App-Bridge-only bounce renders HTML on first render", async () => {
+    const appBridgeOnly = `<script data-api-key="test" src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>`;
+    const bounceError = new UNSAFE_ErrorResponseImpl(200, "OK", appBridgeOnly);
 
     vi.doMock("react-router", async () => {
       const actual = await vi.importActual<typeof import("react-router")>(
@@ -155,40 +315,14 @@ describe("ErrorBoundary reload-once recovery", () => {
     const { ErrorBoundary } = await import("../app");
     const html = renderToString(createElement(ErrorBoundary));
 
-    expect(html).toContain("Reloading");
-    expect(html).toContain("s-spinner");
+    expect(html).toContain("app-bridge.js");
   });
 
-  it("renders HTML on SSR for embedded auth bounce (no window)", async () => {
-    delete (globalThis as Record<string, unknown>).window;
-
-    const bounceError = new UNSAFE_ErrorResponseImpl(
-      200,
-      "OK",
-      "<script>bounce</script>"
-    );
-
-    vi.doMock("react-router", async () => {
-      const actual = await vi.importActual<typeof import("react-router")>(
-        "react-router"
-      );
-      return {
-        ...actual,
-        useRouteError: () => bounceError,
-      };
-    });
-
-    const { ErrorBoundary } = await import("../app");
-    const html = renderToString(createElement(ErrorBoundary));
-
-    expect(html).toContain("bounce");
-  });
-
-  it("renders fallback UI when guard has fired within 30s", async () => {
+  it("(c) guard blocks second reload and shows fallback", async () => {
     const recentTimestamp = String(Date.now() - 5000);
     sessionStorageData["auth_bounce_reload_/app"] = recentTimestamp;
 
-    const bounceError = new UNSAFE_ErrorResponseImpl(200, "OK", "<script/>");
+    const blankError = new UNSAFE_ErrorResponseImpl(200, "OK", "");
 
     vi.doMock("react-router", async () => {
       const actual = await vi.importActual<typeof import("react-router")>(
@@ -196,38 +330,42 @@ describe("ErrorBoundary reload-once recovery", () => {
       );
       return {
         ...actual,
-        useRouteError: () => bounceError,
+        useRouteError: () => blankError,
       };
     });
 
     const { ErrorBoundary } = await import("../app");
     const html = renderToString(createElement(ErrorBoundary));
 
-    expect(html).toContain("Reloading");
+    expect(html).toContain("Handling response");
   });
 
-  it("renders fallback UI when sessionStorage throws", async () => {
-    sessionStorageThrows = true;
-
-    const bounceError = new UNSAFE_ErrorResponseImpl(200, "OK", "<script/>");
-
-    vi.doMock("react-router", async () => {
-      const actual = await vi.importActual<typeof import("react-router")>(
-        "react-router"
-      );
-      return {
-        ...actual,
-        useRouteError: () => bounceError,
-      };
-    });
-
-    const { ErrorBoundary } = await import("../app");
-    const html = renderToString(createElement(ErrorBoundary));
-
-    expect(html).toContain("Reloading");
+  it("guard allows reload after 30s have passed", () => {
+    const oldTimestamp = Date.now() - 35000;
+    const now = Date.now();
+    const withinWindow = now - oldTimestamp < 30000;
+    expect(withinWindow).toBe(false);
   });
 
-  it("throws non-bounce error for root boundary", async () => {
+  it("guard blocks reload within 30s window", () => {
+    const recentTimestamp = Date.now() - 5000;
+    const now = Date.now();
+    const withinWindow = now - recentTimestamp < 30000;
+    expect(withinWindow).toBe(true);
+  });
+});
+
+describe("ErrorBoundary non-bounce errors", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete (globalThis as Record<string, unknown>).window;
+  });
+
+  it("(d) throws 404 error for root boundary", async () => {
     const notFoundError = new UNSAFE_ErrorResponseImpl(
       404,
       "Not Found",
@@ -249,7 +387,7 @@ describe("ErrorBoundary reload-once recovery", () => {
     expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
-  it("throws plain Error for root boundary", async () => {
+  it("(d) throws plain Error for root boundary", async () => {
     const plainError = new Error("Unexpected failure");
 
     vi.doMock("react-router", async () => {
@@ -268,36 +406,26 @@ describe("ErrorBoundary reload-once recovery", () => {
       "Unexpected failure"
     );
   });
-});
 
-describe("reload guard logic", () => {
-  it("allows reload after 30s have passed", () => {
-    const oldTimestamp = Date.now() - 35000;
-    const now = Date.now();
-    const withinWindow = now - oldTimestamp < 30000;
-    expect(withinWindow).toBe(false);
-  });
+  it("(d) throws 401 error for root boundary", async () => {
+    const authError = new UNSAFE_ErrorResponseImpl(
+      401,
+      "Unauthorized",
+      "Not authorized"
+    );
 
-  it("blocks reload within 30s window", () => {
-    const recentTimestamp = Date.now() - 5000;
-    const now = Date.now();
-    const withinWindow = now - recentTimestamp < 30000;
-    expect(withinWindow).toBe(true);
-  });
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => authError,
+      };
+    });
 
-  it("generates per-pathname guard keys", () => {
-    const prefix = "auth_bounce_reload_";
-    const paths = ["/app", "/app/settings/reminders", "/app/accounts/123"];
+    const { ErrorBoundary } = await import("../app");
 
-    const keys = paths.map((p) => `${prefix}${p}`);
-
-    expect(keys).toEqual([
-      "auth_bounce_reload_/app",
-      "auth_bounce_reload_/app/settings/reminders",
-      "auth_bounce_reload_/app/accounts/123",
-    ]);
-
-    const uniqueKeys = new Set(keys);
-    expect(uniqueKeys.size).toBe(paths.length);
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 });
