@@ -8,7 +8,7 @@
  * - Thrown Errors render in-app fallback
  * - Error message text is NOT exposed in the output
  * - Dashboard link is present in fallback
- * - AppProvider wraps fallback so Polaris script loads
+ * - AppProvider wraps fallback (Polaris script + shopify:navigate listener)
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { renderToString } from "react-dom/server";
@@ -21,6 +21,21 @@ describe("app.tsx ErrorBoundary", () => {
     vi.doUnmock("@shopify/shopify-app-react-router/server");
     vi.resetModules();
   });
+
+  function setupRouterMocks(
+    errorValue: unknown,
+    rootLoaderData: { apiKey?: string } | undefined = { apiKey: "test-api-key" }
+  ) {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useRouteError: () => errorValue,
+        useRouteLoaderData: (routeId: string) => (routeId === "root" ? rootLoaderData : undefined),
+        useNavigate: () => vi.fn(),
+      };
+    });
+  }
 
   describe("delegates to boundary.error for status < 400 and 401", () => {
     it("delegates status 200 ErrorResponse to boundary.error (Shopify bootstrap)", async () => {
@@ -38,14 +53,7 @@ describe("app.tsx ErrorBoundary", () => {
       });
 
       const errorResponse = new ErrorResponseImpl(200, "OK", "<html>bootstrap</html>");
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => errorResponse,
-        };
-      });
+      setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -70,14 +78,7 @@ describe("app.tsx ErrorBoundary", () => {
       });
 
       const errorResponse = new ErrorResponseImpl(302, "Found", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => errorResponse,
-        };
-      });
+      setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -102,14 +103,7 @@ describe("app.tsx ErrorBoundary", () => {
       });
 
       const errorResponse = new ErrorResponseImpl(401, "Unauthorized", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => errorResponse,
-        };
-      });
+      setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -123,14 +117,7 @@ describe("app.tsx ErrorBoundary", () => {
   describe("renders in-app fallback for other errors", () => {
     it("renders in-app fallback for status 404 ErrorResponse", async () => {
       const errorResponse = new ErrorResponseImpl(404, "Not Found", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => errorResponse,
-        };
-      });
+      setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -145,14 +132,7 @@ describe("app.tsx ErrorBoundary", () => {
 
     it("renders in-app fallback for status 500 ErrorResponse", async () => {
       const errorResponse = new ErrorResponseImpl(500, "Internal Server Error", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => errorResponse,
-        };
-      });
+      setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -166,13 +146,7 @@ describe("app.tsx ErrorBoundary", () => {
     });
 
     it("renders in-app fallback for thrown Error", async () => {
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => new Error("Internal test error"),
-        };
-      });
+      setupRouterMocks(new Error("Internal test error"));
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -187,13 +161,7 @@ describe("app.tsx ErrorBoundary", () => {
     });
 
     it("does not expose error message text in output", async () => {
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => new Error("SENSITIVE_ERROR_MESSAGE_12345"),
-        };
-      });
+      setupRouterMocks(new Error("SENSITIVE_ERROR_MESSAGE_12345"));
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -205,21 +173,38 @@ describe("app.tsx ErrorBoundary", () => {
     });
   });
 
-  describe("Polaris script in fallback", () => {
-    it("includes Polaris script tag in fallback HTML for shopify:navigate handling", async () => {
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => new Error("Test error"),
-        };
-      });
+  describe("AppProvider wraps fallback", () => {
+    it("includes Polaris script tag in fallback HTML", async () => {
+      setupRouterMocks(new Error("Test error"));
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
 
       const html = renderToString(createElement(ErrorBoundary));
 
+      expect(html).toContain("polaris-2.js");
+    });
+
+    it("uses apiKey from root loader data when available", async () => {
+      setupRouterMocks(new Error("Test error"), { apiKey: "custom-api-key" });
+
+      vi.resetModules();
+      const { ErrorBoundary } = await import("../app");
+
+      const html = renderToString(createElement(ErrorBoundary));
+
+      expect(html).toContain("s-page");
+    });
+
+    it("renders fallback when root loader data is undefined", async () => {
+      setupRouterMocks(new Error("Test error"), undefined);
+
+      vi.resetModules();
+      const { ErrorBoundary } = await import("../app");
+
+      const html = renderToString(createElement(ErrorBoundary));
+
+      expect(html).toContain("s-page");
       expect(html).toContain("polaris-2.js");
     });
   });

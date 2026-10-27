@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, isRouteErrorResponse, data } from "react-router";
+import { Outlet, useLoaderData, useRouteError, useRouteLoaderData, isRouteErrorResponse, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
@@ -140,18 +140,17 @@ export default function App() {
   );
 }
 
-const POLARIS_URL = "https://cdn.shopify.com/shopifycloud/polaris-2.js";
-
 export function ErrorBoundary() {
   const error = useRouteError();
+  const rootData = useRouteLoaderData<{ apiKey?: string }>("root");
+  const apiKey = rootData?.apiKey ?? "";
 
   if (isRouteErrorResponse(error) && (error.status < 400 || error.status === 401)) {
     return boundary.error(error);
   }
 
   return (
-    <>
-      <script src={POLARIS_URL} />
+    <AppProvider apiKey={apiKey}>
       <s-page heading="Something went wrong">
         <s-section>
           <s-banner tone="critical" heading="Unexpected Error">
@@ -164,7 +163,7 @@ export function ErrorBoundary() {
           </s-banner>
         </s-section>
       </s-page>
-    </>
+    </AppProvider>
   );
 }
 
