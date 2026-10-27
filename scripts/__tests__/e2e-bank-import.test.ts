@@ -318,4 +318,101 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
       expect(line).not.toContain(shopId);
     }
   });
+
+  it("emits suggestion lines with r<row>_<band>_<score>_<label> format", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    expect(suggestionLines.length).toBeGreaterThan(0);
+
+    for (const line of suggestionLines) {
+      const value = line.split("=")[1];
+      expect(value).toMatch(/^r\d+_(high|medium|low)_\d+_(order_\d+|other)$/);
+      expect(value).not.toContain("#");
+      expect(value).toBe(value.toLowerCase());
+    }
+
+    const truncatedLine = c.lines.find((l) => l.startsWith("suggestion_lines_truncated="));
+    expect(truncatedLine).toBeDefined();
+    expect(truncatedLine).toMatch(/^suggestion_lines_truncated=(true|false)$/);
+  });
+
+  it("suggestion lines use row numbers from fixture CSV (13-15 for credits)", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    const rows = suggestionLines.map((l) => {
+      const m = l.match(/^suggestion=r(\d+)_/);
+      return m ? Number(m[1]) : 0;
+    });
+    expect(rows.some((r) => r === 13 || r === 14 || r === 15)).toBe(true);
+  });
+
+  it("suggestion lines for seed invoices use order_<digits> label", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    const seedLabels = suggestionLines.filter((l) => l.includes("_order_1001") || l.includes("_order_1002"));
+    expect(seedLabels.length).toBeGreaterThan(0);
+  });
+
+  it("suggestion lines never contain forbidden fields", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    const forbidden = [
+      "SYNT0001", "SYNT0002", "SYNT0003",
+      "gid://", "example.com", ".myshopify.com",
+      "TEST BUYER", "NEFT-", "UPI-", "IMPS-",
+      "10000", "5000", "2500",
+      shopId,
+    ];
+    for (const line of suggestionLines) {
+      for (const pattern of forbidden) {
+        expect(line, `line contains "${pattern}"`).not.toContain(pattern);
+      }
+    }
+  });
+
+  it("emits suggestion_lines_truncated=false when under 64 suggestions", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionCount = c.lines.filter((l) => l.startsWith("suggestion=")).length;
+    expect(suggestionCount).toBeLessThanOrEqual(64);
+    const truncatedLine = c.lines.find((l) => l.startsWith("suggestion_lines_truncated="));
+    expect(truncatedLine).toBe("suggestion_lines_truncated=false");
+  });
+
+  it("suggestion lines for non-seed invoice names use 'other' label", async () => {
+    const otherInvoiceId = `invoice-e2e-import-other-${runId}`;
+    try {
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+          "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${otherInvoiceId}, ${shopId}, ${buyerId},
+          ${`gid://shopify/Order/e2e-import-other-${runId}`}, '#9999', ${REVIEWER_DEMO_AMOUNTS.order1}, 'open', ${REVIEWER_DEMO_AMOUNTS.order1},
+          ${DEMO_ISSUED_AT}, ${DEMO_DUE_AT}, NOW(), NOW()
+        )
+      `;
+
+      const c = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+      const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+
+      const otherLabels = suggestionLines.filter((l) => l.includes("_other"));
+      expect(otherLabels.length, "should have at least one 'other' label match").toBeGreaterThan(0);
+
+      for (const line of otherLabels) {
+        expect(line).not.toContain("9999");
+        expect(line).not.toContain("#");
+        expect(line).toMatch(/_other$/);
+      }
+    } finally {
+      await sql`DELETE FROM "Match" WHERE "invoiceId" = ${otherInvoiceId}`;
+      await sql`DELETE FROM "Invoice" WHERE id = ${otherInvoiceId}`;
+    }
+  });
 });

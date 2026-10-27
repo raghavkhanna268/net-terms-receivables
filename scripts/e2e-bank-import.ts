@@ -56,7 +56,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlOptions, type Sql } from "~/lib/db-light.server";
 import { parseBankStatement } from "~/lib/banks/index";
-import { insertBankImportRows } from "~/services/bank-import.server";
+import { insertBankImportRows, normalizeDedupeKeyForDb } from "~/services/bank-import.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
 import { CONFIDENCE_THRESHOLD } from "~/lib/matching/score";
 import { isCurrencyGateOpen } from "~/lib/currency-gate.server";
@@ -75,6 +75,9 @@ export const MEDIUM_BAND_MIN = 50;
 
 /** Advisory lock key (arbitrary constant) to serialize concurrent runs. */
 const ADVISORY_LOCK_KEY = 482_017_446;
+
+/** Reviewer demo order names for seeded invoices (single source of truth). */
+export const REVIEWER_DEMO_ORDER_NAMES = ["#1001", "#1002"] as const;
 
 /** Every key the script may print. The workflow filter uses the same list. */
 export const OUTPUT_KEYS = [
@@ -117,6 +120,8 @@ export const OUTPUT_KEYS = [
   "rolled_back",
   "result",
   "error_code",
+  "suggestion",
+  "suggestion_lines_truncated",
 ] as const;
 export type OutputKey = (typeof OUTPUT_KEYS)[number];
 export type OutputValue = number | boolean | string;
@@ -158,6 +163,45 @@ export function scoreBand(score: number): "high" | "medium" | "low" {
   return "low";
 }
 
+/** Maximum suggestion lines to emit before truncating. */
+export const MAX_SUGGESTION_LINES = 64;
+
+/**
+ * Format a suggestion label from an invoice name.
+ * Returns 'order_<digits>' ONLY for REVIEWER_DEMO_ORDER_NAMES, else 'other'.
+ * Never returns the raw invoice name to avoid leaking identifiers.
+ */
+export function formatSuggestionLabel(invoiceName: string): string {
+  const demoNames = REVIEWER_DEMO_ORDER_NAMES as readonly string[];
+  if (demoNames.includes(invoiceName) && invoiceName.startsWith("#")) {
+    return `order_${invoiceName.slice(1)}`;
+  }
+  return "other";
+}
+
+/** Value pattern for suggestion output: ^[a-z0-9_]{1,64}$ */
+const SUGGESTION_VALUE = /^[a-z0-9_]{1,64}$/;
+
+/**
+ * Format a single suggestion line value.
+ * Format: r<row>_<band>_<score>_<label>
+ * Example: r14_medium_58_order_1002
+ */
+export function formatSuggestionValue(
+  row: number,
+  score: number,
+  invoiceName: string
+): string {
+  const band = scoreBand(score);
+  const roundedScore = Math.round(score);
+  const label = formatSuggestionLabel(invoiceName);
+  const value = `r${row}_${band}_${roundedScore}_${label}`;
+  if (!SUGGESTION_VALUE.test(value)) {
+    throw new E2eImportError("suggestion_value_invalid");
+  }
+  return value;
+}
+
 /** SHOP/ALLOWED_DEV_STORE allowlist. Returns the shop domain or throws. */
 export function assertE2eShop(env: Record<string, string | undefined>): string {
   const shop = (env.SHOP ?? "").trim();
@@ -177,6 +221,14 @@ export async function loadFixturePayload(rootDir: string) {
   // Same shape the Imports page builds from parseBankStatement before
   // mapCreditsForImport (app/routes/app.imports.tsx, ImportsPage).
   const creditTxns = parsed.transactions.filter((t) => t.direction === "CR");
+  // Build normalized-db-key-to-sourceRow mapping BEFORE mapCreditsForImport drops sourceRow.
+  // The key is the normalized dedupe key as stored in Payment.utr (same as what
+  // normalizeDedupeKeyForDb returns in bank-import.server.ts).
+  const utrToSourceRow = new Map<string, number>();
+  for (const t of creditTxns) {
+    const normalizedKey = normalizeDedupeKeyForDb(t.dedupeKey);
+    utrToSourceRow.set(normalizedKey, t.sourceRow);
+  }
   const credits = mapCreditsForImport(
     creditTxns.map((t) => ({
       date: t.date,
@@ -199,6 +251,7 @@ export async function loadFixturePayload(rootDir: string) {
     parseErrors: parsed.errors.length,
     debits: parsed.transactions.length - creditTxns.length,
     body: { bank: parsed.detection.bank, fileName: FIXTURE_FILE_NAME, credits },
+    utrToSourceRow,
   };
 }
 
@@ -256,13 +309,13 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
   emit("shop_currency_inr", inr);
   if (!inr) throw new E2eImportError("shop_currency_not_inr");
 
-  // 2b. Read-only: how many of the reviewer-demo invoices (#1001, #1002) exist
-  // for this shop (0-2). Runs in both modes before any write. Count only: no
-  // names, ids or amounts are printed.
+  // 2b. Read-only: how many of the reviewer-demo invoices exist for this shop
+  // (0-N where N = length of REVIEWER_DEMO_ORDER_NAMES). Runs in both modes
+  // before any write. Count only: no names, ids or amounts are printed.
   const [demo] = await sql<{ n: string }[]>`
     SELECT COUNT(DISTINCT name)::text AS n
     FROM "Invoice"
-    WHERE "shopId" = ${shop.id} AND name IN ('#1001', '#1002')
+    WHERE "shopId" = ${shop.id} AND name = ANY(${[...REVIEWER_DEMO_ORDER_NAMES]})
   `;
   emit("reviewer_demo_invoices_present", Number(demo?.n ?? 0));
 
@@ -368,6 +421,36 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
         SELECT COUNT(*)::text AS n FROM "Match" WHERE "shopId" = ${shop.id} AND state = 'suggested'
       `;
       emit("suggested_tab_total_shop", Number(tab.n));
+
+      // Query suggested matches for this import to emit per-suggestion lines.
+      // Join Payment (for UTR -> row mapping) and Invoice (for label).
+      const suggestions = await tx<{ utr: string | null; score: number; invoiceName: string }[]>`
+        SELECT p.utr, m.score, i.name AS "invoiceName"
+        FROM "Match" m
+        JOIN "Payment" p ON p.id = m."paymentId"
+        JOIN "Invoice" i ON i.id = m."invoiceId"
+        WHERE p."importId" = ${imported.importId}
+          AND p."shopId" = ${shop.id}
+          AND m.state = 'suggested'
+      `;
+
+      // Map each suggestion to (row, score, label) and sort by row then score desc.
+      const suggestionLines: { row: number; score: number; invoiceName: string }[] = [];
+      for (const s of suggestions) {
+        // Map UTR back to source row from the parsed fixture credits IN MEMORY.
+        // UTRs that don't map (SYNTH- keys or unknown) get row 0.
+        const row = s.utr && fixture.utrToSourceRow.has(s.utr) ? fixture.utrToSourceRow.get(s.utr)! : 0;
+        suggestionLines.push({ row, score: s.score, invoiceName: s.invoiceName });
+      }
+      suggestionLines.sort((a, b) => a.row - b.row || b.score - a.score);
+
+      // Emit up to MAX_SUGGESTION_LINES, then the truncation flag.
+      const truncated = suggestionLines.length > MAX_SUGGESTION_LINES;
+      const toEmit = truncated ? suggestionLines.slice(0, MAX_SUGGESTION_LINES) : suggestionLines;
+      for (const s of toEmit) {
+        emit("suggestion", formatSuggestionValue(s.row, s.score, s.invoiceName));
+      }
+      emit("suggestion_lines_truncated", truncated);
 
       const [pay] = await tx<{ n: string }[]>`
         SELECT COUNT(*)::text AS n FROM "Payment"
