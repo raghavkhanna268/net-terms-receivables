@@ -1043,13 +1043,11 @@ describe("Critical Path: Reminder Job Handler", () => {
 });
 
 describe("Critical Path: Resend Client", () => {
-  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
     mockFetch.mockReset();
-    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
   });
 
   afterEach(() => {

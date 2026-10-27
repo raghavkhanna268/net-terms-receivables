@@ -157,7 +157,6 @@ function createMockSql() {
 describe("Payment Reminders (S18)", () => {
   const originalEnv = process.env;
   let mockSql: ReturnType<typeof createMockSql>;
-  let consoleInfoSpy: ReturnType<typeof vi.spyOn>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
@@ -169,7 +168,7 @@ describe("Payment Reminders (S18)", () => {
     mockSql = createMockSql();
     mockFetch.mockReset();
     process.env = { ...originalEnv };
-    consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
