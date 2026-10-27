@@ -231,4 +231,28 @@ describe("seed-e2e-store.yml static checks", () => {
   it("pipes seed output through the redaction filter", () => {
     expect(wf).toContain('npx tsx scripts/seed.ts "${ARGS[@]}" 2>&1 | bash scripts/ci/redact-seed-output.sh');
   });
+
+  it("fetches the deployed commit (depth 1) before the seed step, gated on g4_fixture == 'write'", () => {
+    // Shallow checkout means the deployed commit must be fetched so seed.ts's
+    // `git show $DEPLOY_SHA:wrangler.jsonc` drift check can run.
+    const fetchCmd = 'fetch --no-tags --depth=1 origin "$DEPLOY_SHA"';
+    const fetchIdx = wf.indexOf(fetchCmd);
+    expect(fetchIdx).toBeGreaterThan(0);
+    // Not a full-history checkout (no `fetch-depth: 0` YAML setting).
+    expect(wf).not.toMatch(/^\s*fetch-depth:\s*0\s*$/m);
+
+    const runSeedIdx = wf.indexOf("- name: Run seed script");
+    expect(runSeedIdx).toBeGreaterThan(0);
+    // The fetch happens in a step before the seed step.
+    expect(fetchIdx).toBeLessThan(runSeedIdx);
+
+    // The fetch lives in the write-gated "resolve deployed SHA" step, which
+    // fails closed with a fixed code when the commit can't be fetched.
+    const maskStepIdx = wf.indexOf("- name: Mask G4 recipient and resolve deployed SHA");
+    expect(maskStepIdx).toBeGreaterThan(0);
+    expect(maskStepIdx).toBeLessThan(fetchIdx);
+    const stepBlock = wf.slice(maskStepIdx, runSeedIdx);
+    expect(stepBlock).toMatch(/if:\s*inputs\.g4_fixture == 'write'/);
+    expect(stepBlock).toContain("g4_deploy_sha_fetch_failed");
+  });
 });

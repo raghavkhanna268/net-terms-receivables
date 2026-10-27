@@ -4,6 +4,7 @@ import {
   assertNotCleanupBlackout,
   assertWithinWriteWindow,
   domainOf,
+  formatG4CleanupOutput,
   G4_CLEANUP_DUE_BEFORE,
   G4_RECIPIENT_ENV,
   g4FixtureIds,
@@ -13,7 +14,7 @@ import {
   resolveG4Recipient,
   stripJsonComments,
 } from "../lib/g4-fixture";
-import { isG4FixtureBadArgs } from "../seed";
+import { assertG4AllowlistGuardWith, isG4FixtureBadArgs } from "../seed";
 
 // All data here is synthetic (example.com addresses only); no real recipients.
 
@@ -287,6 +288,135 @@ describe("isSendableRecipient", () => {
 
   it("is sendable (fail safe) for an unparseable value", () => {
     expect(isSendableRecipient("nobody")).toBe(true);
+  });
+});
+
+describe("assertG4AllowlistGuardWith (deploy-SHA drift)", () => {
+  // Minimal wrangler.jsonc text with an optional enforcement value.
+  const wrangler = (enforced?: string) =>
+    enforced === undefined
+      ? `{ "vars": { "RESEND_FROM": "reminders@example.com" } }`
+      : `{ "vars": { "RESEND_RECIPIENT_ALLOWLIST_ENFORCED": "${enforced}" } }`;
+
+  const SHA_A = "a".repeat(40);
+  const SHA_B = "b".repeat(40);
+
+  it("passes when the deploy SHA equals the checkout SHA (no git show)", () => {
+    const readDeployedWrangler = () => {
+      throw new Error("should not be called");
+    };
+    expect(() =>
+      assertG4AllowlistGuardWith({
+        readWrangler: () => wrangler("true"),
+        readDeployedWrangler,
+        deploySha: SHA_A,
+        checkoutSha: SHA_A,
+      })
+    ).not.toThrow();
+  });
+
+  it("passes when no deploy/checkout SHAs are provided (drift check skipped)", () => {
+    expect(() =>
+      assertG4AllowlistGuardWith({
+        readWrangler: () => wrangler("true"),
+        readDeployedWrangler: () => {
+          throw new Error("should not be called");
+        },
+      })
+    ).not.toThrow();
+  });
+
+  it("passes for a different SHA whose deployed config omits the enforcement value", () => {
+    expect(() =>
+      assertG4AllowlistGuardWith({
+        readWrangler: () => wrangler("true"),
+        readDeployedWrangler: () => wrangler(undefined),
+        deploySha: SHA_A,
+        checkoutSha: SHA_B,
+      })
+    ).not.toThrow();
+  });
+
+  it('passes for a different SHA whose deployed config is "true"', () => {
+    expect(() =>
+      assertG4AllowlistGuardWith({
+        readWrangler: () => wrangler("true"),
+        readDeployedWrangler: () => wrangler("true"),
+        deploySha: SHA_A,
+        checkoutSha: SHA_B,
+      })
+    ).not.toThrow();
+  });
+
+  it('aborts for a different SHA whose deployed config is "false"', () => {
+    expect(() =>
+      assertG4AllowlistGuardWith({
+        readWrangler: () => wrangler("true"),
+        readDeployedWrangler: () => wrangler("false"),
+        deploySha: SHA_A,
+        checkoutSha: SHA_B,
+      })
+    ).toThrow("g4_deploy_sha_mismatch");
+  });
+
+  it("aborts when the deployed git show fails", () => {
+    expect(() =>
+      assertG4AllowlistGuardWith({
+        readWrangler: () => wrangler("true"),
+        readDeployedWrangler: () => {
+          throw new Error("fatal: path 'wrangler.jsonc' does not exist");
+        },
+        deploySha: SHA_A,
+        checkoutSha: SHA_B,
+      })
+    ).toThrow("g4_deploy_sha_mismatch");
+  });
+
+  it("aborts when the checked-out config itself is not enforced", () => {
+    expect(() =>
+      assertG4AllowlistGuardWith({
+        readWrangler: () => wrangler("false"),
+        readDeployedWrangler: () => wrangler("true"),
+        deploySha: SHA_A,
+        checkoutSha: SHA_B,
+      })
+    ).toThrow("g4_allowlist_not_enforced");
+  });
+});
+
+describe("formatG4CleanupOutput", () => {
+  const base = {
+    mode: "cleanup" as const,
+    dryRun: false,
+    store: "resolved" as const,
+    prior: "off" as const,
+    fixture: "deleted" as const,
+    queued: 0,
+  };
+
+  it("reports non-fixture counts by status and queue count (counts only)", () => {
+    const lines = formatG4CleanupOutput({
+      ...base,
+      nonfixtureReminderLogByStatus: { sent: 2, skipped_opted_out: 1 },
+      nonfixtureQueued: 3,
+    });
+    const out = lines.join("\n");
+    // Statuses are sorted; counts only, no ids/emails/amounts.
+    expect(out).toContain(
+      "g4_cleanup_sideeffects nonfixture_reminderlog sent=2 skipped_opted_out=1"
+    );
+    expect(out).toContain("g4_cleanup_sideeffects nonfixture_queued=3");
+    expect(out).not.toContain("@");
+  });
+
+  it("prints 'none' when there are no non-fixture reminder logs", () => {
+    const lines = formatG4CleanupOutput({
+      ...base,
+      nonfixtureReminderLogByStatus: {},
+      nonfixtureQueued: 0,
+    });
+    expect(lines.join("\n")).toContain("g4_cleanup_sideeffects nonfixture_reminderlog none");
+    expect(lines.join("\n")).toContain("g4_cleanup_sideeffects nonfixture_queued=0");
   });
 });
 

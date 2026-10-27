@@ -4184,23 +4184,36 @@ export function isG4FixtureBadArgs(a: {
 }
 
 /**
- * Read the allowlist enforcement value from the checked-out wrangler.jsonc and
- * verify it is absent or exactly "true". Keeps the deployed-vs-checkout drift
- * check: when a deploy SHA differs from the checkout, the deployed config must
- * pass the same guard. Throws a fixed g4_* code; the recipient is never read.
+ * Injectable dependencies for the allowlist / deploy-SHA drift guard, so the
+ * wiring can be unit tested without touching the filesystem or git.
  */
-function assertG4AllowlistGuard(): void {
-  const wranglerText = readFileSync("wrangler.jsonc", "utf8");
-  assertAllowlistEnforced(readAllowlistEnforcedFromWrangler(wranglerText));
+export interface G4AllowlistGuardDeps {
+  /** Read the checked-out wrangler.jsonc text. */
+  readWrangler: () => string;
+  /** Read the deployed commit's wrangler.jsonc text (git show <sha>:wrangler.jsonc). */
+  readDeployedWrangler: (sha: string) => string;
+  /** The last successful deploy SHA (G4_DEPLOY_SHA), or undefined. */
+  deploySha?: string;
+  /** The dispatch checkout SHA (GITHUB_SHA), or undefined. */
+  checkoutSha?: string;
+}
 
-  const deploySha = process.env.G4_DEPLOY_SHA?.trim();
-  const checkoutSha = process.env.GITHUB_SHA?.trim();
+/**
+ * Verify the allowlist enforcement value in the checked-out wrangler.jsonc is
+ * absent or exactly "true", plus the deployed-vs-checkout drift check: when a
+ * deploy SHA differs from the checkout, the deployed config must pass the same
+ * guard. Throws a fixed g4_* code; the recipient is never read. Pure over its
+ * injected deps (no fs/git/process access of its own) so it is unit testable.
+ */
+export function assertG4AllowlistGuardWith(deps: G4AllowlistGuardDeps): void {
+  assertAllowlistEnforced(readAllowlistEnforcedFromWrangler(deps.readWrangler()));
+
+  const deploySha = deps.deploySha?.trim();
+  const checkoutSha = deps.checkoutSha?.trim();
   if (deploySha && checkoutSha && deploySha !== checkoutSha) {
     let deployedText: string;
     try {
-      deployedText = execFileSync("git", ["show", `${deploySha}:wrangler.jsonc`], {
-        encoding: "utf8",
-      });
+      deployedText = deps.readDeployedWrangler(deploySha);
     } catch {
       throw new Error("g4_deploy_sha_mismatch");
     }
@@ -4210,6 +4223,17 @@ function assertG4AllowlistGuard(): void {
       throw new Error("g4_deploy_sha_mismatch");
     }
   }
+}
+
+/** Production wiring: read from the filesystem and git, SHAs from the env. */
+function assertG4AllowlistGuard(): void {
+  assertG4AllowlistGuardWith({
+    readWrangler: () => readFileSync("wrangler.jsonc", "utf8"),
+    readDeployedWrangler: (sha) =>
+      execFileSync("git", ["show", `${sha}:wrangler.jsonc`], { encoding: "utf8" }),
+    deploySha: process.env.G4_DEPLOY_SHA,
+    checkoutSha: process.env.GITHUB_SHA,
+  });
 }
 
 /**

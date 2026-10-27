@@ -286,6 +286,20 @@ jobs:
             echo "::error::g4_deploy_sha_unresolved"
             exit 1
           fi
+          # The checkout is shallow (fetch-depth 1), so the deployed commit is
+          # usually absent and seed.ts's `git show $DEPLOY_SHA:wrangler.jsonc`
+          # drift check would fail. Fetch exactly that one commit (depth 1, no
+          # tags). persist-credentials is false, so authenticate this single
+          # fetch with the job token via an http header (as actions/checkout
+          # does). Fail closed if the commit can't be fetched. This fetches a
+          # single commit, never the full history.
+          GH_AUTH_B64="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$GH_AUTH_B64"
+          if ! git -c "http.https://github.com/.extraheader=Authorization: Basic $GH_AUTH_B64" \
+            fetch --no-tags --depth=1 origin "$DEPLOY_SHA"; then
+            echo "::error::g4_deploy_sha_fetch_failed"
+            exit 1
+          fi
           echo "G4_DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
 
       - name: Run seed script
