@@ -468,7 +468,9 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
 
       const adminCalls = adminGraphQLMock.mock.calls;
+      const callsForShopA = adminCalls.filter((call) => call[0] === SHOP_A_DOMAIN);
       const callsForShopB = adminCalls.filter((call) => call[0] === SHOP_B_DOMAIN);
+      expect(callsForShopA.length).toBe(1);
       expect(callsForShopB.length).toBeGreaterThanOrEqual(1);
 
       const [queueCountA] = await sql<{ count: string }[]>`
@@ -482,6 +484,28 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         WHERE message->>'webhookId' = ${webhookIdA}
       `;
       expect(parseInt(dlqCountA.count, 10)).toBe(0);
+    });
+
+    it.skip("drain makes no Admin client request for an uninstalled shop (pending follow-up)", async () => {
+      const webhookIdA = `drain-skip-a-${TEST_SUFFIX}`;
+      const orderGidA = `gid://shopify/Order/drain-skip-a-${TEST_SUFFIX}`;
+
+      await sql`
+        SELECT pgmq.send('s6_sync', ${sql.json({
+          topic: "ORDERS_CREATE",
+          shop: SHOP_A_DOMAIN,
+          webhookId: webhookIdA,
+          resourceGid: orderGidA,
+          enqueuedAt: new Date().toISOString(),
+        })})
+      `;
+
+      const { runDrain } = await import("~/services/drain/processor.server");
+      await runDrain(sql, { batchSize: 10, timeBudgetMs: 10000 });
+
+      const adminCalls = adminGraphQLMock.mock.calls;
+      const callsForShopA = adminCalls.filter((call) => call[0] === SHOP_A_DOMAIN);
+      expect(callsForShopA.length).toBe(0);
     });
 
     it("drain: bulk messages for uninstalled shop A go to DLQ with bulk_op_not_found (guard: processBulkOperation shop lookup)", async () => {
