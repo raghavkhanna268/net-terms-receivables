@@ -60,7 +60,7 @@ describe("app.tsx ErrorBoundary AppProvider integration", () => {
     });
 
     const navigateListenerCalls = addEventListenerSpy.mock.calls.filter(
-      (call) => call[0] === "shopify:navigate"
+      (call: [string, ...unknown[]]) => call[0] === "shopify:navigate"
     );
 
     expect(navigateListenerCalls.length).toBeGreaterThan(0);
