@@ -2,6 +2,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Outlet, useLoaderData, useRouteError, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
+import { NavigationIndicator } from "~/components/NavigationIndicator";
 import { runAfterAuth } from "~/lib/after-auth.server";
 import { useEffect } from "react";
 import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
@@ -59,6 +60,7 @@ export default function App() {
 
   return (
     <AppProvider apiKey={apiKey}>
+      <NavigationIndicator />
       <s-app-nav>
         {/* @ts-expect-error rel="home" is valid per Shopify App Bridge docs but not in @shopify/polaris-types */}
         <s-link href="/app" rel="home">Home</s-link>
