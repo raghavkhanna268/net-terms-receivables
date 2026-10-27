@@ -141,13 +141,49 @@ describe("Payment Reminder Email Rendering - Due Today Copy", () => {
     expect(html).not.toContain("good standing");
   });
 
+  it("overdue reminder uses exact overdue copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment 7 days overdue" })
+    );
+
+    expect(html).toContain(
+      "Please arrange payment as soon as possible. Overdue accounts may be placed on hold, which pauses ordering on payment terms."
+    );
+  });
+
+  it("overdue reminder does not contain old service-disruptions copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment 7 days overdue" })
+    );
+
+    expect(html).not.toContain("service disruptions");
+    expect(html).not.toContain("earliest convenience");
+  });
+
   it("overdue reminder does not use due-today copy", () => {
     const html = renderPaymentReminderEmail(
       createSyntheticProps({ reminderType: "Payment 7 days overdue" })
     );
 
-    expect(html).toContain("avoid any service disruptions");
     expect(html).not.toContain("good standing");
+  });
+
+  it("due-today reminder does not use overdue copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment due today" })
+    );
+
+    expect(html).not.toContain("placed on hold");
+    expect(html).not.toContain("pauses ordering");
+  });
+
+  it("pre-due reminder does not use overdue copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment due in 3 days" })
+    );
+
+    expect(html).not.toContain("placed on hold");
+    expect(html).not.toContain("pauses ordering");
   });
 });
 

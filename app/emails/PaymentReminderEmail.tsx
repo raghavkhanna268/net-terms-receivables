@@ -119,7 +119,7 @@ export function renderPaymentReminderEmail(
               <p style="margin: 0 0 24px; color: #374151; font-size: 16px; line-height: 1.5;">
                 ${
                   isOverdue
-                    ? "Please arrange payment at your earliest convenience to avoid any service disruptions."
+                    ? "Please arrange payment as soon as possible. Overdue accounts may be placed on hold, which pauses ordering on payment terms."
                     : isDueToday
                       ? "Please make the payment today so your account stays in good standing."
                       : "Please ensure payment is made before the due date."
