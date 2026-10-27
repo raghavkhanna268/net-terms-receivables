@@ -1583,6 +1583,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         webhookId,
         enqueuedAt: new Date().toISOString(),
         bulkOperationId: bulkOpId,
+        bulkType: "draft_orders",
       });
 
       expect(result.success).toBe(true);
