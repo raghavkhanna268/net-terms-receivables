@@ -80,7 +80,6 @@ describeWithDb("S8 Draft Order Delete: id-only payload (#272)", () => {
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
-    vi.stubEnv("SHOPIFY_API_SECRET", TEST_SECRET);
 
     await sql`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
@@ -99,7 +98,6 @@ describeWithDb("S8 Draft Order Delete: id-only payload (#272)", () => {
   });
 
   afterAll(async () => {
-    vi.unstubAllEnvs();
     await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
@@ -112,6 +110,7 @@ describeWithDb("S8 Draft Order Delete: id-only payload (#272)", () => {
   });
 
   beforeEach(async () => {
+    vi.stubEnv("SHOPIFY_API_SECRET", TEST_SECRET);
     await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM webhook_receipts WHERE shop = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`.catch(() => {});
