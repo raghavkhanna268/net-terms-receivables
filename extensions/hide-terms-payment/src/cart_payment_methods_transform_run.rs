@@ -1865,73 +1865,66 @@ mod tests {
         assert_eq!(result.operations.len(), 2, "pinned behaviour: manualPaymentMethodName as number");
     }
 
-    // =========================================================================
-    // Defaults-coverage check
+    // Pin default patterns against observed input names.
     //
-    // The app never writes a `$app:hide-terms-config` metafield (asserted on the
-    // TS side), so this Function always falls back to DEFAULT_DEFERRED_PATTERNS.
-    // This test pins that those shipped defaults both MATCH (via the real
-    // `matches_deferred_patterns`) and HIDE (via the full function run for a
-    // held B2B buyer) the deferred / net-terms payment-method labels a held
-    // buyer would see. It deliberately does not change the patterns.
-    //
-    // Sourcing of the asserted labels (see PR notes for the full write-up):
-    //   - Setup / UX copy: the merchant is NOT told to create any specifically
-    //     named payment or manual-payment method. `onboarding-steps.server.ts`
-    //     ("Configure payment options" / "Hide or show payment methods based on
-    //     buyer account status") and `app.onboarding.tsx` (the customization is
-    //     named "Hide net terms at checkout") name the app's own customization,
-    //     not a method the merchant creates. So setup copy contributes no
-    //     create-a-method name here.
-    //   - `/workspace/listing/reviewer-instructions.md` is not present in the
-    //     repo, so no name is sourced from it.
-    //   - Official Shopify docs model B2B deferral as "payment terms"
-    //     (Net 7/15/30/45/60/90, "Due on fulfillment", admin option
-    //     "Payment due later"), not as a named checkout payment method. No
-    //     official source gives an exact checkout PaymentMethod.name, so no such
-    //     string is asserted here (none is invented).
-    //
-    // The labels below are the deferred / net-terms option names the repo's own
-    // copy and fixtures say a held buyer sees (docs/privacy.md and docs/qa/S13
-    // "the net-terms payment option"; the Function's canonical fixtures use
-    // "Net Terms" and "Deferred Payment"). All match the defaults, so this test
-    // is NOT #[ignore]d. If a required name ever fails to match, it would be
-    // marked #[ignore] with a generic note instead of changing the patterns.
-    // =========================================================================
+    // With no config metafield the Function uses Configuration::default(), so
+    // the shipped DEFAULT_DEFERRED_PATTERNS apply. These tests pin, for a fixed
+    // set of observed input payment-method names, that a held buyer hides
+    // exactly the deferred names (index 0 and index 2) and a non-held buyer
+    // hides nothing. The patterns are not changed.
+    fn observed_input_names() -> [(&'static str, &'static str); 3] {
+        [
+            ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Deferred"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/2", "(for testing) Bogus Gateway"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/3", "Net terms"),
+        ]
+    }
+
     #[test]
-    fn test_default_patterns_match_and_hide_deferred_method_names() {
-        let deferred_names = ["Net Terms", "Deferred Payment"];
-        let visible = ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Credit Card");
-        let deferred_id = "gid://shopify/PaymentCustomizationPaymentMethod/2";
+    fn pins_default_patterns_against_observed_input_names_held() {
+        let payment_methods = observed_input_names();
+        // No config metafield -> Configuration::default() -> default patterns.
+        let input = make_b2b_input(Some(held_metafield()), &payment_methods);
+        let result = run_test(&input).unwrap();
 
-        for name in deferred_names {
-            // (1) The shipped defaults match the name directly.
-            assert!(
-                matches_deferred_patterns(name, DEFAULT_DEFERRED_PATTERNS),
-                "DEFAULT_DEFERRED_PATTERNS should match deferred method name: {name}",
-            );
+        assert_eq!(
+            result.operations.len(),
+            2,
+            "held buyer: exactly the two deferred names (index 0 and index 2) should be hidden",
+        );
 
-            // (2) The full function run hides exactly that method for a held
-            //     B2B buyer, leaving the non-deferred method visible.
-            let payment_methods = [visible, (deferred_id, name)];
-            let input = make_b2b_input(Some(held_metafield()), &payment_methods);
-            let result = run_test(&input).unwrap();
+        let hidden: Vec<&str> = result
+            .operations
+            .iter()
+            .map(|op| match op {
+                schema::Operation::PaymentMethodHide(hide_op) => hide_op.payment_method_id.as_str(),
+            })
+            .collect();
 
-            assert_eq!(
-                result.operations.len(),
-                1,
-                "held B2B buyer: only the deferred method ({name}) should be hidden",
-            );
-            for op in &result.operations {
-                match op {
-                    schema::Operation::PaymentMethodHide(hide_op) => {
-                        assert_eq!(
-                            hide_op.payment_method_id, deferred_id,
-                            "the hidden method should be the deferred one ({name})",
-                        );
-                    }
-                }
-            }
-        }
+        assert!(
+            hidden.contains(&payment_methods[0].0),
+            "index 0 ('Deferred') should be hidden",
+        );
+        assert!(
+            hidden.contains(&payment_methods[2].0),
+            "index 2 ('Net terms') should be hidden",
+        );
+        assert!(
+            !hidden.contains(&payment_methods[1].0),
+            "index 1 (gateway) must not be hidden",
+        );
+    }
+
+    #[test]
+    fn pins_default_patterns_against_observed_input_names_not_held() {
+        let payment_methods = observed_input_names();
+        // No config metafield -> Configuration::default() -> default patterns.
+        let input = make_b2b_input(Some(ok_metafield()), &payment_methods);
+        let result = run_test(&input).unwrap();
+
+        assert!(
+            result.operations.is_empty(),
+            "non-held buyer: no payment method should be hidden",
+        );
     }
 }
