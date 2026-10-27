@@ -159,6 +159,9 @@ const DB_TEST_PATTERNS = [
 
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
+
+  // Reviewer journey DB tests
+  "tests/integration/reviewer-journey-db.test.ts",
 ];
 
 export default defineConfig({
