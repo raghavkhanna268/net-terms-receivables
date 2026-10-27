@@ -80,6 +80,7 @@ type RouteExpectation = {
 
 const ROUTE_EXCLUSIONS: Record<string, string> = {
   "app.tsx": "Layout wrapper, no record IDs, no loader/action that access data",
+  "app.$.tsx": "Catch-all 404 route, no record IDs (renders static not-found page)",
   "app.onboarding.tsx": "Setup flow, no record IDs, shop-scoped by session only",
   "app.welcome.tsx": "Welcome redirect, no record IDs",
   "api.web-vitals.tsx": "Performance metrics endpoint, no tenant data",

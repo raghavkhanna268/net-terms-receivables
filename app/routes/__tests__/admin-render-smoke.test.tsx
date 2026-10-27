@@ -279,6 +279,13 @@ const APP_ROUTES: RouteTestConfig[] = [
     resourceOnly: true,
     resourceOnlyReason: "Resource-only download handler route with no default export component",
   },
+  {
+    name: "app.$",
+    importPath: "../app.$",
+    urlPath: "/app/unknown-path",
+    resourceOnly: true,
+    resourceOnlyReason: "Catch-all 404 route that throws in loader and renders ErrorBoundary",
+  },
 ];
 
 const RESOURCE_ONLY_ROUTES = APP_ROUTES.filter(
@@ -515,9 +522,10 @@ describeWithDb("Admin Render Smoke Tests", () => {
         ).toBeTruthy();
       }
 
-      expect(RESOURCE_ONLY_ROUTES.length).toBe(3);
+      expect(RESOURCE_ONLY_ROUTES.length).toBe(4);
       expect(RESOURCE_ONLY_ROUTES.map((r) => r.name).sort()).toEqual([
         "app",
+        "app.$",
         "app.data-requests.$id.download",
         "app.welcome",
       ]);
