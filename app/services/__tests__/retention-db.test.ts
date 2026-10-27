@@ -59,7 +59,8 @@ describeWithDb("access event retention purge (DB)", () => {
 
   describe("purge deletes only old access.* events", () => {
     it("deletes 366-day-old access.* events, keeps 364-day-old and non-access types", async () => {
-      const now = new Date();
+      const [{ dbNow }] = await sql<{ dbNow: Date }[]>`SELECT NOW() AS "dbNow"`;
+      const now = dbNow;
       const days366Ago = new Date(now.getTime() - 366 * 24 * 60 * 60 * 1000);
       const days364Ago = new Date(now.getTime() - 364 * 24 * 60 * 60 * 1000);
       const days400Ago = new Date(now.getTime() - 400 * 24 * 60 * 60 * 1000);
@@ -163,7 +164,8 @@ describeWithDb("access event retention purge (DB)", () => {
     });
 
     it("purge is idempotent (running twice deletes nothing extra)", async () => {
-      const now = new Date();
+      const [{ dbNow }] = await sql<{ dbNow: Date }[]>`SELECT NOW() AS "dbNow"`;
+      const now = dbNow;
       const days366Ago = new Date(now.getTime() - 366 * 24 * 60 * 60 * 1000);
       const days364Ago = new Date(now.getTime() - 364 * 24 * 60 * 60 * 1000);
 
