@@ -258,6 +258,135 @@ describe("value bounds", () => {
   });
 });
 
+describe("server-bounds filtering", () => {
+  it("drops INP values above the server maximum (30000)", () => {
+    const metrics = [
+      { id: "v1-1", name: "INP" as const, value: 30001 },
+      { id: "v1-2", name: "INP" as const, value: 150 },
+    ];
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result!.metrics).toHaveLength(1);
+    expect(result!.metrics[0].value).toBe(150);
+  });
+
+  it("drops LCP values above the server maximum (60000)", () => {
+    const metrics = [
+      { id: "v1-1", name: "LCP" as const, value: 60001 },
+      { id: "v1-2", name: "LCP" as const, value: 2500 },
+    ];
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result!.metrics).toHaveLength(1);
+    expect(result!.metrics[0].value).toBe(2500);
+  });
+
+  it("drops CLS values above the server maximum (10)", () => {
+    const metrics = [
+      { id: "v1-1", name: "CLS" as const, value: 10.5 },
+      { id: "v1-2", name: "CLS" as const, value: 0.05 },
+    ];
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result!.metrics).toHaveLength(1);
+    expect(result!.metrics[0].value).toBe(0.05);
+  });
+
+  it("drops negative values for every metric", () => {
+    const metrics = [
+      { id: "v1-1", name: "LCP" as const, value: -1 },
+      { id: "v1-2", name: "CLS" as const, value: -0.1 },
+      { id: "v1-3", name: "INP" as const, value: -50 },
+    ];
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result).toBeNull();
+  });
+
+  it("drops NaN and Infinity values", () => {
+    const metrics = [
+      { id: "v1-1", name: "LCP" as const, value: NaN },
+      { id: "v1-2", name: "INP" as const, value: Infinity },
+      { id: "v1-3", name: "CLS" as const, value: -Infinity },
+      { id: "v1-4", name: "LCP" as const, value: 2500 },
+    ];
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result!.metrics).toHaveLength(1);
+    expect(result!.metrics[0].name).toBe("LCP");
+    expect(result!.metrics[0].value).toBe(2500);
+  });
+
+  it("keeps boundary values (0 and the exact maxima)", () => {
+    const metrics = [
+      { id: "v1-1", name: "LCP" as const, value: 0 },
+      { id: "v1-2", name: "LCP" as const, value: 60000 },
+      { id: "v1-3", name: "CLS" as const, value: 0 },
+      { id: "v1-4", name: "CLS" as const, value: 10 },
+      { id: "v1-5", name: "INP" as const, value: 0 },
+      { id: "v1-6", name: "INP" as const, value: 30000 },
+    ];
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result!.metrics).toHaveLength(6);
+    expect(result!.metrics.map((m) => m.value)).toEqual([
+      0, 60000, 0, 10, 0, 30000,
+    ]);
+  });
+
+  it("returns null when every metric is out of bounds or non-finite", () => {
+    const metrics = [
+      { id: "v1-1", name: "LCP" as const, value: 60001 },
+      { id: "v1-2", name: "INP" as const, value: Infinity },
+      { id: "v1-3", name: "CLS" as const, value: 10.5 },
+      { id: "v1-4", name: "LCP" as const, value: NaN },
+    ];
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result).toBeNull();
+  });
+});
+
+describe("metric count cap", () => {
+  it("never emits more than 10 metrics even with more valid inputs", () => {
+    const metrics = Array.from({ length: 25 }, (_, i) => ({
+      id: `v1-${i}`,
+      name: "LCP" as const,
+      value: 2500 + i,
+    }));
+
+    const result = filterMetrics(metrics, "/app");
+
+    expect(result).not.toBeNull();
+    expect(result!.metrics.length).toBeLessThanOrEqual(10);
+  });
+
+  it("counts only in-bounds metrics toward the cap", () => {
+    const outOfBounds = Array.from({ length: 15 }, (_, i) => ({
+      id: `bad-${i}`,
+      name: "LCP" as const,
+      value: 60001 + i,
+    }));
+    const valid = Array.from({ length: 4 }, (_, i) => ({
+      id: `ok-${i}`,
+      name: "INP" as const,
+      value: 100 + i,
+    }));
+
+    const result = filterMetrics([...outOfBounds, ...valid], "/app");
+
+    expect(result!.metrics).toHaveLength(4);
+    expect(result!.metrics.every((m) => m.name === "INP")).toBe(true);
+  });
+});
+
 describe("debug logging", () => {
   const originalWindow = global.window;
   const originalLocalStorage = global.localStorage;
