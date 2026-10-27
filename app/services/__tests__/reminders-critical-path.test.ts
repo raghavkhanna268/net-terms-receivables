@@ -1644,16 +1644,17 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     const savedTestRecipients = process.env.RESEND_TEST_RECIPIENTS;
 
     const restoreEnv = () => {
-      if (savedResendKey === undefined) delete process.env.RESEND_API_KEY;
-      else process.env.RESEND_API_KEY = savedResendKey;
-      if (savedResendFrom === undefined) delete process.env.RESEND_FROM;
-      else process.env.RESEND_FROM = savedResendFrom;
-      if (savedUnsubscribeSecret === undefined) delete process.env.REMINDER_UNSUBSCRIBE_SECRET;
-      else process.env.REMINDER_UNSUBSCRIBE_SECRET = savedUnsubscribeSecret;
-      if (savedAppUrl === undefined) delete process.env.SHOPIFY_APP_URL;
-      else process.env.SHOPIFY_APP_URL = savedAppUrl;
-      if (savedTestRecipients === undefined) delete process.env.RESEND_TEST_RECIPIENTS;
-      else process.env.RESEND_TEST_RECIPIENTS = savedTestRecipients;
+      const env = process.env as Record<string, string | undefined>;
+      if (savedResendKey === undefined) delete env.RESEND_API_KEY;
+      else env.RESEND_API_KEY = savedResendKey;
+      if (savedResendFrom === undefined) delete env.RESEND_FROM;
+      else env.RESEND_FROM = savedResendFrom;
+      if (savedUnsubscribeSecret === undefined) delete env.REMINDER_UNSUBSCRIBE_SECRET;
+      else env.REMINDER_UNSUBSCRIBE_SECRET = savedUnsubscribeSecret;
+      if (savedAppUrl === undefined) delete env.SHOPIFY_APP_URL;
+      else env.SHOPIFY_APP_URL = savedAppUrl;
+      if (savedTestRecipients === undefined) delete env.RESEND_TEST_RECIPIENTS;
+      else env.RESEND_TEST_RECIPIENTS = savedTestRecipients;
     };
 
     try {
