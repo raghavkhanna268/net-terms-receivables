@@ -6,7 +6,8 @@
  *
  * Allowlisted fields: shopId, shopHash, requestId, jobId, matchId,
  * buyerAccountId, orderGid, invoiceId, and other *Id/*Gid keys, plus topic,
- * status, reason, code, err, count/*Count, boolean flags, durationMs, timestamps.
+ * status, reason, code, err, count/*Count, boolean flags, durationMs, ms,
+ * timestamps.
  * Note: webhookId is explicitly BANNED (#332) and will be redacted.
  *
  * Any other key, or any string value matching sensitive patterns, is redacted.
@@ -49,6 +50,7 @@ const ALLOWED_KEY_PATTERNS: RegExp[] = [
   /^count$/,
   /^durationMs$/,
   /^elapsedMs$/,
+  /^ms$/,
   /^at$/,
   /^timestamp$/,
   /^createdAt$/,
