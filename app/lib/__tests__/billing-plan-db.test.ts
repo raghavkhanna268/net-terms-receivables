@@ -726,7 +726,10 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       );
     }
 
-    function assertNoSensitiveData(testShopDomain?: string): void {
+    function assertNoSensitiveData(
+      testShopDomain: string,
+      syntheticSubscriptionIds: string[]
+    ): void {
       const allOutput = getAllConsoleOutput();
       const outputStr = allOutput.join("\n");
 
@@ -734,8 +737,10 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       expect(outputStr).not.toMatch(/gid:\/\/shopify\/App/i);
       expect(outputStr).not.toMatch(/charge_id/i);
 
-      if (testShopDomain) {
-        expect(outputStr).not.toContain(testShopDomain);
+      expect(outputStr).not.toContain(testShopDomain);
+
+      for (const subId of syntheticSubscriptionIds) {
+        expect(outputStr).not.toContain(subId);
       }
     }
 
@@ -752,6 +757,7 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       }));
 
       const shopDomain = `test-log-refresh-${TEST_SUFFIX}.myshopify.com`;
+      const syntheticSubId = "log-test-sub-refresh";
 
       await sql`
         INSERT INTO "Shop" (domain, timezone, currency, plan_key, "createdAt", "updatedAt")
@@ -763,7 +769,7 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
         data: {
           currentAppInstallation: {
             activeSubscriptions: [{
-              id: "gid://shopify/AppSubscription/log-test-sub",
+              id: `gid://shopify/AppSubscription/${syntheticSubId}`,
               name: "Starter",
               status: "ACTIVE",
               test: false,
@@ -776,7 +782,11 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       const { refreshPlanCache } = await import("~/services/plan.server");
       await refreshPlanCache(sql, shopDomain);
 
-      assertNoSensitiveData(shopDomain);
+      const allOutput = getAllConsoleOutput();
+      expect(allOutput.length).toBeGreaterThan(0);
+      expect(allOutput.some(line => line.includes("plan_cache_refreshed"))).toBe(true);
+
+      assertNoSensitiveData(shopDomain, [syntheticSubId]);
 
       vi.doUnmock("~/services/drain/admin-client.server");
       vi.doUnmock("~/lib/sentry");
@@ -784,12 +794,13 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
 
     it("webhook success path logs contain no sensitive data", async () => {
       vi.resetModules();
+      const syntheticSubId = "webhook-log-sub-success";
       const mockAdminGraphQL = vi.fn().mockResolvedValue({
         success: true,
         data: {
           currentAppInstallation: {
             activeSubscriptions: [{
-              id: "gid://shopify/AppSubscription/webhook-log-sub",
+              id: `gid://shopify/AppSubscription/${syntheticSubId}`,
               name: "Growth",
               status: "ACTIVE",
               test: false,
@@ -821,7 +832,7 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
         VALUES (${shopDomain}, 'UTC', 'INR', 'none', NOW(), NOW())
       `;
 
-      const payload = { app_subscription: { id: "gid://shopify/AppSubscription/webhook-log-sub" } };
+      const payload = { app_subscription: { id: `gid://shopify/AppSubscription/${syntheticSubId}` } };
       const body = JSON.stringify(payload);
 
       const request = createSignedWebhookRequest(body, "app_subscriptions/update", SYNTHETIC_TEST_SECRET, {
@@ -839,7 +850,11 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
         await args._waitUntil.mock.calls[0][0];
       }
 
-      assertNoSensitiveData(shopDomain);
+      const allOutput = getAllConsoleOutput();
+      expect(allOutput.length).toBeGreaterThan(0);
+      expect(allOutput.some(line => line.includes("Refreshed plan"))).toBe(true);
+
+      assertNoSensitiveData(shopDomain, [syntheticSubId]);
 
       vi.doUnmock("~/services/drain/admin-client.server");
       vi.doUnmock("~/lib/sentry");
@@ -849,7 +864,8 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
 
     it("HMAC failure path logs contain no sensitive data", async () => {
       const shopDomain = `test-log-hmac-fail-${TEST_SUFFIX}.myshopify.com`;
-      const payload = { app_subscription: { id: "gid://shopify/AppSubscription/hmac-fail-log" } };
+      const syntheticSubId = "hmac-fail-log-sub";
+      const payload = { app_subscription: { id: `gid://shopify/AppSubscription/${syntheticSubId}` } };
       const body = JSON.stringify(payload);
       const wrongHmac = generateShopifyHmac(body, "wrong-secret");
 
@@ -866,7 +882,11 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
         // Expected 401
       }
 
-      assertNoSensitiveData(shopDomain);
+      const allOutput = getAllConsoleOutput();
+      expect(allOutput.length).toBeGreaterThan(0);
+      expect(allOutput.some(line => line.includes("401") || line.includes("HMAC") || line.includes("webhook"))).toBe(true);
+
+      assertNoSensitiveData(shopDomain, [syntheticSubId]);
     });
 
     it("gating check logs contain no sensitive data", async () => {
@@ -884,7 +904,11 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       const { checkCompanyLimit } = await import("~/services/gating.server");
       await checkCompanyLimit(sql, shopId);
 
-      assertNoSensitiveData(shopDomain);
+      const allOutput = getAllConsoleOutput();
+      expect(allOutput.length).toBeGreaterThan(0);
+      expect(allOutput.some(line => line.includes("company_limit_check") || line.includes("gating"))).toBe(true);
+
+      assertNoSensitiveData(shopDomain, []);
     });
   });
 
