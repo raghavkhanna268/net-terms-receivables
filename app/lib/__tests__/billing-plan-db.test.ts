@@ -2,7 +2,7 @@
  * Billing and Plan Coverage Tests (S21) - Additions beyond #481.
  *
  * Tests unique Managed Pricing features not covered by billing-plan-state-db.test.ts:
- * A. Plan handle redirect and currentAppInstallation query - table-driven
+ * A. Plan resolution via currentAppInstallation activeSubscriptions query - table-driven
  * C. Plan handle to features mapping - table-driven
  * D. PLAN_GATING_ENFORCED behavior
  * E. Unknown/missing handle fails safe
@@ -21,7 +21,6 @@ import {
   getPlanConfig,
   planLimit,
   planHasFeature,
-  ALL_FEATURE_KEYS,
   resolvePlanKey,
 } from "~/lib/entitlements";
 
@@ -61,11 +60,10 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
   });
 
   /**
-   * A. Plan handle redirect and currentAppInstallation query - table-driven.
+   * A. Plan resolution via currentAppInstallation activeSubscriptions query - table-driven.
    *
-   * Tests how the app reads the current plan via:
-   * 1. The plan_handle redirect param (processPlanWelcome)
-   * 2. The currentAppInstallation activeSubscriptions query (fetchPlanFromShopify)
+   * Tests how the app reads the current plan via the Admin GraphQL
+   * currentAppInstallation activeSubscriptions query (fetchPlanFromShopify).
    */
   describe("A. Plan resolution from Admin API (table-driven)", () => {
     const KNOWN_HANDLES: Array<{ handle: string; expectedPlanKey: PlanKey; expectedLimit: number }> = [
@@ -201,12 +199,16 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       planKey: PlanKey;
       companiesLimit: number;
       importsLimit: number;
-      hasAllFeatures: boolean;
+      aging_dashboard: boolean;
+      unlimited_imports: boolean;
+      matching: boolean;
+      reminders: boolean;
+      credit_holds: boolean;
     }> = [
-      { planKey: "none", companiesLimit: 0, importsLimit: -1, hasAllFeatures: true },
-      { planKey: "starter", companiesLimit: 25, importsLimit: -1, hasAllFeatures: true },
-      { planKey: "growth", companiesLimit: 100, importsLimit: -1, hasAllFeatures: true },
-      { planKey: "unlimited", companiesLimit: -1, importsLimit: -1, hasAllFeatures: true },
+      { planKey: "none", companiesLimit: 0, importsLimit: -1, aging_dashboard: true, unlimited_imports: true, matching: true, reminders: true, credit_holds: true },
+      { planKey: "starter", companiesLimit: 25, importsLimit: -1, aging_dashboard: true, unlimited_imports: true, matching: true, reminders: true, credit_holds: true },
+      { planKey: "growth", companiesLimit: 100, importsLimit: -1, aging_dashboard: true, unlimited_imports: true, matching: true, reminders: true, credit_holds: true },
+      { planKey: "unlimited", companiesLimit: -1, importsLimit: -1, aging_dashboard: true, unlimited_imports: true, matching: true, reminders: true, credit_holds: true },
     ];
 
     it("coverage guard: all plan keys have a feature matrix row", () => {
@@ -217,19 +219,19 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
     });
 
     it.each(PLAN_FEATURE_MATRIX)(
-      "plan '$planKey' has companies=$companiesLimit, imports=$importsLimit, allFeatures=$hasAllFeatures",
-      ({ planKey, companiesLimit, importsLimit, hasAllFeatures }) => {
+      "plan '$planKey' has companies=$companiesLimit, imports=$importsLimit, features as expected",
+      ({ planKey, companiesLimit, importsLimit, aging_dashboard, unlimited_imports, matching, reminders, credit_holds }) => {
         const plan = getPlanConfig(planKey);
 
         expect(plan.key).toBe(planKey);
         expect(planLimit(plan, "companies")).toBe(companiesLimit);
         expect(planLimit(plan, "importsPerMonth")).toBe(importsLimit);
 
-        if (hasAllFeatures) {
-          for (const feature of ALL_FEATURE_KEYS) {
-            expect(planHasFeature(plan, feature)).toBe(true);
-          }
-        }
+        expect(planHasFeature(plan, "aging_dashboard")).toBe(aging_dashboard);
+        expect(planHasFeature(plan, "unlimited_imports")).toBe(unlimited_imports);
+        expect(planHasFeature(plan, "matching")).toBe(matching);
+        expect(planHasFeature(plan, "reminders")).toBe(reminders);
+        expect(planHasFeature(plan, "credit_holds")).toBe(credit_holds);
       }
     );
 
@@ -559,9 +561,8 @@ describeWithDb("Billing and Plan Coverage (DB)", () => {
       const response = await action(args as Parameters<typeof action>[0]);
       expect(response.status).toBe(200);
 
-      if (mockWaitUntil.mock.calls.length > 0) {
-        await mockWaitUntil.mock.calls[0][0];
-      }
+      expect(mockWaitUntil).toHaveBeenCalledTimes(1);
+      await mockWaitUntil.mock.calls[0][0];
 
       const allOutput = getAllConsoleOutput();
       expect(allOutput.length).toBeGreaterThan(0);
