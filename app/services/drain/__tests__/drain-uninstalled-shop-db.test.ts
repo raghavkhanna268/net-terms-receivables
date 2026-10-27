@@ -45,8 +45,28 @@ vi.mock("~/services/sync/company.server", async (importOriginal) => {
   return {
     ...actual,
     isWebhookProcessed: vi.fn().mockResolvedValue(false),
-    markWebhookProcessed: actual.markWebhookProcessed,
+    markWebhookProcessed: vi.fn().mockResolvedValue(undefined),
     processCompanyWebhook: actual.processCompanyWebhook,
+  };
+});
+
+vi.mock("~/services/sync/order.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/sync/order.server")>();
+  return {
+    ...actual,
+    processOrderWebhook: vi.fn().mockResolvedValue({
+      success: true,
+      action: "created",
+      entityId: "test-invoice-id",
+    }),
+  };
+});
+
+vi.mock("~/services/backstop.server", async () => {
+  return {
+    executeBackstop: vi.fn().mockResolvedValue(null),
+    resolveInvoiceForOrder: vi.fn().mockResolvedValue(null),
+    recordBackstopFailure: vi.fn().mockResolvedValue(undefined),
   };
 });
 

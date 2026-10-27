@@ -714,7 +714,10 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
   });
 
   describe("Uninstalled-but-present shop", () => {
-    it("sync: message for uninstalled-but-present shop goes to handler (NOT deleted by guard)", async () => {
+    // #515: Uninstalled-but-present shops are now skipped BEFORE any Admin call.
+    // The guard (for MISSING shops) does NOT delete the message - the new skip logic archives it.
+    // This is the expected behavior: zero Admin API calls, message archived, no DLQ entry.
+    it("sync: message for uninstalled-but-present shop is SKIPPED and archived (NOT deleted by guard, NOT sent to handler)", async () => {
       const suffix = testContext.suffix;
       const uninstalledDomain = `test-uninstalled-${suffix}.myshopify.com`;
       const shopId = `shop-uninstalled-${suffix}`;
@@ -745,32 +748,40 @@ describeWithDb("drain guard: messages for redacted shops (#239)", () => {
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000, maxRetries: 1 });
 
+        // Guard log should NOT appear (shop exists, guard is for missing shops)
         const guardLog = findLogEntry("drain_shop_missing_deleted");
         expect(guardLog).toBeNull();
 
+        // Shop row should still exist
         const [shopExists] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM "Shop" WHERE id = ${shopId}
         `;
         expect(parseInt(shopExists.count, 10)).toBe(1);
 
+        // #515: NO DLQ entry - message is skipped before handler
         const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
           SELECT message, error FROM s6_dead_letter WHERE original_msg_id = ${msgId}
         `;
-        expect(dlqRow).toBeDefined();
-        expect(dlqRow!.message.webhookId).toBe(webhookId);
-        expect(dlqRow!.error).toBe("no_buyer_account");
+        expect(dlqRow).toBeUndefined();
 
+        // Message should NOT be in queue
         const [notInQueue] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
           WHERE msg_id = ${msgId}::bigint
         `;
         expect(parseInt(notInQueue.count, 10)).toBe(0);
 
-        const [notArchived] = await sqlRef<[{ count: string }]>`
+        // #515: Message IS archived (skipped without Admin call)
+        const [archived] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
           WHERE msg_id = ${msgId}::bigint
         `;
-        expect(parseInt(notArchived.count, 10)).toBe(0);
+        expect(parseInt(archived.count, 10)).toBe(1);
+
+        // Verify the uninstalled shop skip log
+        const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
+        expect(skipLog).not.toBeNull();
+        expect(skipLog!.reason).toBe("shop_uninstalled");
       } finally {
         await cleanupTestData([uninstalledDomain], suffix);
       }
