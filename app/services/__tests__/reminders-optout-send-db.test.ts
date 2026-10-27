@@ -144,7 +144,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.unstubAllEnvs();
   });
 
   describe("sendPaymentReminder - opt-out between enqueue and send", () => {
@@ -456,10 +455,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
   });
 
   describe("missing REMINDER_UNSUBSCRIBE_SECRET", () => {
-    afterEach(() => {
-      vi.unstubAllEnvs();
-    });
-
     it("sendPaymentReminder skips when secret is missing", async () => {
       vi.stubEnv("REMINDER_UNSUBSCRIBE_SECRET", "");
       vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", "false");

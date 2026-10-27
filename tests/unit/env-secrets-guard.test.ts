@@ -24,8 +24,14 @@ describe("env-secrets-guard", () => {
       "%s is set to fake value",
       (name, expectedFake) => {
         const actual = process.env[name];
-        expect(isFakeValue(actual)).toBe(true);
-        expect(actual).toBe(expectedFake);
+        expect(
+          isFakeValue(actual),
+          `${name} is not recognized as a fake value`
+        ).toBe(true);
+        expect(
+          actual === expectedFake,
+          `${name} does not match its expected fake value`
+        ).toBe(true);
       }
     );
   });

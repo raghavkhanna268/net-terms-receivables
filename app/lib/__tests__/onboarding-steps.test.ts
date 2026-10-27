@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   computeDefaultTermsStep,
   computeBuyerSetupStep,
@@ -185,10 +185,6 @@ describe("onboarding-steps", () => {
   });
 
   describe("computeReminderStep with isEmailSendingConfigured", () => {
-    afterEach(() => {
-      vi.unstubAllEnvs();
-    });
-
     it("step is not-ready when only API key is set (sender missing)", async () => {
       vi.stubEnv("RESEND_FROM", "");
       const { isEmailSendingConfigured } = await import("../email-sender-config.server");

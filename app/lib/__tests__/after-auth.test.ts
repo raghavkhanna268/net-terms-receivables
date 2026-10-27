@@ -75,7 +75,6 @@ describe("after-auth", () => {
 
   afterEach(() => {
     _resetSetupCacheForTesting();
-    vi.unstubAllEnvs();
   });
 
   describe("runAfterAuth", () => {

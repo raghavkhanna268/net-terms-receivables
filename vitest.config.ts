@@ -233,6 +233,7 @@ export default defineConfig({
       ...Object.fromEntries(SECRET_ENV_VARS.map((v) => [v.name, v.fakeValue])),
       SHOPIFY_APP_URL: "https://example.com",
     } as Record<string, string>,
+    unstubEnvs: true,
     projects: [
       {
         test: {

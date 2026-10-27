@@ -3,7 +3,7 @@
  *
  * Tests RFC 8058 header generation for Resend.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { buildUnsubscribeHeaders, canGenerateUnsubscribeHeaders } from "../reminder-headers.server";
 
 const TEST_BASE_URL = "https://example.com";
@@ -67,10 +67,6 @@ describe("buildUnsubscribeHeaders", () => {
 });
 
 describe("canGenerateUnsubscribeHeaders", () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
   it("returns true when secret is configured", () => {
     expect(canGenerateUnsubscribeHeaders({ REMINDER_UNSUBSCRIBE_SECRET: FAKE_SECRET })).toBe(true);
   });

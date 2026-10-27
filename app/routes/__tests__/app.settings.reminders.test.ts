@@ -79,7 +79,6 @@ describe("Reminder Settings Route", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
-    vi.unstubAllEnvs();
   });
 
   describe("loader", () => {
