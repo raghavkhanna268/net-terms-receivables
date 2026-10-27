@@ -14,6 +14,7 @@ describe("isEmailSendingConfigured", () => {
 
   describe("with env parameter override", () => {
     it("returns false when only API key is set (sender missing)", () => {
+      vi.stubEnv("RESEND_FROM", "");
       expect(
         isEmailSendingConfigured({
           RESEND_API_KEY: "re_fake_key_for_test_only_12345",
@@ -23,6 +24,7 @@ describe("isEmailSendingConfigured", () => {
     });
 
     it("returns false when only sender is set (API key missing)", () => {
+      vi.stubEnv("RESEND_API_KEY", "");
       expect(
         isEmailSendingConfigured({
           RESEND_API_KEY: undefined,
@@ -41,6 +43,8 @@ describe("isEmailSendingConfigured", () => {
     });
 
     it("returns false when both are undefined", () => {
+      vi.stubEnv("RESEND_API_KEY", "");
+      vi.stubEnv("RESEND_FROM", "");
       expect(
         isEmailSendingConfigured({
           RESEND_API_KEY: undefined,

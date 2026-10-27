@@ -79,6 +79,7 @@ describe("Reminder Settings Route", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe("loader", () => {
@@ -141,6 +142,7 @@ describe("Reminder Settings Route", () => {
       });
 
       // Only RESEND_FROM set, RESEND_API_KEY missing (real isReminderSendingEnabled)
+      vi.stubEnv("RESEND_API_KEY", "");
       mockContext.cloudflare.env = { RESEND_FROM: "noreply@example.com" };
 
       const { loader } = await import("../app.settings.reminders");
@@ -378,6 +380,7 @@ describe("Reminder Settings Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Only RESEND_FROM, no RESEND_API_KEY
+      vi.stubEnv("RESEND_API_KEY", "");
       mockContext.cloudflare.env = { RESEND_FROM: "noreply@example.com" };
 
       const formData = new FormData();
