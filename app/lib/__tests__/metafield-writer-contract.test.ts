@@ -12,7 +12,7 @@
  * 2. Strict schema validation: exact key set, JSON types, ranges
  * 3. Writer exercise tests: call actual functions, capture serialized value
  * 4. Positive controls: deliberate shape violations detected
- * 5. Guard tests: verify each exercised writer actually invoked metafieldsSet
+ * 5. Guard tests: verify each exercised writer actually invoked admin.graphql/metafieldsSet
  *
  * Writers Covered:
  * - credit_status: updateCreditStatus (EXERCISED), syncCreditStatusMetafield (EXERCISED),
@@ -30,15 +30,12 @@ import { companyLocationGid, customerGid, shopGid } from "../../../tests/helpers
 const MOCK_SHOP_DOMAIN = "test-writer-contract.example.com";
 
 // Track metafield writes from shopifyGraphQLRequest (for credit_status)
-let creditStatusMetafieldCaptures: Array<{ ownerId: string; namespace: string; key: string; value: string }> = [];
-
-// Track shop_config writes from writeShopConfigMetafield
-let shopConfigWriteCaptures: Array<{ shopId: string; currency: string }> = [];
+let creditStatusMetafieldCaptures: Array<{ ownerId: string; namespace: string; key: string; value: string; type?: string }> = [];
 
 // Mock shopifyGraphQLRequest at module level (hoisted) - for credit_status writes
 vi.mock("../../services/shopify-client.server", () => ({
   shopifyGraphQLRequest: vi.fn().mockImplementation(async (_domain, _query, variables) => {
-    const metafields = variables?.metafields as Array<{ ownerId: string; namespace: string; key: string; value: string }>;
+    const metafields = variables?.metafields as Array<{ ownerId: string; namespace: string; key: string; value: string; type?: string }>;
     if (metafields) {
       creditStatusMetafieldCaptures.push(...metafields);
     }
@@ -53,25 +50,6 @@ vi.mock("../../services/shopify-client.server", () => ({
     };
   }),
 }));
-
-// Track calls to the actual serializeShopConfig for shape validation
-let lastSerializedShopConfig: string | null = null;
-
-// Capture what writeShopConfigMetafield receives (for syncShopInfo path)
-const originalWriteShopConfigMetafield = vi.fn();
-vi.mock("../../services/shop-config.server", async (importOriginal) => {
-  const original = await importOriginal() as Record<string, unknown>;
-  return {
-    ...original,
-    writeShopConfigMetafield: vi.fn(async (admin: unknown, shopId: string, currency: string) => {
-      shopConfigWriteCaptures.push({ shopId, currency });
-      const { serializeShopConfig } = await import("../metafields-contract");
-      lastSerializedShopConfig = serializeShopConfig(currency);
-      originalWriteShopConfigMetafield(admin, shopId, currency);
-      return { success: true, metafieldId: "mf-test" };
-    }),
-  };
-});
 
 /**
  * WRITERS MANIFEST
@@ -309,11 +287,18 @@ function createComprehensiveMockSql(config: MockConfig) {
   return sql;
 }
 
+// Captured metafield from admin.graphql calls (for shop_config writers)
+interface CapturedMetafield {
+  ownerId: string;
+  namespace: string;
+  key: string;
+  type: string;
+  value: string;
+}
+
 describe("Metafield Writer Contract", () => {
   beforeEach(() => {
     creditStatusMetafieldCaptures = [];
-    shopConfigWriteCaptures = [];
-    lastSerializedShopConfig = null;
     vi.clearAllMocks();
   });
 
@@ -697,20 +682,40 @@ describe("Metafield Writer Contract", () => {
 
   describe("EXERCISED: _syncShopInfoForTesting (actual function call)", () => {
     it("syncShopInfo produces valid shop_config shape for reinstall re-sync", async () => {
-      shopConfigWriteCaptures = [];
-      lastSerializedShopConfig = null;
+      vi.resetModules();
+      
+      const testShopGid = shopGid(77777);
+      let capturedMetafield: CapturedMetafield | null = null;
       
       const mockAdmin = {
-        graphql: vi.fn().mockResolvedValue({
-          json: async () => ({
-            data: {
-              shop: {
-                id: shopGid(77777),
-                ianaTimezone: "Asia/Kolkata",
-                currencyCode: "INR",
-              },
-            },
-          }),
+        graphql: vi.fn().mockImplementation(async (query: string, opts?: { variables?: Record<string, unknown> }) => {
+          if (query.includes("ianaTimezone")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: testShopGid,
+                    ianaTimezone: "Asia/Kolkata",
+                    currencyCode: "INR",
+                  },
+                },
+              }),
+            };
+          }
+          
+          if (query.includes("metafieldsSet")) {
+            const variables = opts?.variables as { metafields?: CapturedMetafield[] };
+            if (variables?.metafields?.[0]) {
+              capturedMetafield = variables.metafields[0];
+            }
+            return {
+              json: async () => ({
+                data: { metafieldsSet: { metafields: [{ id: "mf-shop-config" }], userErrors: [] } },
+              }),
+            };
+          }
+          
+          return { json: async () => ({ data: {} }) };
         }),
       };
       
@@ -747,10 +752,15 @@ describe("Metafield Writer Contract", () => {
       
       await _syncShopInfoForTesting(MOCK_SHOP_DOMAIN, mockAdmin);
       
-      expect(shopConfigWriteCaptures.length, "syncShopInfo must call writeShopConfigMetafield").toBeGreaterThan(0);
-      expect(lastSerializedShopConfig).not.toBeNull();
+      expect(mockAdmin.graphql).toHaveBeenCalled();
+      expect(capturedMetafield, "syncShopInfo must call admin.graphql with metafieldsSet").not.toBeNull();
       
-      const parsed = JSON.parse(lastSerializedShopConfig!);
+      expect(capturedMetafield!.namespace).toBe("$app");
+      expect(capturedMetafield!.key).toBe("shop_config");
+      expect(capturedMetafield!.type).toBe("json");
+      expect(capturedMetafield!.ownerId).toBe(testShopGid);
+      
+      const parsed = JSON.parse(capturedMetafield!.value);
       const validation = validateAgainstSchema(parsed, SHOP_CONFIG_SCHEMA, "shop_config (syncShopInfo)");
       
       expect(validation.errors).toEqual([]);
@@ -758,20 +768,37 @@ describe("Metafield Writer Contract", () => {
       expect(parsed.schemaVersion).toBe(1);
     });
 
-    it("GUARD: syncShopInfo actually invoked writeShopConfigMetafield", async () => {
-      shopConfigWriteCaptures = [];
+    it("GUARD: syncShopInfo actually invoked admin.graphql for metafieldsSet", async () => {
+      vi.resetModules();
+      
+      let metafieldsSetCalled = false;
       
       const mockAdmin = {
-        graphql: vi.fn().mockResolvedValue({
-          json: async () => ({
-            data: {
-              shop: {
-                id: shopGid(88888),
-                ianaTimezone: "Asia/Kolkata",
-                currencyCode: "INR",
-              },
-            },
-          }),
+        graphql: vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ianaTimezone")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: shopGid(88888),
+                    ianaTimezone: "Asia/Kolkata",
+                    currencyCode: "INR",
+                  },
+                },
+              }),
+            };
+          }
+          
+          if (query.includes("metafieldsSet")) {
+            metafieldsSetCalled = true;
+            return {
+              json: async () => ({
+                data: { metafieldsSet: { metafields: [{ id: "mf-guard" }], userErrors: [] } },
+              }),
+            };
+          }
+          
+          return { json: async () => ({ data: {} }) };
         }),
       };
       
@@ -808,7 +835,7 @@ describe("Metafield Writer Contract", () => {
       
       await _syncShopInfoForTesting("test-guard.example.com", mockAdmin);
       
-      expect(shopConfigWriteCaptures.length, "syncShopInfo must invoke writeShopConfigMetafield").toBeGreaterThan(0);
+      expect(metafieldsSetCalled, "syncShopInfo must invoke admin.graphql with metafieldsSet mutation").toBe(true);
     });
   });
 
@@ -902,31 +929,65 @@ describe("Metafield Writer Contract", () => {
 
   describe("EXERCISED: writeShopConfigMetafield (shop_config writer)", () => {
     it("produces valid shape for INR currency", async () => {
+      const testShopGid = shopGid(12345);
+      let capturedMetafield: CapturedMetafield | null = null;
+      
       const mockAdmin = {
-        graphql: vi.fn().mockResolvedValue({
-          json: async () => ({
-            data: { metafieldsSet: { metafields: [{ id: "mf-shop-config" }], userErrors: [] } },
-          }),
+        graphql: vi.fn().mockImplementation(async (_query: string, opts?: { variables?: Record<string, unknown> }) => {
+          const variables = opts?.variables as { metafields?: CapturedMetafield[] };
+          if (variables?.metafields?.[0]) {
+            capturedMetafield = variables.metafields[0];
+          }
+          return {
+            json: async () => ({
+              data: { metafieldsSet: { metafields: [{ id: "mf-shop-config" }], userErrors: [] } },
+            }),
+          };
         }),
       };
       
       const { writeShopConfigMetafield } = await import("../../services/shop-config.server");
-      const result = await writeShopConfigMetafield(mockAdmin, shopGid(12345), "INR");
+      const result = await writeShopConfigMetafield(mockAdmin, testShopGid, "INR");
       
       expect(result.success).toBe(true);
-      expect(lastSerializedShopConfig).not.toBeNull();
+      expect(capturedMetafield, "writeShopConfigMetafield must call admin.graphql").not.toBeNull();
       
-      const parsed = JSON.parse(lastSerializedShopConfig!);
+      expect(capturedMetafield!.namespace).toBe("$app");
+      expect(capturedMetafield!.key).toBe("shop_config");
+      expect(capturedMetafield!.type).toBe("json");
+      expect(capturedMetafield!.ownerId).toBe(testShopGid);
+      
+      const parsed = JSON.parse(capturedMetafield!.value);
       const validation = validateAgainstSchema(parsed, SHOP_CONFIG_SCHEMA, "shop_config (INR)");
       expect(validation.errors).toEqual([]);
       expect(parsed.currencyCode).toBe("INR");
+    });
+
+    it("GUARD: writeShopConfigMetafield actually invoked admin.graphql", async () => {
+      let graphqlCalled = false;
+      
+      const mockAdmin = {
+        graphql: vi.fn().mockImplementation(async () => {
+          graphqlCalled = true;
+          return {
+            json: async () => ({
+              data: { metafieldsSet: { metafields: [{ id: "mf-guard" }], userErrors: [] } },
+            }),
+          };
+        }),
+      };
+      
+      const { writeShopConfigMetafield } = await import("../../services/shop-config.server");
+      await writeShopConfigMetafield(mockAdmin, shopGid(99999), "INR");
+      
+      expect(graphqlCalled, "writeShopConfigMetafield must invoke admin.graphql").toBe(true);
     });
   });
 
   describe("EXERCISED: checkAndRecoverCurrency (currency recovery path)", () => {
     it("currency recovery writes valid shop_config shape", async () => {
-      shopConfigWriteCaptures = [];
-      lastSerializedShopConfig = null;
+      const testShopGid = shopGid(99999);
+      let capturedMetafield: CapturedMetafield | null = null;
       
       const sql = createComprehensiveMockSql({
         account: {
@@ -954,13 +1015,13 @@ describe("Metafield Writer Contract", () => {
       });
       
       const mockAdmin = {
-        graphql: vi.fn().mockImplementation(async (query: string) => {
+        graphql: vi.fn().mockImplementation(async (query: string, opts?: { variables?: Record<string, unknown> }) => {
           if (query.includes("ShopCurrencyAndId")) {
             return {
               json: async () => ({
                 data: {
                   shop: {
-                    id: shopGid(99999),
+                    id: testShopGid,
                     currencyCode: "INR",
                     metafield: { value: '{"schemaVersion":1,"currencyCode":"USD"}' },
                   },
@@ -969,11 +1030,19 @@ describe("Metafield Writer Contract", () => {
             };
           }
           
-          return {
-            json: async () => ({
-              data: { metafieldsSet: { metafields: [{ id: "mf-recovery" }], userErrors: [] } },
-            }),
-          };
+          if (query.includes("metafieldsSet")) {
+            const variables = opts?.variables as { metafields?: CapturedMetafield[] };
+            if (variables?.metafields?.[0]) {
+              capturedMetafield = variables.metafields[0];
+            }
+            return {
+              json: async () => ({
+                data: { metafieldsSet: { metafields: [{ id: "mf-recovery" }], userErrors: [] } },
+              }),
+            };
+          }
+          
+          return { json: async () => ({ data: {} }) };
         }),
       };
       
@@ -982,13 +1051,81 @@ describe("Metafield Writer Contract", () => {
       const result = await checkAndRecoverCurrency(sql, MOCK_SHOP_DOMAIN, "USD", mockAdmin);
       
       expect(result.currency).toBe("INR");
-      expect(shopConfigWriteCaptures.length, "checkAndRecoverCurrency must call writeShopConfigMetafield").toBeGreaterThan(0);
-      expect(lastSerializedShopConfig).not.toBeNull();
+      expect(capturedMetafield, "checkAndRecoverCurrency must call admin.graphql with metafieldsSet").not.toBeNull();
       
-      const parsed = JSON.parse(lastSerializedShopConfig!);
+      expect(capturedMetafield!.namespace).toBe("$app");
+      expect(capturedMetafield!.key).toBe("shop_config");
+      expect(capturedMetafield!.type).toBe("json");
+      expect(capturedMetafield!.ownerId).toBe(testShopGid);
+      
+      const parsed = JSON.parse(capturedMetafield!.value);
       const validation = validateAgainstSchema(parsed, SHOP_CONFIG_SCHEMA, "shop_config (recovery)");
       expect(validation.errors).toEqual([]);
       expect(parsed.currencyCode).toBe("INR");
+    });
+
+    it("GUARD: checkAndRecoverCurrency actually invoked admin.graphql for metafieldsSet", async () => {
+      let metafieldsSetCalled = false;
+      
+      const sql = createComprehensiveMockSql({
+        account: {
+          id: "acc-guard-recovery",
+          shopId: "shop-guard-recovery",
+          kind: "COMPANY",
+          companyLocationId: null,
+          customerId: null,
+          creditLimit: null,
+          holdState: "OK",
+          bypass: false,
+          manualHold: false,
+          holdReasonCode: null,
+          holdNote: null,
+          syncPending: false,
+          gatedAt: null,
+          metafieldSyncedAt: null,
+          metafieldSyncErrorAt: null,
+          metafieldSyncErrorCode: null,
+        },
+        shop: { id: "shop-guard-recovery", domain: "guard-recovery.example.com", currency: "USD" },
+        invoiceExposure: "0",
+        draftExposure: "0",
+        hasOverdue: false,
+      });
+      
+      const mockAdmin = {
+        graphql: vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ShopCurrencyAndId")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: shopGid(11111),
+                    currencyCode: "INR",
+                    metafield: null,
+                  },
+                },
+              }),
+            };
+          }
+          
+          if (query.includes("metafieldsSet")) {
+            metafieldsSetCalled = true;
+            return {
+              json: async () => ({
+                data: { metafieldsSet: { metafields: [{ id: "mf-guard" }], userErrors: [] } },
+              }),
+            };
+          }
+          
+          return { json: async () => ({ data: {} }) };
+        }),
+      };
+      
+      const { checkAndRecoverCurrency } = await import("../../services/shop-currency-recovery.server");
+      
+      await checkAndRecoverCurrency(sql, "guard-recovery.example.com", "USD", mockAdmin);
+      
+      expect(metafieldsSetCalled, "checkAndRecoverCurrency must invoke admin.graphql with metafieldsSet mutation").toBe(true);
     });
   });
 
