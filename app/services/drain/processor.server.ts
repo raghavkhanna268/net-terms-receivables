@@ -127,6 +127,42 @@ const TERMINAL_TOPICS = new Set([
 ]);
 
 /**
+ * Topics safe to archive (ACK without processing) for uninstalled shops.
+ *
+ * A topic is on this list only if reinstall + reconcile restores the correct
+ * local state. Topics not on this list follow main's handler path.
+ *
+ * RECOVERS (state restored by bulk reconcile):
+ * - ORDERS_*: RECONCILE_ORDERS re-reads displayFinancialStatus from Shopify
+ * - COMPANY_LOCATIONS_*: RECONCILE_COMPANIES re-upserts all locations
+ * - CUSTOMERS_CREATE: RECONCILE_CUSTOMERS re-upserts matching customers
+ *
+ * N/A (no local state modified):
+ * - COMPANIES_*: No BuyerAccount created; only marks webhook processed
+ * - COMPANY_LOCATIONS_DELETE: BuyerAccount preserved for financial history
+ *
+ * NOT on this list (follow main's handler path):
+ * - DRAFT_ORDERS_*: Handler runs with 0 Admin calls (DELETE/UPDATE local state)
+ * - CUSTOMERS_DELETE: Handler sets tag_active=false with 0 Admin calls
+ * - CUSTOMERS_UPDATE: When tag removed, handler sets tag_active=false; reconcile
+ *   only exports currently-tagged customers (getBulkCustomersQuery) so cannot
+ *   restore the deactivation
+ */
+export const ARCHIVE_SAFE_UNINSTALLED_TOPICS = new Set([
+  "ORDERS_CREATE",
+  "ORDERS_UPDATED",
+  "ORDERS_PAID",
+  "ORDERS_CANCELLED",
+  "COMPANIES_CREATE",
+  "COMPANIES_UPDATE",
+  "COMPANIES_DELETE",
+  "COMPANY_LOCATIONS_CREATE",
+  "COMPANY_LOCATIONS_UPDATE",
+  "COMPANY_LOCATIONS_DELETE",
+  "CUSTOMERS_CREATE",
+]);
+
+/**
  * Configuration for drain processing.
  */
 export interface DrainConfig {
@@ -1320,28 +1356,38 @@ export async function moveToDeadLetter(
 }
 
 /**
- * #292: Batch lookup shop currencies for INR-only filtering.
- * Returns a map of shop domain to currency string. Shops not in the map were not found.
+ * Shop info for batch filtering in drain processing.
+ */
+interface ShopInfo {
+  currency: string;
+  uninstalledAt: Date | null;
+}
+
+/**
+ * #292: Batch lookup shop info for INR-only filtering and uninstall checks.
+ * Returns a map of shop domain to ShopInfo. Shops not in the map were not found.
  * NULL currency in DB is stored as empty string "" (sentinel) to distinguish from not found.
  */
-async function loadShopCurrencies(
+async function loadShopInfo(
   sql: Sql,
   shopDomains: string[]
-): Promise<Map<string, string>> {
+): Promise<Map<string, ShopInfo>> {
   if (shopDomains.length === 0) {
     return new Map();
   }
 
   const uniqueDomains = [...new Set(shopDomains)];
   // Note: use IN ${sql(ids)} instead of ANY(${ids}) for fetch_types:false compatibility
-  const rows = await sql<{ domain: string; currency: string | null }[]>`
-    SELECT domain, currency FROM "Shop" WHERE domain IN ${sql(uniqueDomains)}
+  const rows = await sql<{ domain: string; currency: string | null; uninstalledAt: Date | null }[]>`
+    SELECT domain, currency, "uninstalledAt" FROM "Shop" WHERE domain IN ${sql(uniqueDomains)}
   `;
 
-  const result = new Map<string, string>();
+  const result = new Map<string, ShopInfo>();
   for (const row of rows) {
-    // Store NULL as empty string to distinguish from "shop not found"
-    result.set(row.domain, row.currency ?? "");
+    result.set(row.domain, {
+      currency: row.currency ?? "",
+      uninstalledAt: row.uninstalledAt,
+    });
   }
   return result;
 }
@@ -1369,9 +1415,9 @@ async function processSyncQueue(
 
   const messages = await readSyncMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
-  // #292: Batch lookup shop currencies for INR-only filtering
+  // #292: Batch lookup shop info for INR-only filtering and uninstall checks
   const shopDomains = messages.map((m) => m.message.shop);
-  const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
+  const shopInfoMap = await loadShopInfo(sql, shopDomains);
   const skippedNonInrCounts = new Map<string, number>();
 
   for (const msg of messages) {
@@ -1397,13 +1443,13 @@ async function processSyncQueue(
     // #292: Skip non-INR shops (but let terminal topics through for existing rows)
     // Shop not in map → guard below re-checks; if missing, message is deleted
     // Shop in map with unsupported currency (NULL/""/XXX/non-INR) → skip non-terminal, pass terminal
-    const shopCurrency = shopCurrencies.get(msg.message.shop);
-    const shopFound = shopCurrencies.has(msg.message.shop);
+    const shopInfo = shopInfoMap.get(msg.message.shop);
+    const shopFound = shopInfoMap.has(msg.message.shop);
     // Fail closed: NULL/"" or unsupported currency treated as non-INR
-    const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
+    const isNonInr = shopFound && !isShopCurrencySupported(shopInfo?.currency ?? "");
 
     // #239: Shop row missing (redacted or never existed) → re-check and delete message.
-    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    // Uninstalled-but-present shops: archive if topic in ARCHIVE_SAFE_UNINSTALLED_TOPICS.
     if (!shopFound) {
       try {
         const [shopRow] = await sql<[{ id: string }?]>`
@@ -1461,6 +1507,22 @@ async function processSyncQueue(
     }
     // G8: Terminal topics (PAID, CANCELLED, DRAFT_DELETE) pass through to handlers
     // which will update existing rows without importing new amounts
+
+    // Archive uninstalled shops ONLY for topics proven to recover via reconcile.
+    // Topics not on the allowlist take main's code path (handler is called).
+    if (shopInfo?.uninstalledAt !== null && shopInfo?.uninstalledAt !== undefined) {
+      if (ARCHIVE_SAFE_UNINSTALLED_TOPICS.has(msg.message.topic)) {
+        await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+        result.skipped++;
+        safeLog("info", "order_webhook_uninstalled_shop_acked", {
+          shopHash: await shopHash(msg.message.shop),
+          topic: msg.message.topic,
+          reason: "shop_uninstalled",
+        });
+        continue;
+      }
+      // Topic not on allowlist: fall through to handler (main's behaviour)
+    }
 
     const handler = getSyncHandler(msg.message.topic);
 
@@ -1657,9 +1719,10 @@ async function processBulkQueue(
 
   const messages = await readBulkMessages(sql, config.batchSize, config.visibilityTimeoutSec);
 
-  // #292: Batch lookup shop currencies for INR-only filtering
+  // #292: Batch lookup shop info for INR-only filtering
+  // Note: uninstalledAt is NOT used for bulk queue - bulk_op_not_found is the accepted contract
   const shopDomains = messages.map((m) => m.message.shop);
-  const shopCurrencies = await loadShopCurrencies(sql, shopDomains);
+  const shopInfoMap = await loadShopInfo(sql, shopDomains);
   const skippedNonInrCounts = new Map<string, number>();
 
   for (const msg of messages) {
@@ -1685,13 +1748,13 @@ async function processBulkQueue(
 
     // Shop not in map → guard below re-checks; if missing, message is deleted
     // Shop in map with unsupported currency → skip (bulk queue has no terminal topics)
-    const shopCurrency = shopCurrencies.get(msg.message.shop);
-    const shopFound = shopCurrencies.has(msg.message.shop);
+    const shopInfo = shopInfoMap.get(msg.message.shop);
+    const shopFound = shopInfoMap.has(msg.message.shop);
     // Fail closed: NULL/"" or unsupported currency treated as non-INR
-    const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
+    const isNonInr = shopFound && !isShopCurrencySupported(shopInfo?.currency ?? "");
 
     // #239: Shop row missing (redacted or never existed) → re-check and delete message.
-    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    // Bulk queue has no uninstalled-shop archive logic; messages proceed to handlers.
     if (!shopFound) {
       try {
         const [shopRow] = await sql<[{ id: string }?]>`

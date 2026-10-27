@@ -478,7 +478,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       const adminCalls = adminGraphQLMock.mock.calls;
       const callsForShopA = adminCalls.filter((call) => call[0] === SHOP_A_DOMAIN);
       const callsForShopB = adminCalls.filter((call) => call[0] === SHOP_B_DOMAIN);
-      expect(callsForShopA.length).toBe(1);
+      expect(callsForShopA.length).toBe(0);
       expect(callsForShopB.length).toBeGreaterThanOrEqual(1);
 
       const [queueCountA] = await sql<{ count: string }[]>`
@@ -494,7 +494,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(parseInt(dlqCountA.count, 10)).toBe(0);
     });
 
-    it.skip("drain makes no Admin client request for an uninstalled shop (pending follow-up)", async () => {
+    it("drain makes no Admin client request for an uninstalled shop (pending follow-up)", async () => {
       const webhookIdA = `drain-skip-a-${TEST_SUFFIX}`;
       const orderGidA = `gid://shopify/Order/drain-skip-a-${TEST_SUFFIX}`;
 

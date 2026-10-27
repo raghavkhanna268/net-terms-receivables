@@ -84,6 +84,12 @@ vi.mock("~/services/sync/company.server", async (importOriginal) => {
           redactTriggered.done = true;
           const { deleteShop } = await import("~/services/compliance/compliance.server");
 
+          // #515: Shop A is created with uninstalledAt=NULL so the drain doesn't skip it.
+          // Before deleteShop, set uninstalledAt so deleteShop's reinstall guard passes.
+          // This simulates the real scenario where uninstall webhook sets uninstalledAt
+          // before shop/redact arrives ~48h later.
+          await sqlRef`UPDATE "Shop" SET "uninstalledAt" = NOW() - interval '48 hours' WHERE domain = ${A.domain}`;
+
           // deleteShop now handles sessions and webhook_receipts internally
           await deleteShop(sqlRef, A.domain);
         }
@@ -136,15 +142,15 @@ describeWithDb("drain: in-flight message for a redacted shop (#239)", () => {
 
   it("leaves 0 rows for shop A, B untouched, C (near-miss) untouched, and counts deadLetterAlreadyGoneCount", async () => {
     const now = new Date();
-    // Shops being redacted need uninstalledAt set, matching real Shopify behavior
-    // where shop/redact arrives ~48h after uninstall
-    const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
     // Create shops A, B, and C (near-miss)
-    // Shop A is being redacted, so set uninstalledAt
+    // #515: Shop A must NOT have uninstalledAt set, otherwise the new skip logic
+    // would archive the messages before the handler is called, preventing the race
+    // condition test. The deleteShop call is triggered from isWebhookProcessed mock
+    // during handler execution to simulate the race condition.
     await sqlRef`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
-      VALUES (${A.id}, ${A.domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
+      VALUES (${A.id}, ${A.domain}, 'INR', ${now}, ${now}, NULL)
     `;
     await sqlRef`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")

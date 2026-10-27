@@ -224,15 +224,22 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     // Archive foreign rows before each test to prevent batch pollution
     await archiveForeignQueueMessages();
 
-    // #239: Create an uninstalled-but-present Shop row so the drain guard allows
-    // the message through to the handler (which returns shop_not_found for this
-    // domain). Without this, the guard would delete messages for missing shops.
+    // #239: Create a Shop row so the drain guard allows the message through to
+    // the handler (which returns shop_not_found for this domain because the mock
+    // simulates a missing shop scenario). Without this, the guard would delete
+    // messages for missing shops.
+    // #515: Shop must NOT have uninstalledAt set, otherwise the new skip logic
+    // would intercept the message before the handler is called.
     const shopId = `shop-sanitize-${testContext.suffix}`;
     const now = new Date();
-    const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
     await sqlRef`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
-      VALUES (${shopId}, ${testContext.missingShopDomain}, 'INR', ${now}, ${now}, ${uninstalledAt})
+      VALUES (${shopId}, ${testContext.missingShopDomain}, 'INR', ${now}, ${now}, NULL)
+    `;
+    // Add a Session so the drain handler doesn't fail with no_session before calling the mocked handler
+    await sqlRef`
+      INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+      VALUES (${'offline_' + testContext.missingShopDomain}, ${testContext.missingShopDomain}, 'test-state', false, 'test-token')
     `;
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -256,7 +263,8 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
     await sqlRef`DELETE FROM s6_dead_letter WHERE message->>'bulkOperationId' LIKE ${`%${testContext.suffix}%`}`;
     await sqlRef`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${`%${testContext.suffix}%`}`;
     await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`%${testContext.suffix}%`}`;
-    // #239: Clean up the uninstalled-but-present Shop row
+    // #239: Clean up the Shop row and associated Session
+    await sqlRef`DELETE FROM "Session" WHERE shop = ${testContext.missingShopDomain}`;
     await sqlRef`DELETE FROM "Shop" WHERE domain = ${testContext.missingShopDomain}`;
 
     await assertNoQueueLeftovers(sqlRef, [testContext.missingShopDomain], "dlq-sanitize-db.test.ts");
@@ -560,9 +568,10 @@ describeWithDb("DLQ shop_not_found sanitization (#239 part a)", () => {
       enqueuedAt: new Date().toISOString(),
     };
 
-    // Create a Shop row so that moveToDeadLetter sees the shop as existing and NOT uninstalled.
-    // This ensures non-shop errors keep the full message - only shop-gone scenarios sanitize.
-    // First delete the uninstalled Shop created by beforeEach, then insert a non-uninstalled one.
+    // Create a Shop row that is NOT uninstalled so the message reaches the handler.
+    // COMPANY_LOCATIONS_UPDATE is on ARCHIVE_SAFE_UNINSTALLED_TOPICS, so an uninstalled
+    // shop would archive it before the handler. We need DLQ to test sanitization.
+    // Delete the beforeEach Shop (installed, has Session) and re-insert without Session.
     await sqlRef`DELETE FROM "Shop" WHERE domain = ${testContext.missingShopDomain}`;
     await sqlRef`
       INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
