@@ -113,6 +113,63 @@ describe("Payment Reminder Email Rendering - Reminder Kinds (Table-Driven)", () 
   );
 });
 
+describe("Payment Reminder Email Rendering - Due Today Copy", () => {
+  it("due-today reminder uses new good-standing copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment due today" })
+    );
+
+    expect(html).toContain(
+      "Please make the payment today so your account stays in good standing."
+    );
+  });
+
+  it("due-today reminder does not contain old overdue-charges copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment due today" })
+    );
+
+    expect(html).not.toContain("avoid overdue charges");
+  });
+
+  it("pre-due reminder does not use due-today copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment due in 3 days" })
+    );
+
+    expect(html).toContain("Please ensure payment is made before the due date.");
+    expect(html).not.toContain("good standing");
+  });
+
+  it("overdue reminder does not use due-today copy", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ reminderType: "Payment 7 days overdue" })
+    );
+
+    expect(html).toContain("avoid any service disruptions");
+    expect(html).not.toContain("good standing");
+  });
+});
+
+describe("Payment Reminder Email Rendering - Greeting", () => {
+  it("greeting uses provided buyerName", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ buyerName: "Test Buyer Co" })
+    );
+
+    expect(html).toContain("Dear Test Buyer Co,");
+  });
+
+  it("greeting escapes HTML in buyer name", () => {
+    const html = renderPaymentReminderEmail(
+      createSyntheticProps({ buyerName: "Test & Co <Ltd>" })
+    );
+
+    expect(html).toContain("Dear Test &amp; Co &lt;Ltd&gt;,");
+    expect(html).not.toContain("Dear Test & Co <Ltd>,");
+  });
+});
+
 describe("Payment Reminder Email Rendering - No Invalid Patterns", () => {
   const invalidPatterns = [
     { pattern: "undefined", description: "undefined literal" },
@@ -209,6 +266,51 @@ describe("Payment Reminder Email Rendering - Required Content Presence", () => {
   });
 });
 
+describe("Payment Reminder Email Rendering - Store Display Name", () => {
+  it("body uses storeDisplayName (not handle) when provided", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: SYNTHETIC_INVOICE_NUMBER,
+      buyerName: SYNTHETIC_BUYER_NAME,
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: "test-handle",
+      reminderType: "Payment due today",
+      storeDisplayName: "Test Store Display Name",
+    });
+
+    expect(html).toContain("invoice from <strong>Test Store Display Name</strong>");
+    expect(html).not.toContain("invoice from <strong>test-handle</strong>");
+  });
+
+  it("body falls back to merchantName when storeDisplayName not provided", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: SYNTHETIC_INVOICE_NUMBER,
+      buyerName: SYNTHETIC_BUYER_NAME,
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: "test-fallback-handle",
+      reminderType: "Payment due today",
+    });
+
+    expect(html).toContain("invoice from <strong>test-fallback-handle</strong>");
+  });
+
+  it("footer uses storeDisplayName (not handle) when provided", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: SYNTHETIC_INVOICE_NUMBER,
+      buyerName: SYNTHETIC_BUYER_NAME,
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: "test-handle",
+      reminderType: "Payment due today",
+      storeDisplayName: "Test Store Display Name",
+    });
+
+    expect(html).toContain("open invoice with Test Store Display Name.");
+    expect(html).not.toContain("open invoice with test-handle.");
+  });
+});
+
 describe("Payment Reminder Email Rendering - Footer Content", () => {
   it("footer contains receiving explanation with store display name", () => {
     const html = renderPaymentReminderEmail(
@@ -258,6 +360,9 @@ describe("Payment Reminder Email Rendering - Footer Content", () => {
 
     expect(html).toContain(
       "You're receiving this because you have an open invoice with fallback-handle."
+    );
+    expect(html).toContain(
+      "invoice from <strong>fallback-handle</strong>"
     );
   });
 });
@@ -321,10 +426,15 @@ describe("Payment Reminder Email Rendering - XSS Prevention", () => {
     expect(html).not.toContain("<Ltd>");
   });
 
-  it("escapes HTML in merchant name", () => {
-    const html = renderPaymentReminderEmail(
-      createSyntheticProps({ merchantName: 'Shop "Name" & Co' })
-    );
+  it("escapes HTML in merchant name (fallback case)", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: "INV-TEST-001",
+      buyerName: "Test Customer",
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: 'Shop "Name" & Co',
+      reminderType: "Payment due today",
+    });
 
     expect(html).toContain("Shop &quot;Name&quot; &amp; Co");
   });
