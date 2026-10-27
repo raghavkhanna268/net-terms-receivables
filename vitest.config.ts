@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (94 total, counting expanded globs):
+ * Files included (95 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -79,6 +79,9 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/lib/__tests__/reinstall-sync-reset-db.test.ts
  * - app/lib/__tests__/schema-trigger-guard-db.test.ts
  * - app/lib/matching/__tests__/integration.test.ts
+ *
+ * Bank import edge-case DB tests:
+ * - app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts
  *
  * Script DB tests:
  * - scripts/__tests__/seed.test.ts
