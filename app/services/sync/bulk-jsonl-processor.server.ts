@@ -205,6 +205,10 @@ export async function handleReconcileDeleteMissing(
     // Guard: no partialDataUrl
     if (partialDataUrl) return;
 
+    // Guard: objectCount 0 means empty export - skip delete-missing (Team Lead decision)
+    // An empty or failed export must never close drafts or deactivate customers/locations.
+    if (objectCount == null || objectCount === "0") return;
+
     // Guard: lines_processed = objectCount
     const [opRow] = await sql<{ lines_processed: string | null; completed_at: Date | null }[]>`
       SELECT lines_processed, completed_at FROM s6_bulk_operations

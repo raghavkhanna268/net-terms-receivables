@@ -1445,7 +1445,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
   });
 
   describe("Empty result (objectCount 0) behavior", () => {
-    it("objectCount 0 with lines_processed 0 passes guards and closes unseen drafts", async () => {
+    it("objectCount 0 skips delete-missing: drafts, customers, and locations stay untouched (Team Lead decision)", async () => {
       const mockGetStatus = vi.fn<(shop: string, bulkOperationId: string) => Promise<BulkOperationStatusResult>>().mockResolvedValue({
         success: true,
         data: {
@@ -1461,6 +1461,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
       const bulkOpId = `bulk-op-empty-result-${TEST_SUFFIX}`;
       const draftMissing = `draft-order-empty-result-draft-${TEST_SUFFIX}`;
+      const customerMissing = `customer-empty-result-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_draft_orders (
@@ -1469,6 +1470,14 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         ) VALUES (
           ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#EMPTY-RESULT', '1000.00',
           true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, last_seen_bulk_op_id, created_at, updated_at
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${customerMissing}, '["net-terms"]'::jsonb, true, ${OLD_BULK_OP_ID}, NOW(), NOW()
         )
       `;
 
@@ -1487,9 +1496,28 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
       `;
-      expect(draftRow.status).toBe("closed");
+      expect(draftRow.status).toBe("open");
 
-      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage,
+          started_at, byte_offset, lines_read, lines_processed, completed_at
+        ) VALUES (
+          ${bulkOpId + '-cust'}, ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers',
+          NOW(), 0, 0, 0, NOW()
+        )
+      `;
+
+      await handleReconcileDeleteMissing(sql, TEST_SHOP_DOMAIN, bulkOpId + '-cust', "customers", mockGetStatus);
+
+      const [customerRow] = await sql<{ tag_active: boolean }[]>`
+        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerMissing}
+      `;
+      expect(customerRow.tag_active).toBe(true);
+
+      await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id LIKE ${bulkOpId + '%'}`;
+      await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}`;
+      await sql`DELETE FROM s8_tagged_customers WHERE customer_id = ${customerMissing}`;
     });
   });
 
@@ -1536,7 +1564,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       vi.resetModules();
     });
 
-    it("single-chunk export (empty result): lines_processed == objectCount and unseen drafts are closed", async () => {
+    it("single-chunk export (empty result, objectCount 0): lines_processed == 0 but drafts stay open (Team Lead decision)", async () => {
       const { adminGraphQL } = await import("../../drain/admin-client.server");
       const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
       const mockAdminGraphQL = vi.mocked(adminGraphQL);
@@ -1597,7 +1625,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const [draftRow] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}
       `;
-      expect(draftRow.status).toBe("closed");
+      expect(draftRow.status).toBe("open");
 
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
       await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}`;
