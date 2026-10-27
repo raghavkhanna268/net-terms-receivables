@@ -47,30 +47,34 @@ vi.mock("~/lib/aging-queries.server", () => ({
   getBuyerInvoices: vi.fn().mockResolvedValue({ rows: [], totalCount: 0 }),
 }));
 
-vi.mock("~/services/credit-status.server", () => ({
-  getCreditStatusDisplay: vi.fn().mockResolvedValue({
-    creditLimitAmount: 100000,
-    creditLimitPaise: 10000000n,
-    exposurePaise: 0n,
-    draftExposurePaise: 0n,
-    availableCreditPaise: 10000000n,
-    currency: "INR",
-    holdState: "OK",
-    manualHold: false,
-    holdReasonCode: null,
-    holdNote: null,
-    isOnHold: false,
-    holdReasonDisplay: null,
-    isOverLimit: false,
-    isOverdue: false,
-    utilizationPercent: 0,
-    syncPending: false,
-    syncErrorCode: null,
-    metafieldSyncedAt: null,
-  }),
-  getCompanyTotals: vi.fn().mockResolvedValue(null),
-  updateCreditStatus: vi.fn().mockResolvedValue({ success: true }),
-}));
+vi.mock("~/services/credit-status.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/credit-status.server")>();
+  return {
+    ...actual,
+    getCreditStatusDisplay: vi.fn().mockResolvedValue({
+      creditLimitAmount: 100000,
+      creditLimitPaise: 10000000n,
+      exposurePaise: 0n,
+      draftExposurePaise: 0n,
+      availableCreditPaise: 10000000n,
+      currency: "INR",
+      holdState: "OK",
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      isOnHold: false,
+      holdReasonDisplay: null,
+      isOverLimit: false,
+      isOverdue: false,
+      utilizationPercent: 0,
+      syncPending: false,
+      syncErrorCode: null,
+      metafieldSyncedAt: null,
+    }),
+    getCompanyTotals: vi.fn().mockResolvedValue(null),
+    updateCreditStatus: vi.fn().mockResolvedValue({ success: true }),
+  };
+});
 
 vi.mock("~/services/reminder-optout.server", () => ({
   getBuyerOptOutStatus: vi.fn().mockResolvedValue(null),
@@ -100,6 +104,7 @@ vi.mock("~/services/reminder-status.server", () => ({
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
+  ApiVersion: { October26: "2026-10" },
 }));
 
 interface ActionResultData {
@@ -513,7 +518,231 @@ describeWithDb("Merchant form validation (DB)", () => {
       );
     });
 
-    it("Indian grouping '1,00,000' is rejected (commas not allowed)", async () => {
+    it("Indian lakh format '1,00,000' is accepted and normalized to 100000", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "1,00,000");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 100000 })
+      );
+    });
+
+    it("Indian 10-lakh format '10,00,000' is accepted and normalized to 1000000", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "10,00,000");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 1000000 })
+      );
+    });
+
+    it("Western format '100,000' is accepted and normalized to 100000", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "100,000");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 100000 })
+      );
+    });
+
+    it("rupee prefix '₹1,00,000' is accepted and normalized to 100000", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "₹1,00,000");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 100000 })
+      );
+    });
+
+    it("rupee with space '₹ 1,00,000' is accepted and normalized to 100000", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "₹ 1,00,000");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 100000 })
+      );
+    });
+
+    it("rupee with decimals '₹1,00,000.50' is accepted and normalized to 100000.50", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "₹1,00,000.50");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 100000.5 })
+      );
+    });
+
+    it("'₹5,00,000' (5 lakh with rupee prefix) is accepted and normalized to 500000", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "₹5,00,000");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 500000 })
+      );
+    });
+
+    it("single decimal '1,00,000.5' is accepted and normalized to 100000.5", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "1,00,000.5");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 100000.5 })
+      );
+    });
+
+    it("letters in input '1,00,000abc' are rejected", async () => {
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
         getRequestWaitUntil: () => undefined,
@@ -526,7 +755,7 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       const formData = new FormData();
       formData.set("_action", "updateCredit");
-      formData.set("creditLimit", "1,00,000");
+      formData.set("creditLimit", "1,00,000abc");
 
       const { action } = await import("../app.accounts.$id");
       const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
@@ -537,7 +766,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(mockUpdate).not.toHaveBeenCalled();
     });
 
-    it("rupee symbol '₹1,00,000.50' is rejected", async () => {
+    it("'Rs 100' is rejected (non-₹ currency prefix)", async () => {
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
         getRequestWaitUntil: () => undefined,
@@ -550,7 +779,7 @@ describeWithDb("Merchant form validation (DB)", () => {
 
       const formData = new FormData();
       formData.set("_action", "updateCredit");
-      formData.set("creditLimit", "₹1,00,000.50");
+      formData.set("creditLimit", "Rs 100");
 
       const { action } = await import("../app.accounts.$id");
       const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
@@ -558,6 +787,126 @@ describeWithDb("Merchant form validation (DB)", () => {
       const data = extractActionData(result);
       expect(data.success).toBe(false);
       expect(data.error).toContain("Invalid credit limit format");
+      expect(mockUpdate).not.toHaveBeenCalled();
+    });
+
+    it("scientific notation '1e5' is rejected", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "1e5");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Invalid credit limit format");
+      expect(mockUpdate).not.toHaveBeenCalled();
+    });
+
+    it("whitespace-only input is rejected", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "   ");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("cannot be empty");
+      expect(mockUpdate).not.toHaveBeenCalled();
+    });
+
+    it("lone rupee sign '₹' is rejected", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "₹");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("cannot be empty");
+      expect(mockUpdate).not.toHaveBeenCalled();
+    });
+
+    it("multiple dots '100.50.25' are rejected", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "100.50.25");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("Invalid credit limit format");
+      expect(mockUpdate).not.toHaveBeenCalled();
+    });
+
+    it("negative with rupee sign '₹-100' is rejected", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "₹-100");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("non-negative");
       expect(mockUpdate).not.toHaveBeenCalled();
     });
 
