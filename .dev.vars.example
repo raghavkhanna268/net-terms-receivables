@@ -34,6 +34,11 @@ RESEND_TEST_RECIPIENTS=ops@test-example.com
 # test inbox, performed by DevOps after setting the flag, only with owner approval.
 # RESEND_RECIPIENT_ALLOWLIST_ENFORCED=false
 
+# Plan selection redirect. Set to the exact string "true" to enable.
+# When enabled, merchants without an active subscription are redirected to the plan page.
+# Any other value (including unset, empty, "True", "1") keeps the redirect OFF.
+# PLAN_SELECTION_REDIRECT_ENABLED=false
+
 # Database connection for local development
 # Option 1: Local Postgres (recommended for offline dev)
 # CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://postgres:password@localhost:5432/net_terms
