@@ -215,7 +215,89 @@ describeWithDb("updateMatchAllocation IN-list query (DB-backed)", () => {
     const [finalMatch] = await sql<{ amount: string }[]>`
       SELECT amount::text FROM "Match" WHERE id = ${matchId}
     `;
-    expect(parseFloat(finalMatch.amount)).toBeLessThanOrEqual(10000);
+    expect(finalMatch.amount).toBe("10000.00");
+  });
+
+  it("cross-payment confirmed/pushing matches reduce available allocation", async () => {
+    const { updateMatchAllocation } = await import("../matcher.server");
+
+    const invoiceId = `inv-xpay-${TEST_SUFFIX}`;
+    const orderId = `gid://shopify/Order/xpay-${TEST_SUFFIX}`;
+    
+    const payment2Id = `pmt-xpay2-${TEST_SUFFIX}`;
+    const payment3Id = `pmt-xpay3-${TEST_SUFFIX}`;
+    
+    const matchSuggestedId = `match-xpay-sugg-${TEST_SUFFIX}`;
+    const matchConfirmedId = `match-xpay-conf-${TEST_SUFFIX}`;
+    const matchPushingId = `match-xpay-push-${TEST_SUFFIX}`;
+
+    await sql`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, narration, status, "createdAt", "updatedAt"
+      ) VALUES
+        (${payment2Id}, ${TEST_SHOP_ID}, ${TEST_IMPORT_ID},
+         NOW(), 50000.00, 'Payment 2 for cross-payment test', 'matched', NOW(), NOW()),
+        (${payment3Id}, ${TEST_SHOP_ID}, ${TEST_IMPORT_ID},
+         NOW(), 50000.00, 'Payment 3 for cross-payment test', 'matched', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+        status, "issuedAt", "createdAt", "updatedAt"
+      ) VALUES
+        (${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
+         '#XPAY', 50000.00, 50000.00, 'open', NOW(), NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
+        "createdAt", "updatedAt"
+      ) VALUES
+        (${matchSuggestedId}, ${TEST_SHOP_ID}, ${TEST_PAYMENT_ID}, ${invoiceId},
+         10000.00, 85, '{"test":true}'::jsonb, 'suggested', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
+        "confirmedBy", "confirmedAt", "createdAt", "updatedAt"
+      ) VALUES
+        (${matchConfirmedId}, ${TEST_SHOP_ID}, ${payment2Id}, ${invoiceId},
+         20000.00, 90, '{"test":true}'::jsonb, 'confirmed', 'user-1', NOW(), NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state,
+        "createdAt", "updatedAt"
+      ) VALUES
+        (${matchPushingId}, ${TEST_SHOP_ID}, ${payment3Id}, ${invoiceId},
+         15000.00, 88, '{"test":true}'::jsonb, 'pushing', NOW(), NOW())
+    `;
+
+    const result = await updateMatchAllocation(sql, TEST_SHOP_ID, matchSuggestedId, 5000000n);
+
+    expect(result.success).toBe(true);
+
+    const [finalMatch] = await sql<{ amount: string }[]>`
+      SELECT amount::text FROM "Match" WHERE id = ${matchSuggestedId}
+    `;
+    expect(finalMatch.amount).toBe("15000.00");
+
+    const [confMatch] = await sql<{ amount: string }[]>`
+      SELECT amount::text FROM "Match" WHERE id = ${matchConfirmedId}
+    `;
+    expect(confMatch.amount).toBe("20000.00");
+
+    const [pushMatch] = await sql<{ amount: string }[]>`
+      SELECT amount::text FROM "Match" WHERE id = ${matchPushingId}
+    `;
+    expect(pushMatch.amount).toBe("15000.00");
+
+    await sql`DELETE FROM "Match" WHERE "paymentId" IN ${sql([payment2Id, payment3Id])}`;
+    await sql`DELETE FROM "Payment" WHERE id IN ${sql([payment2Id, payment3Id])}`;
   });
 
   it("non-existent match returns error", async () => {

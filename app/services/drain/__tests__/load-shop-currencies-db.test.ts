@@ -10,7 +10,7 @@
  * Cases:
  * - Several shops with different currencies are loaded correctly
  * - Duplicate domains in message batch are deduplicated
- * - Unknown domain (shop not in DB) is handled gracefully
+ * - Unknown domain (shop not in DB) results in message deletion
  *
  * Uses the shared sqlOptions (fetch_types:false) to exercise the real query behavior.
  */
@@ -138,26 +138,30 @@ describeWithDb("loadShopCurrencies IN-list query (DB-backed via runDrain)", () =
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${`wh-curr-${TEST_SUFFIX}%`}`;
   });
 
-  it("several shops with different currencies: INR processed, non-INR skipped", async () => {
+  it("INR and non-INR in same batch: INR processed (mock called), non-INR skipped", async () => {
     const { runDrain } = await import("../processor.server");
+    const { adminGraphQL } = await import("~/services/drain/admin-client.server");
+    const mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
 
+    const inrWebhookId = `wh-curr-inr-${Date.now()}-${TEST_SUFFIX}`;
     const usdWebhookId = `wh-curr-usd-${Date.now()}-${TEST_SUFFIX}`;
-    const xxxWebhookId = `wh-curr-xxx2-${Date.now()}-${TEST_SUFFIX}`;
+    const inrOrderGid = `gid://shopify/Order/inr-batch-${TEST_SUFFIX}`;
+    const usdOrderGid = `gid://shopify/Order/usd-batch-${TEST_SUFFIX}`;
 
-    const usdMessage = {
-      shop: SHOP_USD_DOMAIN,
+    const inrMessage = {
+      shop: SHOP_INR_DOMAIN,
       topic: "ORDERS_CREATE",
-      resourceGid: `gid://shopify/Order/usd-${TEST_SUFFIX}`,
-      webhookId: usdWebhookId,
+      resourceGid: inrOrderGid,
+      webhookId: inrWebhookId,
       enqueuedAt: new Date().toISOString(),
       triggeredAt: new Date().toISOString(),
     };
 
-    const xxxMessage = {
-      shop: SHOP_XXX_DOMAIN,
+    const usdMessage = {
+      shop: SHOP_USD_DOMAIN,
       topic: "ORDERS_CREATE",
-      resourceGid: `gid://shopify/Order/xxx2-${TEST_SUFFIX}`,
-      webhookId: xxxWebhookId,
+      resourceGid: usdOrderGid,
+      webhookId: usdWebhookId,
       enqueuedAt: new Date().toISOString(),
       triggeredAt: new Date().toISOString(),
     };
@@ -165,13 +169,21 @@ describeWithDb("loadShopCurrencies IN-list query (DB-backed via runDrain)", () =
     await sql`
       INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
       VALUES
-        (NOW() - interval '1 second', 0, NOW(), ${sql.json(usdMessage)}::jsonb),
-        (NOW() - interval '1 second', 0, NOW(), ${sql.json(xxxMessage)}::jsonb)
+        (NOW() - interval '1 second', 0, NOW(), ${sql.json(inrMessage)}::jsonb),
+        (NOW() - interval '1 second', 0, NOW(), ${sql.json(usdMessage)}::jsonb)
     `;
 
-    const result = await runDrain(sql, { batchSize: 10, timeBudgetMs: 5000 });
+    await runDrain(sql, { batchSize: 10, timeBudgetMs: 5000 });
 
-    expect(result.skipped).toBeGreaterThanOrEqual(2);
+    const inrCalls = mockAdminGraphQL.mock.calls.filter(
+      (call: unknown[]) => call[0] === SHOP_INR_DOMAIN
+    );
+    expect(inrCalls.length).toBeGreaterThanOrEqual(1);
+
+    const usdCalls = mockAdminGraphQL.mock.calls.filter(
+      (call: unknown[]) => call[0] === SHOP_USD_DOMAIN
+    );
+    expect(usdCalls.length).toBe(0);
 
     const [usdArchived] = await sql<[{ count: string }]>`
       SELECT COUNT(*)::text AS count FROM pgmq.a_s6_sync
@@ -179,11 +191,16 @@ describeWithDb("loadShopCurrencies IN-list query (DB-backed via runDrain)", () =
     `;
     expect(parseInt(usdArchived.count, 10)).toBe(1);
 
-    const [xxxArchived] = await sql<[{ count: string }]>`
-      SELECT COUNT(*)::text AS count FROM pgmq.a_s6_sync
-      WHERE message->>'webhookId' = ${xxxWebhookId}
+    const [inrInQueue] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text AS count FROM pgmq.q_s6_sync
+      WHERE message->>'webhookId' = ${inrWebhookId}
     `;
-    expect(parseInt(xxxArchived.count, 10)).toBe(1);
+    const [inrArchived] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text AS count FROM pgmq.a_s6_sync
+      WHERE message->>'webhookId' = ${inrWebhookId}
+    `;
+    const inrTotal = parseInt(inrInQueue.count, 10) + parseInt(inrArchived.count, 10);
+    expect(inrTotal).toBeGreaterThanOrEqual(1);
   });
 
   it("duplicate domains in message batch are deduplicated", async () => {
