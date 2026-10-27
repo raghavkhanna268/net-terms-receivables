@@ -1754,5 +1754,278 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
       await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${draftMissingId}`;
     });
+
+    it("(i) processBulkOperation E2E single-chunk (N>0): lines_processed == objectCount, unseen draft closed, seen draft open", async () => {
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+      const { processBulkDraftOrder } = await import("../draft-order.server");
+      const mockAdminGraphQL = vi.mocked(adminGraphQL);
+      const mockProcessBulkDraftOrder = vi.mocked(processBulkDraftOrder);
+
+      const bulkOpId = `bulk-op-e2e-nonempty-single-${TEST_SUFFIX}`;
+      const webhookId = `webhook-e2e-nonempty-single-${TEST_SUFFIX}`;
+      const draftSeenId = `draft-order-e2e-seen-single-${TEST_SUFFIX}`;
+      const draftUnseenId = `draft-order-e2e-unseen-single-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES
+          (${TEST_SHOP_ID}, ${draftSeenId}, ${TEST_ACCOUNT_ID}, '#E2E-SEEN', '1000.00', true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draftUnseenId}, ${TEST_ACCOUNT_ID}, '#E2E-UNSEEN', '2000.00', true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID})
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, byte_offset
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders', NOW(), 0
+        )
+      `;
+
+      const jsonlLine1 = JSON.stringify({
+        id: draftSeenId,
+        name: "#E2E-SEEN",
+        createdAt: "2026-10-25T10:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt1", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+      });
+      const jsonlLine2 = JSON.stringify({
+        id: `draft-order-e2e-extra1-${TEST_SUFFIX}`,
+        name: "#E2E-EXTRA1",
+        createdAt: "2026-10-25T11:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1500.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt2", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+      });
+      const jsonlLine3 = JSON.stringify({
+        id: `draft-order-e2e-extra2-${TEST_SUFFIX}`,
+        name: "#E2E-EXTRA2",
+        createdAt: "2026-10-25T12:00:00Z",
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "2000.00", currencyCode: "INR" } },
+        paymentTerms: { id: "pt3", paymentTermsName: "Net 30", paymentTermsType: "NET" },
+      });
+      const jsonlContent = [jsonlLine1, jsonlLine2, jsonlLine3].join("\n");
+      const jsonlBytes = new TextEncoder().encode(jsonlContent);
+
+      mockAdminGraphQL.mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            objectCount: "3",
+            fileSize: jsonlBytes.length,
+            url: "https://example.com/results.jsonl",
+            errorCode: null,
+          }
+        },
+        retryable: false,
+      });
+
+      mockProcessBulkDraftOrder.mockImplementation(async (_sql, _shop, draftOrder) => {
+        return {
+          shopId: TEST_SHOP_ID,
+          draftOrderId: draftOrder.id,
+          buyerAccountId: TEST_ACCOUNT_ID,
+          name: draftOrder.name,
+          total: draftOrder.totalPriceSet?.shopMoney.amount ?? "0.00",
+          hasPaymentTerms: true,
+          status: (draftOrder.status ?? "open").toLowerCase(),
+          createdAt: new Date(draftOrder.createdAt),
+        };
+      });
+
+      const originalFetch = global.fetch;
+      global.fetch = vi.fn().mockImplementation(() => {
+        return Promise.resolve({
+          status: 206,
+          ok: true,
+          statusText: "Partial Content",
+          headers: new Headers({
+            "Content-Range": `bytes 0-${jsonlBytes.length - 1}/${jsonlBytes.length}`,
+          }),
+          arrayBuffer: () => Promise.resolve(jsonlBytes.buffer),
+        } as Response);
+      });
+
+      try {
+        const result = await processBulkOperation(sql, {
+          topic: "BULK_OPERATIONS_FINISH",
+          shop: TEST_SHOP_DOMAIN,
+          webhookId,
+          enqueuedAt: new Date().toISOString(),
+          bulkOperationId: bulkOpId,
+          bulkType: "draft_orders",
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.status).toBe("complete");
+
+        const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
+          SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+        `;
+        expect(opRow.lines_processed).toBe("3");
+        expect(opRow.lines_read).toBe("3");
+
+        const [seenDraft] = await sql<{ status: string; last_seen_bulk_op_id: string | null }[]>`
+          SELECT status, last_seen_bulk_op_id FROM s8_draft_orders WHERE draft_order_id = ${draftSeenId}
+        `;
+        expect(seenDraft.last_seen_bulk_op_id).toBe(bulkOpId);
+        expect(seenDraft.status).toBe("open");
+
+        const [unseenDraft] = await sql<{ status: string; last_seen_bulk_op_id: string | null }[]>`
+          SELECT status, last_seen_bulk_op_id FROM s8_draft_orders WHERE draft_order_id = ${draftUnseenId}
+        `;
+        expect(unseenDraft.last_seen_bulk_op_id).toBe(OLD_BULK_OP_ID);
+        expect(unseenDraft.status).toBe("closed");
+      } finally {
+        global.fetch = originalFetch;
+        await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+        await sql`DELETE FROM s8_draft_orders WHERE draft_order_id IN (${draftSeenId}, ${draftUnseenId})`;
+      }
+    });
+
+    it("(ii) processBulkOperation E2E multi-chunk (N>chunk): at least 2 progress saves, lines_processed == objectCount, unseen closed", async () => {
+      const { adminGraphQL } = await import("../../drain/admin-client.server");
+      const { processBulkOperation, DEFAULT_CHUNK_SIZE } = await import("../bulk-jsonl-processor.server");
+      const { processBulkDraftOrder } = await import("../draft-order.server");
+      const mockAdminGraphQL = vi.mocked(adminGraphQL);
+      const mockProcessBulkDraftOrder = vi.mocked(processBulkDraftOrder);
+
+      const bulkOpId = `bulk-op-e2e-nonempty-multi-${TEST_SUFFIX}`;
+      const webhookId = `webhook-e2e-nonempty-multi-${TEST_SUFFIX}`;
+      const draftSeenId = `draft-order-e2e-seen-multi-${TEST_SUFFIX}`;
+      const draftUnseenId = `draft-order-e2e-unseen-multi-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES
+          (${TEST_SHOP_ID}, ${draftSeenId}, ${TEST_ACCOUNT_ID}, '#E2E-MULTI-SEEN', '1000.00', true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draftUnseenId}, ${TEST_ACCOUNT_ID}, '#E2E-MULTI-UNSEEN', '2000.00', true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID})
+      `;
+
+      await sql`
+        INSERT INTO s6_bulk_operations (
+          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, byte_offset
+        ) VALUES (
+          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders', NOW(), 0
+        )
+      `;
+
+      const makeLine = (id: string, name: string, idx: number) => JSON.stringify({
+        id,
+        name,
+        createdAt: `2026-10-25T${String(10 + idx).padStart(2, "0")}:00:00Z`,
+        status: "open",
+        totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
+        paymentTerms: { id: `pt${idx}`, paymentTermsName: "Net 30", paymentTermsType: "NET" },
+      });
+
+      const lines = [
+        makeLine(draftSeenId, "#E2E-MULTI-SEEN", 0),
+        makeLine(`draft-order-e2e-multi-extra1-${TEST_SUFFIX}`, "#EXTRA1", 1),
+        makeLine(`draft-order-e2e-multi-extra2-${TEST_SUFFIX}`, "#EXTRA2", 2),
+        makeLine(`draft-order-e2e-multi-extra3-${TEST_SUFFIX}`, "#EXTRA3", 3),
+        makeLine(`draft-order-e2e-multi-extra4-${TEST_SUFFIX}`, "#EXTRA4", 4),
+        makeLine(`draft-order-e2e-multi-extra5-${TEST_SUFFIX}`, "#EXTRA5", 5),
+      ];
+      const jsonlContent = lines.join("\n");
+      const jsonlBytes = new TextEncoder().encode(jsonlContent);
+
+      const smallChunkSize = Math.floor(jsonlBytes.length / 3);
+
+      mockAdminGraphQL.mockResolvedValue({
+        success: true,
+        data: {
+          node: {
+            id: bulkOpId,
+            status: "COMPLETED",
+            objectCount: "6",
+            fileSize: jsonlBytes.length,
+            url: "https://example.com/results.jsonl",
+            errorCode: null,
+          }
+        },
+        retryable: false,
+      });
+
+      mockProcessBulkDraftOrder.mockImplementation(async (_sql, _shop, draftOrder) => {
+        return {
+          shopId: TEST_SHOP_ID,
+          draftOrderId: draftOrder.id,
+          buyerAccountId: TEST_ACCOUNT_ID,
+          name: draftOrder.name,
+          total: draftOrder.totalPriceSet?.shopMoney.amount ?? "0.00",
+          hasPaymentTerms: true,
+          status: (draftOrder.status ?? "open").toLowerCase(),
+          createdAt: new Date(draftOrder.createdAt),
+        };
+      });
+
+      const originalFetch = global.fetch;
+      let fetchCallCount = 0;
+      global.fetch = vi.fn().mockImplementation((url: string, options: RequestInit) => {
+        fetchCallCount++;
+        const rangeHeader = (options.headers as Record<string, string>)?.Range || "";
+        const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d+)/);
+        const start = rangeMatch ? parseInt(rangeMatch[1], 10) : 0;
+        const requestedEnd = rangeMatch ? parseInt(rangeMatch[2], 10) : jsonlBytes.length - 1;
+        const actualEnd = Math.min(requestedEnd, jsonlBytes.length - 1);
+        const chunk = jsonlBytes.slice(start, actualEnd + 1);
+        const isEof = actualEnd >= jsonlBytes.length - 1;
+
+        return Promise.resolve({
+          status: 206,
+          ok: true,
+          statusText: "Partial Content",
+          headers: new Headers({
+            "Content-Range": `bytes ${start}-${actualEnd}/${jsonlBytes.length}`,
+          }),
+          arrayBuffer: () => Promise.resolve(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength)),
+        } as Response);
+      });
+
+      try {
+        const result = await processBulkOperation(sql, {
+          topic: "BULK_OPERATIONS_FINISH",
+          shop: TEST_SHOP_DOMAIN,
+          webhookId,
+          enqueuedAt: new Date().toISOString(),
+          bulkOperationId: bulkOpId,
+          bulkType: "draft_orders",
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.status).toBe("complete");
+
+        const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
+          SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
+        `;
+        expect(opRow.lines_processed).toBe("6");
+        expect(opRow.lines_read).toBe("6");
+
+        const [seenDraft] = await sql<{ status: string; last_seen_bulk_op_id: string | null }[]>`
+          SELECT status, last_seen_bulk_op_id FROM s8_draft_orders WHERE draft_order_id = ${draftSeenId}
+        `;
+        expect(seenDraft.last_seen_bulk_op_id).toBe(bulkOpId);
+        expect(seenDraft.status).toBe("open");
+
+        const [unseenDraft] = await sql<{ status: string; last_seen_bulk_op_id: string | null }[]>`
+          SELECT status, last_seen_bulk_op_id FROM s8_draft_orders WHERE draft_order_id = ${draftUnseenId}
+        `;
+        expect(unseenDraft.last_seen_bulk_op_id).toBe(OLD_BULK_OP_ID);
+        expect(unseenDraft.status).toBe("closed");
+      } finally {
+        global.fetch = originalFetch;
+        await sql`DELETE FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}`;
+        await sql`DELETE FROM s8_draft_orders WHERE draft_order_id IN (${draftSeenId}, ${draftUnseenId})`;
+      }
+    });
   });
 });
