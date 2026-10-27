@@ -4,6 +4,8 @@
  * Tests that:
  * - Topics on the allowlist are archived for uninstalled shops (zero Admin calls, no DLQ)
  * - Topics NOT on the allowlist take main's code path (handler is called)
+ * - Nightly reconcile (enqueueReconcileForAllShops) picks up reinstalled shops
+ * - N/A topics don't modify local state
  *
  * Uses REAL database, REAL log.server, and mocked Admin GraphQL responses.
  */
@@ -481,11 +483,110 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
     });
   });
 
-  describe("N/A topics: no local state change", () => {
-    it("COMPANIES_CREATE: uninstalled shop archives, no BuyerAccount created", async () => {
+  describe("N/A topics: installed shop handler changes no state", () => {
+    it("COMPANIES_CREATE: installed shop handler creates no BuyerAccount", async () => {
       const suffix = testContext.suffix;
-      const domain = `test-companies-create-na-${suffix}.example.com`;
-      const shopId = `shop-companies-create-na-${suffix}`;
+      const domain = `test-companies-create-installed-${suffix}.example.com`;
+      const shopId = `shop-companies-create-installed-${suffix}`;
+      const companyGid = `gid://shopify/Company/companies-create-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+
+        const [buyerCountBefore] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        `;
+
+        const { processCompanyWebhook } = await import("~/services/sync/company.server");
+        const result = await processCompanyWebhook(
+          sqlRef,
+          domain,
+          "COMPANIES_CREATE",
+          { id: companyGid, name: "Test Company", externalId: null },
+          `wh-companies-create-${suffix}`
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("BuyerAccount created from CompanyLocation");
+
+        const [buyerCountAfter] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        `;
+        expect(buyerCountAfter.count, "no BuyerAccount created").toBe(buyerCountBefore.count);
+      } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
+    it("COMPANY_LOCATIONS_DELETE: installed shop handler preserves BuyerAccount", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-cl-delete-installed-${suffix}.example.com`;
+      const shopId = `shop-cl-delete-installed-${suffix}`;
+      const locationGid = `gid://shopify/CompanyLocation/cl-delete-${suffix}`;
+      const companyGid = `gid://shopify/Company/company-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+
+        await sqlRef`
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+          VALUES (${`ba-${suffix}`}, ${shopId}, 'COMPANY', ${companyGid}, ${locationGid}, 'Test Buyer', ${now}, ${now})
+        `;
+
+        const [buyerBefore] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "BuyerAccount" WHERE "shopId" = ${shopId} AND "companyLocationId" = ${locationGid}
+        `;
+        expect(buyerBefore, "BuyerAccount exists before").toBeDefined();
+
+        const { processCompanyLocationWebhook } = await import("~/services/sync/company-location.server");
+        const result = await processCompanyLocationWebhook(
+          sqlRef,
+          domain,
+          "COMPANY_LOCATIONS_DELETE",
+          { id: locationGid, name: "Test Location", company: { id: companyGid } },
+          `wh-cl-delete-${suffix}`
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+        expect(result.skipReason).toContain("BuyerAccount preserved");
+
+        const [buyerAfter] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "BuyerAccount" WHERE "shopId" = ${shopId} AND "companyLocationId" = ${locationGid}
+        `;
+        expect(buyerAfter, "BuyerAccount preserved for financial history").toBeDefined();
+      } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+  });
+
+  describe("Nightly reconcile picks up reinstalled shops", () => {
+    it("enqueueReconcileForAllShops excludes uninstalled, includes after reinstall", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-reconcile-reinstall-${suffix}.example.com`;
+      const shopId = `shop-reconcile-reinstall-${suffix}`;
 
       try {
         const now = new Date();
@@ -496,40 +597,34 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
           VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
         `;
 
-        const [buyerAccountCountBefore] = await sqlRef<[{ count: string }]>`
-          SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+        await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${domain}`;
+        await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'reconcile:' + domain + '%'}`;
+
+        const { enqueueReconcileForAllShops } = await import("~/services/drain/reconcile.server");
+        await enqueueReconcileForAllShops(sqlRef);
+
+        const [msgBeforeReinstall] = await sqlRef<[{ shop: string }?]>`
+          SELECT message->>'shop' AS shop
+          FROM pgmq.q_s6_sync
+          WHERE message->>'shop' = ${domain}
+            AND message->>'topic' = 'RECONCILE_COMPANIES'
         `;
+        expect(msgBeforeReinstall, "uninstalled shop excluded from reconcile").toBeUndefined();
 
-        const webhookId = `wh-companies-create-na-${suffix}`;
-        const message = {
-          shop: domain,
-          topic: "COMPANIES_CREATE",
-          webhookId,
-          resourceGid: `gid://shopify/Company/companies-create-${suffix}`,
-          enqueuedAt: new Date().toISOString(),
-        };
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${shopId}`;
+        await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${domain}`;
+        await sqlRef`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'reconcile:' + domain + '%'}`;
 
-        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+        await enqueueReconcileForAllShops(sqlRef);
 
-        const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
-
-        const [archiveCount] = await sqlRef<[{ count: string }]>`
-          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
-          WHERE message->>'webhookId' = ${webhookId}
+        const [msgAfterReinstall] = await sqlRef<[{ shop: string }?]>`
+          SELECT message->>'shop' AS shop
+          FROM pgmq.q_s6_sync
+          WHERE message->>'shop' = ${domain}
+            AND message->>'topic' = 'RECONCILE_COMPANIES'
         `;
-        expect(parseInt(archiveCount.count, 10), "message archived").toBe(1);
-
-        const [dlqCount] = await sqlRef<[{ count: string }]>`
-          SELECT COUNT(*)::text as count FROM s6_dead_letter
-          WHERE message->>'webhookId' = ${webhookId}
-        `;
-        expect(parseInt(dlqCount.count, 10), "no DLQ").toBe(0);
-
-        const [buyerAccountCountAfter] = await sqlRef<[{ count: string }]>`
-          SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-        `;
-        expect(buyerAccountCountAfter.count).toBe(buyerAccountCountBefore.count);
+        expect(msgAfterReinstall, "reinstalled shop included in reconcile").toBeDefined();
+        expect(msgAfterReinstall?.shop).toBe(domain);
       } finally {
         await cleanupTestData([domain], suffix);
       }

@@ -130,7 +130,7 @@ const TERMINAL_TOPICS = new Set([
  * Topics safe to archive (ACK without processing) for uninstalled shops.
  *
  * A topic is on this list only if reinstall + reconcile restores the correct
- * local state. Topics not on this list follow main's DLQ behaviour unchanged.
+ * local state. Topics not on this list follow main's handler path.
  *
  * RECOVERS (state restored by bulk reconcile):
  * - ORDERS_*: RECONCILE_ORDERS re-reads displayFinancialStatus from Shopify
@@ -141,9 +141,9 @@ const TERMINAL_TOPICS = new Set([
  * - COMPANIES_*: No BuyerAccount created; only marks webhook processed
  * - COMPANY_LOCATIONS_DELETE: BuyerAccount preserved for financial history
  *
- * NOT on this list (must DLQ to preserve message for manual review):
- * - DRAFT_ORDERS_*: Bulk reconcile is upsert-only; orphan rows remain
- * - CUSTOMERS_DELETE: Bulk reconcile doesn't delete orphan s8_tagged_customers
+ * NOT on this list (follow main's handler path):
+ * - DRAFT_ORDERS_*: Handler runs with 0 Admin calls (DELETE/UPDATE local state)
+ * - CUSTOMERS_DELETE: Handler sets tag_active=false with 0 Admin calls
  */
 export const ARCHIVE_SAFE_UNINSTALLED_TOPICS = new Set([
   "ORDERS_CREATE",
