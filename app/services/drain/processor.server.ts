@@ -1364,7 +1364,6 @@ async function processSyncQueue(
   const shopDomains = messages.map((m) => m.message.shop);
   const shopInfoMap = await loadShopInfo(sql, shopDomains);
   const skippedNonInrCounts = new Map<string, number>();
-  const skippedUninstalledCounts = new Map<string, number>();
 
   for (const msg of messages) {
     // Check time budget
@@ -1458,10 +1457,11 @@ async function processSyncQueue(
     if (shopInfo?.uninstalledAt !== null && shopInfo?.uninstalledAt !== undefined) {
       await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
       result.skipped++;
-      skippedUninstalledCounts.set(
-        msg.message.shop,
-        (skippedUninstalledCounts.get(msg.message.shop) ?? 0) + 1
-      );
+      safeLog("info", "order_webhook_uninstalled_shop_acked", {
+        shopHash: await shopHash(msg.message.shop),
+        topic: msg.message.topic,
+        reason: "shop_uninstalled",
+      });
       continue;
     }
 
@@ -1627,16 +1627,6 @@ async function processSyncQueue(
       queue: S6_QUEUES.SYNC,
       shopHash: await shopHash(domain),
       count,
-    });
-  }
-
-  // Log aggregated uninstalled shop skip counts (reuse existing drain_skip_non_inr_shop event)
-  for (const [domain, count] of skippedUninstalledCounts) {
-    safeLog("info", "drain_skip_non_inr_shop", {
-      queue: S6_QUEUES.SYNC,
-      shopHash: await shopHash(domain),
-      count,
-      reason: "shop_uninstalled",
     });
   }
 

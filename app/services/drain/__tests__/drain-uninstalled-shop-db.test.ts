@@ -194,18 +194,18 @@ describeWithDb("Drain: skip work for uninstalled shops", () => {
       `;
       expect(parseInt(dlqCount.count, 10), "no DLQ entry").toBe(0);
 
-      // Reuses existing drain_skip_non_inr_shop event code with reason 'shop_uninstalled'
-      const logEntry = findLogEntry("drain_skip_non_inr_shop");
-      expect(logEntry, "log entry exists with drain_skip_non_inr_shop event").not.toBeNull();
+      // Reuses existing order_webhook_uninstalled_shop_acked event code with reason 'shop_uninstalled'
+      const logEntry = findLogEntry("order_webhook_uninstalled_shop_acked");
+      expect(logEntry, "log entry exists with order_webhook_uninstalled_shop_acked event").not.toBeNull();
       expect(logEntry!.reason).toBe("shop_uninstalled");
-      expect(logEntry!.queue).toBe("s6_sync");
-      expect(typeof logEntry!.count).toBe("number");
+      expect(logEntry!.topic).toBe("ORDERS_CREATE");
       expect(typeof logEntry!.shopHash).toBe("string");
 
-      // Verify no domain or webhookId in any log line
+      // Verify no domain, GID, or webhookId in any log line
       const allLogs = getAllLogOutput().join("\n");
       expect(allLogs, "no domain in logs").not.toContain(uninstalledDomain);
       expect(allLogs, "no webhookId in logs").not.toContain(webhookId);
+      expect(allLogs, "no resourceGid in logs").not.toContain(`gid://shopify/Order/uninstalled-${suffix}`);
     } finally {
       await cleanupTestData([uninstalledDomain], suffix);
     }
@@ -338,9 +338,9 @@ describeWithDb("Drain: skip work for uninstalled shops", () => {
       `;
       expect(parseInt(dlqCount.count, 10), "no DLQ entry").toBe(0);
 
-      // Reuses existing drain_skip_non_inr_shop event code with reason 'shop_uninstalled'
-      const logEntry = findLogEntry("drain_skip_non_inr_shop");
-      expect(logEntry, "log entry exists with drain_skip_non_inr_shop event").not.toBeNull();
+      // Reuses existing order_webhook_uninstalled_shop_acked event code with reason 'shop_uninstalled'
+      const logEntry = findLogEntry("order_webhook_uninstalled_shop_acked");
+      expect(logEntry, "log entry exists with order_webhook_uninstalled_shop_acked event").not.toBeNull();
       expect(logEntry!.reason).toBe("shop_uninstalled");
     } finally {
       await cleanupTestData([raceDomain], suffix);
