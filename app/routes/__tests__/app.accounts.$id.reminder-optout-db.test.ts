@@ -48,6 +48,7 @@ vi.mock("~/services/credit-status.server", () => ({
   }),
   getCompanyTotals: vi.fn().mockResolvedValue(null),
   updateCreditStatus: vi.fn().mockResolvedValue({ success: true }),
+  parseCreditLimitString: vi.fn().mockReturnValue({ valid: true, value: 0 }),
 }));
 
 describeWithDb("app.accounts.$id reminder opt-out toggle (DB)", () => {
