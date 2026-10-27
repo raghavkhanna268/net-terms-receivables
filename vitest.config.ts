@@ -137,6 +137,7 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
   "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
   "app/services/drain/__tests__/drain-guard-db.test.ts",
+  "app/services/drain/__tests__/multipass-drain-db.test.ts",
   "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
   "app/services/drain/__tests__/company-location-pii-db.test.ts",
 
