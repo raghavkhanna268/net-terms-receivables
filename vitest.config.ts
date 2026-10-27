@@ -26,7 +26,8 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/__tests__/integration/prisma-session-storage.test.ts
  *
  * Service DB tests (explicit + *-db.test.ts glob):
- * - app/services/__tests__/*-db.test.ts (matches ~30 files)
+ * - app/services/__tests__/*-db.test.ts (matches ~31 files)
+ * - app/services/__tests__/audit-event-no-pii-db.test.ts
  * - app/services/__tests__/gating.test.ts
  * - app/services/__tests__/bank-import-critical-path.test.ts
  * - app/services/__tests__/reminders-critical-path.test.ts

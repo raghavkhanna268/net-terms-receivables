@@ -169,13 +169,14 @@ All amounts are in INR with varied values across the seed data.
 
 ### Prerequisites
 
-The seed script requires an Admin API access token with the **same 11 production scopes** as the main app (see `docs/scopes.md` for complete justifications):
+The seed script requires an Admin API access token with the **same 9 production scopes** as the main app (see `docs/scopes.md` for complete justifications):
 
 | Scope | Purpose |
 |-------|---------|
 | `write_companies` | Create B2B companies and locations, set payment terms templates (implies read_companies) |
 | `write_customers` | Create net-terms customers, set credit metafields (implies read_customers) |
 | `read_draft_orders` | Draft order payment terms (S8) |
+| `read_all_orders` | Extends write_orders read access to orders >60 days old |
 | `write_orders` | Create orders with custom line items and backdate with `processedAt` (implies read_orders) |
 | `read_payment_terms` | Read payment terms on orders and company locations |
 | `write_validations` | Pre-granted for S12 checkout validation function |
