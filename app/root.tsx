@@ -104,6 +104,23 @@ export default function App() {
   );
 }
 
+/**
+ * Returns generic user-facing copy based on HTTP status code.
+ * Never exposes error.data, error.message, or stack traces.
+ */
+function getGenericErrorCopy(status: number): { title: string; message: string } {
+  if (status === 404) {
+    return { title: "404 Not Found", message: "Page not found" };
+  }
+  if (status === 401 || status === 403) {
+    return { title: `${status} Forbidden`, message: "You don't have access to this page" };
+  }
+  if (status >= 400 && status < 500) {
+    return { title: `${status} Error`, message: "Something went wrong with this request" };
+  }
+  return { title: "Error", message: "Something went wrong. Please try again." };
+}
+
 export function ErrorBoundary() {
   const error = useRouteError();
   const loaderData = useRouteLoaderData<typeof loader>("root");
@@ -111,20 +128,13 @@ export function ErrorBoundary() {
   const isDevMode = loaderData?.isDevMode ?? import.meta.env.DEV;
   const isEmbedded = useIsEmbeddedRoute();
 
-  let title = "Unexpected Error";
-  let message = "An unexpected error occurred. Please try again.";
+  let title = "Error";
+  let message = "Something went wrong. Please try again.";
 
   if (isRouteErrorResponse(error)) {
-    title = `${error.status} ${error.statusText}`;
-    message =
-      error.status === 404
-        ? "The page you're looking for doesn't exist."
-        : error.data?.message || message;
-  } else if (error instanceof Error) {
-    if (import.meta.env.DEV) {
-      message = error.message;
-      console.error(error);
-    }
+    const copy = getGenericErrorCopy(error.status);
+    title = copy.title;
+    message = copy.message;
   }
 
   return (
