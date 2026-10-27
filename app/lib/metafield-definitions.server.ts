@@ -189,6 +189,9 @@ async function createMetafieldDefinition(
  * Creates the credit_status definition on both COMPANY_LOCATION and CUSTOMER.
  * This operation is idempotent - TAKEN errors are treated as success.
  *
+ * Latency optimization: Both owner types are created in PARALLEL (Promise.all),
+ * reducing the critical path from 2 serial calls to 1 parallel batch.
+ *
  * @param admin - The Shopify Admin API client
  * @returns Array of results for each definition
  * @throws Error if any definition fails to create (excluding TAKEN)
@@ -196,34 +199,34 @@ async function createMetafieldDefinition(
 export async function ensureMetafieldDefinitions(
   admin: AdminGraphqlClient,
 ): Promise<MetafieldDefinitionResult[]> {
-  const results: MetafieldDefinitionResult[] = [];
   const errors: string[] = [];
+
+  const allPromises: Promise<MetafieldDefinitionResult>[] = [];
 
   for (const definition of METAFIELD_DEFINITIONS) {
     for (const ownerType of OWNER_TYPES) {
-      const result = await createMetafieldDefinition(
-        admin,
-        definition,
-        ownerType,
-      );
-      results.push(result);
+      allPromises.push(createMetafieldDefinition(admin, definition, ownerType));
+    }
+  }
 
-      if (result.error) {
-        safeLog("error", "metafield_definition_create_failed", {
-          ownerType,
-          err: result.error,
-        });
-        errors.push(result.error);
-      } else if (result.created) {
-        safeLog("info", "metafield_definition_created", {
-          ownerType,
-          definitionId: result.id,
-        });
-      } else if (result.alreadyExists) {
-        safeLog("info", "metafield_definition_exists", {
-          ownerType,
-        });
-      }
+  const results = await Promise.all(allPromises);
+
+  for (const result of results) {
+    if (result.error) {
+      safeLog("error", "metafield_definition_create_failed", {
+        ownerType: result.ownerType,
+        err: result.error,
+      });
+      errors.push(result.error);
+    } else if (result.created) {
+      safeLog("info", "metafield_definition_created", {
+        ownerType: result.ownerType,
+        definitionId: result.id,
+      });
+    } else if (result.alreadyExists) {
+      safeLog("info", "metafield_definition_exists", {
+        ownerType: result.ownerType,
+      });
     }
   }
 

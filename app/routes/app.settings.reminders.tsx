@@ -42,6 +42,7 @@ import type {
   DelayedReminder,
 } from "~/services/reminder-status.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
+import { pluralizeWithCount } from "~/lib/copy-helpers";
 
 const VALID_INTENTS = ["toggle_enabled", "update_rule", "create_rule", "delete_rule"] as const;
 type ReminderIntent = (typeof VALID_INTENTS)[number];
@@ -81,7 +82,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     };
   }
 
-  // Ensure default rules exist (idempotent, only seeds when shop has no rules)
+  // Create settings row if missing; seed default rules only on first visit
+  // (no settings row, no ReminderLog, and no existing ReminderRule rows).
   await ensureDefaultReminderRules(sql, shop.id);
 
   const [settings, rules, logs, statusCounts, delayedReminders, shopSentToday] = await Promise.all([
@@ -140,7 +142,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
         if (enabled && !providerConfigured) {
           return {
             success: false,
-            error: "Email reminders will be available once the email provider is configured",
+            error: "Email reminders aren't available yet",
           };
         }
         await updateShopReminderSettings(sql, shop.id, enabled);
@@ -243,11 +245,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
 function RuleOffsetLabel({ offsetDays }: { offsetDays: number }) {
   if (offsetDays < 0) {
-    return <>{Math.abs(offsetDays)} days before due</>;
+    return <>{pluralizeWithCount(Math.abs(offsetDays), "day")} before due</>;
   } else if (offsetDays === 0) {
     return <>On due date</>;
   } else {
-    return <>{offsetDays} days overdue</>;
+    return <>{pluralizeWithCount(offsetDays, "day")} overdue</>;
   }
 }
 
@@ -400,10 +402,9 @@ export default function RemindersSettingsPage() {
       {/* Provider Status Banner */}
       {!providerConfigured && (
         <s-section>
-          <s-banner tone="warning" heading="Email sending not configured yet">
+          <s-banner tone="warning" heading="Email reminders aren't available yet">
             <s-text>
-              Payment reminder emails are not yet enabled. This feature will be
-              available once the email provider is configured. You can still
+              Payment reminder emails are not yet available. You can still
               configure your reminder settings below.
             </s-text>
           </s-banner>
@@ -577,8 +578,7 @@ export default function RemindersSettingsPage() {
           </s-list-item>
         </s-unordered-list>
         <s-paragraph>
-          Each reminder is sent only once per invoice, even if the job runs
-          multiple times.
+          Each reminder is sent only once per invoice.
         </s-paragraph>
       </s-section>
 
@@ -593,8 +593,8 @@ export default function RemindersSettingsPage() {
 
       <s-section slot="aside" heading="Opted-Out Buyers">
         <s-paragraph>
-          The buyer unsubscribed from reminder emails. Only you can turn
-          reminders back on for them.
+          These buyers unsubscribed from reminder emails. Only you can turn
+          reminders back on for them, from the buyer&apos;s account page.
         </s-paragraph>
       </s-section>
 

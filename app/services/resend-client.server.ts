@@ -54,6 +54,8 @@ export interface ResendEmailParams {
   text?: string;
   headers?: Record<string, string>;
   idempotencyKey?: string;
+  /** Reply-To address. Sent to Resend as reply_to when set. */
+  replyTo?: string;
 }
 
 /**
@@ -200,6 +202,10 @@ export async function sendViaResend(
 
   if (filteredParams.headers && Object.keys(filteredParams.headers).length > 0) {
     body.headers = filteredParams.headers;
+  }
+
+  if (params.replyTo && params.replyTo.trim().length > 0) {
+    body.reply_to = params.replyTo;
   }
 
   const response = await fetch("https://api.resend.com/emails", {

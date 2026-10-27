@@ -23,12 +23,17 @@ import { useLoaderData, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
-import { generateDedupeKey, isValidUtrForRail } from "~/lib/banks/dedupe";
-import type { PaymentRail } from "~/lib/banks/types";
+import { insertBankImportRows } from "~/services/bank-import.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import {
+  formatSupportedBankList,
+  getImportErrorLabel,
+  formatValidationError,
+  pluralize,
+} from "~/lib/copy-helpers";
 
 /**
  * Maximum rows per import request.
@@ -364,161 +369,17 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const shopId = shop.id;
 
   try {
-    // Compute dedupe keys server-side for all credits
-    // Use isValidUtrForRail to validate UTRs - fall back to hash for invalid/untrusted rails
-    const creditsWithKeys: Array<CreditRow & { dedupeKey: string }> = [];
-    for (const credit of importData.credits) {
-      let dedupeKey: string;
-      
-      // Only trust UTR if it's valid for the rail
-      const hasValidUtr = credit.utr && isValidUtrForRail(credit.utr, credit.rail as PaymentRail);
-      
-      if (hasValidUtr) {
-        // Use UTR-based key
-        dedupeKey = await generateDedupeKey(
-          credit.date,
-          credit.amountPaise,
-          "CR",
-          credit.narration,
-          credit.rail as PaymentRail,
-          credit.utr,
-          credit.balancePaise,
-          credit.valueDate,
-          credit.refNo
-        );
-      } else {
-        // Generate hash-based key (includes balancePaise for identical same-day distinction)
-        dedupeKey = await generateDedupeKey(
-          credit.date,
-          credit.amountPaise,
-          "CR",
-          credit.narration,
-          credit.rail as PaymentRail,
-          undefined, // Don't pass untrusted UTR
-          credit.balancePaise,
-          credit.valueDate,
-          credit.refNo
-        );
-      }
-      
-      creditsWithKeys.push({ ...credit, dedupeKey });
-    }
-
-    // Normalize dedupe keys for DB storage
-    // UTR-based keys stay as-is, hash-based get SYNTH- prefix
-    const normalizeForDb = (key: string): string => {
-      if (key.startsWith("utr:")) {
-        // Extract the actual UTR value from utr:RAIL:DIR:VALUE format
-        const parts = key.split(":");
-        return parts[3] || key;
-      }
-      return `SYNTH-${key}`;
-    };
-
-    // Use batched INSERT ... ON CONFLICT DO NOTHING in a transaction
-    const result = await sql.begin(async (tx) => {
-      // Create BankImport record
-      const [bankImport] = await tx<{ id: string }[]>`
-        INSERT INTO "BankImport" (
-          "shopId", bank, "fileName", "rowCount", "createdAt"
-        )
-        VALUES (
-          ${shopId},
-          ${importData.bank.toLowerCase()},
-          ${importData.fileName},
-          ${importData.credits.length},
-          ${now}
-        )
-        RETURNING id
-      `;
-
-      const importId = bankImport.id;
-
-      // Log import start (counts only, no PII)
-      safeLog("info", "import.start", {
+    // Dedupe keys + BankImport/Payment inserts live in the shared service
+    // (also used by scripts/e2e-bank-import.ts) so both paths stay identical.
+    const result = await sql.begin((tx) =>
+      insertBankImportRows(tx, {
         shopId,
-        importId,
-        count: importData.credits.length,
-      });
-
-      // Prepare all rows for batch insert
-      const rows = creditsWithKeys.map((credit) => {
-        const dbUtr = normalizeForDb(credit.dedupeKey);
-        // Convert to ISO string for JSON serialization (tx.json() needs string, not Date)
-        const valueDate = credit.valueDate 
-          ? new Date(credit.valueDate + "T00:00:00Z").toISOString()
-          : new Date(credit.date + "T00:00:00Z").toISOString();
-        // Use exact decimal string to avoid float precision issues
-        const amountString = (credit.amountPaise / 100).toFixed(2);
-        
-        return {
-          shopId,
-          importId,
-          valueDate,
-          amount: amountString,
-          rail: credit.rail,
-          utr: dbUtr,
-          payerText: credit.payerName ?? null,
-          narration: credit.narration,
-        };
-      });
-
-      // Batch insert with ON CONFLICT DO NOTHING
-      // Returns only the inserted rows (not duplicates)
-      // Use tx.json() for proper JSON serialization - JSON.stringify() causes
-      // postgres.js to double-encode, sending a JSON string scalar instead of array
-      const insertedRows = await tx<{ id: string }[]>`
-        INSERT INTO "Payment" (
-          "shopId",
-          "importId",
-          "valueDate",
-          amount,
-          rail,
-          utr,
-          "payerText",
-          narration,
-          status,
-          "createdAt",
-          "updatedAt"
-        )
-        SELECT
-          r."shopId",
-          r."importId",
-          r."valueDate"::timestamptz,
-          r.amount::decimal(14,2),
-          r.rail,
-          r.utr,
-          r."payerText",
-          r.narration,
-          'unmatched',
-          ${now},
-          ${now}
-        FROM jsonb_to_recordset(${tx.json(rows)}) AS r(
-          "shopId" text,
-          "importId" text,
-          "valueDate" text,
-          amount text,
-          rail text,
-          utr text,
-          "payerText" text,
-          narration text
-        )
-        ON CONFLICT ("shopId", utr) DO NOTHING
-        RETURNING id
-      `;
-
-      const inserted = insertedRows.length;
-      const duplicates = rows.length - inserted;
-
-      // Log import completion (counts only, no PII)
-      safeLog("info", "import.complete", {
-        importId,
-        insertedCount: inserted,
-        duplicateCount: duplicates,
-      });
-
-      return { importId, inserted, duplicates };
-    });
+        bank: importData.bank,
+        fileName: importData.fileName,
+        credits: importData.credits,
+        now,
+      })
+    );
 
     // Trigger matcher for newly imported payments
     let matcherResult = null;
@@ -630,42 +491,6 @@ export interface ParseErrorRow {
   row: number;
   code: string;
   message: string;
-}
-
-/**
- * Badge tone for error codes.
- */
-export type ErrorBadgeTone = "warning" | "critical";
-
-/**
- * Get badge tone for error code.
- * NORMALIZE_FAILED gets warning (recoverable), others get critical.
- * Exported for testing.
- */
-export function getErrorBadgeTone(code: string): ErrorBadgeTone {
-  return code === "NORMALIZE_FAILED" ? "warning" : "critical";
-}
-
-/**
- * Fixed error messages for each error code.
- * Raw parser messages are NOT shown to merchants.
- * Exported for testing.
- */
-export const ERROR_CODE_MESSAGES: Record<string, string> = {
-  ROW_PARSE_FAILED: "Could not parse this row",
-  NORMALIZE_FAILED: "Could not normalize transaction data",
-  NO_HEADER_ROW: "Could not find header row in file",
-  COLUMN_MAP_FAILED: "Could not map columns to expected format",
-  UNKNOWN_BANK_FORMAT: "Unrecognized bank statement format",
-};
-
-/**
- * Get fixed display message for an error code.
- * Never returns raw parser error messages.
- * Exported for testing.
- */
-export function getErrorDisplayMessage(code: string): string {
-  return ERROR_CODE_MESSAGES[code] ?? "Unknown error";
 }
 
 /**
@@ -906,7 +731,7 @@ export default function ImportsPage() {
       <s-section heading="Upload Statement">
         <s-stack>
           <s-paragraph>
-            Upload an HDFC or ICICI bank statement (CSV, XLS, or XLSX). The file
+            Upload a bank statement from {formatSupportedBankList()} (CSV, XLS, or XLSX). The file
             is parsed entirely in your browser — no raw data is sent to our
             servers.
           </s-paragraph>
@@ -946,8 +771,7 @@ export default function ImportsPage() {
             <s-stack>
               {result.bank === "UNKNOWN" ? (
                 <s-banner tone="warning" heading="Unknown bank format">
-                  Could not detect HDFC or ICICI format. Please ensure you are
-                  uploading a standard bank statement export.
+                  We couldn&apos;t recognise this statement. Upload a standard export from {formatSupportedBankList()}.
                 </s-banner>
               ) : (
                 <>
@@ -974,17 +798,14 @@ export default function ImportsPage() {
 
               {result.errors.length > 0 && (() => {
                 const summary = summarizeParseErrors(result.errors);
+                const rowWord = pluralize(summary.totalCount, "row");
                 return (
-                  <s-banner tone="warning" heading={`${summary.totalCount} row(s) could not be parsed`}>
+                  <s-banner tone="warning" heading={`${summary.totalCount} ${rowWord} couldn't be read`}>
                     <s-unordered-list>
                       {summary.initialErrors.map((err, idx) => (
                         <s-list-item key={idx}>
-                          <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
-                          {" "}
-                          <s-badge tone={getErrorBadgeTone(err.code)}>
-                            {err.code}
-                          </s-badge>
-                          {" "}{getErrorDisplayMessage(err.code)}
+                          <s-text type="strong">{formatErrorRowLabel(err.row)}:</s-text>
+                          {" "}{getImportErrorLabel(err.code)}
                         </s-list-item>
                       ))}
                     </s-unordered-list>
@@ -998,12 +819,8 @@ export default function ImportsPage() {
                         <s-unordered-list>
                           {summary.overflowErrors.map((err, idx) => (
                             <s-list-item key={`overflow-${idx}`}>
-                              <s-text type="strong">{formatErrorRowLabel(err.row)}</s-text>
-                              {" "}
-                              <s-badge tone={getErrorBadgeTone(err.code)}>
-                                {err.code}
-                              </s-badge>
-                              {" "}{getErrorDisplayMessage(err.code)}
+                              <s-text type="strong">{formatErrorRowLabel(err.row)}:</s-text>
+                              {" "}{getImportErrorLabel(err.code)}
                             </s-list-item>
                           ))}
                         </s-unordered-list>
@@ -1054,16 +871,25 @@ export default function ImportsPage() {
                 ) : (
                   <s-banner tone="critical" heading="Import failed">
                     {importResult.error}
-                    {importResult.details && importResult.details.length > 0 && (
-                      <s-unordered-list>
-                        {importResult.details.slice(0, 5).map((detail, idx) => (
-                          <s-list-item key={idx}>{detail}</s-list-item>
-                        ))}
-                        {importResult.details.length > 5 && (
-                          <s-list-item>...and {importResult.details.length - 5} more errors</s-list-item>
-                        )}
-                      </s-unordered-list>
-                    )}
+                    {importResult.details && importResult.details.length > 0 && (() => {
+                      const sourceRowLookup = (creditIndex: number) =>
+                        result?.credits[creditIndex]?.sourceRow;
+                      return (
+                        <s-unordered-list>
+                          {importResult.details.slice(0, 5).map((detail, idx) => {
+                            const parts = detail.split(": ");
+                            const path = parts[0] ?? "";
+                            const message = parts.slice(1).join(": ");
+                            return (
+                              <s-list-item key={idx}>{formatValidationError(path, message, sourceRowLookup)}</s-list-item>
+                            );
+                          })}
+                          {importResult.details.length > 5 && (
+                            <s-list-item>...and {importResult.details.length - 5} more errors</s-list-item>
+                          )}
+                        </s-unordered-list>
+                      );
+                    })()}
                   </s-banner>
                 )
               )}

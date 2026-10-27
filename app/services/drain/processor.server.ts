@@ -66,6 +66,7 @@ import {
   sanitizeSyncMessage,
   sanitizeBulkMessage,
   type SanitizedDeadLetterMessage,
+  type SanitizationReason,
 } from "./dead-letter-sanitize.server";
 
 /**
@@ -931,10 +932,30 @@ async function handleReconcileOrders(sql: Sql, message: SyncMessage): Promise<Sy
   return startReconcileBulkOperation(sql, message.shop, "orders", message.webhookId);
 }
 
+/**
+ * Handler for RECONCILE_DRAFT_ORDERS topic.
+ * Starts a bulk draft orders export for the shop.
+ *
+ * Exports draft orders with status=open or status=invoice_sent for
+ * pending credit exposure tracking.
+ */
+async function handleReconcileDraftOrders(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  if (await isWebhookProcessed(sql, message.webhookId, message.shop)) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Reconcile already processed (idempotent)",
+    };
+  }
+
+  return startReconcileBulkOperation(sql, message.shop, "draft_orders", message.webhookId);
+}
+
 // Register RECONCILE_* handlers
 registerSyncHandler("RECONCILE_COMPANIES", handleReconcileCompanies);
 registerSyncHandler("RECONCILE_CUSTOMERS", handleReconcileCustomers);
 registerSyncHandler("RECONCILE_ORDERS", handleReconcileOrders);
+registerSyncHandler("RECONCILE_DRAFT_ORDERS", handleReconcileDraftOrders);
 
 // =============================================================================
 // CREDIT STATUS RECOMPUTE HANDLER
@@ -1180,7 +1201,7 @@ async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds:
  * @returns true if the message was successfully dead-lettered, false if
  *          the message was already deleted (e.g., by shop/redact)
  */
-async function moveToDeadLetter(
+export async function moveToDeadLetter(
   sql: Sql,
   queue: string,
   msgId: string,
@@ -1189,37 +1210,76 @@ async function moveToDeadLetter(
   readCt: number
 ): Promise<boolean> {
   let messageToStore: SyncMessage | BulkMessage | SanitizedDeadLetterMessage = message;
+  let preSanitized = false;
 
   if (isShopNotFoundReason(error)) {
     if (queue === S6_QUEUES.SYNC) {
       const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt);
       if (sanitized) {
         messageToStore = sanitized;
-        safeLog("info", "dlq_sanitized_shop_not_found", {
-          topic: message.topic,
-          originalMsgId: msgId,
-        });
+        preSanitized = true;
       }
     } else if (queue === S6_QUEUES.BULK) {
       const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt);
       if (sanitized) {
         messageToStore = sanitized;
-        safeLog("info", "dlq_sanitized_shop_not_found", {
-          topic: message.topic,
-          bulkType: (message as BulkMessage).bulkType,
-          originalMsgId: msgId,
-        });
+        preSanitized = true;
       }
     }
   }
 
   return sql.begin(async (tx) => {
+    const [shopRow] = await tx<[{ id: string; uninstalledAt: Date | null }?]>`
+      SELECT id, "uninstalledAt" FROM "Shop"
+      WHERE domain = ${message.shop}
+      FOR SHARE
+    `;
+
+    const shopRowMissing = !shopRow;
+    const shopUninstalled = shopRow !== undefined && shopRow.uninstalledAt !== null;
+    const shopGone = shopRowMissing || shopUninstalled;
+    const shopId = shopRow?.id;
+    let sanitizationReason: SanitizationReason | null = null;
+
+    if (shopGone && !preSanitized) {
+      const reason: SanitizationReason = shopRowMissing ? "shop_row_missing" : "shop_uninstalled";
+      if (queue === S6_QUEUES.SYNC) {
+        const sanitized = sanitizeSyncMessage(message as SyncMessage, msgId, readCt, reason, shopId);
+        if (sanitized) {
+          messageToStore = sanitized;
+          sanitizationReason = reason;
+        }
+      } else if (queue === S6_QUEUES.BULK) {
+        const sanitized = sanitizeBulkMessage(message as BulkMessage, msgId, readCt, reason, shopId);
+        if (sanitized) {
+          messageToStore = sanitized;
+          sanitizationReason = reason;
+        }
+      }
+    }
+
     const [result] = await tx<[{ delete: boolean }]>`
       SELECT pgmq.delete(${queue}, ${msgId}::bigint)
     `;
 
     if (!result.delete) {
       return false;
+    }
+
+    if (sanitizationReason) {
+      safeLog("info", "dlq_sanitized_shop_not_found", {
+        topic: message.topic,
+        originalMsgId: msgId,
+        reason: sanitizationReason,
+        ...(queue === S6_QUEUES.BULK && { bulkType: (message as BulkMessage).bulkType }),
+      });
+    } else if (preSanitized) {
+      safeLog("info", "dlq_sanitized_shop_not_found", {
+        topic: message.topic,
+        originalMsgId: msgId,
+        reason: "shop_not_found" as SanitizationReason,
+        ...(queue === S6_QUEUES.BULK && { bulkType: (message as BulkMessage).bulkType }),
+      });
     }
 
     await tx`
@@ -1303,14 +1363,73 @@ async function processSyncQueue(
       break;
     }
 
+    // Skip already-sanitized messages (re-enqueued by hand) before any shop lookup
+    if ((msg.message as Record<string, unknown>).sanitized === true) {
+      safeLog("warn", "drain_skip_sanitized_message", {
+        queue: S6_QUEUES.SYNC,
+        originalMsgId: msg.msg_id,
+        topic: msg.message.topic,
+      });
+      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
+      result.skipped++;
+      continue;
+    }
+
     // #292: Skip non-INR shops (but let terminal topics through for existing rows)
-    // Shop not in map → let handler fail with shop_not_found → sanitized DLQ path
+    // Shop not in map → guard below re-checks; if missing, message is deleted
     // Shop in map with unsupported currency (NULL/""/XXX/non-INR) → skip non-terminal, pass terminal
     const shopCurrency = shopCurrencies.get(msg.message.shop);
     const shopFound = shopCurrencies.has(msg.message.shop);
     // Fail closed: NULL/"" or unsupported currency treated as non-INR
     const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
-    
+
+    // #239: Shop row missing (redacted or never existed) → re-check and delete message.
+    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    if (!shopFound) {
+      try {
+        const [shopRow] = await sql<[{ id: string }?]>`
+          SELECT id FROM "Shop" WHERE domain = ${msg.message.shop}
+        `;
+        if (!shopRow) {
+          await sql`SELECT pgmq.delete(${S6_QUEUES.SYNC}, ${msg.msg_id}::bigint)`;
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "sync",
+            topic: msg.message.topic,
+            msgId: msg.msg_id,
+            count: 1,
+          });
+          continue;
+        }
+      } catch (err) {
+        const errorCode = toErrorCode(err);
+        safeLog("error", "sync_message_exception", {
+          topic: msg.message.topic,
+          queue: S6_QUEUES.SYNC,
+          errorCode,
+          readCt: msg.read_ct,
+        });
+        if (msg.read_ct >= config.maxRetries) {
+          await moveToDeadLetter(
+            sql,
+            S6_QUEUES.SYNC,
+            msg.msg_id,
+            msg.message,
+            `permanent:${errorCode}`,
+            msg.read_ct
+          );
+          result.deadLettered++;
+        } else {
+          result.failed++;
+          result.errors.push({
+            msgId: msg.msg_id,
+            topic: msg.message.topic,
+            code: errorCode,
+          });
+        }
+        continue;
+      }
+    }
+
     if (isNonInr && !TERMINAL_TOPICS.has(msg.message.topic)) {
       // G8: Non-INR shop, non-terminal topic - skip (don't import new amounts)
       await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
@@ -1323,19 +1442,6 @@ async function processSyncQueue(
     }
     // G8: Terminal topics (PAID, CANCELLED, DRAFT_DELETE) pass through to handlers
     // which will update existing rows without importing new amounts
-    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
-
-    // Skip already-sanitized messages (re-enqueued by hand)
-    if ((msg.message as Record<string, unknown>).sanitized === true) {
-      safeLog("warn", "drain_skip_sanitized_message", {
-        queue: S6_QUEUES.SYNC,
-        originalMsgId: msg.msg_id,
-        topic: msg.message.topic,
-      });
-      await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
-      result.skipped++;
-      continue;
-    }
 
     const handler = getSyncHandler(msg.message.topic);
 
@@ -1541,26 +1647,7 @@ async function processBulkQueue(
     }
 
     // #292: Skip non-INR shops
-    // Shop not in map → let handler fail with shop_not_found → sanitized DLQ path
-    // Shop in map with unsupported currency → skip (bulk queue has no terminal topics)
-    const shopCurrency = shopCurrencies.get(msg.message.shop);
-    const shopFound = shopCurrencies.has(msg.message.shop);
-    // Fail closed: NULL/"" or unsupported currency treated as non-INR
-    const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
-    
-    if (isNonInr) {
-      // G8: Bulk queue has no terminal topics - all non-INR are skipped
-      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
-      result.skipped++;
-      skippedNonInrCounts.set(
-        msg.message.shop,
-        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
-      );
-      continue;
-    }
-    // Shop not found → handler returns shop_not_found → moveToDeadLetter with sanitization
-
-    // Skip already-sanitized messages (re-enqueued by hand)
+    // Skip already-sanitized messages (re-enqueued by hand) before any shop lookup
     if ((msg.message as Record<string, unknown>).sanitized === true) {
       safeLog("warn", "drain_skip_sanitized_message", {
         queue: S6_QUEUES.BULK,
@@ -1569,6 +1656,71 @@ async function processBulkQueue(
       });
       await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
       result.skipped++;
+      continue;
+    }
+
+    // Shop not in map → guard below re-checks; if missing, message is deleted
+    // Shop in map with unsupported currency → skip (bulk queue has no terminal topics)
+    const shopCurrency = shopCurrencies.get(msg.message.shop);
+    const shopFound = shopCurrencies.has(msg.message.shop);
+    // Fail closed: NULL/"" or unsupported currency treated as non-INR
+    const isNonInr = shopFound && !isShopCurrencySupported(shopCurrency ?? "");
+
+    // #239: Shop row missing (redacted or never existed) → re-check and delete message.
+    // Uninstalled-but-present shops keep today's behaviour (handler returns shop_not_found).
+    if (!shopFound) {
+      try {
+        const [shopRow] = await sql<[{ id: string }?]>`
+          SELECT id FROM "Shop" WHERE domain = ${msg.message.shop}
+        `;
+        if (!shopRow) {
+          await sql`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+          safeLog("info", "drain_shop_missing_deleted", {
+            queue: "bulk",
+            topic: msg.message.topic,
+            msgId: msg.msg_id,
+            count: 1,
+          });
+          continue;
+        }
+      } catch (err) {
+        const errorCode = toErrorCode(err);
+        safeLog("error", "bulk_message_exception", {
+          topic: msg.message.topic,
+          queue: S6_QUEUES.BULK,
+          errorCode,
+          readCt: msg.read_ct,
+        });
+        if (msg.read_ct >= config.maxRetries) {
+          await moveToDeadLetter(
+            sql,
+            S6_QUEUES.BULK,
+            msg.msg_id,
+            msg.message,
+            `permanent:${errorCode}`,
+            msg.read_ct
+          );
+          result.deadLettered++;
+        } else {
+          result.failed++;
+          result.errors.push({
+            msgId: msg.msg_id,
+            topic: msg.message.topic,
+            code: errorCode,
+          });
+        }
+        continue;
+      }
+    }
+
+    if (isNonInr) {
+      // G8: Bulk queue has no terminal topics - all non-INR are skipped
+      await archiveMessage(sql, S6_QUEUES.BULK, msg.msg_id);
+      result.skipped++;
+      skippedNonInrCounts.set(
+        msg.message.shop,
+        (skippedNonInrCounts.get(msg.message.shop) ?? 0) + 1
+      );
       continue;
     }
 

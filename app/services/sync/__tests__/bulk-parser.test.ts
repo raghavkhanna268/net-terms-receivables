@@ -4,11 +4,13 @@ import {
   parseCompanyBulkJsonl,
   parseOrderBulkJsonl,
   parseCustomerBulkJsonl,
+  parseDraftOrderBulkJsonl,
   bulkLocationToShopifyLocation,
   bulkOrderToShopifyOrder,
   bulkCustomerToShopifyCustomer,
+  bulkDraftOrderToShopifyDraftOrder,
 } from "../bulk-parser.server";
-import type { BulkCompanyLocationLine, BulkOrderLine, BulkCustomerLine } from "../types";
+import type { BulkCompanyLocationLine, BulkOrderLine, BulkCustomerLine, BulkDraftOrderLine } from "../types";
 
 describe("parseJsonl", () => {
   it("parses valid JSONL", () => {
@@ -411,5 +413,110 @@ describe("bulkCustomerToShopifyCustomer", () => {
     const result = bulkCustomerToShopifyCustomer(bulkLine);
 
     expect(result.tags).toEqual([]);
+  });
+});
+
+describe("parseDraftOrderBulkJsonl", () => {
+  it("parses draft order JSONL with payment terms", () => {
+    const jsonl = `{"id":"gid://shopify/DraftOrder/1","name":"#D1","status":"open","createdAt":"2026-10-25T10:00:00Z","paymentTerms":{"id":"gid://shopify/PaymentTerms/1","paymentTermsName":"Net 30","paymentTermsType":"NET","dueInDays":30}}
+{"id":"gid://shopify/DraftOrder/2","name":"#D2","status":"invoice_sent","createdAt":"2026-10-25T11:00:00Z"}`;
+
+    const result = parseDraftOrderBulkJsonl(jsonl);
+
+    expect(result.draftOrders).toHaveLength(2);
+    expect(result.draftOrders[0].id).toBe("gid://shopify/DraftOrder/1");
+    expect(result.draftOrders[0].name).toBe("#D1");
+    expect(result.draftOrders[0].status).toBe("open");
+    expect(result.draftOrders[0].paymentTerms?.dueInDays).toBe(30);
+    expect(result.draftOrders[1].id).toBe("gid://shopify/DraftOrder/2");
+    expect(result.draftOrders[1].status).toBe("invoice_sent");
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("handles empty JSONL", () => {
+    const result = parseDraftOrderBulkJsonl("");
+
+    expect(result.draftOrders).toHaveLength(0);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("captures parse errors", () => {
+    const jsonl = `{"id":"gid://shopify/DraftOrder/1","name":"#D1","status":"open","createdAt":"2026-10-25T10:00:00Z"}
+invalid json line
+{"id":"gid://shopify/DraftOrder/2","name":"#D2","status":"open","createdAt":"2026-10-25T11:00:00Z"}`;
+
+    const result = parseDraftOrderBulkJsonl(jsonl);
+
+    expect(result.draftOrders).toHaveLength(2);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].line).toBe(2);
+    expect(result.errors[0].raw).toBe("invalid json line");
+  });
+
+  it("handles draft orders with purchasing entity", () => {
+    const jsonl = `{"id":"gid://shopify/DraftOrder/1","name":"#D1","status":"open","createdAt":"2026-10-25T10:00:00Z","purchasingEntity":{"company":{"id":"gid://shopify/Company/123"},"location":{"id":"gid://shopify/CompanyLocation/456"}}}`;
+
+    const result = parseDraftOrderBulkJsonl(jsonl);
+
+    expect(result.draftOrders).toHaveLength(1);
+    expect(result.draftOrders[0].purchasingEntity?.company?.id).toBe("gid://shopify/Company/123");
+    expect(result.draftOrders[0].purchasingEntity?.location?.id).toBe("gid://shopify/CompanyLocation/456");
+  });
+});
+
+describe("bulkDraftOrderToShopifyDraftOrder", () => {
+  it("converts bulk line to ShopifyDraftOrder with all fields", () => {
+    const bulkLine: BulkDraftOrderLine = {
+      id: "gid://shopify/DraftOrder/123",
+      name: "#D123",
+      createdAt: "2026-10-25T10:00:00Z",
+      updatedAt: "2026-10-25T12:00:00Z",
+      status: "open",
+      totalPriceSet: {
+        shopMoney: {
+          amount: "500.00",
+          currencyCode: "USD",
+        },
+      },
+      paymentTerms: {
+        id: "gid://shopify/PaymentTerms/1",
+        paymentTermsName: "Net 30",
+        paymentTermsType: "NET",
+        dueInDays: 30,
+      },
+      purchasingEntity: {
+        company: { id: "gid://shopify/Company/456" },
+        location: { id: "gid://shopify/CompanyLocation/789" },
+      },
+      customer: { id: "gid://shopify/Customer/111" },
+    };
+
+    const result = bulkDraftOrderToShopifyDraftOrder(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/DraftOrder/123");
+    expect(result.name).toBe("#D123");
+    expect(result.createdAt).toBe("2026-10-25T10:00:00Z");
+    expect(result.updatedAt).toBe("2026-10-25T12:00:00Z");
+    expect(result.status).toBe("open");
+    expect(result.totalPriceSet?.shopMoney.amount).toBe("500.00");
+    expect(result.paymentTerms?.dueInDays).toBe(30);
+    expect(result.purchasingEntity?.company?.id).toBe("gid://shopify/Company/456");
+    expect(result.customer?.id).toBe("gid://shopify/Customer/111");
+  });
+
+  it("handles minimal draft order", () => {
+    const bulkLine: BulkDraftOrderLine = {
+      id: "gid://shopify/DraftOrder/456",
+      name: "#D456",
+      createdAt: "2026-10-25T10:00:00Z",
+    };
+
+    const result = bulkDraftOrderToShopifyDraftOrder(bulkLine);
+
+    expect(result.id).toBe("gid://shopify/DraftOrder/456");
+    expect(result.name).toBe("#D456");
+    expect(result.paymentTerms).toBeUndefined();
+    expect(result.purchasingEntity).toBeUndefined();
+    expect(result.customer).toBeUndefined();
   });
 });

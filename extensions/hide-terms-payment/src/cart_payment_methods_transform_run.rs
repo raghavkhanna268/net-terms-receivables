@@ -1353,4 +1353,515 @@ mod tests {
         let result = run_test(input).unwrap();
         assert!(result.operations.is_empty(), "Unparseable shop_config (string value) with INR cart must pass without error");
     }
+
+    // =========================================================================
+    // Case 1: Buyer Eligibility Tests (using runtime-generated IDs)
+    // Tests that net terms are shown to eligible buyers, hidden for non-eligible
+    // =========================================================================
+
+    fn pm_gid(n: u64) -> String {
+        format!("gid://shopify/PaymentCustomizationPaymentMethod/{}", n)
+    }
+
+    fn make_b2b_input_runtime_ids(
+        metafield_json: Option<&str>,
+        payment_method_ids: &[(u64, &str)],
+    ) -> String {
+        let location_metafield = match metafield_json {
+            Some(mf) => format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, mf),
+            None => r#"{ "metafield": null }"#.to_string(),
+        };
+
+        let pm_json: String = payment_method_ids
+            .iter()
+            .map(|(id, name)| format!(r#"{{ "id": "{}", "name": "{}" }}"#, pm_gid(*id), name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            r#"{{
+                "cart": {{
+                    "cost": {{ "totalAmount": {{ "currencyCode": "INR" }} }},
+                    "buyerIdentity": {{
+                        "customer": null,
+                        "purchasingCompany": {{ "location": {} }}
+                    }}
+                }},
+                "paymentMethods": [{}],
+                "paymentCustomization": null,
+                "shop": {{ "metafield": {{ "jsonValue": {{"schemaVersion": 1, "currencyCode": "INR"}} }} }}
+            }}"#,
+            location_metafield, pm_json
+        )
+    }
+
+    fn make_customer_input_runtime_ids(
+        metafield_json: Option<&str>,
+        payment_method_ids: &[(u64, &str)],
+    ) -> String {
+        let customer_metafield = match metafield_json {
+            Some(mf) => format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, mf),
+            None => r#"{ "metafield": null }"#.to_string(),
+        };
+
+        let pm_json: String = payment_method_ids
+            .iter()
+            .map(|(id, name)| format!(r#"{{ "id": "{}", "name": "{}" }}"#, pm_gid(*id), name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            r#"{{
+                "cart": {{
+                    "cost": {{ "totalAmount": {{ "currencyCode": "INR" }} }},
+                    "buyerIdentity": {{
+                        "customer": {},
+                        "purchasingCompany": null
+                    }}
+                }},
+                "paymentMethods": [{}],
+                "paymentCustomization": null,
+                "shop": {{ "metafield": {{ "jsonValue": {{"schemaVersion": 1, "currencyCode": "INR"}} }} }}
+            }}"#,
+            customer_metafield, pm_json
+        )
+    }
+
+    #[test]
+    fn test_eligible_buyer_sees_net_terms() {
+        let eligible_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "50000000", "exposurePaise": "10000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(101, "UPI"), (102, "Net Terms 30"), (103, "Credit Card")];
+        let input = make_b2b_input_runtime_ids(Some(eligible_metafield), pms);
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Eligible buyer (hold=false, under limit) should see all payment methods including net terms");
+    }
+
+    #[test]
+    fn test_held_buyer_net_terms_hidden() {
+        let held_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "PAYMENT_OVERDUE", "limitPaise": "50000000", "exposurePaise": "10000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(201, "UPI"), (202, "Net Terms 30"), (203, "Deferred Payment")];
+        let input = make_b2b_input_runtime_ids(Some(held_metafield), pms);
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Held buyer should have deferred payment methods hidden");
+        for op in &result.operations {
+            match op {
+                schema::Operation::PaymentMethodHide(hide_op) => {
+                    assert!(
+                        hide_op.payment_method_id.contains("202") || hide_op.payment_method_id.contains("203"),
+                        "Should hide net terms and deferred payment, not UPI"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hold_false_shows_all_methods_even_when_overlimit() {
+        let overlimit_not_held = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "99000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(301, "Net Terms"), (302, "Pay Later"), (303, "COD")];
+        let input = make_b2b_input_runtime_ids(Some(overlimit_not_held), pms);
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "hold=false shows all methods regardless of exposure vs limit");
+    }
+
+    #[test]
+    fn test_missing_metafield_failopen_shows_all() {
+        let pms = &[(401, "Net Terms"), (402, "Deferred"), (403, "Card")];
+        let input = make_b2b_input_runtime_ids(None, pms);
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Missing credit_status metafield must fail-open (show all methods)");
+    }
+
+    #[test]
+    fn test_customer_tagged_held_hides_deferred() {
+        let held_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "20000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(501, "Razorpay UPI"), (502, "Net Terms"), (503, "Pay Later")];
+        let input = make_customer_input_runtime_ids(Some(held_metafield), pms);
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Tagged customer on hold should have net terms/pay later hidden");
+    }
+
+    #[test]
+    fn test_customer_tagged_eligible_sees_all() {
+        let ok_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "20000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(601, "Razorpay UPI"), (602, "Net Terms"), (603, "Pay Later")];
+        let input = make_customer_input_runtime_ids(Some(ok_metafield), pms);
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "Eligible tagged customer should see all payment methods");
+    }
+
+    #[test]
+    fn test_near_limit_buyer_still_sees_net_terms() {
+        let near_limit_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "9500000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(701, "Net Terms"), (702, "Deferred Payment")];
+        let input = make_b2b_input_runtime_ids(Some(near_limit_metafield), pms);
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "NEAR_LIMIT buyer (not held) should still see net terms");
+    }
+
+    #[test]
+    fn test_hold_reason_credit_review_hides_methods() {
+        let credit_review_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "CREDIT_REVIEW", "limitPaise": "10000000", "exposurePaise": "12000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(801, "Card"), (802, "Net Terms")];
+        let input = make_b2b_input_runtime_ids(Some(credit_review_metafield), pms);
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "CREDIT_REVIEW hold should hide deferred methods");
+    }
+
+    #[test]
+    fn test_hold_reason_new_account_hides_methods() {
+        let new_account_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "NEW_ACCOUNT", "limitPaise": "5000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(901, "Bank Transfer"), (902, "Deferred Payment")];
+        let input = make_b2b_input_runtime_ids(Some(new_account_metafield), pms);
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "NEW_ACCOUNT hold should hide deferred methods");
+    }
+
+    // =========================================================================
+    // Case 5: Non-INR shop fail-closed tests
+    // =========================================================================
+
+    fn make_b2b_with_currency(
+        metafield_json: Option<&str>,
+        payment_method_ids: &[(u64, &str)],
+        cart_currency: &str,
+        shop_currency: &str,
+    ) -> String {
+        let location_metafield = match metafield_json {
+            Some(mf) => format!(r#"{{ "metafield": {{ "jsonValue": {} }} }}"#, mf),
+            None => r#"{ "metafield": null }"#.to_string(),
+        };
+
+        let pm_json: String = payment_method_ids
+            .iter()
+            .map(|(id, name)| format!(r#"{{ "id": "{}", "name": "{}" }}"#, pm_gid(*id), name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let shop_config = format!(r#"{{"schemaVersion": 1, "currencyCode": "{}"}}"#, shop_currency);
+
+        format!(
+            r#"{{
+                "cart": {{
+                    "cost": {{ "totalAmount": {{ "currencyCode": "{}" }} }},
+                    "buyerIdentity": {{
+                        "customer": null,
+                        "purchasingCompany": {{ "location": {} }}
+                    }}
+                }},
+                "paymentMethods": [{}],
+                "paymentCustomization": null,
+                "shop": {{ "metafield": {{ "jsonValue": {} }} }}
+            }}"#,
+            cart_currency, location_metafield, pm_json, shop_config
+        )
+    }
+
+    #[test]
+    fn test_usd_shop_no_net_terms_offered() {
+        let ok_metafield = r#"{"schemaVersion": 1, "currencyCode": "USD", "hold": false, "holdReasonCode": null, "limitPaise": "50000000", "exposurePaise": "10000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(1001, "Card"), (1002, "Net Terms"), (1003, "Deferred")];
+        let input = make_b2b_with_currency(Some(ok_metafield), pms, "USD", "USD");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "Non-INR (USD) shop must hide deferred payment methods (fail-closed)");
+    }
+
+    #[test]
+    fn test_eur_shop_no_net_terms_offered() {
+        let ok_metafield = r#"{"schemaVersion": 1, "currencyCode": "EUR", "hold": false, "holdReasonCode": null, "limitPaise": "50000000", "exposurePaise": "10000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(1101, "PayPal"), (1102, "Net Terms 60")];
+        let input = make_b2b_with_currency(Some(ok_metafield), pms, "EUR", "EUR");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Non-INR (EUR) shop must hide deferred payment methods");
+    }
+
+    #[test]
+    fn test_inr_shop_non_inr_cart_hides_deferred() {
+        let ok_metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "50000000", "exposurePaise": "10000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let pms = &[(1201, "Card"), (1202, "Net Terms")];
+        let input = make_b2b_with_currency(Some(ok_metafield), pms, "USD", "INR");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "INR shop with non-INR cart must hide deferred methods");
+    }
+
+    #[test]
+    fn test_missing_shop_config_non_inr_cart_hides_deferred() {
+        let input = format!(
+            r#"{{
+                "cart": {{
+                    "cost": {{ "totalAmount": {{ "currencyCode": "USD" }} }},
+                    "buyerIdentity": {{
+                        "customer": null,
+                        "purchasingCompany": {{ "location": {{ "metafield": null }} }}
+                    }}
+                }},
+                "paymentMethods": [{{ "id": "{}", "name": "Card" }}, {{ "id": "{}", "name": "Deferred Payment" }}],
+                "paymentCustomization": null,
+                "shop": {{ "metafield": null }}
+            }}"#,
+            pm_gid(1301), pm_gid(1302)
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "Missing shop_config with non-INR cart must hide deferred (fail-closed)");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: Metafield parsing and type coercion
+    // =========================================================================
+
+    /// Empty string metafield (not a JSON object).
+    #[test]
+    fn test_metafield_empty_string() {
+        let input = make_b2b_input(Some(r#""""#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield empty string");
+    }
+
+    /// Array metafield (not a JSON object).
+    #[test]
+    fn test_metafield_array() {
+        let input = make_b2b_input(Some(r#"[1, 2, 3]"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield array");
+    }
+
+    /// Number metafield (not a JSON object).
+    #[test]
+    fn test_metafield_number() {
+        let input = make_b2b_input(Some(r#"12345"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield number");
+    }
+
+    /// Boolean metafield (not a JSON object).
+    #[test]
+    fn test_metafield_boolean() {
+        let input = make_b2b_input(Some(r#"true"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield boolean");
+    }
+
+    /// hold field as string "true" instead of boolean.
+    #[test]
+    fn test_hold_string_true() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "true", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as string true");
+    }
+
+    /// hold field as string "HOLD".
+    #[test]
+    fn test_hold_string_hold() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "HOLD", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as string HOLD");
+    }
+
+    /// hold field as empty string.
+    #[test]
+    fn test_hold_empty_string() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as empty string");
+    }
+
+    /// hold field as number 1.
+    #[test]
+    fn test_hold_number() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": 1, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as number");
+    }
+
+    /// schemaVersion field as string "1" instead of number.
+    #[test]
+    fn test_schema_version_string() {
+        let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion as string");
+    }
+
+    /// schemaVersion field as 0.
+    #[test]
+    fn test_schema_version_zero() {
+        let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion zero");
+    }
+
+    /// schemaVersion field as -1.
+    #[test]
+    fn test_schema_version_negative() {
+        let metafield = r#"{"schemaVersion": -1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion negative");
+    }
+
+    /// schemaVersion field as very large number.
+    #[test]
+    fn test_schema_version_very_large() {
+        let metafield = r#"{"schemaVersion": 999999, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion very large");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: shop_config parsing
+    // =========================================================================
+
+    /// Empty string shop_config with INR cart.
+    #[test]
+    fn test_empty_string_shop_config_inr_cart() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "INR" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Deferred Payment" }
+            ],
+            "paymentCustomization": null,
+            "shop": { "metafield": { "jsonValue": "" } }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: empty string shop_config with INR cart");
+    }
+
+    /// Empty string shop_config with USD cart.
+    #[test]
+    fn test_empty_string_shop_config_usd_cart() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "USD" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Deferred Payment" }
+            ],
+            "paymentCustomization": null,
+            "shop": { "metafield": { "jsonValue": "" } }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert_eq!(result.operations.len(), 1, "pinned behaviour: empty string shop_config with USD cart");
+    }
+
+    /// shop_config with schemaVersion as string, INR cart.
+    #[test]
+    fn test_shop_config_schema_version_string_inr_cart() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": "1", "currencyCode": "INR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: shop_config schemaVersion string with INR cart");
+    }
+
+    /// shop_config with schemaVersion as string, USD cart.
+    #[test]
+    fn test_shop_config_schema_version_string_usd_cart() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"schemaVersion": "1", "currencyCode": "USD"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: shop_config schemaVersion string with USD cart");
+    }
+
+    /// shop_config with currencyCode as number, INR cart.
+    #[test]
+    fn test_shop_config_currency_number_inr_cart() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": 356}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: shop_config currencyCode as number with INR cart");
+    }
+
+    /// shop_config with empty currencyCode.
+    #[test]
+    fn test_shop_config_empty_currency() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": ""}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: shop_config with empty currencyCode");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: hide-terms-config parsing
+    // =========================================================================
+
+    /// hide-terms-config as empty object.
+    #[test]
+    fn test_hide_config_empty_object() {
+        let metafield = held_metafield();
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(r#"{}"#));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: empty hide-config object");
+    }
+
+    /// hide-terms-config as number.
+    #[test]
+    fn test_hide_config_number() {
+        let metafield = held_metafield();
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(r#"12345"#));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: hide-config as number");
+    }
+
+    /// hide-terms-config with deferredPaymentPatterns as string.
+    #[test]
+    fn test_hide_config_patterns_string() {
+        let metafield = held_metafield();
+        let config = r#"{"deferredPaymentPatterns": "deferred"}"#;
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: deferredPaymentPatterns as string");
+    }
+
+    /// hide-terms-config with manualPaymentMethodName as number.
+    #[test]
+    fn test_hide_config_manual_method_number() {
+        let metafield = held_metafield();
+        let config = r#"{"manualPaymentMethodName": 12345}"#;
+        let input = make_customer_input(Some(metafield), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: manualPaymentMethodName as number");
+    }
 }

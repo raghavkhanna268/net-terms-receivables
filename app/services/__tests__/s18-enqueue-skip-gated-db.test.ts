@@ -197,8 +197,12 @@ describeWithDb("Gating: SQL enqueues all, TS gates (DB)", () => {
   }
 
   async function setupNoonMock() {
+    const [row] = await sql<{ today: string }[]>`
+      SELECT ((NOW() AT TIME ZONE ${testTimezone})::DATE)::TEXT AS today
+    `;
+    const [year, month, day] = row.today.split("-").map(Number);
     const luxon = await import("luxon");
-    const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: testTimezone });
+    const mockNow = luxon.DateTime.fromObject({ year, month, day, hour: 12, minute: 0 }, { zone: testTimezone });
     return vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
   }
 
