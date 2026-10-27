@@ -26,8 +26,10 @@ import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server"
 import { insertBankImportRows } from "~/services/bank-import.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
-import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import {
   formatSupportedBankList,
   getImportErrorLabel,
@@ -258,22 +260,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
-    return {
-      shopDomain,
-      shopCurrency: "INR",
-      maxImportRows: MAX_IMPORT_ROWS,
-      notSupported: false,
-    };
-  }
+  const storeSetupStatus = getStoreSetupStatus(shop);
 
-  // #292: Check currency gate - if not supported, return minimal payload (no preview)
-  if (!isCurrencyGateOpen(shop.currency)) {
+  if (storeSetupStatus !== "supported") {
     return {
       shopDomain,
-      shopCurrency: getEffectiveCurrency(shop.currency),
+      shopCurrency: shop ? getEffectiveCurrency(shop.currency) : "INR",
       maxImportRows: MAX_IMPORT_ROWS,
-      notSupported: true,
+      notSupported: storeSetupStatus === "not_supported",
+      settingUp: storeSetupStatus === "setting_up",
+      storeSetupStatus,
     };
   }
 
@@ -289,6 +285,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopCurrency: shop.currency ?? "INR",
     maxImportRows: MAX_IMPORT_ROWS,
     notSupported: false,
+    settingUp: false,
   };
 };
 
@@ -316,15 +313,16 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
+  const storeSetupStatus = getStoreSetupStatus(shop);
+
+  if (storeSetupStatus === "setting_up") {
     return Response.json(
-      { success: false, error: "Shop not found" },
-      { status: 404 }
+      { success: false, error: "Your store is still being set up. Please wait a moment and try again." },
+      { status: 400 }
     );
   }
 
-  // #292: Check currency gate - INR only for bank imports
-  if (!isCurrencyGateOpen(shop.currency)) {
+  if (storeSetupStatus === "not_supported") {
     return Response.json(
       { success: false, error: "Only INR currency is supported for bank imports" },
       { status: 400 }
@@ -593,7 +591,7 @@ function RailBadge({ rail }: { rail: string }) {
 
 export default function ImportsPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { shopCurrency, maxImportRows, notSupported } = loaderData;
+  const { shopCurrency, maxImportRows, notSupported, settingUp } = loaderData;
   const fetcher = useFetcher<ImportResult>();
 
   const [status, setStatus] = useState<ParseStatus>("idle");
@@ -712,7 +710,17 @@ export default function ImportsPage() {
     }
   }, []);
 
-  // #292: When currency not supported, show only the banner (after all hooks)
+  // When store is setting up or currency not supported, show appropriate banner (after all hooks)
+  if (settingUp) {
+    return (
+      <s-page heading="Import Bank Statement">
+        <s-section>
+          <StoreSettingUpBanner />
+        </s-section>
+      </s-page>
+    );
+  }
+
   if (notSupported) {
     return (
       <s-page heading="Import Bank Statement">

@@ -103,7 +103,7 @@ describeWithDb("Reminder Email DB Suite", () => {
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    delete process.env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED;
+    Reflect.deleteProperty(process.env, "RESEND_RECIPIENT_ALLOWLIST_ENFORCED");
   });
 
   afterEach(async () => {
