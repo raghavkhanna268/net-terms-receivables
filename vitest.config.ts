@@ -166,6 +166,9 @@ const DB_TEST_PATTERNS = [
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
 
+  // Confirm-only reconcile flow DB tests
+  "tests/integration/confirm-only-reconcile-db.test.ts",
+
   // Reviewer coverage-gap DB tests (tag-rule enqueue/#498 dedupe + checkout protection install)
   "tests/integration/reviewer-gaps-tagrules-protection-db.test.ts",
 ];
