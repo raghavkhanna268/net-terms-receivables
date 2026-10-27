@@ -80,7 +80,7 @@ enum PaymentStatus {
 enum MatchState {
   suggested
   confirmed
-  pushing // S17: In-flight push (claimed but not finalized)
+  pushing   // S17: In-flight push (claimed but not finalized)
   pushed
   unmatched
 }
@@ -179,28 +179,28 @@ model Shop {
   planCachedAt     DateTime? @map("plan_cached_at") @db.Timestamptz
 
   // Relations - direct children with CASCADE
-  accounts                BuyerAccount[]
-  sources                 AccountSource[]
-  imports                 BankImport[]
-  rules                   ReminderRule[]
-  auditEvents             AuditEvent[]
+  accounts     BuyerAccount[]
+  sources      AccountSource[]
+  imports      BankImport[]
+  rules        ReminderRule[]
+  auditEvents  AuditEvent[]
   // Direct CASCADE relations to enable Shop delete when financial records exist
   // These rows are deleted before their parents (BuyerAccount, BankImport, etc.)
-  invoices                Invoice[]
-  payments                Payment[]
-  matches                 Match[]
-  reminderLogs            ReminderLog[]
-  rejectedMatches         RejectedMatch[]
+  invoices     Invoice[]
+  payments     Payment[]
+  matches      Match[]
+  reminderLogs ReminderLog[]
+  rejectedMatches RejectedMatch[]
   // S22: CASCADE FKs for shop/redact cleanup (created by S22 migration)
-  taggedCustomers         S8TaggedCustomer[]
-  draftOrders             S8DraftOrder[]
-  dataRequests            S22DataRequest[]
+  taggedCustomers S8TaggedCustomer[]
+  draftOrders     S8DraftOrder[]
+  dataRequests    S22DataRequest[]
   // S13: Backstop processed orders
   backstopProcessedOrders BackstopProcessedOrder[]
   // S18: Payment reminder settings
-  reminderSettings        S18ShopReminderSettings?
+  reminderSettings S18ShopReminderSettings?
   // S23: When the merchant dismissed the onboarding checklist (NULL = not dismissed)
-  onboardingDismissedAt   DateTime?                @map("onboarding_dismissed_at") @db.Timestamptz
+  onboardingDismissedAt DateTime? @map("onboarding_dismissed_at") @db.Timestamptz
 
   // S21: Index for finding shops by plan (analytics, batch operations)
   @@index([planKey])
@@ -209,7 +209,7 @@ model Shop {
 /// Tag rule for non-B2B wholesale (tagged customer accounts)
 /// Maps customer tags to default payment terms
 model AccountSource {
-  id               String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id               String @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId           String
   /// Customer tag to match (e.g. "net30", "wholesale-gold")
   tag              String
@@ -235,49 +235,49 @@ model AccountSource {
 /// - COMPANY requires companyLocationId (and companyId)
 /// - TAGGED_CUSTOMER requires customerId
 model BuyerAccount {
-  id                     String                @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId                 String
+  id                  String             @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId              String
   /// Type of buyer: B2B company or tagged customer
-  kind                   AccountKind
+  kind                AccountKind
   /// Shopify Company GID (for COMPANY accounts)
-  companyId              String?
+  companyId           String?
   /// Shopify CompanyLocation GID (for COMPANY accounts)
-  companyLocationId      String?
+  companyLocationId   String?
   /// Shopify Customer GID (for TAGGED_CUSTOMER accounts)
-  customerId             String?
+  customerId          String?
   /// Display name for the account
-  name                   String
+  name                String
   /// Credit limit in shop currency (null = no limit)
-  creditLimit            Decimal?              @db.Decimal(14, 2)
+  creditLimit         Decimal?           @db.Decimal(14, 2)
   /// Account-specific default payment terms in days
-  defaultTermsDays       Int?
+  defaultTermsDays    Int?
   /// Source of the default terms: explicit (set by merchant) or tag (copied from tag rule)
   /// A tag-copied default counts as tag-derived for S9 inference precedence
-  defaultTermsSource     DefaultTermsSource?
+  defaultTermsSource  DefaultTermsSource?
   /// Credit hold state (computed from manualHold and auto-hold conditions)
-  holdState              HoldState             @default(OK)
+  holdState           HoldState          @default(OK)
   /// Manual bypass for credit hold (overrides holdState, exempts at checkout)
-  bypass                 Boolean               @default(false)
+  bypass              Boolean            @default(false)
   /// S11: Explicit manual hold flag set by merchant
-  manualHold             Boolean               @default(false)
+  manualHold          Boolean            @default(false)
   /// S11: Whether metafield sync to Shopify is pending
-  syncPending            Boolean               @default(false)
+  syncPending         Boolean            @default(false)
   /// S11: Monotonic version incremented on state change; prevents stale metafield clears
-  syncVersion            Int                   @default(0)
+  syncVersion         Int                @default(0)
   /// S11: Machine-readable reason code for hold (e.g., MANUAL_HOLD, PAYMENT_OVERDUE)
-  holdReasonCode         String?
+  holdReasonCode      String?
   /// S11: Optional internal note about the hold
-  holdNote               String?
+  holdNote            String?
   /// When the account was created
-  createdAt              DateTime              @default(now()) @db.Timestamptz(3)
+  createdAt           DateTime           @default(now()) @db.Timestamptz(3)
   /// When the account was last updated (set by trigger)
-  updatedAt              DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime           @default(now()) @db.Timestamptz(3)
   /// S21: When this account was gated due to plan limits. NULL means active.
   /// Gated accounts are excluded from limit count and enforcement.
-  gatedAt                DateTime?             @map("gated_at") @db.Timestamptz
+  gatedAt             DateTime?          @map("gated_at") @db.Timestamptz
   /// When the credit_status metafield was last successfully synced to Shopify.
   /// NULL means the metafield has never been written; recompute must sync it.
-  metafieldSyncedAt      DateTime?             @db.Timestamptz(3)
+  metafieldSyncedAt   DateTime?          @db.Timestamptz(3)
   /// Error code from the last permanent metafield sync failure (e.g., no_session, access_denied).
   /// NULL means no permanent error. Set on permanent failure, cleared on success.
   /// Only stores fixed codes from PERMANENT_SYNC_ERROR_CODES allowlist; never raw error text.
@@ -287,10 +287,10 @@ model BuyerAccount {
   /// 2. Retryable failure streak: set while metafieldSyncErrorCode is NULL, marking the
   ///    streak start for backoff calculation. Cleared on success.
   /// NULL only when no error has occurred or after a successful sync clears both fields.
-  metafieldSyncErrorAt   DateTime?             @db.Timestamptz(3)
+  metafieldSyncErrorAt   DateTime?        @db.Timestamptz(3)
   /// S18: When the buyer opted out of payment reminder emails. NULL means opted-in.
   /// Set via unsubscribe link (RFC 8058) or merchant toggle on account page.
-  reminderOptOutAt       DateTime?             @db.Timestamptz(3)
+  reminderOptOutAt       DateTime?        @db.Timestamptz(3)
   /// S18: Source of the opt-out: 'merchant' (toggle) or 'link' (unsubscribe).
   /// NULL when reminderOptOutAt is NULL. Both must be set together.
   reminderOptOutSource   ReminderOptOutSource?
@@ -305,7 +305,7 @@ model BuyerAccount {
   mainContactCustomerId  String?
 
   // Relations (onDelete: CASCADE - accounts are shop-specific)
-  shop     Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop     Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
   // Invoices use NoAction to prevent silent deletion of financial history
   invoices Invoice[]
   // Aliases can cascade - they're just helper data
@@ -336,53 +336,53 @@ model BuyerAccount {
 /// - 0 <= outstanding <= total
 /// - Exactly one of orderId/draftOrderId must be set
 model Invoice {
-  id             String        @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId         String
-  buyerAccountId String
+  id              String        @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId          String
+  buyerAccountId  String
   /// Shopify Order GID (mutually exclusive with draftOrderId)
-  orderId        String?       @unique
+  orderId         String?       @unique
   /// Shopify DraftOrder GID (mutually exclusive with orderId)
-  draftOrderId   String?       @unique
+  draftOrderId    String?       @unique
   /// Invoice display name (e.g. "#1234")
-  name           String
+  name            String
   /// GST invoice number (Indian tax compliance)
-  gstInvoiceNo   String?
+  gstInvoiceNo    String?
   /// Total invoice amount in shop currency
-  total          Decimal       @db.Decimal(14, 2)
+  total           Decimal       @db.Decimal(14, 2)
   /// Outstanding amount in shop currency
-  outstanding    Decimal       @db.Decimal(14, 2)
+  outstanding     Decimal       @db.Decimal(14, 2)
   /// When the invoice was issued
-  issuedAt       DateTime      @db.Timestamptz(3)
+  issuedAt        DateTime      @db.Timestamptz(3)
   /// Computed due date (result of S9 inference or Shopify schedule)
-  dueAt          DateTime?     @db.Timestamptz(3)
+  dueAt           DateTime?     @db.Timestamptz(3)
   /// Source category of the due date (matches due-date.ts DueSource)
-  dueSource      DueSource     @default(none)
+  dueSource       DueSource     @default(none)
   /// Basis for inferred due dates: accountDefault, tagRule, shopDefault,
   /// paymentTermsDueInDays (for computed NET/FIXED), or null
   /// Allows the UI to label where the due date came from
-  dueBasis       String?
+  dueBasis        String?
   /// Human-readable explanation of due date inference (from due-date.ts reason)
-  dueReason      String?
+  dueReason       String?
   /// Merchant override for due date (S9: never beats a Shopify schedule)
   /// Applied only to inferred dates or when no schedule dueAt exists
-  dueOverrideAt  DateTime?     @db.Timestamptz(3)
+  dueOverrideAt   DateTime?     @db.Timestamptz(3)
   /// Invoice status
-  status         InvoiceStatus @default(open)
+  status          InvoiceStatus @default(open)
   /// When the invoice was created in our system
-  createdAt      DateTime      @default(now()) @db.Timestamptz(3)
+  createdAt       DateTime      @default(now()) @db.Timestamptz(3)
   /// When the invoice was last updated (set by trigger)
-  updatedAt      DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime      @default(now()) @db.Timestamptz(3)
 
   // Relations
   // Direct Shop FK with CASCADE enables Shop delete to work
-  shop            Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop        Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
   // Composite FK ensures invoice belongs to same shop as account
   // NoAction: deleting an account with invoices is rejected (preserves financial history)
-  account         BuyerAccount    @relation(fields: [buyerAccountId, shopId], references: [id, shopId], onDelete: NoAction)
+  account     BuyerAccount  @relation(fields: [buyerAccountId, shopId], references: [id, shopId], onDelete: NoAction)
   // Matches use NoAction to prevent silent deletion of allocations
-  allocations     Match[]
+  allocations Match[]
   // ReminderLogs use NoAction to prevent silent deletion
-  reminders       ReminderLog[]
+  reminders   ReminderLog[]
   // Rejected matches cascade delete (helper data)
   rejectedMatches RejectedMatch[]
 
@@ -397,7 +397,7 @@ model Invoice {
 /// Bank statement import (HDFC, ICICI, or mapped format)
 /// Groups payments from a single import operation
 model BankImport {
-  id        String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id        String    @id @default(dbgenerated("(gen_random_uuid())::text"))
   shopId    String
   /// Bank type: hdfc, icici, or mapped (normalized format)
   bank      String
@@ -406,7 +406,7 @@ model BankImport {
   /// Number of rows/credits in the import
   rowCount  Int
   /// When the import was performed
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
 
   // Relations (onDelete: CASCADE - imports are shop-specific)
   shop     Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -428,36 +428,36 @@ model BankImport {
 /// handler (S22) will need to redact these fields for the affected customer.
 /// See GitHub issue #22 for S22 implementation.
 model Payment {
-  id        String        @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId    String
-  importId  String
+  id         String        @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId     String
+  importId   String
   /// Value date from the bank statement
-  valueDate DateTime      @db.Timestamptz(3)
+  valueDate  DateTime      @db.Timestamptz(3)
   /// Payment amount in shop currency
-  amount    Decimal       @db.Decimal(14, 2)
+  amount     Decimal       @db.Decimal(14, 2)
   /// Payment rail: NEFT, RTGS, IMPS, UPI, CLG
-  rail      String?
+  rail       String?
   /// Unique Transaction Reference (bank transaction ID)
-  utr       String?
+  utr        String?
   /// Payer name/text from the bank statement (may contain PII - see DPDP note)
-  payerText String?
+  payerText  String?
   /// Full narration from the bank statement (may contain PII - see DPDP note)
-  narration String
+  narration  String
   /// Payment matching status
-  status    PaymentStatus @default(unmatched)
+  status     PaymentStatus @default(unmatched)
   /// When the payment was imported
-  createdAt DateTime      @default(now()) @db.Timestamptz(3)
+  createdAt  DateTime      @default(now()) @db.Timestamptz(3)
   /// When the payment was last updated (set by trigger)
-  updatedAt DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime      @default(now()) @db.Timestamptz(3)
 
   // Relations
   // Direct Shop FK with CASCADE enables Shop delete to work
-  shop            Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop    Shop       @relation(fields: [shopId], references: [id], onDelete: Cascade)
   // Composite FK ensures payment belongs to same shop as import
   // NoAction: deleting an import with payments is rejected (preserves financial history)
-  import          BankImport      @relation(fields: [importId, shopId], references: [id, shopId], onDelete: NoAction)
+  import  BankImport @relation(fields: [importId, shopId], references: [id, shopId], onDelete: NoAction)
   // Matches use NoAction to prevent silent deletion of allocations
-  matches         Match[]
+  matches Match[]
   // Rejected matches cascade delete (helper data)
   rejectedMatches RejectedMatch[]
 
@@ -518,7 +518,7 @@ model Match {
 /// Payer alias: maps narration tokens to buyer accounts
 /// Used by the matching algorithm to recognize payers
 model PayerAlias {
-  id             String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id             String @id @default(dbgenerated("(gen_random_uuid())::text"))
   buyerAccountId String
   /// Normalized narration token (lowercase, common prefixes stripped)
   payerKey       String
@@ -591,14 +591,14 @@ model ReminderRule {
 /// Reminder log: tracks sent and delayed reminders
 /// S18 catch-up: delayed reminders are retried within D+1..D+3 window
 model ReminderLog {
-  id            String            @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId        String
-  ruleId        String
-  invoiceId     String
+  id           String             @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId       String
+  ruleId       String
+  invoiceId    String
   /// Status of this reminder: sent, delayed (capped), or skipped_daily_limit (expired)
-  status        ReminderLogStatus @default(sent)
+  status       ReminderLogStatus  @default(sent)
   /// When the reminder was sent (NULL for delayed/skipped)
-  sentAt        DateTime?         @db.Timestamptz(3)
+  sentAt       DateTime?          @db.Timestamptz(3)
   /// When the reminder was first capped (NULL for sent, set on first cap for delayed)
   firstCappedAt DateTime?         @db.Timestamptz(3)
 
@@ -676,28 +676,28 @@ model S6ProcessedWebhook {
 /// Note: This table is created by the S6 migration, not Prisma.
 /// It's included here to keep schema.prisma in sync with the database.
 model S6BulkOperation {
-  bulkOperationId      String    @id @map("bulk_operation_id")
-  shop                 String
-  bulkType             String    @map("bulk_type")
-  startedAt            DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
-  byteOffset           BigInt?   @default(0) @map("byte_offset")
-  completedAt          DateTime? @map("completed_at") @db.Timestamptz(6)
-  origin               String    @default("webhook")
-  reconcileStage       String?   @map("reconcile_stage")
-  failureCount         Int       @default(0) @map("failure_count")
-  chunkSize            Int       @default(524288) @map("chunk_size")
+  bulkOperationId String    @id @map("bulk_operation_id")
+  shop            String
+  bulkType        String    @map("bulk_type")
+  startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  byteOffset      BigInt?   @default(0) @map("byte_offset")
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+  origin          String    @default("webhook")
+  reconcileStage  String?   @map("reconcile_stage")
+  failureCount    Int       @default(0) @map("failure_count")
+  chunkSize       Int       @default(524288) @map("chunk_size")
   /// When the operation was closed. NULL means open.
-  closedAt             DateTime? @map("closed_at") @db.Timestamptz(6)
+  closedAt        DateTime? @map("closed_at") @db.Timestamptz(6)
   /// Why the operation was closed. Currently only 'reinstall_reset'.
-  closedReason         String?   @map("closed_reason")
+  closedReason    String?   @map("closed_reason")
   /// When the finish webhook was received. Set in the same tx as recording the receipt.
-  finishReceivedAt     DateTime? @map("finish_received_at") @db.Timestamptz(6)
+  finishReceivedAt DateTime? @map("finish_received_at") @db.Timestamptz(6)
   /// Processing lease expiry. A processor must acquire the lease before processing.
   processingLeaseUntil DateTime? @map("processing_lease_until") @db.Timestamptz(6)
   /// Processing lease owner token. A per-run UUID to ensure only the lease owner can renew/release.
   processingLeaseToken String?   @map("processing_lease_token")
   /// When the next stage was enqueued. Prevents duplicate nextStage enqueues.
-  nextStageEnqueuedAt  DateTime? @map("next_stage_enqueued_at") @db.Timestamptz(6)
+  nextStageEnqueuedAt DateTime? @map("next_stage_enqueued_at") @db.Timestamptz(6)
 
   @@map("s6_bulk_operations")
 }
@@ -706,11 +706,11 @@ model S6BulkOperation {
 /// Prevents duplicate bulk operations per reconcile chain stage.
 /// Each chain_key (day or manual key) can have at most one op per stage.
 model S6ReconcileStageClaim {
-  chainKey        String   @map("chain_key")
+  chainKey        String    @map("chain_key")
   stage           String
   shop            String
-  bulkOperationId String?  @map("bulk_operation_id")
-  claimedAt       DateTime @default(now()) @map("claimed_at") @db.Timestamptz(6)
+  bulkOperationId String?   @map("bulk_operation_id")
+  claimedAt       DateTime  @default(now()) @map("claimed_at") @db.Timestamptz(6)
 
   @@id([chainKey, stage])
   @@index([shop], map: "s6_reconcile_stage_claims_shop_idx")
@@ -748,31 +748,31 @@ model S6ReconcileStageClaim {
 /// FK to Shop with ON DELETE CASCADE (S22 migration).
 /// Runtime uses postgres.js directly, but FK exists in DB for cascade delete on shop/redact.
 model S8TaggedCustomer {
-  id     String @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId String @map("shop_id")
+  id              String    @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId          String    @map("shop_id")
 
   // FK to Shop with CASCADE delete, NO ACTION update (matches migration exactly)
-  shop             Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s8_tagged_customers_shop_fkey")
+  shop            Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s8_tagged_customers_shop_fkey")
   /// Shopify Customer GID (e.g., "gid://shopify/Customer/123")
-  customerId       String    @map("customer_id")
+  customerId      String    @map("customer_id")
   /// Customer tags as JSON array (e.g., ["net-terms", "wholesale"])
   /// Only the tags are stored for rule matching; no other customer data
-  tags             Json      @default("[]")
+  tags            Json      @default("[]")
   /// Whether the customer currently has a matching buyer tag
   /// Separate from BuyerAccount.holdState - tag sync never touches credit hold
-  tagActive        Boolean   @default(false) @map("tag_active")
+  tagActive       Boolean   @default(false) @map("tag_active")
   /// When the customer lost the matching tag (NULL if tagActive=true)
   tagDeactivatedAt DateTime? @map("tag_deactivated_at") @db.Timestamptz
   /// Reserved: customer email, requires Protected Customer Data approval
   /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
-  email            String?
+  email           String?
   /// Reserved: customer display name, requires Protected Customer Data approval
   /// Always NULL until CUSTOMER_PII_FIELDS=1 is set after approval
-  displayName      String?   @map("display_name")
+  displayName     String?   @map("display_name")
   /// When the record was created
-  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
   /// When the record was last updated
-  updatedAt        DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+  updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz
 
   // One record per customer per shop
   @@unique([shopId, customerId], map: "s8_tagged_customers_shop_customer_unique")
@@ -796,27 +796,27 @@ model S8TaggedCustomer {
 /// FK to Shop with ON DELETE CASCADE (S22 migration).
 /// Runtime uses postgres.js directly, but FK exists in DB for cascade delete on shop/redact.
 model S8DraftOrder {
-  id     String @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId String @map("shop_id")
+  id             String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId         String   @map("shop_id")
 
   // FK to Shop with CASCADE delete, NO ACTION update (matches migration exactly)
-  shop            Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s8_draft_orders_shop_fkey")
+  shop           Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s8_draft_orders_shop_fkey")
   /// Shopify DraftOrder GID (e.g., "gid://shopify/DraftOrder/123")
-  draftOrderId    String   @map("draft_order_id")
+  draftOrderId   String   @map("draft_order_id")
   /// Reference to BuyerAccount for credit exposure calculation
-  buyerAccountId  String?  @map("buyer_account_id")
+  buyerAccountId String?  @map("buyer_account_id")
   /// Display name (e.g., "#D1")
-  name            String
+  name           String
   /// Total amount in shop currency
-  total           Decimal  @db.Decimal(14, 2)
+  total          Decimal  @db.Decimal(14, 2)
   /// Whether the draft order has payment terms
-  hasPaymentTerms Boolean  @default(false) @map("has_payment_terms")
+  hasPaymentTerms Boolean @default(false) @map("has_payment_terms")
   /// Draft order status (open, invoice_sent, completed)
-  status          String   @default("open")
+  status         String   @default("open")
   /// When the draft order was created in Shopify
-  createdAt       DateTime @map("created_at") @db.Timestamptz
+  createdAt      DateTime @map("created_at") @db.Timestamptz
   /// When the record was last updated
-  updatedAt       DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
 
   // One record per draft order per shop
   @@unique([shopId, draftOrderId], map: "s8_draft_orders_shop_draft_unique")
@@ -911,8 +911,8 @@ model S10bCustomerPiiFallback {
 /// FK to Shop with ON DELETE CASCADE (S22 migration).
 /// Runtime uses postgres.js directly, but FK exists in DB for cascade delete on shop/redact.
 model S22DataRequest {
-  id     String @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId String @map("shop_id")
+  id           String    @id @default(dbgenerated("(gen_random_uuid())::text"))
+  shopId       String    @map("shop_id")
 
   // FK to Shop with CASCADE delete, NO ACTION update (matches migration exactly)
   shop         Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "s22_data_requests_shop_fkey")
@@ -958,7 +958,7 @@ model WebhookReceipt {
   /// Shop domain (e.g., "example.myshopify.com")
   shop        String
   /// X-Shopify-Webhook-Id header value
-  webhookId   String    @map("webhook_id")
+  webhookId   String   @map("webhook_id")
   /// Normalized webhook topic (e.g., "ORDERS_CREATE")
   topic       String
   /// X-Shopify-Triggered-At header value (stored for audit, not used for ordering)
