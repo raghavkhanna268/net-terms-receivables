@@ -80,9 +80,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     throw new Error(result.code);
   }
 
-  console.log(
-    `[webhooks.companies] Enqueued ${normalizedTopic}: ${resourceGid}`
-  );
+  console.log(`[webhooks.companies] Enqueued ${normalizedTopic}`);
 
   return new Response(null, { status: 200 });
 };

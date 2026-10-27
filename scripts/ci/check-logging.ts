@@ -170,6 +170,22 @@ const SENSITIVE_TEMPLATE_LAST_PROP = /(?:^|\.)(shop|shopDomain|domain|myshopifyD
 const DOMAIN_LITERAL_PATTERN = /myshopify\.com/i;
 
 /**
+ * Shopify resource GID literal pattern (e.g. "gid://shopify/Order/123").
+ * Flagged when it appears inside a console.*, safeLog, or Sentry call argument.
+ */
+const GID_LITERAL_PATTERN = /gid:\/\//i;
+
+/**
+ * Check if an identifier/property name holds a Shopify resource GID.
+ * Matches names ending in Gid/gid (resourceGid, orderGid, customerGid, ...)
+ * and the adminGraphqlApiId payload field (camelCase or snake_case).
+ */
+function isGidIdentifier(name: string): boolean {
+  const normalized = name.toLowerCase().replace(/_/g, "");
+  return /gid$/.test(normalized) || normalized === "admingraphqlapiid";
+}
+
+/**
  * Check if a specific myshopify.com occurrence is protected by a validation pattern.
  * For NON-TEST paths (script scan, log args, Sentry args), only ONE exemption:
  * - The escaped-regex form: `\.myshopify\.com` (backslash immediately before the dot)
@@ -629,6 +645,17 @@ function checkArgument(
         column: character + 1,
         rule: "domain-literal",
         message: "Literal myshopify.com domain in log statement",
+        snippet: truncate(arg.getText(), 100),
+      });
+    }
+    if (GID_LITERAL_PATTERN.test(text)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+      violations.push({
+        file: relPath,
+        line: line + 1,
+        column: character + 1,
+        rule: "resource-gid",
+        message: "Literal gid:// resource identifier in log statement",
         snippet: truncate(arg.getText(), 100),
       });
     }
@@ -1093,6 +1120,17 @@ function checkSentryCall(
           column: character + 1,
           rule: "domain-literal",
           message: "Literal myshopify.com domain in Sentry call",
+          snippet: truncate(arg.getText(), 100),
+        });
+      }
+      if (GID_LITERAL_PATTERN.test(arg.text)) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(arg.getStart());
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          column: character + 1,
+          rule: "resource-gid",
+          message: "Literal gid:// resource identifier in Sentry call",
           snippet: truncate(arg.getText(), 100),
         });
       }
@@ -1652,6 +1690,33 @@ function checkTemplateLiteral(
         });
         return;
       }
+    }
+
+    // Resource GID interpolation: ${resourceGid}, ${orderGid}, ${message.resourceGid}
+    // Log the topic or a static message and the structured safeLog *Gid key instead.
+    if (ts.isIdentifier(expr) && isGidIdentifier(expr.text)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+      violations.push({
+        line: line + 1,
+        column: character + 1,
+        expr: expr.text,
+        snippet: truncate(span.getText(sourceFile), 80),
+        rule: "resource-gid",
+        message: `Resource GID interpolated in log string: \${${expr.text}}`,
+      });
+      return;
+    }
+    if (ts.isPropertyAccessExpression(expr) && isGidIdentifier(expr.name.text)) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(expr.getStart());
+      violations.push({
+        line: line + 1,
+        column: character + 1,
+        expr: exprText.trim(),
+        snippet: truncate(span.getText(sourceFile), 80),
+        rule: "resource-gid",
+        message: `Resource GID interpolated in log string: .${expr.name.text}`,
+      });
+      return;
     }
 
     // Gap 3: Check for bare error-like identifiers (${err}, ${error}, etc.)

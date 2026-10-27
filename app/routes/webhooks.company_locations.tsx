@@ -83,9 +83,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     throw new Error(result.code);
   }
 
-  console.log(
-    `[webhooks.company_locations] Enqueued ${normalizedTopic}: ${resourceGid}`
-  );
+  console.log(`[webhooks.company_locations] Enqueued ${normalizedTopic}`);
 
   return new Response(null, { status: 200 });
 };
