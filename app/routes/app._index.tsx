@@ -702,7 +702,7 @@ export function BuyerLedgerTable({
             return (
               <s-table-row key={`${row.buyer_account_id}-${row.currency}`}>
                 <s-table-cell>
-                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
+                  <s-link href={`/app/accounts/${row.buyer_account_id}`}>
                     {row.buyer_name}
                   </s-link>
                   {gatingEnforced && row.is_gated && <s-badge tone="warning">Over plan limit</s-badge>}
@@ -713,7 +713,9 @@ export function BuyerLedgerTable({
                     : "No limit"}
                 </s-table-cell>
                 <s-table-cell>
-                  {formatPaiseAmount(outstanding, row.currency)}
+                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
+                    {formatPaiseAmount(outstanding, row.currency)}
+                  </s-link>
                 </s-table-cell>
                 <s-table-cell>
                   {overdue > 0n ? (
@@ -757,14 +759,16 @@ export function BuyerLedgerTable({
   );
 }
 
-function BuyerInvoiceList({
+export function BuyerInvoiceList({
   invoices,
   buyerName,
+  buyerAccountId,
   onClose,
   shopTimezone,
 }: {
   invoices: BuyerInvoiceRow[];
   buyerName: string;
+  buyerAccountId: string;
   onClose: string;
   shopTimezone: string;
 }) {
@@ -776,7 +780,10 @@ function BuyerInvoiceList({
             This buyer has no outstanding invoices.
           </s-text>
         </s-empty-state>
-        <s-button href={onClose}>Back to Ledger</s-button>
+        <s-stack direction="inline">
+          <s-button href={onClose}>Back to Ledger</s-button>
+          <s-button href={`/app/accounts/${buyerAccountId}`} variant="secondary">View account</s-button>
+        </s-stack>
       </s-section>
     );
   }
@@ -831,7 +838,10 @@ function BuyerInvoiceList({
             })}
           </s-table-body>
         </s-table>
-        <s-button href={onClose}>Back to Ledger</s-button>
+        <s-stack direction="inline">
+          <s-button href={onClose}>Back to Ledger</s-button>
+          <s-button href={`/app/accounts/${buyerAccountId}`} variant="secondary">View account</s-button>
+        </s-stack>
       </s-stack>
     </s-section>
   );
@@ -944,6 +954,7 @@ function DashboardContent({
   sortOrder,
   onlyOverLimit,
   shopTimezone,
+  selectedBuyerId,
 }: {
   dashboardData: DeferredDashboardData;
   gatingEnforced: boolean;
@@ -952,6 +963,7 @@ function DashboardContent({
   sortOrder: SortOrder;
   onlyOverLimit: boolean;
   shopTimezone: string;
+  selectedBuyerId: string | null;
 }) {
   const {
     plan,
@@ -1056,10 +1068,11 @@ function DashboardContent({
           </s-section>
 
           {/* Buyer Invoice Drill-down */}
-          {selectedBuyerInvoices && (
+          {selectedBuyerInvoices && selectedBuyerId && (
             <BuyerInvoiceList
               invoices={selectedBuyerInvoices.rows}
               buyerName={selectedBuyerInvoices.buyerName}
+              buyerAccountId={selectedBuyerId}
               onClose={closeInvoiceListUrl}
               shopTimezone={shopTimezone}
             />
@@ -1141,6 +1154,7 @@ export default function Index() {
     currencyFlipBlocked,
     shopTimezone,
     dashboardData,
+    selectedBuyerId,
   } = loaderData;
 
   if (!currencySupported) {
@@ -1185,6 +1199,7 @@ export default function Index() {
               sortOrder={sortOrder}
               onlyOverLimit={onlyOverLimit}
               shopTimezone={shopTimezone}
+              selectedBuyerId={selectedBuyerId}
             />
           )}
         </Await>

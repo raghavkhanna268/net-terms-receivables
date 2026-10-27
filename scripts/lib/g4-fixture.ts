@@ -396,6 +396,14 @@ export interface G4SideEffects {
   otherDueToday: number;
   /** Distinct non-fixture invoices due today whose recipient looks deliverable. */
   otherSendableToday: number;
+  /**
+   * Distinct OTHER (non-fixture) GATED buyers' open invoices that would match an
+   * enabled email rule today (counts only). These are excluded from the enqueue
+   * (and from otherDueToday/otherSendableToday) because they are gated; this key
+   * reports them separately. When no enabled offset-0 email rule exists yet the
+   * would-be offset-0 rule (the one the live write creates) is folded in too.
+   */
+  otherGatedDueToday: number;
   /** Non-fixture (invoice,rule) reminders the enqueue would create when ON. */
   wouldEnqueueNonFixture: number;
   /** Of those, how many we expect the allowlist to skip (reserved domains). */
@@ -404,6 +412,45 @@ export interface G4SideEffects {
   wouldEnqueueExpectedSend: number;
   /** Existing non-fixture ReminderLog rows, grouped by status. */
   existingLogsByStatus: Record<string, number>;
+}
+
+/**
+ * Read-only lookup of the offset-0 email ReminderRule the fixture would reuse:
+ * the oldest enabled offset-0 email rule for the shop, or null when none exists
+ * (in which case the live write creates seed-g4-rule0-<shop>).
+ *
+ * This is the single source of truth shared by BOTH the dry run (which reports
+ * rule="would_reuse"/"would_create") and the live write (which reports
+ * "reused"/"created" and performs the insert), so the two paths cannot diverge.
+ * The SELECT is identical to the one the live write used before this helper.
+ */
+async function findReusableOffsetZeroEmailRule(
+  tx: Sql,
+  shopId: string
+): Promise<{ id: string } | null> {
+  const [row] = await tx<{ id: string }[]>`
+    SELECT id FROM "ReminderRule"
+    WHERE "shopId" = ${shopId} AND "offsetDays" = 0 AND channel = 'email' AND enabled
+    ORDER BY "createdAt" LIMIT 1
+  `;
+  return row ?? null;
+}
+
+/** Options controlling how far the dry-run side-effect counts look ahead. */
+interface G4SideEffectOptions {
+  /**
+   * Dry-run would_create only: fold non-gated invoices due TODAY (which no
+   * existing enabled email rule matches yet) into otherDueToday/otherSendableToday
+   * and the wouldEnqueue counts. The live write leaves this false so its counts
+   * and the g4_other_buyers_due abort stay exactly as before.
+   */
+  includeWouldBeOffset0NonGated: boolean;
+  /**
+   * No existing enabled offset-0 email rule: fold the would-be offset-0 rule
+   * (the one the live write creates) into the otherGatedDueToday count, so it
+   * reflects the post-write rule set. Only ever changes a reported count.
+   */
+  includeWouldBeOffset0Gated: boolean;
 }
 
 /**
@@ -416,7 +463,8 @@ async function collectG4SideEffects(
   tx: Sql,
   shopId: string,
   fixtureInvoiceId: string,
-  tz: string
+  tz: string,
+  opts: G4SideEffectOptions
 ): Promise<G4SideEffects> {
   // One row per (invoice, enabled email rule) pair the enqueue would pick today,
   // mirroring s18_enqueue_reminders (gated accounts excluded, no existing log).
@@ -442,6 +490,7 @@ async function collectG4SideEffects(
   const dueInvoices = new Set<string>();
   const sendableInvoices = new Set<string>();
   let expectedSend = 0;
+  let wouldEnqueue = pairs.length;
   for (const row of pairs) {
     dueInvoices.add(row.invoice_id);
     const sendable = !row.opted_out && row.email !== null && isSendableRecipient(row.email);
@@ -450,6 +499,70 @@ async function collectG4SideEffects(
       expectedSend += 1;
     }
   }
+
+  if (opts.includeWouldBeOffset0NonGated) {
+    // would_create gap: with no enabled offset-0 email rule, the pairs query
+    // above matches NO non-gated invoice due TODAY (an offset-0 match needs an
+    // offset-0 rule). The live write creates seed-g4-rule0-<shop>, after which
+    // the enqueue WOULD pick those invoices up. A dry run folds them in here so
+    // other_due_today / other_sendable_today describe the post-write state. The
+    // NOT EXISTS keeps this disjoint from the pairs above, so there is no double
+    // count. The live write passes false, leaving its counts and abort unchanged.
+    const extra = await tx<{ invoice_id: string; email: string | null; opted_out: boolean }[]>`
+      SELECT
+        i.id AS invoice_id,
+        lower(COALESCE(NULLIF(trim(ba."mainContactEmail"), ''), tc.email)) AS email,
+        (ba."reminderOptOutAt" IS NOT NULL) AS opted_out
+      FROM "Invoice" i
+      JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId" AND ba."shopId" = i."shopId"
+      LEFT JOIN s8_tagged_customers tc
+        ON ba.kind = 'TAGGED_CUSTOMER' AND tc.shop_id = ba."shopId" AND tc.customer_id = ba."customerId"
+      WHERE i."shopId" = ${shopId} AND i.id <> ${fixtureInvoiceId}
+        AND ba.gated_at IS NULL
+        AND i.status = 'open' AND i."dueAt" IS NOT NULL AND i.outstanding > 0
+        AND (i."dueAt" AT TIME ZONE ${tz})::date = (now() AT TIME ZONE ${tz})::date
+        AND NOT EXISTS (
+          SELECT 1 FROM "ReminderRule" r
+          WHERE r."shopId" = i."shopId" AND r.enabled AND r.channel = 'email'
+            AND ((i."dueAt" AT TIME ZONE ${tz})::date + r."offsetDays") = (now() AT TIME ZONE ${tz})::date
+        )
+    `;
+    for (const row of extra) {
+      dueInvoices.add(row.invoice_id);
+      wouldEnqueue += 1;
+      const sendable = !row.opted_out && row.email !== null && isSendableRecipient(row.email);
+      if (sendable) {
+        sendableInvoices.add(row.invoice_id);
+        expectedSend += 1;
+      }
+    }
+  }
+
+  // OTHER (non-fixture) GATED buyers' open invoices due today (counts only). The
+  // enqueue skips gated accounts, so these never appear in the counts above; this
+  // separate key reports them. When no enabled offset-0 email rule exists the
+  // would-be offset-0 rule is folded in (second disjunct) to match the post-write
+  // rule set. Uses the same date expression as the pairs query.
+  const gatedRows = await tx<{ invoice_id: string }[]>`
+    SELECT DISTINCT i.id AS invoice_id
+    FROM "Invoice" i
+    JOIN "BuyerAccount" ba ON ba.id = i."buyerAccountId" AND ba."shopId" = i."shopId"
+    WHERE i."shopId" = ${shopId} AND i.id <> ${fixtureInvoiceId}
+      AND ba.gated_at IS NOT NULL
+      AND i.status = 'open' AND i."dueAt" IS NOT NULL AND i.outstanding > 0
+      AND (
+        EXISTS (
+          SELECT 1 FROM "ReminderRule" r
+          WHERE r."shopId" = i."shopId" AND r.enabled AND r.channel = 'email'
+            AND ((i."dueAt" AT TIME ZONE ${tz})::date + r."offsetDays") = (now() AT TIME ZONE ${tz})::date
+        )
+        OR (
+          ${opts.includeWouldBeOffset0Gated}::boolean
+          AND (i."dueAt" AT TIME ZONE ${tz})::date = (now() AT TIME ZONE ${tz})::date
+        )
+      )
+  `;
+  const otherGatedDueToday = gatedRows.length;
 
   const logRows = await tx<{ status: string; c: number }[]>`
     SELECT status::text AS status, count(*)::int AS c
@@ -463,8 +576,9 @@ async function collectG4SideEffects(
   return {
     otherDueToday: dueInvoices.size,
     otherSendableToday: sendableInvoices.size,
-    wouldEnqueueNonFixture: pairs.length,
-    wouldEnqueueExpectedSkip: pairs.length - expectedSend,
+    otherGatedDueToday,
+    wouldEnqueueNonFixture: wouldEnqueue,
+    wouldEnqueueExpectedSkip: wouldEnqueue - expectedSend,
     wouldEnqueueExpectedSend: expectedSend,
     existingLogsByStatus,
   };
@@ -561,7 +675,12 @@ export interface G4WriteResult {
   dryRun: boolean;
   store: "resolved";
   prior: RemindersSetting;
-  rule: "reused" | "created";
+  /**
+   * Live write: "reused" (an enabled offset-0 email rule already existed) or
+   * "created" (the fixture created seed-g4-rule0-<shop>). Dry run: the read-only
+   * prediction of the same decision, "would_reuse" / "would_create".
+   */
+  rule: "reused" | "created" | "would_reuse" | "would_create";
   fixture: "written" | "would_write";
   reminders: "on" | "unchanged";
   queued: number;
@@ -607,7 +726,19 @@ export async function runG4Write(sql: Sql, params: G4WriteParams): Promise<G4Wri
     }
 
     const ids = g4FixtureIds(store.id);
-    const sideEffects = await collectG4SideEffects(tx, store.id, ids.invoice, store.tz);
+
+    // Shared, read-only rule lookup so the dry run's prediction and the live
+    // write's action cannot diverge. null => no enabled offset-0 email rule, so
+    // the live write would CREATE seed-g4-rule0-<shop>.
+    const reusableRule = await findReusableOffsetZeroEmailRule(tx, store.id);
+    const offsetZeroWouldBeCreated = reusableRule === null;
+
+    const sideEffects = await collectG4SideEffects(tx, store.id, ids.invoice, store.tz, {
+      // Only a dry run folds the would-be offset-0 rule into other_due_today /
+      // other_sendable_today; the live write keeps its counts and abort unchanged.
+      includeWouldBeOffset0NonGated: dryRun && offsetZeroWouldBeCreated,
+      includeWouldBeOffset0Gated: offsetZeroWouldBeCreated,
+    });
     const queued = await countQueuedReminders(tx, store.id);
     const fixtureLogs = await countFixtureLogs(tx, ids.invoice);
     const slotTaken = await isFixtureSlotTaken(tx, store.id, ids.location, ids.account);
@@ -626,7 +757,7 @@ export async function runG4Write(sql: Sql, params: G4WriteParams): Promise<G4Wri
         dryRun: true,
         store: "resolved",
         prior: store.remindersSetting,
-        rule: "reused",
+        rule: offsetZeroWouldBeCreated ? "would_create" : "would_reuse",
         fixture: "would_write",
         reminders: "unchanged",
         queued,
@@ -678,14 +809,10 @@ export async function runG4Write(sql: Sql, params: G4WriteParams): Promise<G4Wri
       throw new Error("g4_fixture_slot_taken");
     }
 
-    // (3) rule: reuse an enabled offset-0 email rule, else create a seed rule
-    const existingRule = await tx<{ id: string }[]>`
-      SELECT id FROM "ReminderRule"
-      WHERE "shopId" = ${store.id} AND "offsetDays" = 0 AND channel = 'email' AND enabled
-      ORDER BY "createdAt" LIMIT 1
-    `;
+    // (3) rule: reuse an enabled offset-0 email rule, else create a seed rule.
+    // Reuses the shared read-only lookup above (same SELECT, same ordering).
     let ruleOutcome: "reused" | "created";
-    if (existingRule.length > 0) {
+    if (reusableRule) {
       ruleOutcome = "reused";
     } else {
       await tx`
@@ -870,7 +997,8 @@ function formatG4SideEffects(s: G4SideEffects): string[] {
       ? statuses.map((k) => `${k}=${s.existingLogsByStatus[k]}`).join(" ")
       : "none";
   return [
-    `g4_sideeffects other_due_today=${s.otherDueToday} other_sendable_today=${s.otherSendableToday}`,
+    `g4_sideeffects other_due_today=${s.otherDueToday} other_sendable_today=${s.otherSendableToday} ` +
+      `other_gated_due_today=${s.otherGatedDueToday}`,
     `g4_sideeffects nonfixture_would_enqueue=${s.wouldEnqueueNonFixture} ` +
       `expected_skip=${s.wouldEnqueueExpectedSkip} expected_send=${s.wouldEnqueueExpectedSend}`,
     `g4_sideeffects nonfixture_reminderlog ${logLine}`,
