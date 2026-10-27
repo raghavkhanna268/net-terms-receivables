@@ -143,7 +143,7 @@ describe("Reconcile action result banners", () => {
   });
 
   it("thrown error shows generic text, never the internal error message", () => {
-    const internalErrorMessage = "internal-db-connection-xyz-leak-secret";
+    const internalErrorMessage = "internal-db-connection-xyz-detail-secret";
     mockUseActionData.mockReturnValue({
       success: false,
       intent: "confirm",
