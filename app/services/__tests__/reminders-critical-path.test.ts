@@ -192,11 +192,9 @@ describe("Critical Path: Reminder Sending Gates", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     process.env = originalEnv;
-    consoleLogSpy.mockRestore();
-    consoleWarnSpy.mockRestore();
-    consoleErrorSpy.mockRestore();
   });
 
   describe("Case 1: remindersEnabled + email sender config gates", () => {
@@ -1045,17 +1043,15 @@ describe("Critical Path: Reminder Job Handler", () => {
 });
 
 describe("Critical Path: Resend Client", () => {
-  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
     mockFetch.mockReset();
-    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
   });
 
   afterEach(() => {
-    consoleLogSpy.mockRestore();
+    vi.restoreAllMocks();
   });
 
   it("sendViaResend returns error when API key is missing", async () => {
@@ -1177,7 +1173,7 @@ describe("Critical Path: safeLog redaction", () => {
 
 describeWithDb("Critical Path: DB-backed tests", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-critdb";
+  const TEST_SUFFIX = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8) + "-critdb";
   const TEST_SHOP_ID = `shop-critdb-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-critdb-${TEST_SUFFIX}.myshopify.com`;
   const TEST_ACCOUNT_ID = `acc-critdb-${TEST_SUFFIX}`;
