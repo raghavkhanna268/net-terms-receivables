@@ -1,17 +1,14 @@
 /**
- * Metafield Function Fixtures Test
+ * Metafield Function Fixtures Guard Tests
  *
- * Generates complete Shopify Function input fixtures from the REAL TypeScript
- * metafield writers (updateCreditStatus and shop_config writer). These fixtures
- * are consumed by the Rust Function tests to verify cross-language contract.
+ * Guards the contract between TypeScript metafield writers (updateCreditStatus,
+ * shop_config) and Rust Shopify Functions. Verifies that committed fixture files
+ * match the exact output of the real writers.
  *
- * Structure:
- * 1. Run real writers with mocked Shopify Admin GraphQL client
- * 2. Capture the exact serialized metafield values
- * 3. Write fixtures matching the Function input query shape
- * 4. Guard test: verify writer output matches embedded fixture values
+ * To regenerate fixtures:
+ *   npx vitest run scripts/gen-function-fixtures.ts
  */
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import type { Sql } from "~/lib/db-light.server";
@@ -169,8 +166,6 @@ interface FixtureCase {
   draftExposure: string;
   hasOverdue: boolean;
   cartAmount: string;
-  expectedCreditCheckDecision: "allow" | "block";
-  expectedHideTermsDecision: "show" | "hide";
 }
 
 const FIXTURE_CASES: FixtureCase[] = [
@@ -200,8 +195,6 @@ const FIXTURE_CASES: FixtureCase[] = [
     draftExposure: "0",
     hasOverdue: false,
     cartAmount: "1000.00",
-    expectedCreditCheckDecision: "allow",
-    expectedHideTermsDecision: "show",
   },
   {
     name: "unheld_over_limit",
@@ -229,8 +222,6 @@ const FIXTURE_CASES: FixtureCase[] = [
     draftExposure: "0",
     hasOverdue: false,
     cartAmount: "10000.00",
-    expectedCreditCheckDecision: "block",
-    expectedHideTermsDecision: "show",
   },
   {
     name: "held",
@@ -258,8 +249,6 @@ const FIXTURE_CASES: FixtureCase[] = [
     draftExposure: "0",
     hasOverdue: false,
     cartAmount: "100.00",
-    expectedCreditCheckDecision: "block",
-    expectedHideTermsDecision: "hide",
   },
   {
     name: "zero_limit",
@@ -287,8 +276,6 @@ const FIXTURE_CASES: FixtureCase[] = [
     draftExposure: "0",
     hasOverdue: false,
     cartAmount: "100.00",
-    expectedCreditCheckDecision: "block",
-    expectedHideTermsDecision: "show",
   },
   {
     name: "no_limit",
@@ -316,8 +303,6 @@ const FIXTURE_CASES: FixtureCase[] = [
     draftExposure: "0",
     hasOverdue: false,
     cartAmount: "100000.00",
-    expectedCreditCheckDecision: "allow",
-    expectedHideTermsDecision: "show",
   },
 ];
 
@@ -330,116 +315,14 @@ const HIDE_TERMS_FIXTURES_DIR = path.resolve(
   "../../../extensions/hide-terms-payment/tests/fixtures"
 );
 
-function buildCreditCheckFixture(
-  creditStatusValue: Record<string, unknown>,
-  shopConfigValue: Record<string, unknown>,
-  cartAmount: string,
-  cartCurrency: string,
-  ownerGid: string,
-  isB2B: boolean
-): Record<string, unknown> {
-  const creditStatusMetafield = { jsonValue: creditStatusValue };
-  const shopConfigMetafield = { jsonValue: shopConfigValue };
-
-  return {
-    cart: {
-      cost: {
-        totalAmount: {
-          amount: cartAmount,
-          currencyCode: cartCurrency,
-        },
-      },
-      buyerIdentity: isB2B
-        ? {
-            customer: null,
-            purchasingCompany: {
-              location: {
-                metafield: creditStatusMetafield,
-              },
-            },
-          }
-        : {
-            customer: {
-              metafield: creditStatusMetafield,
-            },
-            purchasingCompany: null,
-          },
-    },
-    buyerJourney: {
-      step: "CHECKOUT_COMPLETION",
-    },
-    shop: {
-      metafield: shopConfigMetafield,
-    },
-  };
-}
-
-function buildHideTermsFixture(
-  creditStatusValue: Record<string, unknown>,
-  shopConfigValue: Record<string, unknown>,
-  cartCurrency: string,
-  ownerGid: string,
-  isB2B: boolean
-): Record<string, unknown> {
-  const creditStatusMetafield = { jsonValue: creditStatusValue };
-  const shopConfigMetafield = { jsonValue: shopConfigValue };
-
-  return {
-    cart: {
-      cost: {
-        totalAmount: {
-          currencyCode: cartCurrency,
-        },
-      },
-      buyerIdentity: isB2B
-        ? {
-            customer: null,
-            purchasingCompany: {
-              location: {
-                metafield: creditStatusMetafield,
-              },
-            },
-          }
-        : {
-            customer: {
-              metafield: creditStatusMetafield,
-            },
-            purchasingCompany: null,
-          },
-    },
-    paymentMethods: [
-      { id: "gid://shopify/PaymentCustomizationPaymentMethod/1", name: "Credit Card" },
-      { id: "gid://shopify/PaymentCustomizationPaymentMethod/2", name: "Deferred Payment" },
-      { id: "gid://shopify/PaymentCustomizationPaymentMethod/3", name: "Net Terms" },
-    ],
-    paymentCustomization: {
-      metafield: null,
-    },
-    shop: {
-      metafield: shopConfigMetafield,
-    },
-  };
-}
-
-describe("Metafield Function Fixtures", () => {
-  let originalDateNow: () => number;
-
+describe("Metafield Function Fixtures Guard", () => {
   beforeAll(() => {
-    originalDateNow = Date.now;
-    Date.now = () => new Date(FIXED_TIMESTAMP).getTime();
-
-    const originalToISOString = Date.prototype.toISOString;
-    vi.spyOn(Date.prototype, "toISOString").mockImplementation(function (this: Date) {
-      if (this.getTime() === Date.now()) {
-        return FIXED_TIMESTAMP;
-      }
-      return originalToISOString.call(this);
-    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(FIXED_TIMESTAMP));
   });
 
   afterAll(() => {
-    Date.now = originalDateNow;
-    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   beforeEach(() => {
@@ -447,18 +330,12 @@ describe("Metafield Function Fixtures", () => {
     vi.clearAllMocks();
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  describe("Fixture Generation from Real Writers", () => {
-    const generatedFixtures: Map<
-      string,
-      { creditCheck: Record<string, unknown>; hideTerms: Record<string, unknown>; creditStatusValue: string }
-    > = new Map();
-
+  describe("credit-check-validation fixtures", () => {
     for (const fixtureCase of FIXTURE_CASES) {
-      it(`generates fixture for ${fixtureCase.name}: ${fixtureCase.description}`, async () => {
+      it(`guard: ${fixtureCase.name} credit_status and shop_config match fixture`, async () => {
+        const fixturePath = path.join(CREDIT_CHECK_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`);
+        expect(fs.existsSync(fixturePath), `Fixture file missing: ${fixturePath}`).toBe(true);
+
         creditStatusMetafieldCaptures = [];
 
         const sql = createComprehensiveMockSql({
@@ -470,122 +347,34 @@ describe("Metafield Function Fixtures", () => {
         });
 
         const { recomputeCreditStatus } = await import("../../services/credit-status-recompute.server");
-
         const result = await recomputeCreditStatus(sql, fixtureCase.account.id, "invoice_change");
-
         expect(result.success, `recomputeCreditStatus failed: ${result.error}`).toBe(true);
 
         const captured = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
         expect(captured, "No credit_status metafield was captured").toBeDefined();
 
-        const creditStatusValue = JSON.parse(captured!.value);
-        const shopConfigValue = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
+        const writerOutput = JSON.parse(captured!.value);
+        const expectedShopConfig = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
 
-        const isB2B = fixtureCase.account.kind === "COMPANY";
-        const ownerGid = isB2B ? fixtureCase.account.companyLocationId! : fixtureCase.account.customerId!;
+        const fixtureContent = JSON.parse(fs.readFileSync(fixturePath, "utf-8"));
 
-        const creditCheckFixture = buildCreditCheckFixture(
-          creditStatusValue,
-          shopConfigValue,
-          fixtureCase.cartAmount,
-          fixtureCase.shop.currency,
-          ownerGid,
-          isB2B
-        );
+        const fixtureEmbeddedCreditStatus =
+          fixtureContent.cart.buyerIdentity.purchasingCompany?.location?.metafield?.jsonValue ??
+          fixtureContent.cart.buyerIdentity.customer?.metafield?.jsonValue;
 
-        const hideTermsFixture = buildHideTermsFixture(
-          creditStatusValue,
-          shopConfigValue,
-          fixtureCase.shop.currency,
-          ownerGid,
-          isB2B
-        );
+        const fixtureEmbeddedShopConfig = fixtureContent.shop?.metafield?.jsonValue;
 
-        generatedFixtures.set(fixtureCase.name, {
-          creditCheck: creditCheckFixture,
-          hideTerms: hideTermsFixture,
-          creditStatusValue: captured!.value,
-        });
-
-        expect(creditStatusValue.schemaVersion).toBe(1);
-        expect(creditStatusValue.currencyCode).toBe(fixtureCase.shop.currency);
-        expect(typeof creditStatusValue.hold).toBe("boolean");
+        expect(writerOutput).toEqual(fixtureEmbeddedCreditStatus);
+        expect(expectedShopConfig).toEqual(fixtureEmbeddedShopConfig);
       });
     }
-
-    it("writes all fixtures to disk", async () => {
-      for (const fixtureCase of FIXTURE_CASES) {
-        creditStatusMetafieldCaptures = [];
-
-        const sql = createComprehensiveMockSql({
-          account: fixtureCase.account,
-          shop: fixtureCase.shop,
-          invoiceExposure: fixtureCase.invoiceExposure,
-          draftExposure: fixtureCase.draftExposure,
-          hasOverdue: fixtureCase.hasOverdue,
-        });
-
-        const { recomputeCreditStatus } = await import("../../services/credit-status-recompute.server");
-        await recomputeCreditStatus(sql, fixtureCase.account.id, "invoice_change");
-
-        const captured = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
-        if (!captured) continue;
-
-        const creditStatusValue = JSON.parse(captured.value);
-        const shopConfigValue = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
-
-        const isB2B = fixtureCase.account.kind === "COMPANY";
-        const ownerGid = isB2B ? fixtureCase.account.companyLocationId! : fixtureCase.account.customerId!;
-
-        const creditCheckFixture = buildCreditCheckFixture(
-          creditStatusValue,
-          shopConfigValue,
-          fixtureCase.cartAmount,
-          fixtureCase.shop.currency,
-          ownerGid,
-          isB2B
-        );
-
-        const hideTermsFixture = buildHideTermsFixture(
-          creditStatusValue,
-          shopConfigValue,
-          fixtureCase.shop.currency,
-          ownerGid,
-          isB2B
-        );
-
-        fs.mkdirSync(CREDIT_CHECK_FIXTURES_DIR, { recursive: true });
-        fs.mkdirSync(HIDE_TERMS_FIXTURES_DIR, { recursive: true });
-
-        fs.writeFileSync(
-          path.join(CREDIT_CHECK_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`),
-          JSON.stringify(creditCheckFixture, null, 2) + "\n"
-        );
-
-        fs.writeFileSync(
-          path.join(HIDE_TERMS_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`),
-          JSON.stringify(hideTermsFixture, null, 2) + "\n"
-        );
-      }
-
-      for (const fixtureCase of FIXTURE_CASES) {
-        const creditCheckPath = path.join(CREDIT_CHECK_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`);
-        const hideTermsPath = path.join(HIDE_TERMS_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`);
-
-        expect(fs.existsSync(creditCheckPath), `Missing: ${creditCheckPath}`).toBe(true);
-        expect(fs.existsSync(hideTermsPath), `Missing: ${hideTermsPath}`).toBe(true);
-      }
-    });
   });
 
-  describe("Guard: Writer Output Matches Fixtures", () => {
+  describe("hide-terms-payment fixtures", () => {
     for (const fixtureCase of FIXTURE_CASES) {
-      it(`guard: ${fixtureCase.name} writer output equals fixture`, async () => {
-        const creditCheckPath = path.join(CREDIT_CHECK_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`);
-
-        if (!fs.existsSync(creditCheckPath)) {
-          return;
-        }
+      it(`guard: ${fixtureCase.name} credit_status, shop_config match and hide-terms-config absent`, async () => {
+        const fixturePath = path.join(HIDE_TERMS_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`);
+        expect(fs.existsSync(fixturePath), `Fixture file missing: ${fixturePath}`).toBe(true);
 
         creditStatusMetafieldCaptures = [];
 
@@ -598,69 +387,31 @@ describe("Metafield Function Fixtures", () => {
         });
 
         const { recomputeCreditStatus } = await import("../../services/credit-status-recompute.server");
-        await recomputeCreditStatus(sql, fixtureCase.account.id, "invoice_change");
+        const result = await recomputeCreditStatus(sql, fixtureCase.account.id, "invoice_change");
+        expect(result.success, `recomputeCreditStatus failed: ${result.error}`).toBe(true);
 
         const captured = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
         expect(captured, "No credit_status metafield was captured").toBeDefined();
 
         const writerOutput = JSON.parse(captured!.value);
+        const expectedShopConfig = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
 
-        const fixtureContent = JSON.parse(fs.readFileSync(creditCheckPath, "utf-8"));
-        const fixtureEmbeddedValue =
+        const fixtureContent = JSON.parse(fs.readFileSync(fixturePath, "utf-8"));
+
+        const fixtureEmbeddedCreditStatus =
           fixtureContent.cart.buyerIdentity.purchasingCompany?.location?.metafield?.jsonValue ??
           fixtureContent.cart.buyerIdentity.customer?.metafield?.jsonValue;
 
-        const writerWithoutTimestamp = { ...writerOutput };
-        delete writerWithoutTimestamp.updatedAt;
-        const fixtureWithoutTimestamp = { ...fixtureEmbeddedValue };
-        delete fixtureWithoutTimestamp.updatedAt;
+        const fixtureEmbeddedShopConfig = fixtureContent.shop?.metafield?.jsonValue;
 
-        expect(writerWithoutTimestamp).toEqual(fixtureWithoutTimestamp);
+        expect(writerOutput).toEqual(fixtureEmbeddedCreditStatus);
+        expect(expectedShopConfig).toEqual(fixtureEmbeddedShopConfig);
+
+        expect(
+          fixtureContent.paymentCustomization?.metafield,
+          "hide-terms-config metafield must be absent (null) - no TS writer exists"
+        ).toBeNull();
       });
     }
-  });
-
-  describe("Expected Decisions Documentation", () => {
-    it("documents expected decisions for all fixtures", () => {
-      const decisions = FIXTURE_CASES.map((fc) => ({
-        name: fc.name,
-        description: fc.description,
-        creditCheck: fc.expectedCreditCheckDecision,
-        hideTerms: fc.expectedHideTermsDecision,
-      }));
-
-      expect(decisions).toEqual([
-        {
-          name: "unheld_under_limit",
-          description: "Unheld buyer under the credit limit",
-          creditCheck: "allow",
-          hideTerms: "show",
-        },
-        {
-          name: "unheld_over_limit",
-          description: "Unheld buyer over the credit limit",
-          creditCheck: "block",
-          hideTerms: "show",
-        },
-        {
-          name: "held",
-          description: "Buyer on manual hold",
-          creditCheck: "block",
-          hideTerms: "hide",
-        },
-        {
-          name: "zero_limit",
-          description: "Buyer with zero credit limit",
-          creditCheck: "block",
-          hideTerms: "show",
-        },
-        {
-          name: "no_limit",
-          description: "Buyer with no limit set (unlimited credit)",
-          creditCheck: "allow",
-          hideTerms: "show",
-        },
-      ]);
-    });
   });
 });
