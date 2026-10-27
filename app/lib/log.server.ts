@@ -92,8 +92,21 @@ const SENSITIVE_VALUE_PATTERNS: RegExp[] = [
   /^shpat_/i,
   /^shpua_/i,
   /^shpss_/i,
+  /^shpca_/i,
+  /^shppa_/i,
+  /\b[a-f0-9]{64}\b/i,
+  /\b[a-f0-9]{40}\b/i,
+  /[A-Za-z0-9+/]{43}=/,
   /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/,
 ];
+
+/**
+ * Identifier keys (e.g. orderGid, paymentCustomizationId, subscriptionId) that
+ * legitimately carry `gid://` resource identifiers. Their values pass through
+ * rather than having the gid scrubbed as free text; domains, emails, tokens,
+ * and hash/HMAC values are still redacted via isSensitiveValue.
+ */
+const IDENTIFIER_VALUE_KEY_PATTERN = /(?:Id|Gid)$/;
 
 const REDACTED = "<redacted>";
 
@@ -197,6 +210,9 @@ function redactValue(value: unknown, key: string): unknown {
     if (isAllowedKey(key)) {
       if (isSensitiveValue(value)) {
         return REDACTED;
+      }
+      if (IDENTIFIER_VALUE_KEY_PATTERN.test(key)) {
+        return value;
       }
       return redactString(value);
     }
@@ -310,6 +326,12 @@ export function redactString(str: string): string {
   result = result.replace(/shpat_\S+/gi, REDACTED);
   result = result.replace(/shpua_\S+/gi, REDACTED);
   result = result.replace(/shpss_\S+/gi, REDACTED);
+  result = result.replace(/shpca_\S+/gi, REDACTED);
+  result = result.replace(/shppa_\S+/gi, REDACTED);
+  result = result.replace(/gid:\/\/\S+/gi, REDACTED);
+  result = result.replace(/\b[a-f0-9]{64}\b/gi, REDACTED);
+  result = result.replace(/\b[a-f0-9]{40}\b/gi, REDACTED);
+  result = result.replace(/[A-Za-z0-9+/]{43}=/g, REDACTED);
   result = result.replace(/[^\s"']+@[^\s"']+/g, REDACTED);
   return result;
 }

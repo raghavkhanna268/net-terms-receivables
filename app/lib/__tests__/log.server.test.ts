@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { safeLog, toErrorCode, shopHash, redactString } from "../log.server";
 
+vi.mock("@sentry/cloudflare", () => ({
+  withSentry: vi.fn((_configFn, handler) => handler),
+  captureException: vi.fn(),
+  captureMessage: vi.fn(),
+}));
+
 describe("log.server", () => {
   describe("safeLog", () => {
     let consoleLogSpy: ReturnType<typeof vi.spyOn>;
@@ -178,6 +184,49 @@ describe("log.server", () => {
       it("redacts JWT-like patterns", () => {
         safeLog("info", "test", { reason: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" });
         expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts shpca_ tokens in context", () => {
+        safeLog("info", "test", { reason: "token " + "shpca_" + "x".repeat(32) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"token <redacted>"');
+      });
+
+      it("redacts shppa_ tokens in context", () => {
+        safeLog("info", "test", { reason: "token " + "shppa_" + "x".repeat(32) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"token <redacted>"');
+      });
+
+      it("redacts gid:// resource identifiers in free-text fields", () => {
+        safeLog("info", "test", { reason: "gid://shopify/Order/1" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts 64-char hex digests (SHA-256 / HMAC-hex)", () => {
+        safeLog("info", "test", { reason: "a".repeat(64) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts 40-char hex digests (SHA-1)", () => {
+        safeLog("info", "test", { reason: "a".repeat(40) });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("redacts 44-char base64 HMAC values (x-shopify-hmac-sha256)", () => {
+        safeLog("info", "test", { reason: "A".repeat(43) + "=" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
+      });
+
+      it("does not redact a normal free-text value", () => {
+        safeLog("info", "test", { reason: "plan refresh scheduled" });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"plan refresh scheduled"');
+      });
+
+      it("does not redact the logger's own shopHash output", async () => {
+        const hash = await shopHash("test-shop.myshopify.com");
+        safeLog("info", "test", { shopHash: hash });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain(`"shopHash":"${hash}"`);
+        expect(output).not.toContain("<redacted>");
       });
     });
 
@@ -631,5 +680,34 @@ describe("log.server", () => {
         expect(logOutput).not.toContain("hmac=");
       });
     });
+  });
+});
+
+describe("Sentry message allowlist (plan.server messages)", () => {
+  let beforeSend: (
+    event: { message?: string },
+    hint: unknown
+  ) => { message?: string } | null;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const { withSentry } = await import("@sentry/cloudflare");
+    const { wrapWithSentry } = await import("../sentry");
+
+    wrapWithSentry({ fetch: vi.fn() });
+
+    const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
+    beforeSend = config.beforeSend as typeof beforeSend;
+  });
+
+  it("passes plan_fetch_failed through unscrubbed", () => {
+    const result = beforeSend({ message: "plan_fetch_failed" }, {});
+    expect(result?.message).toBe("plan_fetch_failed");
+  });
+
+  it("passes unknown_subscription_name through unscrubbed", () => {
+    const result = beforeSend({ message: "unknown_subscription_name" }, {});
+    expect(result?.message).toBe("unknown_subscription_name");
   });
 });
