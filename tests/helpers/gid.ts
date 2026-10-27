@@ -12,7 +12,8 @@ type ShopifyResource =
   | "Company"
   | "CompanyLocation"
   | "Customer"
-  | "BulkOperation";
+  | "BulkOperation"
+  | "Shop";
 
 const GID_PREFIX = ["gid:", "", "shopify"].join("/");
 
@@ -67,4 +68,11 @@ export function customerGid(id: string | number): string {
  */
 export function bulkOperationGid(id: string | number): string {
   return buildGid("BulkOperation", id);
+}
+
+/**
+ * Build a Shop GID.
+ */
+export function shopGid(id: string | number): string {
+  return buildGid("Shop", id);
 }
