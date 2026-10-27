@@ -89,9 +89,11 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
 
   afterAll(async () => {
     try {
-      // Clean up any remaining queue and archive entries
-      await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE (message->>'shop')::text = ${TEST_SHOP}`;
-      await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE (message->>'shop')::text = ${TEST_SHOP}`;
+      // Purge queues to ensure no leftovers for subsequent test files.
+      // Safe for Sequential DB tests (fileParallelism: false).
+      await sqlRef`SELECT pgmq.purge_queue(${S6_QUEUES.SYNC})`;
+      await sqlRef`SELECT pgmq.purge_queue(${S6_QUEUES.BULK})`;
+      // Clean up archives and shop
       await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE (message->>'shop')::text = ${TEST_SHOP}`;
       await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE (message->>'shop')::text = ${TEST_SHOP}`;
       await sqlRef`DELETE FROM "Shop" WHERE id = ${`shop-${TEST_ID}`}`;
@@ -104,9 +106,11 @@ describeWithDb("multi-pass drain DB tests (#454)", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    // Clean up queue tables and archives
-    await sqlRef`DELETE FROM pgmq.q_s6_sync WHERE (message->>'shop')::text = ${TEST_SHOP}`;
-    await sqlRef`DELETE FROM pgmq.q_s6_bulk WHERE (message->>'shop')::text = ${TEST_SHOP}`;
+    // Purge entire queues to ensure test isolation.
+    // Safe for Sequential DB tests (fileParallelism: false).
+    await sqlRef`SELECT pgmq.purge_queue(${S6_QUEUES.SYNC})`;
+    await sqlRef`SELECT pgmq.purge_queue(${S6_QUEUES.BULK})`;
+    // Also clean archives for our test shop
     await sqlRef`DELETE FROM pgmq.a_s6_sync WHERE (message->>'shop')::text = ${TEST_SHOP}`;
     await sqlRef`DELETE FROM pgmq.a_s6_bulk WHERE (message->>'shop')::text = ${TEST_SHOP}`;
   }, 30000);
