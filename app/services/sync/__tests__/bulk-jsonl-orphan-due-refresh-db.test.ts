@@ -285,4 +285,231 @@ describeWithDb("orphan payment schedule due date refresh (DB-backed)", () => {
       expect(invoice.dueReason).toBe("Payment schedule from Shopify");
     });
   });
+
+  describe("midnight UTC normalization to shop-local end-of-day", () => {
+    it("normalizes midnight UTC dueAt to America/New_York end-of-day", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+
+      const tzSuffix = `${TEST_SUFFIX}-ny`;
+      const shopId = `test-shop-ny-${tzSuffix}`;
+      const shopDomain = `test-ny-${tzSuffix}.example.com`;
+      const accountId = `test-account-ny-${tzSuffix}`;
+      const companyId = `gid://shopify/Company/co-ny-${tzSuffix}`;
+      const locationId = `gid://shopify/CompanyLocation/loc-ny-${tzSuffix}`;
+      const orderId = `gid://shopify/Order/ny-mid-${tzSuffix}`;
+      const invoiceId = `inv-ny-mid-${tzSuffix}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${shopDomain}, 'INR', 'America/New_York', NOW(), NOW())
+      `;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${accountId}, ${shopId}, 'COMPANY', ${companyId}, ${locationId}, 'Test NY Company',
+          NOW(), NOW()
+        )
+      `;
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status
+        ) VALUES (
+          ${invoiceId}, ${shopId}, ${accountId}, ${orderId}, '#NYMID1',
+          1000.00, 1000.00, NOW(), ${new Date("2026-11-01T00:00:00Z")}, 'inferred', 'open'
+        )
+      `;
+
+      const orphanScheduleLine = JSON.stringify({
+        id: `gid://shopify/PaymentSchedule/ps-ny-mid-${tzSuffix}`,
+        __parentId: orderId,
+        dueAt: "2026-11-26T00:00:00.000Z",
+        issuedAt: "2026-10-15T00:00:00Z",
+      });
+
+      const result = await processOrderLines(sql, shopId, shopDomain, [orphanScheduleLine]);
+      expect(result).toBe(1);
+
+      const [invoice] = await sql<{ dueAt: Date | null }[]>`
+        SELECT "dueAt" FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      expect(invoice.dueAt?.toISOString()).toBe("2026-11-27T04:59:59.999Z");
+
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("normalizes midnight UTC dueAt to Asia/Kolkata end-of-day", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+
+      const tzSuffix = `${TEST_SUFFIX}-kol`;
+      const shopId = `test-shop-kol-${tzSuffix}`;
+      const shopDomain = `test-kol-${tzSuffix}.example.com`;
+      const accountId = `test-account-kol-${tzSuffix}`;
+      const companyId = `gid://shopify/Company/co-kol-${tzSuffix}`;
+      const locationId = `gid://shopify/CompanyLocation/loc-kol-${tzSuffix}`;
+      const orderId = `gid://shopify/Order/kol-mid-${tzSuffix}`;
+      const invoiceId = `inv-kol-mid-${tzSuffix}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${shopDomain}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      `;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${accountId}, ${shopId}, 'COMPANY', ${companyId}, ${locationId}, 'Test Kolkata Company',
+          NOW(), NOW()
+        )
+      `;
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status
+        ) VALUES (
+          ${invoiceId}, ${shopId}, ${accountId}, ${orderId}, '#KOLMID1',
+          1000.00, 1000.00, NOW(), ${new Date("2026-11-01T00:00:00Z")}, 'inferred', 'open'
+        )
+      `;
+
+      const orphanScheduleLine = JSON.stringify({
+        id: `gid://shopify/PaymentSchedule/ps-kol-mid-${tzSuffix}`,
+        __parentId: orderId,
+        dueAt: "2026-11-26T00:00:00.000Z",
+        issuedAt: "2026-10-15T00:00:00Z",
+      });
+
+      const result = await processOrderLines(sql, shopId, shopDomain, [orphanScheduleLine]);
+      expect(result).toBe(1);
+
+      const [invoice] = await sql<{ dueAt: Date | null }[]>`
+        SELECT "dueAt" FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      expect(invoice.dueAt?.toISOString()).toBe("2026-11-26T18:29:59.999Z");
+
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("normalizes midnight UTC dueAt to Pacific/Auckland end-of-day", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+
+      const tzSuffix = `${TEST_SUFFIX}-akl`;
+      const shopId = `test-shop-akl-${tzSuffix}`;
+      const shopDomain = `test-akl-${tzSuffix}.example.com`;
+      const accountId = `test-account-akl-${tzSuffix}`;
+      const companyId = `gid://shopify/Company/co-akl-${tzSuffix}`;
+      const locationId = `gid://shopify/CompanyLocation/loc-akl-${tzSuffix}`;
+      const orderId = `gid://shopify/Order/akl-mid-${tzSuffix}`;
+      const invoiceId = `inv-akl-mid-${tzSuffix}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${shopDomain}, 'INR', 'Pacific/Auckland', NOW(), NOW())
+      `;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${accountId}, ${shopId}, 'COMPANY', ${companyId}, ${locationId}, 'Test Auckland Company',
+          NOW(), NOW()
+        )
+      `;
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status
+        ) VALUES (
+          ${invoiceId}, ${shopId}, ${accountId}, ${orderId}, '#AKLMID1',
+          1000.00, 1000.00, NOW(), ${new Date("2026-11-01T00:00:00Z")}, 'inferred', 'open'
+        )
+      `;
+
+      const orphanScheduleLine = JSON.stringify({
+        id: `gid://shopify/PaymentSchedule/ps-akl-mid-${tzSuffix}`,
+        __parentId: orderId,
+        dueAt: "2026-11-26T00:00:00.000Z",
+        issuedAt: "2026-10-15T00:00:00Z",
+      });
+
+      const result = await processOrderLines(sql, shopId, shopDomain, [orphanScheduleLine]);
+      expect(result).toBe(1);
+
+      const [invoice] = await sql<{ dueAt: Date | null }[]>`
+        SELECT "dueAt" FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      expect(invoice.dueAt?.toISOString()).toBe("2026-11-26T10:59:59.999Z");
+
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+
+    it("passes through non-midnight UTC dueAt unchanged", async () => {
+      const { processOrderLines } = await import("../bulk-jsonl-processor.server");
+
+      const tzSuffix = `${TEST_SUFFIX}-nonmid`;
+      const shopId = `test-shop-nonmid-${tzSuffix}`;
+      const shopDomain = `test-nonmid-${tzSuffix}.example.com`;
+      const accountId = `test-account-nonmid-${tzSuffix}`;
+      const companyId = `gid://shopify/Company/co-nonmid-${tzSuffix}`;
+      const locationId = `gid://shopify/CompanyLocation/loc-nonmid-${tzSuffix}`;
+      const orderId = `gid://shopify/Order/nonmid-${tzSuffix}`;
+      const invoiceId = `inv-nonmid-${tzSuffix}`;
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${shopDomain}, 'INR', 'America/New_York', NOW(), NOW())
+      `;
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${accountId}, ${shopId}, 'COMPANY', ${companyId}, ${locationId}, 'Test NonMidnight Company',
+          NOW(), NOW()
+        )
+      `;
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          "issuedAt", "dueAt", "dueSource", status
+        ) VALUES (
+          ${invoiceId}, ${shopId}, ${accountId}, ${orderId}, '#NONMID1',
+          1000.00, 1000.00, NOW(), ${new Date("2026-11-01T00:00:00Z")}, 'inferred', 'open'
+        )
+      `;
+
+      const nonMidnightDueAt = "2026-11-26T10:15:00.000Z";
+      const orphanScheduleLine = JSON.stringify({
+        id: `gid://shopify/PaymentSchedule/ps-nonmid-${tzSuffix}`,
+        __parentId: orderId,
+        dueAt: nonMidnightDueAt,
+        issuedAt: "2026-10-15T00:00:00Z",
+      });
+
+      const result = await processOrderLines(sql, shopId, shopDomain, [orphanScheduleLine]);
+      expect(result).toBe(1);
+
+      const [invoice] = await sql<{ dueAt: Date | null }[]>`
+        SELECT "dueAt" FROM "Invoice" WHERE id = ${invoiceId}
+      `;
+
+      expect(invoice.dueAt?.toISOString()).toBe(nonMidnightDueAt);
+
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+    });
+  });
 });
