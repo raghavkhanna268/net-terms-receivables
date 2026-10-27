@@ -67,8 +67,8 @@ function hasVisibleHeading(html: string): boolean {
   return /<s-page[^>]*\bheading=/.test(html) || /<h1[^>]*>/.test(html);
 }
 
-const TAG_RULES_BREADCRUMB_HREF = "/";
-const TAG_RULES_BREADCRUMB_LABEL = "Back to Dashboard";
+const DASHBOARD_BREADCRUMB_HREF = "/app";
+const DASHBOARD_BREADCRUMB_LABEL = "Back to Dashboard";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -203,8 +203,8 @@ describe("Breadcrumb Consistency", () => {
 
     const html = renderToString(createElement(mod.default));
 
-    expect(html).toContain(`href="${TAG_RULES_BREADCRUMB_HREF}"`);
-    expect(html).toContain(TAG_RULES_BREADCRUMB_LABEL);
+    expect(html).toContain(`href="${DASHBOARD_BREADCRUMB_HREF}"`);
+    expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
   });
 
   it("Reconcile has breadcrumb matching Tag Rules", async () => {
@@ -224,8 +224,8 @@ describe("Breadcrumb Consistency", () => {
 
     const html = renderToString(createElement(mod.default));
 
-    expect(html).toContain(`href="${TAG_RULES_BREADCRUMB_HREF}"`);
-    expect(html).toContain(TAG_RULES_BREADCRUMB_LABEL);
+    expect(html).toContain(`href="${DASHBOARD_BREADCRUMB_HREF}"`);
+    expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
   });
 
   it("Reminders has breadcrumb matching Tag Rules", async () => {
@@ -245,8 +245,8 @@ describe("Breadcrumb Consistency", () => {
 
     const html = renderToString(createElement(mod.default));
 
-    expect(html).toContain(`href="${TAG_RULES_BREADCRUMB_HREF}"`);
-    expect(html).toContain(TAG_RULES_BREADCRUMB_LABEL);
+    expect(html).toContain(`href="${DASHBOARD_BREADCRUMB_HREF}"`);
+    expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
   });
 
   it("Setup Guide has breadcrumb matching Tag Rules", async () => {
@@ -270,8 +270,8 @@ describe("Breadcrumb Consistency", () => {
 
     const html = renderToString(createElement(mod.default));
 
-    expect(html).toContain(`href="${TAG_RULES_BREADCRUMB_HREF}"`);
-    expect(html).toContain(TAG_RULES_BREADCRUMB_LABEL);
+    expect(html).toContain(`href="${DASHBOARD_BREADCRUMB_HREF}"`);
+    expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
   });
 
   it("Imports has breadcrumb matching Tag Rules", async () => {
@@ -286,8 +286,8 @@ describe("Breadcrumb Consistency", () => {
 
     const html = renderToString(createElement(mod.default));
 
-    expect(html).toContain(`href="${TAG_RULES_BREADCRUMB_HREF}"`);
-    expect(html).toContain(TAG_RULES_BREADCRUMB_LABEL);
+    expect(html).toContain(`href="${DASHBOARD_BREADCRUMB_HREF}"`);
+    expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
   });
 
   it("Data Requests has breadcrumb matching Tag Rules", async () => {
@@ -301,8 +301,8 @@ describe("Breadcrumb Consistency", () => {
 
     const html = renderToString(createElement(mod.default));
 
-    expect(html).toContain(`href="${TAG_RULES_BREADCRUMB_HREF}"`);
-    expect(html).toContain(TAG_RULES_BREADCRUMB_LABEL);
+    expect(html).toContain(`href="${DASHBOARD_BREADCRUMB_HREF}"`);
+    expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
   });
 
   it("Plan has breadcrumb matching Tag Rules", async () => {
@@ -322,8 +322,8 @@ describe("Breadcrumb Consistency", () => {
 
     const html = renderToString(createElement(mod.default));
 
-    expect(html).toContain(`href="${TAG_RULES_BREADCRUMB_HREF}"`);
-    expect(html).toContain(TAG_RULES_BREADCRUMB_LABEL);
+    expect(html).toContain(`href="${DASHBOARD_BREADCRUMB_HREF}"`);
+    expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
   });
 });
 
@@ -355,5 +355,123 @@ describe("Setup Guide Table Layout", () => {
     expect(html).toContain("auto");
     expect(html).toContain("<s-table>");
   });
+});
+
+describe("Breadcrumb href consistency across all app pages", () => {
+  const pagesWithBreadcrumbs: Array<{
+    name: string;
+    module: string;
+    loaderData: Record<string, unknown>;
+  }> = [
+    {
+      name: "Tag Rules",
+      module: "../app.tag-rules",
+      loaderData: {
+        storeMode: "tag_based",
+        tagRules: [],
+        shopId: "shop-1",
+        error: null,
+        finishingSetup: false,
+        newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+      },
+    },
+    {
+      name: "Reconcile",
+      module: "../app.reconcile",
+      loaderData: {
+        shopCurrency: "INR",
+        payments: [],
+        matches: [],
+        selectedPayment: null,
+        pagination: { page: 1, pageSize: 20, totalCount: 0 },
+        view: "suggested",
+        error: null,
+        tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
+        notSupported: false,
+      },
+    },
+    {
+      name: "Reminders",
+      module: "../app.settings.reminders",
+      loaderData: {
+        error: null,
+        settings: { enabled: false },
+        rules: [],
+        logs: [],
+        providerConfigured: true,
+        shopTimezone: "Asia/Kolkata",
+        statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 },
+        delayedReminders: [],
+        shopSentToday: 0,
+      },
+    },
+    {
+      name: "Setup Guide",
+      module: "../app.onboarding",
+      loaderData: {
+        error: null,
+        state: {
+          steps: [],
+          isComplete: false,
+          completedCount: 0,
+          totalCount: 5,
+          dismissedAt: null,
+        },
+        registrationStatus: null,
+        initialSyncState: { status: "not_started" },
+        newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+        currencySupported: true,
+        currencyFlipBlocked: false,
+      },
+    },
+    {
+      name: "Imports",
+      module: "../app.imports",
+      loaderData: {
+        shopDomain: "test.myshopify.com",
+        shopCurrency: "INR",
+        maxImportRows: 1000,
+        notSupported: false,
+      },
+    },
+    {
+      name: "Data Requests",
+      module: "../app.data-requests",
+      loaderData: {
+        dataRequests: [],
+        expiresInDays: 30,
+        error: null,
+      },
+    },
+    {
+      name: "Plan",
+      module: "../app.plan",
+      loaderData: {
+        storeHandle: "test-store",
+        shopDomain: "test.myshopify.com",
+        plan: { key: "starter", name: "Starter", isTest: false },
+        usage: { companies: { current: 5, limit: 10 }, importsThisMonth: { current: 2, limit: 100 } },
+        gatedCount: 0,
+        gatingEnforced: false,
+        upgradeUrl: null,
+        newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+        error: null,
+      },
+    },
+  ];
+
+  it.each(pagesWithBreadcrumbs)(
+    "$name breadcrumb must use /app, not /",
+    async ({ module, loaderData }) => {
+      const mod = await import(module);
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(mod.default));
+
+      expect(html).toContain(DASHBOARD_BREADCRUMB_LABEL);
+      expect(html).toContain('href="/app"');
+      expect(html).not.toMatch(/href="\/"[^>]*slot="breadcrumb-actions"/);
+    }
+  );
 });
 

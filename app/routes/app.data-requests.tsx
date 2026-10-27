@@ -109,7 +109,7 @@ export default function DataRequestsPage() {
 
   return (
     <s-page heading="Customer Data Requests">
-      <s-link href="/" slot="breadcrumb-actions">
+      <s-link href="/app" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
       <s-section heading="GDPR/CCPA Data Requests">

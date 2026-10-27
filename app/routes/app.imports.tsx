@@ -716,7 +716,7 @@ export default function ImportsPage() {
   if (notSupported) {
     return (
       <s-page heading="Import Bank Statement">
-        <s-link href="/" slot="breadcrumb-actions">
+        <s-link href="/app" slot="breadcrumb-actions">
           Back to Dashboard
         </s-link>
         <s-section>
@@ -730,7 +730,7 @@ export default function ImportsPage() {
 
   return (
     <s-page heading="Import Bank Statement" key={resetKey}>
-      <s-link href="/" slot="breadcrumb-actions">
+      <s-link href="/app" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
       {/* File upload section */}

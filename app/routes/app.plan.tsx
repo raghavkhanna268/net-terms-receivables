@@ -171,7 +171,7 @@ export default function PlanPage() {
 
   return (
     <s-page heading="Plan & Usage">
-      <s-link href="/" slot="breadcrumb-actions">
+      <s-link href="/app" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
       {/* T4: New accounts paused banner */}

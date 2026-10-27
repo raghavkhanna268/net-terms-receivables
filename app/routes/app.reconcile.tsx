@@ -1106,7 +1106,7 @@ export default function ReconcilePage() {
   if ("notSupported" in loaderData && loaderData.notSupported) {
     return (
       <s-page heading="Payment Reconciliation">
-        <s-link href="/" slot="breadcrumb-actions">
+        <s-link href="/app" slot="breadcrumb-actions">
           Back to Dashboard
         </s-link>
         <s-section>
@@ -1120,7 +1120,7 @@ export default function ReconcilePage() {
 
   return (
     <s-page heading="Payment Reconciliation">
-      <s-link href="/" slot="breadcrumb-actions">
+      <s-link href="/app" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
       {error && (

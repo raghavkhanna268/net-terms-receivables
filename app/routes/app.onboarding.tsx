@@ -973,7 +973,7 @@ export default function OnboardingPage() {
   if (error || !state) {
     return (
       <s-page heading="Setup Guide">
-        <s-link href="/" slot="breadcrumb-actions">
+        <s-link href="/app" slot="breadcrumb-actions">
           Back to Dashboard
         </s-link>
         <s-section>
@@ -989,7 +989,7 @@ export default function OnboardingPage() {
 
   return (
     <s-page heading="Setup Guide">
-      <s-link href="/" slot="breadcrumb-actions">
+      <s-link href="/app" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
       {/* #292: Currency Flip Blocked Banner (non-INR→INR with existing data) */}

@@ -391,7 +391,7 @@ export default function RemindersSettingsPage() {
 
   return (
     <s-page heading="Payment Reminders">
-      <s-link href="/" slot="breadcrumb-actions">
+      <s-link href="/app" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
       {error && (
