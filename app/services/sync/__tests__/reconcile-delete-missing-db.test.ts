@@ -8,10 +8,11 @@
  *     tagged customers not present in the export.
  *
  * Safety requirements:
- * - Act ONLY when the bulk operation finished successfully (COMPLETED, all pages consumed)
  * - Scope every update strictly to that shop (shop_id in WHERE)
  * - Soft only: mark closed or inactive, never hard-delete
- * - Never touch redacted rows (excluded explicitly)
+ * - Never touch redacted rows (excluded explicitly via strpos)
+ * - Never touch rows with NULL last_seen_bulk_op_id (webhook upserts)
+ * - Only close/deactivate rows with a different last_seen_bulk_op_id than the current op
  *
  * Uses native PostgreSQL with all migrations applied.
  */
@@ -35,6 +36,9 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
   const SHOP_B_ID = `shop-v11dm-b-${TEST_SUFFIX}`;
   const SHOP_B_DOMAIN = `test-v11dm-b-${TEST_SUFFIX}.myshopify.com`;
+
+  const CURRENT_BULK_OP_ID = `gid://shopify/BulkOperation/current-${TEST_SUFFIX}`;
+  const OLD_BULK_OP_ID = `gid://shopify/BulkOperation/old-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -70,7 +74,6 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
   afterAll(async () => {
     await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM s6_bulk_operations WHERE shop IN (${TEST_SHOP_DOMAIN}, ${SHOP_B_DOMAIN})`;
     await sql`DELETE FROM "AccountSource" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "Shop" WHERE id IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
@@ -80,39 +83,24 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
   beforeEach(async () => {
     await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id IN (${TEST_SHOP_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM s6_bulk_operations WHERE shop IN (${TEST_SHOP_DOMAIN}, ${SHOP_B_DOMAIN})`;
   });
 
   describe("closeMissingDraftOrders", () => {
-    it("closes drafts not seen during a COMPLETE reconcile (updated_at < started_at)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-draft-close-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
+    it("closes drafts with a different last_seen_bulk_op_id", async () => {
       const draftMissing = `gid://shopify/DraftOrder/missing-${TEST_SUFFIX}`;
-      const draftUpdatedBefore = new Date("2026-10-24T12:00:00Z");
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
-          has_payment_terms, status, created_at, updated_at
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#MISSING', '1000.00',
-          true, 'open', ${draftUpdatedBefore}, ${draftUpdatedBefore}
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
         )
       `;
 
-      const closedCount = await closeMissingDraftOrders(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
-      expect(closedCount.closedCount).toBe(1);
+      expect(closedCount).toBe(1);
 
       const [row] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
@@ -120,35 +108,21 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(row.status).toBe("closed");
     });
 
-    it("does NOT close drafts that were seen (updated_at >= started_at)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-draft-keep-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
+    it("does NOT close drafts with matching last_seen_bulk_op_id (seen in current run)", async () => {
       const draftSeen = `gid://shopify/DraftOrder/seen-${TEST_SUFFIX}`;
-      const draftUpdatedAfter = new Date("2026-10-25T10:02:00Z");
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
-          has_payment_terms, status, created_at, updated_at
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${TEST_SHOP_ID}, ${draftSeen}, ${TEST_ACCOUNT_ID}, '#SEEN', '2000.00',
-          true, 'open', NOW(), ${draftUpdatedAfter}
+          true, 'open', NOW(), NOW(), ${CURRENT_BULK_OP_ID}
         )
       `;
 
-      const closedCount = await closeMissingDraftOrders(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
-      expect(closedCount.closedCount).toBe(0);
+      expect(closedCount).toBe(0);
 
       const [row] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftSeen}
@@ -156,70 +130,43 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(row.status).toBe("open");
     });
 
-    it("does NOT close drafts when op has no completed_at (partial/failed run)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-draft-partial-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          ${startedAt}
-        )
-      `;
-
-      const draftMissing = `gid://shopify/DraftOrder/partial-missing-${TEST_SUFFIX}`;
-      const draftUpdatedBefore = new Date("2026-10-24T12:00:00Z");
+    it("does NOT close drafts with NULL last_seen_bulk_op_id (webhook upserts)", async () => {
+      const draftWebhook = `gid://shopify/DraftOrder/webhook-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
-          has_payment_terms, status, created_at, updated_at
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
-          ${TEST_SHOP_ID}, ${draftMissing}, ${TEST_ACCOUNT_ID}, '#PARTIAL', '1000.00',
-          true, 'open', ${draftUpdatedBefore}, ${draftUpdatedBefore}
+          ${TEST_SHOP_ID}, ${draftWebhook}, ${TEST_ACCOUNT_ID}, '#WEBHOOK', '3000.00',
+          true, 'open', NOW(), NOW(), NULL
         )
       `;
 
-      const closedCount = await closeMissingDraftOrders(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
-      expect(closedCount.closedCount).toBe(0);
+      expect(closedCount).toBe(0);
 
       const [row] = await sql<{ status: string }[]>`
-        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftWebhook}
       `;
       expect(row.status).toBe("open");
     });
 
     it("does NOT touch another shop's rows (scoped by shop_id)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-draft-scope-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
       const draftShopB = `gid://shopify/DraftOrder/shopb-${TEST_SUFFIX}`;
-      const draftUpdatedBefore = new Date("2026-10-24T12:00:00Z");
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, name, total,
-          has_payment_terms, status, created_at, updated_at
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${SHOP_B_ID}, ${draftShopB}, '#SHOPB', '3000.00',
-          true, 'open', ${draftUpdatedBefore}, ${draftUpdatedBefore}
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
         )
       `;
 
-      const closedCount = await closeMissingDraftOrders(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
-      expect(closedCount.closedCount).toBe(0);
+      expect(closedCount).toBe(0);
 
       const [row] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftShopB}
@@ -227,36 +174,24 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(row.status).toBe("open");
     });
 
-    it("only closes open and invoice_sent drafts, not completed ones", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-draft-status-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-      const draftUpdatedBefore = new Date("2026-10-24T12:00:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
+    it("only closes open and invoice_sent drafts, not completed or closed ones", async () => {
       const draftOpen = `gid://shopify/DraftOrder/status-open-${TEST_SUFFIX}`;
       const draftSent = `gid://shopify/DraftOrder/status-sent-${TEST_SUFFIX}`;
       const draftCompleted = `gid://shopify/DraftOrder/status-completed-${TEST_SUFFIX}`;
+      const draftClosed = `gid://shopify/DraftOrder/status-closed-${TEST_SUFFIX}`;
 
       await sql`
-        INSERT INTO s8_draft_orders (shop_id, draft_order_id, name, total, has_payment_terms, status, created_at, updated_at)
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, name, total, has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id)
         VALUES
-          (${TEST_SHOP_ID}, ${draftOpen}, '#OPEN', '1000.00', true, 'open', ${draftUpdatedBefore}, ${draftUpdatedBefore}),
-          (${TEST_SHOP_ID}, ${draftSent}, '#SENT', '2000.00', true, 'invoice_sent', ${draftUpdatedBefore}, ${draftUpdatedBefore}),
-          (${TEST_SHOP_ID}, ${draftCompleted}, '#COMPLETED', '3000.00', true, 'completed', ${draftUpdatedBefore}, ${draftUpdatedBefore})
+          (${TEST_SHOP_ID}, ${draftOpen}, '#OPEN', '1000.00', true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draftSent}, '#SENT', '2000.00', true, 'invoice_sent', NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draftCompleted}, '#COMPLETED', '3000.00', true, 'completed', NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draftClosed}, '#CLOSED', '4000.00', true, 'closed', NOW(), NOW(), ${OLD_BULK_OP_ID})
       `;
 
-      const closedCount = await closeMissingDraftOrders(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
-      expect(closedCount.closedCount).toBe(2);
+      expect(closedCount).toBe(2);
 
       const rows = await sql<{ draft_order_id: string; status: string }[]>`
         SELECT draft_order_id, status FROM s8_draft_orders
@@ -267,27 +202,15 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const openRow = rows.find((r) => r.draft_order_id === draftOpen);
       const sentRow = rows.find((r) => r.draft_order_id === draftSent);
       const completedRow = rows.find((r) => r.draft_order_id === draftCompleted);
+      const closedRow = rows.find((r) => r.draft_order_id === draftClosed);
 
       expect(openRow?.status).toBe("closed");
       expect(sentRow?.status).toBe("closed");
       expect(completedRow?.status).toBe("completed");
+      expect(closedRow?.status).toBe("closed");
     });
 
-    it("does NOT touch redacted rows (buyer account with _redacted_ customerId)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-draft-redact-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-      const draftUpdatedBefore = new Date("2026-10-24T12:00:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
+    it("does NOT touch redacted rows (buyer account with _redacted_ in customerId)", async () => {
       const redactedCustomerId = `gid://shopify/Customer/redacted-cust-${TEST_SUFFIX}_redacted_1698500000000`;
       const redactedAccountId = `account-redacted-${TEST_SUFFIX}`;
       await sql`
@@ -303,16 +226,16 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       await sql`
         INSERT INTO s8_draft_orders (
           shop_id, draft_order_id, buyer_account_id, name, total,
-          has_payment_terms, status, created_at, updated_at
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${TEST_SHOP_ID}, ${draftRedacted}, ${redactedAccountId}, '#REDACTED', '5000.00',
-          true, 'open', ${draftUpdatedBefore}, ${draftUpdatedBefore}
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
         )
       `;
 
-      const closedCount = await closeMissingDraftOrders(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
-      expect(closedCount.closedCount).toBe(0);
+      expect(closedCount).toBe(0);
 
       const [row] = await sql<{ status: string }[]>`
         SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftRedacted}
@@ -322,35 +245,76 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       await sql`DELETE FROM s8_draft_orders WHERE draft_order_id = ${draftRedacted}`;
       await sql`DELETE FROM "BuyerAccount" WHERE id = ${redactedAccountId}`;
     });
+
+    it("returns affected account IDs for recompute", async () => {
+      const draft1 = `gid://shopify/DraftOrder/affected1-${TEST_SUFFIX}`;
+      const draft2 = `gid://shopify/DraftOrder/affected2-${TEST_SUFFIX}`;
+      const account2Id = `account-v11dm-2-${TEST_SUFFIX}`;
+      const company2Id = `gid://shopify/Company/co2-v11dm-${TEST_SUFFIX}`;
+      const location2Id = `gid://shopify/CompanyLocation/loc2-v11dm-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt"
+        ) VALUES (
+          ${account2Id}, ${TEST_SHOP_ID}, 'COMPANY', ${company2Id}, ${location2Id}, 'Test V11 Company 2', NOW(), NOW()
+        )
+      `;
+
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id)
+        VALUES
+          (${TEST_SHOP_ID}, ${draft1}, ${TEST_ACCOUNT_ID}, '#AFF1', '1000.00', true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draft2}, ${account2Id}, '#AFF2', '2000.00', true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID})
+      `;
+
+      const { closedCount, affectedAccountIds } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+
+      expect(closedCount).toBe(2);
+      expect(affectedAccountIds).toHaveLength(2);
+      expect(affectedAccountIds).toContain(TEST_ACCOUNT_ID);
+      expect(affectedAccountIds).toContain(account2Id);
+
+      await sql`DELETE FROM "BuyerAccount" WHERE id = ${account2Id}`;
+    });
+
+    it("handles draft with null buyer_account_id correctly", async () => {
+      const draftNullAccount = `gid://shopify/DraftOrder/null-account-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftNullAccount}, NULL, '#NULLACCOUNT', '6000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      const { closedCount, affectedAccountIds } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+
+      expect(closedCount).toBe(1);
+      expect(affectedAccountIds).toHaveLength(0);
+
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftNullAccount}
+      `;
+      expect(row.status).toBe("closed");
+    });
   });
 
   describe("deactivateMissingTaggedCustomers", () => {
-    it("deactivates customers not seen during a COMPLETE reconcile", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-cust-deact-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
+    it("deactivates customers with a different last_seen_bulk_op_id", async () => {
       const customerMissing = `gid://shopify/Customer/missing-cust-${TEST_SUFFIX}`;
-      const customerUpdatedBefore = new Date("2026-10-24T12:00:00Z");
       await sql`
         INSERT INTO s8_tagged_customers (
-          shop_id, customer_id, tags, tag_active, created_at, updated_at
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${TEST_SHOP_ID}, ${customerMissing}, '["net-terms"]'::jsonb, true,
-          ${customerUpdatedBefore}, ${customerUpdatedBefore}
+          NOW(), NOW(), ${OLD_BULK_OP_ID}
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
       expect(deactivatedCount).toBe(1);
 
@@ -361,32 +325,18 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(row.tag_deactivated_at).not.toBeNull();
     });
 
-    it("does NOT deactivate customers that were seen (updated_at >= started_at)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-cust-keep-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
+    it("does NOT deactivate customers with matching last_seen_bulk_op_id (seen in current run)", async () => {
       const customerSeen = `gid://shopify/Customer/seen-cust-${TEST_SUFFIX}`;
-      const customerUpdatedAfter = new Date("2026-10-25T10:02:00Z");
       await sql`
         INSERT INTO s8_tagged_customers (
-          shop_id, customer_id, tags, tag_active, created_at, updated_at
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${TEST_SHOP_ID}, ${customerSeen}, '["net-terms"]'::jsonb, true,
-          NOW(), ${customerUpdatedAfter}
+          NOW(), NOW(), ${CURRENT_BULK_OP_ID}
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
       expect(deactivatedCount).toBe(0);
 
@@ -396,66 +346,39 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(row.tag_active).toBe(true);
     });
 
-    it("does NOT deactivate customers when op has no completed_at (partial/failed run)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-cust-partial-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers',
-          ${startedAt}
-        )
-      `;
-
-      const customerMissing = `gid://shopify/Customer/partial-cust-${TEST_SUFFIX}`;
-      const customerUpdatedBefore = new Date("2026-10-24T12:00:00Z");
+    it("does NOT deactivate customers with NULL last_seen_bulk_op_id (webhook upserts)", async () => {
+      const customerWebhook = `gid://shopify/Customer/webhook-cust-${TEST_SUFFIX}`;
       await sql`
         INSERT INTO s8_tagged_customers (
-          shop_id, customer_id, tags, tag_active, created_at, updated_at
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
-          ${TEST_SHOP_ID}, ${customerMissing}, '["net-terms"]'::jsonb, true,
-          ${customerUpdatedBefore}, ${customerUpdatedBefore}
+          ${TEST_SHOP_ID}, ${customerWebhook}, '["net-terms"]'::jsonb, true,
+          NOW(), NOW(), NULL
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
       expect(deactivatedCount).toBe(0);
 
       const [row] = await sql<{ tag_active: boolean }[]>`
-        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerMissing}
+        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerWebhook}
       `;
       expect(row.tag_active).toBe(true);
     });
 
     it("does NOT touch another shop's rows (scoped by shop_id)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-cust-scope-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
       const customerShopB = `gid://shopify/Customer/shopb-cust-${TEST_SUFFIX}`;
-      const customerUpdatedBefore = new Date("2026-10-24T12:00:00Z");
       await sql`
         INSERT INTO s8_tagged_customers (
-          shop_id, customer_id, tags, tag_active, created_at, updated_at
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${SHOP_B_ID}, ${customerShopB}, '["net-terms"]'::jsonb, true,
-          ${customerUpdatedBefore}, ${customerUpdatedBefore}
+          NOW(), NOW(), ${OLD_BULK_OP_ID}
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
       expect(deactivatedCount).toBe(0);
 
@@ -466,31 +389,17 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("does NOT touch redacted rows (customer_id containing _redacted_)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-cust-redact-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
       const customerRedacted = `gid://shopify/Customer/redacted-cust-${TEST_SUFFIX}_redacted_1698500000000`;
-      const customerUpdatedBefore = new Date("2026-10-24T12:00:00Z");
       await sql`
         INSERT INTO s8_tagged_customers (
-          shop_id, customer_id, tags, tag_active, created_at, updated_at
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
           ${TEST_SHOP_ID}, ${customerRedacted}, '["net-terms"]'::jsonb, true,
-          ${customerUpdatedBefore}, ${customerUpdatedBefore}
+          NOW(), NOW(), ${OLD_BULK_OP_ID}
         )
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
       expect(deactivatedCount).toBe(0);
 
@@ -501,31 +410,17 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
     });
 
     it("only deactivates tag_active=true customers, not already inactive ones", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-cust-inactive-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-      const completedAt = new Date("2026-10-25T10:05:00Z");
-      const customerUpdatedBefore = new Date("2026-10-24T12:00:00Z");
-
-      await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, completed_at
-        ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'customers', 'reconcile', 'customers',
-          ${startedAt}, ${completedAt}
-        )
-      `;
-
       const customerActive = `gid://shopify/Customer/active-${TEST_SUFFIX}`;
       const customerInactive = `gid://shopify/Customer/inactive-${TEST_SUFFIX}`;
 
       await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at, updated_at)
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id)
         VALUES
-          (${TEST_SHOP_ID}, ${customerActive}, '["net-terms"]'::jsonb, true, ${customerUpdatedBefore}, ${customerUpdatedBefore}),
-          (${TEST_SHOP_ID}, ${customerInactive}, '["net-terms"]'::jsonb, false, ${customerUpdatedBefore}, ${customerUpdatedBefore})
+          (${TEST_SHOP_ID}, ${customerActive}, '["net-terms"]'::jsonb, true, NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${customerInactive}, '["net-terms"]'::jsonb, false, NOW(), NOW(), ${OLD_BULK_OP_ID})
       `;
 
-      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
       expect(deactivatedCount).toBe(1);
 
@@ -540,51 +435,70 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       expect(activeRow?.tag_active).toBe(false);
       expect(inactiveRow?.tag_active).toBe(false);
     });
-  });
 
-  describe("cross-feature scenarios", () => {
-    it("a partial, failed or cancelled run changes nothing (drafts and customers)", async () => {
-      const bulkOpId = `gid://shopify/BulkOperation/dm-cross-partial-${TEST_SUFFIX}`;
-      const startedAt = new Date("2026-10-25T10:00:00Z");
-
+    it("sets tag_deactivated_at and updated_at on deactivation", async () => {
+      const customerMissing = `gid://shopify/Customer/timestamp-cust-${TEST_SUFFIX}`;
+      const originalUpdatedAt = new Date("2026-01-01T00:00:00Z");
       await sql`
-        INSERT INTO s6_bulk_operations (
-          bulk_operation_id, shop, bulk_type, origin, reconcile_stage, started_at, failure_count
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, created_at, updated_at, last_seen_bulk_op_id
         ) VALUES (
-          ${bulkOpId}, ${TEST_SHOP_DOMAIN}, 'draft_orders', 'reconcile', 'draft_orders',
-          ${startedAt}, 5
+          ${TEST_SHOP_ID}, ${customerMissing}, '["net-terms"]'::jsonb, true,
+          NOW(), ${originalUpdatedAt}, ${OLD_BULK_OP_ID}
         )
       `;
 
-      const draftMissing = `gid://shopify/DraftOrder/cross-partial-${TEST_SUFFIX}`;
-      const customerMissing = `gid://shopify/Customer/cross-partial-${TEST_SUFFIX}`;
-      const updatedBefore = new Date("2026-10-24T12:00:00Z");
+      const beforeDeactivation = new Date();
+      await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+
+      const [row] = await sql<{ tag_deactivated_at: Date; updated_at: Date }[]>`
+        SELECT tag_deactivated_at, updated_at FROM s8_tagged_customers WHERE customer_id = ${customerMissing}
+      `;
+
+      expect(row.tag_deactivated_at.getTime()).toBeGreaterThanOrEqual(beforeDeactivation.getTime());
+      expect(row.updated_at.getTime()).toBeGreaterThanOrEqual(beforeDeactivation.getTime());
+    });
+  });
+
+  describe("mixed scenarios", () => {
+    it("handles a mix of seen, unseen, null, and redacted rows correctly", async () => {
+      const draftSeen = `gid://shopify/DraftOrder/mix-seen-${TEST_SUFFIX}`;
+      const draftUnseen = `gid://shopify/DraftOrder/mix-unseen-${TEST_SUFFIX}`;
+      const draftNull = `gid://shopify/DraftOrder/mix-null-${TEST_SUFFIX}`;
 
       await sql`
-        INSERT INTO s8_draft_orders (shop_id, draft_order_id, name, total, has_payment_terms, status, created_at, updated_at)
-        VALUES (${TEST_SHOP_ID}, ${draftMissing}, '#CROSS', '1000.00', true, 'open', ${updatedBefore}, ${updatedBefore})
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id)
+        VALUES
+          (${TEST_SHOP_ID}, ${draftSeen}, ${TEST_ACCOUNT_ID}, '#SEEN', '1000.00', true, 'open', NOW(), NOW(), ${CURRENT_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draftUnseen}, ${TEST_ACCOUNT_ID}, '#UNSEEN', '2000.00', true, 'invoice_sent', NOW(), NOW(), ${OLD_BULK_OP_ID}),
+          (${TEST_SHOP_ID}, ${draftNull}, ${TEST_ACCOUNT_ID}, '#NULL', '3000.00', true, 'open', NOW(), NOW(), NULL)
       `;
 
-      await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at, updated_at)
-        VALUES (${TEST_SHOP_ID}, ${customerMissing}, '["net-terms"]'::jsonb, true, ${updatedBefore}, ${updatedBefore})
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+
+      expect(closedCount).toBe(1);
+
+      const rows = await sql<{ draft_order_id: string; status: string }[]>`
+        SELECT draft_order_id, status FROM s8_draft_orders
+        WHERE shop_id = ${TEST_SHOP_ID}
+        ORDER BY draft_order_id
       `;
 
-      const draftsClosed = await closeMissingDraftOrders(sql, TEST_SHOP_DOMAIN, bulkOpId);
-      const customersDeactivated = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_DOMAIN, bulkOpId);
+      const seenRow = rows.find((r) => r.draft_order_id === draftSeen);
+      const unseenRow = rows.find((r) => r.draft_order_id === draftUnseen);
+      const nullRow = rows.find((r) => r.draft_order_id === draftNull);
 
-      expect(draftsClosed.closedCount).toBe(0);
-      expect(customersDeactivated).toBe(0);
+      expect(seenRow?.status).toBe("open");
+      expect(unseenRow?.status).toBe("closed");
+      expect(nullRow?.status).toBe("open");
+    });
 
-      const [draftRow] = await sql<{ status: string }[]>`
-        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftMissing}
-      `;
-      const [customerRow] = await sql<{ tag_active: boolean }[]>`
-        SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerMissing}
-      `;
+    it("handles empty tables gracefully", async () => {
+      const { closedCount } = await closeMissingDraftOrders(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
+      const deactivatedCount = await deactivateMissingTaggedCustomers(sql, TEST_SHOP_ID, CURRENT_BULK_OP_ID);
 
-      expect(draftRow.status).toBe("open");
-      expect(customerRow.tag_active).toBe(true);
+      expect(closedCount).toBe(0);
+      expect(deactivatedCount).toBe(0);
     });
   });
 });

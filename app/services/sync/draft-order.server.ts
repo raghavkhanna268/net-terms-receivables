@@ -414,7 +414,7 @@ export async function getPendingExposure(
     FROM s8_draft_orders
     WHERE buyer_account_id = ${buyerAccountId}
       AND has_payment_terms = true
-      AND status != 'completed'
+      AND status IN ('open', 'invoice_sent')
   `;
 
   return result?.total ?? "0.00";
@@ -435,11 +435,13 @@ export interface BulkUpsertResult {
  *
  * @param sql - postgres.js SQL client
  * @param draftOrders - Array of mapped draft order data
+ * @param bulkOperationId - Optional bulk operation ID (only set for reconcile, not webhook)
  * @returns Count and affected account IDs (old and new buyers where there was a real change)
  */
 export async function bulkUpsertDraftOrders(
   sql: Sql,
-  draftOrders: ReturnType<typeof mapDraftOrder>[]
+  draftOrders: ReturnType<typeof mapDraftOrder>[],
+  bulkOperationId?: string
 ): Promise<BulkUpsertResult> {
   if (draftOrders.length === 0) return { count: 0, affectedAccountIds: new Set() };
 
@@ -464,37 +466,75 @@ export async function bulkUpsertDraftOrders(
     for (const d of draftOrders) {
       const oldRow = oldRowMap.get(d.draftOrderId);
       
-      const upsertResult = await tx`
-        INSERT INTO s8_draft_orders (
-          shop_id,
-          draft_order_id,
-          buyer_account_id,
-          name,
-          total,
-          has_payment_terms,
-          status,
-          created_at,
-          updated_at
-        ) VALUES (
-          ${d.shopId},
-          ${d.draftOrderId},
-          ${d.buyerAccountId},
-          ${d.name},
-          ${d.total},
-          ${d.hasPaymentTerms},
-          ${d.status},
-          ${d.createdAt},
-          NOW()
-        )
-        ON CONFLICT (shop_id, draft_order_id)
-        DO UPDATE SET
-          buyer_account_id = ${d.buyerAccountId},
-          name = ${d.name},
-          total = ${d.total},
-          has_payment_terms = ${d.hasPaymentTerms},
-          status = ${d.status},
-          updated_at = NOW()
-      `;
+      let upsertResult;
+      if (bulkOperationId) {
+        upsertResult = await tx`
+          INSERT INTO s8_draft_orders (
+            shop_id,
+            draft_order_id,
+            buyer_account_id,
+            name,
+            total,
+            has_payment_terms,
+            status,
+            created_at,
+            updated_at,
+            last_seen_bulk_op_id
+          ) VALUES (
+            ${d.shopId},
+            ${d.draftOrderId},
+            ${d.buyerAccountId},
+            ${d.name},
+            ${d.total},
+            ${d.hasPaymentTerms},
+            ${d.status},
+            ${d.createdAt},
+            NOW(),
+            ${bulkOperationId}
+          )
+          ON CONFLICT (shop_id, draft_order_id)
+          DO UPDATE SET
+            buyer_account_id = ${d.buyerAccountId},
+            name = ${d.name},
+            total = ${d.total},
+            has_payment_terms = ${d.hasPaymentTerms},
+            status = ${d.status},
+            updated_at = NOW(),
+            last_seen_bulk_op_id = ${bulkOperationId}
+        `;
+      } else {
+        upsertResult = await tx`
+          INSERT INTO s8_draft_orders (
+            shop_id,
+            draft_order_id,
+            buyer_account_id,
+            name,
+            total,
+            has_payment_terms,
+            status,
+            created_at,
+            updated_at
+          ) VALUES (
+            ${d.shopId},
+            ${d.draftOrderId},
+            ${d.buyerAccountId},
+            ${d.name},
+            ${d.total},
+            ${d.hasPaymentTerms},
+            ${d.status},
+            ${d.createdAt},
+            NOW()
+          )
+          ON CONFLICT (shop_id, draft_order_id)
+          DO UPDATE SET
+            buyer_account_id = ${d.buyerAccountId},
+            name = ${d.name},
+            total = ${d.total},
+            has_payment_terms = ${d.hasPaymentTerms},
+            status = ${d.status},
+            updated_at = NOW()
+        `;
+      }
       upsertCount += upsertResult.count;
 
       // D3: Detect real changes and track affected accounts
@@ -593,50 +633,46 @@ export async function getAccountsWithDraftExposure(
  *
  * v1.1 delete-missing: After a complete RECONCILE_DRAFT_ORDERS bulk operation,
  * mark local s8_draft_orders rows with status 'open' or 'invoice_sent' that were
- * NOT seen (updated_at < started_at) as 'closed'.
+ * NOT seen in this run as 'closed'.
+ *
+ * Detection: Uses last_seen_bulk_op_id column. Rows with a non-null value that
+ * differs from the current operation ID were seen in a previous reconcile but
+ * not this one. Rows with NULL (webhook-only) are never closed.
  *
  * Safety guards:
- * - Only runs when the bulk operation has completed_at set
  * - Scoped to the specific shop (shop_id in WHERE)
  * - Soft close only: sets status='closed', never deletes
- * - Excludes redacted rows (buyer_account_id links to a redacted BuyerAccount)
+ * - Excludes redacted rows using strpos (buyer_account_id links to BuyerAccount
+ *   where customerId contains '_redacted_' infix)
+ * - Only closes rows matching export scope: status IN ('open', 'invoice_sent')
+ * - Rows with last_seen_bulk_op_id = NULL are never closed (webhook-only)
+ *
+ * Note: Completeness and latest-op guards are checked by the caller
+ * (handleReconcileDeleteMissing) before invoking this function.
  *
  * @param sql - postgres.js SQL client
- * @param shopDomain - Shop domain
+ * @param shopId - Internal shop ID
  * @param bulkOperationId - The completed bulk operation ID
  * @returns Count of draft orders closed and array of affected buyer account IDs
  */
 export async function closeMissingDraftOrders(
   sql: Sql,
-  shopDomain: string,
+  shopId: string,
   bulkOperationId: string
 ): Promise<{ closedCount: number; affectedAccountIds: string[] }> {
-  const [shopRow] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
-  `;
-  if (!shopRow) return { closedCount: 0, affectedAccountIds: [] };
-
-  const shopId = shopRow.id;
-
-  const [opRow] = await sql<{ started_at: Date; completed_at: Date | null }[]>`
-    SELECT started_at, completed_at FROM s6_bulk_operations
-    WHERE bulk_operation_id = ${bulkOperationId}
-  `;
-  if (!opRow || !opRow.completed_at) return { closedCount: 0, affectedAccountIds: [] };
-
-  const startedAt = opRow.started_at;
   const redactedInfix = "_redacted_";
 
   const closedRows = await sql<{ id: string; buyer_account_id: string | null }[]>`
     UPDATE s8_draft_orders d
-    SET status = 'closed'
+    SET status = 'closed', updated_at = NOW()
     WHERE d.shop_id = ${shopId}
       AND d.status IN ('open', 'invoice_sent')
-      AND d.updated_at < ${startedAt}
+      AND d.last_seen_bulk_op_id IS NOT NULL
+      AND d.last_seen_bulk_op_id != ${bulkOperationId}
       AND NOT EXISTS (
         SELECT 1 FROM "BuyerAccount" ba
         WHERE ba.id = d.buyer_account_id
-          AND ba."customerId" LIKE '%' || ${redactedInfix} || '%'
+          AND strpos(ba."customerId", ${redactedInfix}) > 0
       )
     RETURNING d.id, d.buyer_account_id
   `;
