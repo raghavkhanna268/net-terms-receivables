@@ -2666,6 +2666,8 @@ jobs:
                   'dlq_' || COALESCE((SELECT lower(l.message->>'topic') FROM linked l ORDER BY l.dead_lettered_at, l.id LIMIT 1), 'unknown')
                 ELSE 'none' END),
             (10, 'e2e_bulk_ops_closed', (SELECT COUNT(*) FROM bulk WHERE closed_at IS NOT NULL)::text),
+            -- Completed per Shopify (completed_at set), whether or not closed. Sorted last.
+            (20, 'e2e_bulk_ops_completed', (SELECT COUNT(*) FROM bulk WHERE completed_at IS NOT NULL)::text),
             (11, 'e2e_bulk_finish_receipts', (SELECT COUNT(*) FROM webhook_receipts WHERE shop = :'shop' AND topic = 'BULK_OPERATIONS_FINISH')::text),
             (12, 'e2e_bulk_ops_listed', (SELECT COUNT(*) FROM bulk WHERE n <= 10)::text),
             (13, 'e2e_dlq_rows_listed', (SELECT COUNT(*) FROM dlq WHERE n <= 10)::text),
