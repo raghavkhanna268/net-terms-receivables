@@ -887,3 +887,54 @@ export async function redactShopData(
     draftOrders: draftResult.count,
   };
 }
+
+/**
+ * Deactivate tagged customers that were not seen during a COMPLETE reconcile run.
+ *
+ * v1.1 delete-missing: After a complete RECONCILE_CUSTOMERS bulk operation,
+ * set tag_active=false on local s8_tagged_customers rows that were NOT seen
+ * (updated_at < started_at).
+ *
+ * Safety guards:
+ * - Only runs when the bulk operation has completed_at set
+ * - Scoped to the specific shop (shop_id in WHERE)
+ * - Soft deactivation only: sets tag_active=false, never deletes
+ * - Excludes redacted rows (customer_id containing _redacted_ infix)
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain
+ * @param bulkOperationId - The completed bulk operation ID
+ * @returns Count of tagged customers deactivated
+ */
+export async function deactivateMissingTaggedCustomers(
+  sql: Sql,
+  shopDomain: string,
+  bulkOperationId: string
+): Promise<number> {
+  const [shopRow] = await sql<{ id: string }[]>`
+    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  if (!shopRow) return 0;
+
+  const shopId = shopRow.id;
+
+  const [opRow] = await sql<{ started_at: Date; completed_at: Date | null }[]>`
+    SELECT started_at, completed_at FROM s6_bulk_operations
+    WHERE bulk_operation_id = ${bulkOperationId}
+  `;
+  if (!opRow || !opRow.completed_at) return 0;
+
+  const startedAt = opRow.started_at;
+  const redactedInfix = "_redacted_";
+
+  const result = await sql`
+    UPDATE s8_tagged_customers
+    SET tag_active = false, tag_deactivated_at = NOW()
+    WHERE shop_id = ${shopId}
+      AND tag_active = true
+      AND updated_at < ${startedAt}
+      AND customer_id NOT LIKE '%' || ${redactedInfix} || '%'
+  `;
+
+  return result.count;
+}

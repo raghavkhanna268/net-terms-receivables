@@ -44,8 +44,8 @@ import {
   bulkUpsertInvoices,
   type InvoiceData,
 } from "./order.server";
-import { processBulkCustomer, type CustomerPiiMode } from "./customer.server";
-import { processBulkDraftOrder, bulkUpsertDraftOrders, getAccountsWithDraftExposure } from "./draft-order.server";
+import { processBulkCustomer, deactivateMissingTaggedCustomers, type CustomerPiiMode } from "./customer.server";
+import { processBulkDraftOrder, bulkUpsertDraftOrders, getAccountsWithDraftExposure, closeMissingDraftOrders } from "./draft-order.server";
 import { flagAccountsForRecompute } from "~/services/credit-status-recompute.server";
 import { captureExceptionWithTags } from "~/lib/sentry";
 import { getRequestEnv } from "~/lib/request-context.server";
@@ -145,6 +145,64 @@ export function getNextStage(
       return undefined;
     default:
       return undefined;
+  }
+}
+
+/**
+ * Handle delete-missing logic after a reconcile bulk operation completes.
+ *
+ * v1.1: After COMPLETE reconcile runs:
+ * - draft_orders stage: close local drafts with status open/invoice_sent not seen
+ * - customers stage: deactivate local tagged customers not seen
+ *
+ * Best-effort: errors are logged but do not fail the completion.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shop - Shop domain
+ * @param bulkOperationId - The completed bulk operation ID
+ * @param reconcileStage - The reconcile stage that completed
+ */
+async function handleReconcileDeleteMissing(
+  sql: Sql,
+  shop: string,
+  bulkOperationId: string,
+  reconcileStage: string | null
+): Promise<void> {
+  if (!reconcileStage) return;
+
+  try {
+    if (reconcileStage === "draft_orders") {
+      const { closedCount, affectedAccountIds } = await closeMissingDraftOrders(
+        sql,
+        shop,
+        bulkOperationId
+      );
+      if (closedCount > 0) {
+        const hash = await shopHash(shop);
+        safeLog("info", "reconcile_draft_orders_closed_missing", {
+          shopHash: hash,
+          count: closedCount,
+        });
+        if (affectedAccountIds.length > 0) {
+          await flagAccountsForRecompute(sql, shop, affectedAccountIds);
+        }
+      }
+    } else if (reconcileStage === "customers") {
+      const deactivatedCount = await deactivateMissingTaggedCustomers(
+        sql,
+        shop,
+        bulkOperationId
+      );
+      if (deactivatedCount > 0) {
+        const hash = await shopHash(shop);
+        safeLog("info", "reconcile_customers_deactivated_missing", {
+          shopHash: hash,
+          count: deactivatedCount,
+        });
+      }
+    }
+  } catch (err) {
+    captureExceptionWithTags(err, {});
   }
 }
 
@@ -1411,6 +1469,11 @@ export async function processBulkOperation(
           metadata?.origin === "reconcile"
             ? getNextStage(metadata.reconcileStage)
             : undefined;
+
+        // v1.1: Handle delete-missing for reconcile completions
+        if (metadata?.origin === "reconcile") {
+          await handleReconcileDeleteMissing(sql, shop, bulkOperationId, metadata.reconcileStage);
+        }
       }
 
       return {
@@ -1591,6 +1654,11 @@ export async function processBulkOperation(
         metadata?.origin === "reconcile"
           ? getNextStage(metadata.reconcileStage)
           : undefined;
+
+      // v1.1: Handle delete-missing for reconcile completions
+      if (metadata?.origin === "reconcile") {
+        await handleReconcileDeleteMissing(sql, shop, bulkOperationId, metadata.reconcileStage);
+      }
     }
 
     return {
@@ -1780,6 +1848,11 @@ export async function processBulkOperation(
         metadata?.origin === "reconcile"
           ? getNextStage(metadata.reconcileStage)
           : undefined;
+
+      // v1.1: Handle delete-missing for reconcile completions
+      if (metadata?.origin === "reconcile") {
+        await handleReconcileDeleteMissing(sql, shop, bulkOperationId, metadata.reconcileStage);
+      }
     }
 
     return {

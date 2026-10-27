@@ -223,6 +223,9 @@ const DB_TEST_PATTERNS = [
 
   // Cross-shop (tenant) isolation DB tests
   "tests/integration/tenant-isolation-db.test.ts",
+
+  // v1.1 reconcile delete-missing DB tests
+  "app/services/sync/__tests__/reconcile-delete-missing-db.test.ts",
 ];
 
 export default defineConfig({

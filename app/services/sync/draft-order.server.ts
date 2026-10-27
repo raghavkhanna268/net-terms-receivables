@@ -587,3 +587,67 @@ export async function getAccountsWithDraftExposure(
   `;
   return new Set(rows.map((r) => r.buyer_account_id));
 }
+
+/**
+ * Close draft orders that were not seen during a COMPLETE reconcile run.
+ *
+ * v1.1 delete-missing: After a complete RECONCILE_DRAFT_ORDERS bulk operation,
+ * mark local s8_draft_orders rows with status 'open' or 'invoice_sent' that were
+ * NOT seen (updated_at < started_at) as 'closed'.
+ *
+ * Safety guards:
+ * - Only runs when the bulk operation has completed_at set
+ * - Scoped to the specific shop (shop_id in WHERE)
+ * - Soft close only: sets status='closed', never deletes
+ * - Excludes redacted rows (buyer_account_id links to a redacted BuyerAccount)
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain
+ * @param bulkOperationId - The completed bulk operation ID
+ * @returns Count of draft orders closed and array of affected buyer account IDs
+ */
+export async function closeMissingDraftOrders(
+  sql: Sql,
+  shopDomain: string,
+  bulkOperationId: string
+): Promise<{ closedCount: number; affectedAccountIds: string[] }> {
+  const [shopRow] = await sql<{ id: string }[]>`
+    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  `;
+  if (!shopRow) return { closedCount: 0, affectedAccountIds: [] };
+
+  const shopId = shopRow.id;
+
+  const [opRow] = await sql<{ started_at: Date; completed_at: Date | null }[]>`
+    SELECT started_at, completed_at FROM s6_bulk_operations
+    WHERE bulk_operation_id = ${bulkOperationId}
+  `;
+  if (!opRow || !opRow.completed_at) return { closedCount: 0, affectedAccountIds: [] };
+
+  const startedAt = opRow.started_at;
+  const redactedInfix = "_redacted_";
+
+  const closedRows = await sql<{ id: string; buyer_account_id: string | null }[]>`
+    UPDATE s8_draft_orders d
+    SET status = 'closed'
+    WHERE d.shop_id = ${shopId}
+      AND d.status IN ('open', 'invoice_sent')
+      AND d.updated_at < ${startedAt}
+      AND NOT EXISTS (
+        SELECT 1 FROM "BuyerAccount" ba
+        WHERE ba.id = d.buyer_account_id
+          AND ba."customerId" LIKE '%' || ${redactedInfix} || '%'
+      )
+    RETURNING d.id, d.buyer_account_id
+  `;
+
+  const affectedAccountIds = [
+    ...new Set(
+      closedRows
+        .map((r) => r.buyer_account_id)
+        .filter((id): id is string => id !== null)
+    ),
+  ];
+
+  return { closedCount: closedRows.count, affectedAccountIds };
+}
