@@ -56,7 +56,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sqlOptions, type Sql } from "~/lib/db-light.server";
 import { parseBankStatement } from "~/lib/banks/index";
-import { insertBankImportRows, normalizeDedupeKeyForDb } from "~/services/bank-import.server";
+import { insertBankImportRows, normalizeDedupeKeyForDb, computeCreditDedupeKeys } from "~/services/bank-import.server";
 import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
 import { CONFIDENCE_THRESHOLD } from "~/lib/matching/score";
 import { isCurrencyGateOpen } from "~/lib/currency-gate.server";
@@ -221,14 +221,6 @@ export async function loadFixturePayload(rootDir: string) {
   // Same shape the Imports page builds from parseBankStatement before
   // mapCreditsForImport (app/routes/app.imports.tsx, ImportsPage).
   const creditTxns = parsed.transactions.filter((t) => t.direction === "CR");
-  // Build normalized-db-key-to-sourceRow mapping BEFORE mapCreditsForImport drops sourceRow.
-  // The key is the normalized dedupe key as stored in Payment.utr (same as what
-  // normalizeDedupeKeyForDb returns in bank-import.server.ts).
-  const utrToSourceRow = new Map<string, number>();
-  for (const t of creditTxns) {
-    const normalizedKey = normalizeDedupeKeyForDb(t.dedupeKey);
-    utrToSourceRow.set(normalizedKey, t.sourceRow);
-  }
   const credits = mapCreditsForImport(
     creditTxns.map((t) => ({
       date: t.date,
@@ -244,6 +236,28 @@ export async function loadFixturePayload(rootDir: string) {
       sourceRow: t.sourceRow,
     }))
   );
+  // Build normalized-db-key-to-sourceRow mapping using the SAME dedupe key
+  // computation as insertBankImportRows (computeCreditDedupeKeys), so the keys
+  // match what gets stored in Payment.utr. The parser's dedupeKey may differ
+  // because mapCreditsForImport drops some fields like valueDate.
+  const creditsWithKeys = await computeCreditDedupeKeys(
+    credits.map((c, i) => ({
+      date: c.date as string,
+      amountPaise: c.amountPaise as number,
+      narration: c.narration as string,
+      rail: c.rail as string,
+      utr: c.utr as string | undefined,
+      payerName: c.payerName as string | undefined,
+      refNo: c.refNo as string | undefined,
+      balancePaise: c.balancePaise as number | undefined,
+      sourceRow: creditTxns[i].sourceRow,
+    }))
+  );
+  const utrToSourceRow = new Map<string, number>();
+  for (const c of creditsWithKeys) {
+    const normalizedKey = normalizeDedupeKeyForDb(c.dedupeKey);
+    utrToSourceRow.set(normalizedKey, c.sourceRow);
+  }
   return {
     bank: parsed.detection.bank,
     totalRows: parsed.totalRows,
