@@ -91,7 +91,7 @@ on:
         default: false
         type: boolean
       reminders:
-        description: "Read-only: S18 reminder counts (shops enabled per shop_kind, due today per rule offset/channel, ReminderLog by status 7d, enqueue/drain pg_cron runs 24h, e2e shop timezone). Counts, enums, booleans and cron timestamps only"
+        description: "Read-only: S18 reminder counts (shops enabled per shop_kind, due today per offset class/channel (raw offset for main/e2e only), ReminderLog by status 7d, enqueue/drain pg_cron runs 24h, e2e shop timezone, main offline session health). Counts, enums, booleans and cron timestamps only"
         required: false
         default: false
         type: boolean
@@ -656,7 +656,7 @@ jobs:
           JOIN shop_labels sl ON sl.shop_id = s.id
           GROUP BY 1, 2, 3, 4
           ORDER BY 1, 2, 3, 4;
-          \echo '== 2. due today per rule (offset_days, channel), each shop''s own timezone; enqueue = 20261122 Part 3 selection'
+          \echo '== 2. due today per rule (offset_class before_due/on_due/after_due, raw offset_days for main/e2e only, channel), each shop''s own timezone; enqueue = 20261122 Part 3 selection'
           WITH shop_labels AS (
             SELECT s.id AS shop_id,
                    CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
@@ -670,6 +670,10 @@ jobs:
           ),
           due AS (
             SELECT sl.shop_kind,
+                   CASE WHEN r."offsetDays" < 0 THEN 'before_due'
+                        WHEN r."offsetDays" = 0 THEN 'on_due'
+                        WHEN r."offsetDays" > 0 THEN 'after_due'
+                   END AS offset_class,
                    r."offsetDays" AS rule_offset,
                    r.channel AS rule_channel,
                    COALESCE(srs.enabled, false) AS settings_on,
@@ -696,7 +700,10 @@ jobs:
                   = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
           )
           SELECT d.shop_kind,
-                 CASE WHEN d.rule_offset::TEXT ~ '^-?[0-9]{1,4}$' THEN d.rule_offset::TEXT END AS offset_days,
+                 d.offset_class AS offset_class,
+                 CASE WHEN d.shop_kind IN ('main', 'e2e')
+                      THEN CASE WHEN d.rule_offset::TEXT ~ '^-?[0-9]{1,4}$' THEN d.rule_offset::TEXT END
+                 END AS offset_days,
                  CASE WHEN d.rule_channel::TEXT IN ('native', 'email') THEN d.rule_channel::TEXT END AS channel,
                  COUNT(*) AS due_today,
                  COUNT(*) FILTER (WHERE d.unpaid) AS due_today_unpaid,
@@ -708,8 +715,8 @@ jobs:
                                     AND d.rule_channel = 'email'::"ReminderChannel"
                                     AND NOT d.logged AND d.in_window) AS enqueue_eligible_now
           FROM due d
-          GROUP BY d.shop_kind, d.rule_offset, d.rule_channel
-          ORDER BY d.shop_kind, d.rule_offset, d.rule_channel;
+          GROUP BY 1, 2, 3, 4
+          ORDER BY 1, 2, 3, 4;
           \echo '== 3. ReminderLog by status per shop_kind (last 7d by COALESCE(sentAt, firstCappedAt); undated = both NULL)'
           WITH shop_labels AS (
             SELECT s.id AS shop_id,

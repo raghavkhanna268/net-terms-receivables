@@ -13,6 +13,8 @@
  *   shop_kind = 'e2e' (no input, no id, no GID);
  * - due-today uses the same day math as the latest s18_enqueue_reminders()
  *   Part 3 (dueAt in shop tz + offsetDays = today in shop tz);
+ * - section 2 groups by offset_class (before_due/on_due/after_due); the raw
+ *   offset is printed only for main/e2e rows and is NULL for other_N/unknown;
  * - pg_cron jobs are picked by the jobnames the migrations schedule, and
  *   cron.job.command / return_message are never read;
  * - every output column is a count, enum, boolean or (cron) timestamp in the
@@ -28,7 +30,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { checkSql, SESSION_CREDENTIAL_COLUMNS } from "../check-readonly-columns";
+import { checkSql, CONFIG_INT_COLUMNS, SESSION_CREDENTIAL_COLUMNS } from "../check-readonly-columns";
 import { SHOP_LABELS_CTE, stripShopLabelsCte } from "../shop-labels";
 
 const ROOT = join(__dirname, "../../..");
@@ -223,6 +225,32 @@ describe("prod-diagnostics reminders option", () => {
     }
   });
 
+  it("section 2 groups by offset class; other_N / unknown rows never carry a raw offset", () => {
+    const sec = mainSql.slice(mainSql.indexOf("\\echo '== 2."), mainSql.indexOf("\\echo '== 3."));
+    const n = norm(sec);
+    // class enum from the raw value, computed in the CTE
+    expect(n).toContain(
+      `CASE WHEN r."offsetDays" < 0 THEN 'before_due' WHEN r."offsetDays" = 0 THEN 'on_due' WHEN r."offsetDays" > 0 THEN 'after_due' END AS offset_class`,
+    );
+    // raw offset only behind the main/e2e gate, NULL (no ELSE) for everyone else
+    const gated =
+      `CASE WHEN d.shop_kind IN ('main', 'e2e') THEN CASE WHEN d.rule_offset::TEXT ~ '^-?[0-9]{1,4}$' THEN d.rule_offset::TEXT END END AS offset_days`;
+    expect(n).toContain(gated);
+    expect(n.split(gated).length).toBe(2);
+    // no other read of the raw offset in the outer select, and no ELSE branch on it
+    const outer = n.slice(n.indexOf("SELECT d.shop_kind"));
+    expect(outer.replace(gated, "").match(/rule_offset|offsetDays/g)).toBeNull();
+    expect(outer).not.toMatch(/\bELSE\b/);
+    expect(n.match(/rule_offset/g)?.length).toBe(1 + 2); // CTE alias + gated CASE (cond, result)
+    // grouping uses the output columns (class + gated offset), never the raw value
+    expect(n).toMatch(/GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;/);
+    expect(n).not.toMatch(/GROUP BY[^;]*rule_offset/);
+    // raw offsets are not a listed config_int
+    expect(CONFIG_INT_COLUMNS).toEqual(["defaultTermsDays"]);
+    expect(CONFIG_INT_COLUMNS).not.toContain("offset_days");
+    expect(CONFIG_INT_COLUMNS).not.toContain("offsetDays");
+  });
+
   it("uses hard-coded windows", () => {
     expect(mainSql).toContain(`COALESCE(rl."sentAt", rl."firstCappedAt") > NOW() - INTERVAL '7 days'`);
     expect(mainSql + cronSql).not.toMatch(/:'?since'?|:'?hours'?|:'?days'?|:'?window'?/);
@@ -238,6 +266,7 @@ describe("prod-diagnostics reminders option", () => {
       "settings_row:boolean",
       "shops:count",
       "shop_kind:enum",
+      "offset_class:enum",
       "offset_days:enum",
       "channel:enum",
       "due_today:count",
