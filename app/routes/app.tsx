@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, useRouteLoaderData, isRouteErrorResponse, data } from "react-router";
+import { Outlet, useLoaderData, useRouteError, isRouteErrorResponse, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
@@ -142,10 +142,7 @@ export default function App() {
 
 export function ErrorBoundary() {
   const error = useRouteError();
-  const rootData = useRouteLoaderData<{ apiKey?: string }>("root");
-  const apiKey = rootData?.apiKey ?? "";
 
-  // (a) #532: status 200 with string data renders embedded re-auth HTML
   if (
     isRouteErrorResponse(error) &&
     error.status === 200 &&
@@ -158,28 +155,7 @@ export function ErrorBoundary() {
     );
   }
 
-  // (b) #567: other sub-400 or 401 responses delegate to boundary.error
-  if (isRouteErrorResponse(error) && (error.status < 400 || error.status === 401)) {
-    return boundary.error(error);
-  }
-
-  // (c) #567: in-app fallback for remaining errors
-  return (
-    <AppProvider apiKey={apiKey}>
-      <s-page heading="Something went wrong">
-        <s-section>
-          <s-banner tone="critical" heading="Unexpected Error">
-            <s-paragraph>
-              We encountered an issue loading this page.
-            </s-paragraph>
-            <s-stack direction="inline" gap="base">
-              <s-button href="/app">Go to Dashboard</s-button>
-            </s-stack>
-          </s-banner>
-        </s-section>
-      </s-page>
-    </AppProvider>
-  );
+  throw error;
 }
 
 export const headers: HeadersFunction = (headersArgs) => {

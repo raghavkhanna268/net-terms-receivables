@@ -39,8 +39,6 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => anonymousError,
-        useRouteLoaderData: (routeId: string) =>
-          routeId === "root" ? { apiKey: "test-key" } : undefined,
       };
     });
 
@@ -68,8 +66,6 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => new AnonymousErrorResponse(),
-        useRouteLoaderData: (routeId: string) =>
-          routeId === "root" ? { apiKey: "test-key" } : undefined,
       };
     });
 
@@ -95,8 +91,6 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => bounceError,
-        useRouteLoaderData: (routeId: string) =>
-          routeId === "root" ? { apiKey: "test-key" } : undefined,
       };
     });
 
@@ -108,22 +102,7 @@ describe("app.tsx ErrorBoundary", () => {
     expect(html).toContain("bounce");
   });
 
-  it("delegates status 401 ErrorResponseImpl to boundary.error (auth flow)", async () => {
-    const mockBoundaryError = vi.fn().mockReturnValue(null);
-
-    vi.doMock("@shopify/shopify-app-react-router/server", async () => {
-      const actual = await vi.importActual<
-        typeof import("@shopify/shopify-app-react-router/server")
-      >("@shopify/shopify-app-react-router/server");
-      return {
-        ...actual,
-        boundary: {
-          ...actual.boundary,
-          error: mockBoundaryError,
-        },
-      };
-    });
-
+  it("rethrows real ErrorResponseImpl with status 401", async () => {
     const reauthError = new UNSAFE_ErrorResponseImpl(
       401,
       "Unauthorized",
@@ -137,20 +116,16 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => reauthError,
-        useRouteLoaderData: (routeId: string) =>
-          routeId === "root" ? { apiKey: "test-key" } : undefined,
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    renderToString(createElement(ErrorBoundary));
-
-    expect(mockBoundaryError).toHaveBeenCalledWith(reauthError);
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
-  it("renders in-app fallback for 404 route error response", async () => {
+  it("rethrows 404 route error response (non-bounce status)", async () => {
     const notFoundError = {
       status: 404,
       statusText: "Not Found",
@@ -165,38 +140,16 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => notFoundError,
-        useRouteLoaderData: (routeId: string) =>
-          routeId === "root" ? { apiKey: "test-key" } : undefined,
-        useNavigate: () => vi.fn(),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    const html = renderToString(createElement(ErrorBoundary));
-
-    expect(html).toContain("s-page");
-    expect(html).toContain("Something went wrong");
-    expect(html).toContain('href="/app"');
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
-  it("delegates status 200 with non-string data to boundary.error", async () => {
-    const mockBoundaryError = vi.fn().mockReturnValue(null);
-
-    vi.doMock("@shopify/shopify-app-react-router/server", async () => {
-      const actual = await vi.importActual<
-        typeof import("@shopify/shopify-app-react-router/server")
-      >("@shopify/shopify-app-react-router/server");
-      return {
-        ...actual,
-        boundary: {
-          ...actual.boundary,
-          error: mockBoundaryError,
-        },
-      };
-    });
-
+  it("rethrows 200 route error with non-string data", async () => {
     const nonStringDataError = {
       status: 200,
       statusText: "OK",
@@ -211,20 +164,16 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => nonStringDataError,
-        useRouteLoaderData: (routeId: string) =>
-          routeId === "root" ? { apiKey: "test-key" } : undefined,
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    renderToString(createElement(ErrorBoundary));
-
-    expect(mockBoundaryError).toHaveBeenCalledWith(nonStringDataError);
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
-  it("renders in-app fallback for plain Error", async () => {
+  it("rethrows plain Error for root boundary to handle", async () => {
     const plainError = new Error("Unexpected failure");
 
     vi.doMock("react-router", async () => {
@@ -234,20 +183,15 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => plainError,
-        useRouteLoaderData: (routeId: string) =>
-          routeId === "root" ? { apiKey: "test-key" } : undefined,
-        useNavigate: () => vi.fn(),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    const html = renderToString(createElement(ErrorBoundary));
-
-    expect(html).toContain("s-page");
-    expect(html).toContain("Something went wrong");
-    expect(html).not.toContain("Unexpected failure");
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow(
+      "Unexpected failure"
+    );
   });
 });
 
@@ -273,8 +217,8 @@ describe("isRouteErrorResponse structural check", () => {
   });
 });
 
-describe("boundary.error behavior on anonymous class", () => {
-  it("boundary.error handles anonymous-class error without throwing", async () => {
+describe("boundary.error behavior on anonymous class (the bug)", () => {
+  it("boundary.error throws for anonymous-class error", async () => {
     const { boundary } = await import(
       "@shopify/shopify-app-react-router/server"
     );
@@ -289,6 +233,6 @@ describe("boundary.error behavior on anonymous class", () => {
 
     const anonymousError = new AnonymousErrorResponse();
 
-    expect(() => boundary.error(anonymousError)).not.toThrow();
+    expect(() => boundary.error(anonymousError)).toThrow();
   });
 });

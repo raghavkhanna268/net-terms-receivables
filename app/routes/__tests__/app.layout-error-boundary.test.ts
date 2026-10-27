@@ -2,13 +2,12 @@
  * Tests for app.tsx ErrorBoundary.
  *
  * Verifies that:
- * - ErrorResponses with status < 400 delegate to boundary.error (Shopify bootstrap)
- * - ErrorResponses with status 401 delegate to boundary.error (auth flow)
- * - ErrorResponses with status >= 400 (except 401) render in-app fallback
- * - Thrown Errors render in-app fallback
- * - Error message text is NOT exposed in the output
- * - Dashboard link is present in fallback
- * - AppProvider wraps fallback (Polaris script + shopify:navigate listener)
+ * - ErrorResponses with status 200 and string data render the embedded HTML
+ *   (the re-auth bounce case from #532)
+ * - Other errors are rethrown for the root boundary to handle
+ *
+ * Note: The in-app error fallback for the /app layout is deferred to v1.1;
+ * this PR keeps the current app route error boundary unchanged.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { renderToString } from "react-dom/server";
@@ -22,22 +21,17 @@ describe("app.tsx ErrorBoundary", () => {
     vi.resetModules();
   });
 
-  function setupRouterMocks(
-    errorValue: unknown,
-    rootLoaderData: { apiKey?: string } | undefined = { apiKey: "test-api-key" }
-  ) {
+  function setupRouterMocks(errorValue: unknown) {
     vi.doMock("react-router", async () => {
       const actual = await vi.importActual<typeof import("react-router")>("react-router");
       return {
         ...actual,
         useRouteError: () => errorValue,
-        useRouteLoaderData: (routeId: string) => (routeId === "root" ? rootLoaderData : undefined),
-        useNavigate: () => vi.fn(),
       };
     });
   }
 
-  describe("delegates to boundary.error for status < 400 and 401", () => {
+  describe("handles status 200 + string data (embedded re-auth bounce)", () => {
     it("renders status 200 + string data as HTML without calling boundary.error", async () => {
       const mockBoundaryError = vi.fn().mockReturnValue(null);
 
@@ -61,153 +55,60 @@ describe("app.tsx ErrorBoundary", () => {
       const html = renderToString(createElement(ErrorBoundary));
 
       expect(html).toContain("window.shopify.reload()");
-      expect(html).not.toContain("s-page");
       expect(mockBoundaryError).not.toHaveBeenCalled();
     });
 
-    it("delegates status 302 ErrorResponse to boundary.error", async () => {
-      const mockBoundaryError = vi.fn().mockReturnValue(null);
-
-      vi.doMock("@shopify/shopify-app-react-router/server", async () => {
-        const actual = await vi.importActual<typeof import("@shopify/shopify-app-react-router/server")>("@shopify/shopify-app-react-router/server");
-        return {
-          ...actual,
-          boundary: {
-            ...actual.boundary,
-            error: mockBoundaryError,
-          },
-        };
-      });
-
-      const errorResponse = new ErrorResponseImpl(302, "Found", null);
+    it("renders 'Handling response' fallback when data is empty string", async () => {
+      const errorResponse = new ErrorResponseImpl(200, "OK", "");
       setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
 
-      renderToString(createElement(ErrorBoundary));
+      const html = renderToString(createElement(ErrorBoundary));
 
-      expect(mockBoundaryError).toHaveBeenCalledWith(errorResponse);
-    });
-
-    it("delegates status 401 ErrorResponse to boundary.error (auth flow)", async () => {
-      const mockBoundaryError = vi.fn().mockReturnValue(null);
-
-      vi.doMock("@shopify/shopify-app-react-router/server", async () => {
-        const actual = await vi.importActual<typeof import("@shopify/shopify-app-react-router/server")>("@shopify/shopify-app-react-router/server");
-        return {
-          ...actual,
-          boundary: {
-            ...actual.boundary,
-            error: mockBoundaryError,
-          },
-        };
-      });
-
-      const errorResponse = new ErrorResponseImpl(401, "Unauthorized", null);
-      setupRouterMocks(errorResponse);
-
-      vi.resetModules();
-      const { ErrorBoundary } = await import("../app");
-
-      renderToString(createElement(ErrorBoundary));
-
-      expect(mockBoundaryError).toHaveBeenCalledWith(errorResponse);
+      expect(html).toContain("Handling response");
     });
   });
 
-  describe("renders in-app fallback for other errors", () => {
-    it("renders in-app fallback for status 404 ErrorResponse", async () => {
+  describe("rethrows other errors for root boundary", () => {
+    it("rethrows status 404 ErrorResponse", async () => {
       const errorResponse = new ErrorResponseImpl(404, "Not Found", null);
       setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
 
-      const html = renderToString(createElement(ErrorBoundary));
-
-      expect(html).toContain("s-page");
-      expect(html).toContain("s-banner");
-      expect(html).toContain("Something went wrong");
-      expect(html).toContain('href="/app"');
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
     });
 
-    it("renders in-app fallback for status 500 ErrorResponse", async () => {
+    it("rethrows status 500 ErrorResponse", async () => {
       const errorResponse = new ErrorResponseImpl(500, "Internal Server Error", null);
       setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
 
-      const html = renderToString(createElement(ErrorBoundary));
-
-      expect(html).toContain("s-page");
-      expect(html).toContain("s-banner");
-      expect(html).toContain("Something went wrong");
-      expect(html).toContain('href="/app"');
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
     });
 
-    it("renders in-app fallback for thrown Error", async () => {
-      setupRouterMocks(new Error("Internal test error"));
+    it("rethrows plain Error", async () => {
+      setupRouterMocks(new Error("Unexpected failure"));
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
 
-      const html = renderToString(createElement(ErrorBoundary));
-
-      expect(html).toContain("s-page");
-      expect(html).toContain("s-banner");
-      expect(html).toContain("Something went wrong");
-      expect(html).toContain('href="/app"');
-      expect(html).toContain("Go to Dashboard");
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow("Unexpected failure");
     });
 
-    it("does not expose error message text in output", async () => {
-      setupRouterMocks(new Error("SENSITIVE_ERROR_MESSAGE_12345"));
+    it("rethrows status 200 with non-string data", async () => {
+      const errorResponse = new ErrorResponseImpl(200, "OK", { message: "object" });
+      setupRouterMocks(errorResponse);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
 
-      const html = renderToString(createElement(ErrorBoundary));
-
-      expect(html).not.toContain("SENSITIVE_ERROR_MESSAGE_12345");
-      expect(html).toContain("We encountered an issue");
-    });
-  });
-
-  describe("AppProvider wraps fallback", () => {
-    it("includes Polaris script tag in fallback HTML", async () => {
-      setupRouterMocks(new Error("Test error"));
-
-      vi.resetModules();
-      const { ErrorBoundary } = await import("../app");
-
-      const html = renderToString(createElement(ErrorBoundary));
-
-      expect(html).toContain("polaris-2.js");
-    });
-
-    it("uses apiKey from root loader data when available", async () => {
-      setupRouterMocks(new Error("Test error"), { apiKey: "custom-api-key" });
-
-      vi.resetModules();
-      const { ErrorBoundary } = await import("../app");
-
-      const html = renderToString(createElement(ErrorBoundary));
-
-      expect(html).toContain("s-page");
-    });
-
-    it("renders fallback when root loader data is undefined", async () => {
-      setupRouterMocks(new Error("Test error"), undefined);
-
-      vi.resetModules();
-      const { ErrorBoundary } = await import("../app");
-
-      const html = renderToString(createElement(ErrorBoundary));
-
-      expect(html).toContain("s-page");
-      expect(html).toContain("polaris-2.js");
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
     });
   });
 });
