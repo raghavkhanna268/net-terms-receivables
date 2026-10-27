@@ -287,7 +287,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
-      it("XXX shop: rejects credit-limit edit (fail-closed)", async () => {
+      it("XXX shop: rejects credit-limit edit with setting-up message", async () => {
         setupSqlMock("XXX");
 
         const formData = new FormData();
@@ -298,11 +298,11 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
-      it("NULL currency: rejects credit-limit edit (fail-closed)", async () => {
+      it("NULL currency: rejects credit-limit edit with setting-up message", async () => {
         setupSqlMock(null);
 
         const formData = new FormData();
@@ -313,7 +313,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
@@ -350,7 +350,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
-      it("XXX shop: rejects place hold (fail-closed)", async () => {
+      it("XXX shop: rejects place hold with setting-up message", async () => {
         setupSqlMock("XXX");
 
         const formData = new FormData();
@@ -363,11 +363,11 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
-      it("NULL currency: rejects place hold (fail-closed)", async () => {
+      it("NULL currency: rejects place hold with setting-up message", async () => {
         setupSqlMock(null);
 
         const formData = new FormData();
@@ -379,7 +379,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
@@ -421,7 +421,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
-      it("XXX shop: rejects release hold (fail-closed)", async () => {
+      it("XXX shop: rejects release hold with setting-up message", async () => {
         setupSqlMock("XXX");
 
         const formData = new FormData();
@@ -433,11 +433,11 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
-      it("NULL currency: rejects release hold (fail-closed)", async () => {
+      it("NULL currency: rejects release hold with setting-up message", async () => {
         setupSqlMock(null);
 
         const formData = new FormData();
@@ -449,7 +449,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
         expect(mockUpdateCreditStatus).not.toHaveBeenCalled();
       });
 
@@ -488,7 +488,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         expect(result.error).toBe("Currency not supported");
       });
 
-      it("XXX shop: rejects reminder opt-out change (fail-closed)", async () => {
+      it("XXX shop: rejects reminder opt-out change with setting-up message", async () => {
         setupSqlMock("XXX");
 
         const formData = new FormData();
@@ -499,10 +499,10 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
       });
 
-      it("NULL currency: rejects reminder opt-out change (fail-closed)", async () => {
+      it("NULL currency: rejects reminder opt-out change with setting-up message", async () => {
         setupSqlMock(null);
 
         const formData = new FormData();
@@ -513,7 +513,7 @@ describe("#292 currency gate on /app/accounts/:id", () => {
         const result = await action(createActionArgs(formData)) as Record<string, unknown>;
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Currency not supported");
+        expect(result.error).toContain("still being set up");
       });
     });
 

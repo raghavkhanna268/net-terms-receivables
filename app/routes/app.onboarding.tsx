@@ -47,6 +47,7 @@ import {
 import { isShopCurrencySupported, NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
 import { isEmailSendingConfigured } from "~/lib/email-sender-config.server";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 import { getShopReminderSettings } from "~/services/reminders.server";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
@@ -406,7 +407,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       headers["Server-Timing"] = serverTiming;
     }
     return data({
-      error: "Shop not found",
+      error: null,
       state: null,
       registrationStatus: null,
       initialSyncState: null,
@@ -418,6 +419,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       } as NewAccountsPausedBannerState,
       currencySupported: false,
       currencyFlipBlocked: false,
+      settingUp: true,
     }, { headers });
   }
 
@@ -528,6 +530,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     newAccountsPausedBanner,
     currencySupported,
     currencyFlipBlocked,
+    settingUp: false,
   }, { headers });
 };
 
@@ -923,7 +926,7 @@ function OnboardingChecklist({
 const POLL_INTERVAL_MS = 5000;
 
 export default function OnboardingPage() {
-  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported, currencyFlipBlocked } = useLoaderData<typeof loader>();
+  const { error, state, registrationStatus, initialSyncState, newAccountsPausedBanner, currencySupported, currencyFlipBlocked, settingUp } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const revalidator = useRevalidator();
@@ -967,6 +970,16 @@ export default function OnboardingPage() {
       }
     };
   }, [loaderSyncStatus, revalidator, currencySupported]);
+
+  if (settingUp) {
+    return (
+      <s-page heading="Setup Guide">
+        <s-section>
+          <StoreSettingUpBanner />
+        </s-section>
+      </s-page>
+    );
+  }
 
   if (error || !state) {
     return (
