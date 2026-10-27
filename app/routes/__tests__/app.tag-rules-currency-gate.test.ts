@@ -120,11 +120,11 @@ describe("#292 currency gate on /app/tag-rules", () => {
   function setupSqlMock(storedCurrency: string | null) {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
-      if (query.includes("SELECT id, currency FROM") && query.includes("Shop")) {
+      if (query.includes("SELECT id, currency, timezone FROM") && query.includes("Shop")) {
         if (storedCurrency === null) {
-          return Promise.resolve([{ id: "shop-123", currency: null }]);
+          return Promise.resolve([{ id: "shop-123", currency: null, timezone: "Asia/Kolkata" }]);
         }
-        return Promise.resolve([{ id: "shop-123", currency: storedCurrency }]);
+        return Promise.resolve([{ id: "shop-123", currency: storedCurrency, timezone: "Asia/Kolkata" }]);
       }
       if (query.includes("SELECT id, domain, currency FROM") && query.includes("Shop")) {
         if (storedCurrency === null) {

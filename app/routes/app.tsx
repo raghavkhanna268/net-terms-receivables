@@ -1,36 +1,26 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, data, isRouteErrorResponse } from "react-router";
+import { Outlet, useLoaderData, useRouteError, isRouteErrorResponse, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
 import { useEffect, useState } from "react";
 import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
+import { getRequestSql } from "~/lib/request-context.server";
+import { isPlanSelectionRedirectEnabled } from "~/services/gating.server";
+import { resolvePlanWithStatus } from "~/services/plan.server";
+import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 
 const RELOAD_GUARD_KEY_PREFIX = "auth_bounce_reload_";
 const RELOAD_GUARD_WINDOW_MS = 30_000;
 
-export function isAppBridgeOnlyOrEmptyResponse(errorData: unknown): boolean {
-  if (errorData === null || errorData === undefined || errorData === "") {
-    return true;
-  }
-  if (typeof errorData !== "string") {
-    return false;
-  }
-  const stripped = errorData.replace(/<!--[\s\S]*?-->/g, "").trim();
-  if (stripped === "") {
-    return true;
-  }
-  const withoutAppBridge = stripped
-    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
-    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*\/>/gi, "")
-    .replace(/<script[^>]*data-api-key="[^"]*"[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
-    .replace(/<script[^>]*data-api-key="[^"]*"[^>]*><\/script>/gi, "")
-    .trim();
-  if (withoutAppBridge === "") {
-    return true;
-  }
-  const withoutWhitespace = withoutAppBridge.replace(/\s+/g, "");
-  return withoutWhitespace === "";
+export function isEmbeddedAuthBounce(
+  error: unknown
+): error is { status: 200; data: string } {
+  return (
+    isRouteErrorResponse(error) &&
+    error.status === 200 &&
+    typeof error.data === "string"
+  );
 }
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
@@ -42,7 +32,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { shopify, cloudflare } = context;
 
   timing.startPhase("auth_layout");
-  const { admin, session } = await shopify.authenticate.admin(request);
+  const { admin, session, redirect: shopifyRedirect } = await shopify.authenticate.admin(request);
   timing.endPhase("auth_layout");
 
   // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
@@ -50,6 +40,64 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // uninstalledAt and registration) completes BEFORE the page renders.
   // This ensures onboarding shows true state on the first load after reinstall.
   await runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
+
+  // Plan selection redirect: when enabled, redirect merchants without an active
+  // subscription to the Shopify-hosted plan selection page.
+  if (isPlanSelectionRedirectEnabled()) {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    // Skip redirect for /app/welcome - the welcome loader runs in parallel
+    // and its forced refresh may not have completed yet.
+    const isWelcomePath = pathname === "/app/welcome" || pathname.startsWith("/app/welcome/");
+
+    // Check if plan_handle or charge_id key is PRESENT in URL (even if empty).
+    // After picking a plan, merchants land on /app?plan_handle=&charge_id= or
+    // /app/onboarding?plan_handle=&charge_id= with empty values. The presence of
+    // these keys indicates a return from the plan selection flow.
+    const hasPlanParams = url.searchParams.has("plan_handle") || url.searchParams.has("charge_id");
+
+    if (!isWelcomePath) {
+      const appHandle = getAppHandle();
+
+      // Only proceed when APP_HANDLE is configured
+      if (appHandle) {
+        const sql = getRequestSql();
+
+        if (hasPlanParams) {
+          // Return from plan selection flow: force refresh to update cache.
+          // Never redirect - the merchant just completed plan selection.
+          await resolvePlanWithStatus(sql, session.shop, true);
+        } else {
+          // Normal navigation: check subscription status
+          const { plan, status } = await resolvePlanWithStatus(sql, session.shop);
+
+          // Only redirect when status is confirmed "none" (no active subscription).
+          // Do NOT redirect on "error" (lookup failed) or "active" (has subscription).
+          if (status === "none") {
+            // If result came from cache, revalidate to avoid redirecting a subscribed
+            // merchant whose webhook hasn't arrived yet.
+            if (plan.fromCache) {
+              const fresh = await resolvePlanWithStatus(sql, session.shop, true);
+              // Only redirect if fresh lookup still confirms no subscription
+              if (fresh.status === "none") {
+                const pricingUrl = buildPlanSelectionUrl(session.shop, appHandle);
+                if (pricingUrl) {
+                  throw shopifyRedirect(pricingUrl, { target: "_top" });
+                }
+              }
+            } else {
+              // Fresh result already - redirect without second lookup
+              const pricingUrl = buildPlanSelectionUrl(session.shop, appHandle);
+              if (pricingUrl) {
+                throw shopifyRedirect(pricingUrl, { target: "_top" });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   // Log auth_layout timing
   timing.logAllPhases();
@@ -124,7 +172,7 @@ function ReloadingSpinner() {
 }
 
 export function ErrorBoundary() {
-  const routeError = useRouteError();
+  const error = useRouteError();
   const [showFallback, setShowFallback] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
 
@@ -132,10 +180,7 @@ export function ErrorBoundary() {
     if (typeof window === "undefined") {
       return;
     }
-    if (!isRouteErrorResponse(routeError)) {
-      return;
-    }
-    if (!isAppBridgeOnlyOrEmptyResponse(routeError.data)) {
+    if (!isEmbeddedAuthBounce(error)) {
       return;
     }
 
@@ -168,10 +213,10 @@ export function ErrorBoundary() {
 
     setIsReloading(true);
     window.location.reload();
-  }, [routeError]);
+  }, [error]);
 
-  if (typeof window !== "undefined" && isRouteErrorResponse(routeError)) {
-    if (isAppBridgeOnlyOrEmptyResponse(routeError.data)) {
+  if (isEmbeddedAuthBounce(error)) {
+    if (typeof window !== "undefined") {
       if (isReloading) {
         return <ReloadingSpinner />;
       }
@@ -190,9 +235,14 @@ export function ErrorBoundary() {
       }
       return <ReloadingSpinner />;
     }
+    return (
+      <div
+        dangerouslySetInnerHTML={{ __html: error.data || "Handling response" }}
+      />
+    );
   }
 
-  return boundary.error(routeError);
+  throw error;
 }
 
 export const headers: HeadersFunction = (headersArgs) => {

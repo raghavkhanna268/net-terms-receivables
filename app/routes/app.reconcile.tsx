@@ -579,7 +579,7 @@ function PaymentDetailView({
           <s-text type="strong">Value Date: </s-text>
           <s-text>
             {new Date(payment.valueDate).toLocaleDateString("en-IN", {
-              timeZone: "Asia/Kolkata",
+              timeZone: "UTC",
             })}
           </s-text>
         </s-paragraph>

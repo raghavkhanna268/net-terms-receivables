@@ -35,6 +35,7 @@ import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import { buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { enqueueReconcileStage } from "~/services/drain/reconcile-handlers.server";
+import { validateTimezone } from "~/lib/aging-dates.server";
 
 /**
  * Check if a character is forbidden in Shopify tags.
@@ -71,6 +72,7 @@ interface LoaderData {
   storeMode: StoreMode;
   tagRules: TagRule[];
   shopId: string | null;
+  shopTimezone: string;
   error: string | null;
   finishingSetup: boolean;
   notSupported: boolean;
@@ -187,10 +189,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; currency: string | null }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null; timezone: string | null }[]>`
+    SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
+  const shopTimezone = validateTimezone(shop?.timezone);
   const storeSetupStatus = getStoreSetupStatus(shop);
 
   if (storeSetupStatus !== "supported") {
@@ -198,6 +201,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       storeMode: "tag_based" as StoreMode,
       tagRules: [],
       shopId: shop?.id ?? null,
+      shopTimezone,
       error: null,
       finishingSetup: storeSetupStatus === "setting_up",
       notSupported: storeSetupStatus === "not_supported",
@@ -251,6 +255,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       storeMode,
       tagRules,
       shopId: shop.id,
+      shopTimezone,
       error: null,
       finishingSetup: false,
       notSupported: false,
@@ -267,6 +272,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       storeMode: "tag_based" as StoreMode,
       tagRules: [],
       shopId: shop.id,
+      shopTimezone,
       error: "Failed to load tag rules",
       finishingSetup: false,
       notSupported: false,
@@ -487,7 +493,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 };
 
-function TagRuleTable({ rules }: { rules: TagRule[] }) {
+function TagRuleTable({ rules, shopTimezone }: { rules: TagRule[]; shopTimezone: string }) {
   if (rules.length === 0) {
     return (
       <s-empty-state heading="No tag rules configured">
@@ -515,7 +521,7 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
             <s-table-cell>Net {rule.defaultTermsDays} days</s-table-cell>
             <s-table-cell>
               {new Date(rule.createdAt).toLocaleDateString("en-IN", {
-                timeZone: "Asia/Kolkata",
+                timeZone: shopTimezone,
               })}
             </s-table-cell>
           </s-table-row>
@@ -526,7 +532,7 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
 }
 
 export default function TagRulesPage() {
-  const { storeMode, tagRules, error, finishingSetup, notSupported, newAccountsPausedBanner } = useLoaderData<typeof loader>();
+  const { storeMode, tagRules, error, finishingSetup, notSupported, shopTimezone, newAccountsPausedBanner } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -687,7 +693,7 @@ export default function TagRulesPage() {
       </s-section>
 
       <s-section heading="Existing Tag Rules">
-        <TagRuleTable rules={tagRules} />
+        <TagRuleTable rules={tagRules} shopTimezone={shopTimezone} />
       </s-section>
 
       <s-section slot="aside" heading="About Tag Rules">
