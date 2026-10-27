@@ -61,11 +61,32 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const inFlightRefreshes = new Map<string, Promise<void>>();
 
 /**
+ * In-flight forced refresh promises by shop ID for resolvePlanForDisplay.
+ * Lets concurrent forced calls share one request. Entry is deleted on settle.
+ */
+const inFlightForcedRefreshes = new Map<string, Promise<ResolvedPlan>>();
+
+/**
+ * Last attempt timestamp by shop ID for resolvePlanForDisplay.
+ * Prevents repeated retries when Shopify is erroring.
+ */
+const lastAttemptByShopId = new Map<string, number>();
+
+/**
  * Reset in-flight refreshes map - only for testing purposes.
  * @internal
  */
 export function _resetInFlightRefreshesForTesting(): void {
   inFlightRefreshes.clear();
+}
+
+/**
+ * Reset forced refresh tracking maps - only for testing purposes.
+ * @internal
+ */
+export function _resetForcedRefreshTrackingForTesting(): void {
+  inFlightForcedRefreshes.clear();
+  lastAttemptByShopId.clear();
 }
 
 /**
@@ -396,6 +417,95 @@ export async function resolvePlan(
     isTest: result.isTest,
     fromCache: result.fromCache,
   };
+}
+
+/**
+ * Options for resolvePlanForDisplay.
+ */
+export interface ResolvePlanForDisplayOptions {
+  minAgeMs?: number;
+  now?: () => number;
+}
+
+/**
+ * Resolve the current plan for display on the Plan page.
+ *
+ * This function is designed for the Plan page loader to show up-to-date
+ * plan information when a merchant returns after changing plans. It
+ * performs a forced refresh when the cached plan is stale.
+ *
+ * Design:
+ * - If no cached row exists, delegates to existing resolvePlan path
+ * - If cache is fresh (younger than minAgeMs), returns cached plan immediately
+ * - If cache is stale, performs forced Admin call and returns fresh result
+ * - On fetch failure, returns cached plan (fail-to-cached, never lowers tier)
+ * - Deduplicates concurrent calls to avoid multiple Admin calls
+ * - Skips retry attempts within minAgeMs after a failed fetch
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
+ * @param options - Configuration options
+ * @param options.minAgeMs - Minimum cache age in ms before forcing refresh (default: 60000)
+ * @param options.now - Function returning current time in ms (for testing)
+ * @returns Resolved plan with metadata
+ */
+export async function resolvePlanForDisplay(
+  sql: Sql,
+  shopDomain: string,
+  { minAgeMs = 60_000, now = Date.now }: ResolvePlanForDisplayOptions = {}
+): Promise<ResolvedPlan> {
+  const shopId = await getShopId(sql, shopDomain);
+  if (!shopId) {
+    return resolvePlan(sql, shopDomain);
+  }
+
+  const cachedPlan = await getCachedPlan(sql, shopId);
+  if (!cachedPlan) {
+    return resolvePlan(sql, shopDomain);
+  }
+
+  const currentTime = now();
+  const cacheAge = currentTime - cachedPlan.cachedAt.getTime();
+
+  if (cacheAge < minAgeMs) {
+    return {
+      plan: getPlanConfig(cachedPlan.planKey),
+      subscriptionId: cachedPlan.subscriptionId,
+      subscriptionName: cachedPlan.subscriptionName,
+      isTest: cachedPlan.isTest,
+      fromCache: true,
+    };
+  }
+
+  const existingPromise = inFlightForcedRefreshes.get(shopId);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const lastAttempt = lastAttemptByShopId.get(shopId);
+  if (lastAttempt !== undefined && currentTime - lastAttempt < minAgeMs) {
+    return {
+      plan: getPlanConfig(cachedPlan.planKey),
+      subscriptionId: cachedPlan.subscriptionId,
+      subscriptionName: cachedPlan.subscriptionName,
+      isTest: cachedPlan.isTest,
+      fromCache: true,
+    };
+  }
+
+  lastAttemptByShopId.set(shopId, currentTime);
+
+  const refreshPromise = (async (): Promise<ResolvedPlan> => {
+    try {
+      const result = await _resolveFromAdminInstallation(sql, shopDomain, true);
+      return result;
+    } finally {
+      inFlightForcedRefreshes.delete(shopId);
+    }
+  })();
+
+  inFlightForcedRefreshes.set(shopId, refreshPromise);
+  return refreshPromise;
 }
 
 /**

@@ -10,7 +10,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { resolvePlan, type ResolvedPlan } from "~/services/plan.server";
+import { resolvePlanForDisplay, type ResolvedPlan } from "~/services/plan.server";
 import {
   getUsageStats,
   getGatedAccountCount,
@@ -46,7 +46,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     try {
       // Always call getUsageStats for usage display. Only skip getGatedAccountCount when flag off.
       const results = await Promise.all([
-        resolvePlan(sql, shopDomain),
+        resolvePlanForDisplay(sql, shopDomain),
         getUsageStats(sql, shop.id).catch((err) => {
           safeLog("warn", "usage_stats_error", { shopId: shop.id, err: toErrorCode(err) });
           return null;
