@@ -253,9 +253,12 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
 
   describe("2. Account page loader returns the account", () => {
     it("loader returns account with correct id and name", async () => {
+      const { requestContext } = await import("~/lib/request-context.server");
       const { loader } = await import("../app.accounts.$id");
 
-      const result = await loader(createLoaderArgs(`/app/accounts/${BUYER_ID}`, { id: BUYER_ID }) as never);
+      const result = await requestContext.run({ getSql: () => sql }, async () => {
+        return loader(createLoaderArgs(`/app/accounts/${BUYER_ID}`, { id: BUYER_ID }) as never);
+      });
       const data = extractLoaderResult<{
         account: { id: string; name: string; isGated: boolean } | null;
         error: string | null;
@@ -270,9 +273,12 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
 
   describe("3. Edit Credit Settings control is present", () => {
     it("account.isGated=false means Edit Credit Settings section renders", async () => {
+      const { requestContext } = await import("~/lib/request-context.server");
       const { loader } = await import("../app.accounts.$id");
 
-      const result = await loader(createLoaderArgs(`/app/accounts/${BUYER_ID}`, { id: BUYER_ID }) as never);
+      const result = await requestContext.run({ getSql: () => sql }, async () => {
+        return loader(createLoaderArgs(`/app/accounts/${BUYER_ID}`, { id: BUYER_ID }) as never);
+      });
       const data = extractLoaderResult<{
         account: { id: string; name: string; isGated: boolean } | null;
         creditStatus: { manualHold: boolean } | null;
@@ -302,9 +308,12 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
 
   describe("4. Manual hold control toggles hold on and off", () => {
     it("manual hold checkbox is present with label 'Place manual hold on this account'", async () => {
+      const { requestContext } = await import("~/lib/request-context.server");
       const { loader } = await import("../app.accounts.$id");
 
-      const result = await loader(createLoaderArgs(`/app/accounts/${BUYER_ID}`, { id: BUYER_ID }) as never);
+      const result = await requestContext.run({ getSql: () => sql }, async () => {
+        return loader(createLoaderArgs(`/app/accounts/${BUYER_ID}`, { id: BUYER_ID }) as never);
+      });
       const data = extractLoaderResult<{
         account: { id: string; name: string; isGated: boolean } | null;
         creditStatus: { manualHold: boolean } | null;
@@ -329,20 +338,23 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
     });
 
     it("action toggles manualHold ON", async () => {
+      const { requestContext } = await import("~/lib/request-context.server");
       const { action } = await import("../app.accounts.$id");
 
-      const result = await action(
-        createActionArgs(
-          `/app/accounts/${BUYER_ID}`,
-          {
-            _action: "updateCredit",
-            creditLimit: "50000",
-            manualHold: "true",
-            holdReasonCode: "MANUAL_HOLD",
-          },
-          { id: BUYER_ID }
-        ) as never
-      );
+      const result = await requestContext.run({ getSql: () => sql }, async () => {
+        return action(
+          createActionArgs(
+            `/app/accounts/${BUYER_ID}`,
+            {
+              _action: "updateCredit",
+              creditLimit: "50000",
+              manualHold: "true",
+              holdReasonCode: "MANUAL_HOLD",
+            },
+            { id: BUYER_ID }
+          ) as never
+        );
+      });
 
       const data = extractActionResult<{ success: boolean; error?: string }>(result);
       expect(data.success).toBe(true);
@@ -355,19 +367,22 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
     });
 
     it("action toggles manualHold OFF", async () => {
+      const { requestContext } = await import("~/lib/request-context.server");
       const { action } = await import("../app.accounts.$id");
 
-      const result = await action(
-        createActionArgs(
-          `/app/accounts/${BUYER_ID}`,
-          {
-            _action: "updateCredit",
-            creditLimit: "50000",
-            manualHold: "",
-          },
-          { id: BUYER_ID }
-        ) as never
-      );
+      const result = await requestContext.run({ getSql: () => sql }, async () => {
+        return action(
+          createActionArgs(
+            `/app/accounts/${BUYER_ID}`,
+            {
+              _action: "updateCredit",
+              creditLimit: "50000",
+              manualHold: "",
+            },
+            { id: BUYER_ID }
+          ) as never
+        );
+      });
 
       const data = extractActionResult<{ success: boolean; error?: string }>(result);
       expect(data.success).toBe(true);
