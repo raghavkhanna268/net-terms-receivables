@@ -286,21 +286,11 @@ describeWithDb("redactCustomer queue cleanup", () => {
   });
 
   it("3. shopId with no Shop row: no throw, counts 0/0/0, redaction still runs", async () => {
-    const fakeShopId = `fake-shop-${SUFFIX}`;
-
-    await sqlRef`
-      INSERT INTO "BuyerAccount" (
-        "shopId", kind, name, "customerId", "createdAt", "updatedAt"
-      ) VALUES (
-        ${SHOP_A.id}, 'TAGGED_CUSTOMER', 'Test Buyer', ${CUSTOMER_X_GID}, NOW(), NOW()
-      )
-    `;
-    await sqlRef`
-      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active)
-      VALUES (${SHOP_A.id}, ${CUSTOMER_X_GID}, '["net-terms"]'::jsonb, true)
-    `;
+    const accountId = await seedTaggedCustomerForRedaction();
 
     const { redactCustomer } = await import("../compliance.server");
+
+    const fakeShopId = `fake-shop-${SUFFIX}`;
 
     let error: Error | null = null;
     let result;
@@ -315,15 +305,19 @@ describeWithDb("redactCustomer queue cleanup", () => {
     expect(result!.pgmqSyncArchivePurged).toBe(0);
     expect(result!.deadLetterPurged).toBe(0);
 
-    const [account] = await sqlRef<[{ name: string }?]>`
-      SELECT name FROM "BuyerAccount" WHERE "shopId" = ${SHOP_A.id} AND "customerId" = ${CUSTOMER_X_GID}
+    const [accountStillExists] = await sqlRef<[{ name: string }?]>`
+      SELECT name FROM "BuyerAccount" WHERE id = ${accountId}
     `;
-    expect(account).toBeUndefined();
+    expect(accountStillExists).toBeDefined();
 
-    const [tagged] = await sqlRef<[{ shop_id: string }?]>`
-      SELECT shop_id FROM s8_tagged_customers WHERE shop_id = ${SHOP_A.id} AND customer_id = ${CUSTOMER_X_GID}
+    const result2 = await redactCustomer(sqlRef, SHOP_A.id, CUSTOMER_X_GID);
+    expect(result2.buyerAccountAnonymized).toBe(true);
+
+    const [accountAnonymized] = await sqlRef<[{ name: string; customerId: string }?]>`
+      SELECT name, "customerId" FROM "BuyerAccount" WHERE id = ${accountId}
     `;
-    expect(tagged).toBeUndefined();
+    expect(accountAnonymized?.name).toBe("Redacted Customer");
+    expect(accountAnonymized?.customerId).toContain("_redacted_");
   });
 });
 
