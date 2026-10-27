@@ -90,6 +90,7 @@ describeWithDb("s18_enqueue_reminders Part 5: next-morning catch-up (DB)", () =>
 
   beforeEach(async () => {
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${TEST_SHOP_ID}`;
@@ -98,6 +99,8 @@ describeWithDb("s18_enqueue_reminders Part 5: next-morning catch-up (DB)", () =>
   });
 
   afterEach(async () => {
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
@@ -649,6 +652,7 @@ describeWithDb("s18_enqueue_reminders Part 5: next-morning catch-up (DB)", () =>
         }
       } finally {
         await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${istShopDomain}`;
+        await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${istShopDomain}`;
         await sql`DELETE FROM "Invoice" WHERE "shopId" = ${istShopId}`;
         await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${istShopId}`;
         await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${istShopId}`;
@@ -739,6 +743,7 @@ describeWithDb("s18_enqueue_reminders Part 5: next-morning catch-up (DB)", () =>
         }
       } finally {
         await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${nyShopDomain}`;
+        await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${nyShopDomain}`;
         await sql`DELETE FROM "Invoice" WHERE "shopId" = ${nyShopId}`;
         await sql`DELETE FROM s8_tagged_customers WHERE shop_id = ${nyShopId}`;
         await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${nyShopId}`;
