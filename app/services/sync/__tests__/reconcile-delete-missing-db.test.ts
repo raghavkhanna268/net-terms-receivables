@@ -16,11 +16,12 @@
  *
  * Uses native PostgreSQL with all migrations applied.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { closeMissingDraftOrders, getPendingExposure } from "../draft-order.server";
 import { deactivateMissingTaggedCustomers } from "../customer.server";
+import * as creditRecompute from "~/services/credit-status-recompute.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -537,6 +538,97 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
 
       expect(exposure).toBe("12000.00");
+    });
+  });
+
+  describe("Status pins: getPendingExposure counts by status", () => {
+    it("counts 'open' status in exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/pin-open-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
+        VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-OPEN', '1000.00', true, 'open', NOW(), NOW())
+      `;
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe("1000.00");
+    });
+
+    it("counts 'invoice_sent' status in exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/pin-sent-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
+        VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-SENT', '2000.00', true, 'invoice_sent', NOW(), NOW())
+      `;
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe("2000.00");
+    });
+
+    it("excludes 'completed' status from exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/pin-completed-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
+        VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-COMPLETED', '3000.00', true, 'completed', NOW(), NOW())
+      `;
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe("0.00");
+    });
+
+    it("excludes 'closed' status from exposure", async () => {
+      const draftId = `gid://shopify/DraftOrder/pin-closed-${TEST_SUFFIX}`;
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
+        VALUES (${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#PIN-CLOSED', '4000.00', true, 'closed', NOW(), NOW())
+      `;
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+      expect(exposure).toBe("0.00");
+    });
+  });
+
+  describe("Transaction rollback: enqueue failure rolls back close", () => {
+    it("drafts stay open when flagAccountsForRecompute throws (transaction rollback)", async () => {
+      const draftId = `gid://shopify/DraftOrder/tx-rollback-${TEST_SUFFIX}`;
+      
+      await sql`
+        INSERT INTO s8_draft_orders (
+          shop_id, draft_order_id, buyer_account_id, name, total,
+          has_payment_terms, status, created_at, updated_at, last_seen_bulk_op_id
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${draftId}, ${TEST_ACCOUNT_ID}, '#TX-ROLLBACK', '1000.00',
+          true, 'open', NOW(), NOW(), ${OLD_BULK_OP_ID}
+        )
+      `;
+
+      const flagSpy = vi.spyOn(creditRecompute, "flagAccountsForRecompute")
+        .mockRejectedValueOnce(new Error("Simulated enqueue failure"));
+
+      let errorThrown = false;
+      try {
+        await sql.begin(async (tx) => {
+          const { closedCount, affectedAccountIds } = await closeMissingDraftOrders(
+            tx,
+            TEST_SHOP_ID,
+            CURRENT_BULK_OP_ID
+          );
+          if (closedCount > 0 && affectedAccountIds.length > 0) {
+            await creditRecompute.flagAccountsForRecompute(
+              sql,
+              TEST_SHOP_DOMAIN,
+              affectedAccountIds,
+              tx
+            );
+          }
+        });
+      } catch {
+        errorThrown = true;
+      }
+
+      expect(errorThrown).toBe(true);
+
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM s8_draft_orders WHERE draft_order_id = ${draftId}
+      `;
+      expect(row.status).toBe("open");
+
+      flagSpy.mockRestore();
     });
   });
 });

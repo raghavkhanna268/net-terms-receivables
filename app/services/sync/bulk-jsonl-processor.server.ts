@@ -227,20 +227,25 @@ async function handleReconcileDeleteMissing(
 
     // All guards passed - perform delete-missing action
     if (reconcileStage === "draft_orders") {
-      const { closedCount, affectedAccountIds } = await closeMissingDraftOrders(
-        sql,
-        shopId,
-        bulkOperationId
-      );
-      if (closedCount > 0) {
+      // v1.1: Run close + enqueue in a single transaction so a failed enqueue
+      // rolls back the close, preventing closed drafts without queued recompute.
+      const result = await sql.begin(async (tx) => {
+        const { closedCount, affectedAccountIds } = await closeMissingDraftOrders(
+          tx,
+          shopId,
+          bulkOperationId
+        );
+        if (closedCount > 0 && affectedAccountIds.length > 0) {
+          await flagAccountsForRecompute(sql, shop, affectedAccountIds, tx);
+        }
+        return { closedCount, affectedAccountIds };
+      });
+      if (result.closedCount > 0) {
         const hash = await shopHash(shop);
         safeLog("info", "reconcile_draft_orders_closed_missing", {
           shopHash: hash,
-          count: closedCount,
+          count: result.closedCount,
         });
-        if (affectedAccountIds.length > 0) {
-          await flagAccountsForRecompute(sql, shop, affectedAccountIds);
-        }
       }
     } else if (reconcileStage === "customers") {
       const deactivatedCount = await deactivateMissingTaggedCustomers(
