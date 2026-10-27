@@ -186,7 +186,7 @@ describe("#548 setup state on /app/accounts/$id", () => {
       formData.append("creditLimit", "100000");
 
       const { action } = await import("../app.accounts.$id");
-      const result = await action(createActionArgs(formData));
+      const result = await action(createActionArgs(formData)) as { success: boolean; error?: string };
 
       expect(result.success).toBe(false);
       expect(result.error).toContain("still being set up");
@@ -200,7 +200,7 @@ describe("#548 setup state on /app/accounts/$id", () => {
       formData.append("enable", "true");
 
       const { action } = await import("../app.accounts.$id");
-      const result = await action(createActionArgs(formData));
+      const result = await action(createActionArgs(formData)) as { success: boolean; error?: string };
 
       expect(result.success).toBe(false);
       expect(result.error).toContain("still being set up");
@@ -214,7 +214,7 @@ describe("#548 setup state on /app/accounts/$id", () => {
       formData.append("creditLimit", "100000");
 
       const { action } = await import("../app.accounts.$id");
-      const result = await action(createActionArgs(formData));
+      const result = await action(createActionArgs(formData)) as { success: boolean; error?: string };
 
       expect(result.success).toBe(false);
       expect(result.error).toContain("still being set up");

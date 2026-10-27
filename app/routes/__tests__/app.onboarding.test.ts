@@ -47,6 +47,7 @@ interface LoaderStep {
  */
 interface LoaderResult {
   error: string | null;
+  settingUp?: boolean;
   state: {
     steps: LoaderStep[];
     isComplete: boolean;
