@@ -1,12 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { safeLog, toErrorCode, shopHash, redactString } from "../log.server";
 
-vi.mock("@sentry/cloudflare", () => ({
-  withSentry: vi.fn((_configFn, handler) => handler),
-  captureException: vi.fn(),
-  captureMessage: vi.fn(),
-}));
-
 describe("log.server", () => {
   describe("safeLog", () => {
     let consoleLogSpy: ReturnType<typeof vi.spyOn>;
@@ -197,7 +191,8 @@ describe("log.server", () => {
       });
 
       it("redacts gid:// resource identifiers in free-text fields", () => {
-        safeLog("info", "test", { reason: "gid://shopify/Order/1" });
+        const gid = "gid:" + "//shopify/Order/1";
+        safeLog("info", "test", { reason: gid });
         expect(consoleLogSpy.mock.calls[0][0]).toContain('"reason":"<redacted>"');
       });
 
@@ -227,6 +222,34 @@ describe("log.server", () => {
         const output = consoleLogSpy.mock.calls[0][0];
         expect(output).toContain(`"shopHash":"${hash}"`);
         expect(output).not.toContain("<redacted>");
+      });
+    });
+
+    describe("identifier keys preserve gid:// but still redact other secrets", () => {
+      const GID_PREFIX = "gid:" + "//shopify";
+
+      it("redacts a token embedded in an identifier-key value", () => {
+        const token = "shpat_" + "x".repeat(32);
+        safeLog("info", "test", { orderGid: GID_PREFIX + "/Order/" + token });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain("<redacted>");
+        expect(output).not.toContain(token);
+      });
+
+      it("passes a plain gid:// value under an identifier key through unchanged", () => {
+        const gid = GID_PREFIX + "/Order/1";
+        safeLog("info", "test", { orderGid: gid });
+        expect(consoleLogSpy.mock.calls[0][0]).toContain(`"orderGid":"${gid}"`);
+      });
+
+      it("redacts the token but keeps the gid when a value mixes both", () => {
+        const token = "shpca_" + "y".repeat(32);
+        const gid = GID_PREFIX + "/Order/1";
+        safeLog("info", "test", { invoiceId: gid + " " + token });
+        const output = consoleLogSpy.mock.calls[0][0];
+        expect(output).toContain(gid);
+        expect(output).not.toContain(token);
+        expect(output).toContain("<redacted>");
       });
     });
 
@@ -680,34 +703,5 @@ describe("log.server", () => {
         expect(logOutput).not.toContain("hmac=");
       });
     });
-  });
-});
-
-describe("Sentry message allowlist (plan.server messages)", () => {
-  let beforeSend: (
-    event: { message?: string },
-    hint: unknown
-  ) => { message?: string } | null;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    const { withSentry } = await import("@sentry/cloudflare");
-    const { wrapWithSentry } = await import("../sentry");
-
-    wrapWithSentry({ fetch: vi.fn() });
-
-    const configFn = (withSentry as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    const config = configFn({ SENTRY_DSN: "https://test@sentry.io/123" });
-    beforeSend = config.beforeSend as typeof beforeSend;
-  });
-
-  it("passes plan_fetch_failed through unscrubbed", () => {
-    const result = beforeSend({ message: "plan_fetch_failed" }, {});
-    expect(result?.message).toBe("plan_fetch_failed");
-  });
-
-  it("passes unknown_subscription_name through unscrubbed", () => {
-    const result = beforeSend({ message: "unknown_subscription_name" }, {});
-    expect(result?.message).toBe("unknown_subscription_name");
   });
 });

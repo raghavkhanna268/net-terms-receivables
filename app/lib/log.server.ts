@@ -211,8 +211,11 @@ function redactValue(value: unknown, key: string): unknown {
       if (isSensitiveValue(value)) {
         return REDACTED;
       }
+      // Identifier keys may legitimately carry gid:// resource identifiers, so
+      // keep those; every other redaction (tokens anywhere in the value, HMAC,
+      // emails, domains, ...) still applies.
       if (IDENTIFIER_VALUE_KEY_PATTERN.test(key)) {
-        return value;
+        return applyStringRedactions(value, { redactGid: false });
       }
       return redactString(value);
     }
@@ -319,7 +322,15 @@ function redactFields(fields: Record<string, unknown>): Record<string, unknown> 
  * Redact a string, replacing sensitive patterns.
  * Used for error messages and other free-text strings.
  */
-export function redactString(str: string): string {
+/**
+ * Apply the string-value redaction rules.
+ *
+ * @param str - The string to redact.
+ * @param redactGid - When false, `gid://` identifiers are left intact (used for
+ *   identifier keys that legitimately carry resource gids). All other rules
+ *   (tokens anywhere in the value, HMAC, emails, domains, ...) always apply.
+ */
+function applyStringRedactions(str: string, { redactGid }: { redactGid: boolean }): string {
   let result = str;
   result = result.replace(/[a-z0-9-]+\.myshopify\.com/gi, REDACTED);
   result = result.replace(/Bearer\s+\S+/gi, REDACTED);
@@ -328,12 +339,18 @@ export function redactString(str: string): string {
   result = result.replace(/shpss_\S+/gi, REDACTED);
   result = result.replace(/shpca_\S+/gi, REDACTED);
   result = result.replace(/shppa_\S+/gi, REDACTED);
-  result = result.replace(/gid:\/\/\S+/gi, REDACTED);
+  if (redactGid) {
+    result = result.replace(/gid:\/\/\S+/gi, REDACTED);
+  }
   result = result.replace(/\b[a-f0-9]{64}\b/gi, REDACTED);
   result = result.replace(/\b[a-f0-9]{40}\b/gi, REDACTED);
   result = result.replace(/[A-Za-z0-9+/]{43}=/g, REDACTED);
   result = result.replace(/[^\s"']+@[^\s"']+/g, REDACTED);
   return result;
+}
+
+export function redactString(str: string): string {
+  return applyStringRedactions(str, { redactGid: true });
 }
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
