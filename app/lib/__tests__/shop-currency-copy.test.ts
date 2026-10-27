@@ -8,9 +8,9 @@ import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "../shop-currency-copy";
 
 describe("shop-currency-copy", () => {
   describe("CURRENCY_NOT_SUPPORTED_BANNER_COPY", () => {
-    it("contains instruction to reload and open Setup Guide", () => {
+    it("contains instruction to reopen and open Setup Guide", () => {
       expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain(
-        "Then reload this page. To start syncing your data, open the Setup Guide and click Start sync."
+        "Then reopen the app. To start syncing your data, open the Setup Guide and click Start sync."
       );
     });
 
@@ -20,7 +20,7 @@ describe("shop-currency-copy", () => {
         "To use it, the store owner must change the store currency to Indian Rupee (INR) in " +
         "Shopify admin → Settings → General → Store defaults → Currency display → ⋯ → Change store currency. " +
         "If your store already has orders, Shopify asks you to confirm the change. " +
-        "Then reload this page. To start syncing your data, open the Setup Guide and click Start sync."
+        "Then reopen the app. To start syncing your data, open the Setup Guide and click Start sync."
       );
     });
   });

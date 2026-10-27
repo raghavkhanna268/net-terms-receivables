@@ -164,6 +164,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/tenant-isolation.test.ts",
 
   // Lib DB tests
+  "app/lib/__tests__/billing-plan-db.test.ts",
   "app/lib/__tests__/after-auth-db.test.ts",
   "app/lib/__tests__/after-auth-syncshopinfo-db.test.ts",
   "app/lib/__tests__/aging-reconcile.test.ts",
@@ -172,12 +173,16 @@ const DB_TEST_PATTERNS = [
   "app/lib/__tests__/offline-token.test.ts",
   "app/lib/__tests__/reinstall-sync-reset-db.test.ts",
   "app/lib/__tests__/schema-trigger-guard-db.test.ts",
+  "app/lib/__tests__/uninstall-lifecycle-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
   // Bank import edge-case DB tests
   "app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts",
 
   // Script DB tests
+  // G4 fixture (and any future scripts/__tests__ DB test): runs sequentially
+  // against the real Postgres/pgmq like the other DB-backed suites.
+  "scripts/__tests__/*-db.test.ts",
   "scripts/__tests__/seed.test.ts",
   "scripts/__tests__/backstop-backfill.test.ts",
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
@@ -204,6 +209,12 @@ const DB_TEST_PATTERNS = [
 
   // Confirm concurrency lock DB tests
   "tests/integration/confirm-concurrency-lock-db.test.ts",
+
+  // Embedded admin scale and N+1 tests
+  "tests/integration/embedded-admin-scale-db.test.ts",
+
+  // Cross-shop (tenant) isolation DB tests
+  "tests/integration/tenant-isolation-db.test.ts",
 ];
 
 export default defineConfig({
