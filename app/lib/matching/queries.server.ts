@@ -224,6 +224,7 @@ export async function getBuyersWithAliases(
   shopId: string
 ): Promise<BuyerForScoring[]> {
   // Get all buyers (gating applies only to value-add actions, not matching)
+  // ORDER BY createdAt, id ensures deterministic iteration order for name-tie-breaking
   const buyers = await sql<BuyerRow[]>`
     SELECT
       ba.id,
@@ -232,6 +233,7 @@ export async function getBuyersWithAliases(
     FROM "BuyerAccount" ba
     LEFT JOIN "s8_tagged_customers" tc ON tc."shop_id" = ba."shopId" AND tc."customer_id" = ba."customerId"
     WHERE ba."shopId" = ${shopId}
+    ORDER BY ba."createdAt", ba.id
   `;
 
   if (buyers.length === 0) {
