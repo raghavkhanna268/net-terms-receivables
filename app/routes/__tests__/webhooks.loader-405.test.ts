@@ -63,18 +63,32 @@ describe("webhooks.* loader 405 responses", () => {
     });
   });
 
-  it("guard: all webhooks.* routes in app/routes have a loader export", () => {
+  it("guard: all webhooks.* routes on disk are covered by test tables", () => {
     const routesDir = path.resolve(__dirname, "..");
     const files = fs.readdirSync(routesDir);
 
-    const webhookFiles = files.filter(
-      (f) => f.startsWith("webhooks.") && f.endsWith(".tsx")
+    const webhookFiles = files
+      .filter((f) => f.startsWith("webhooks.") && f.endsWith(".tsx"))
+      .map((f) => f.replace(/\.tsx$/, ""));
+
+    const uncovered = webhookFiles.filter(
+      (routeName) => !ALL_WEBHOOK_ROUTES.includes(routeName as (typeof ALL_WEBHOOK_ROUTES)[number])
     );
+
+    expect(
+      uncovered,
+      `The following webhooks.* routes are not in NEW_LOADER_ROUTES or EXISTING_LOADER_ROUTES: ${uncovered.join(", ")}. ` +
+        `Add new webhook routes to the appropriate list and ensure they export a 405 loader.`
+    ).toEqual([]);
+  });
+
+  it("guard: all webhooks.* routes have a loader export", () => {
+    const routesDir = path.resolve(__dirname, "..");
 
     const missingLoader: string[] = [];
 
-    for (const file of webhookFiles) {
-      const filePath = path.join(routesDir, file);
+    for (const routeName of ALL_WEBHOOK_ROUTES) {
+      const filePath = path.join(routesDir, `${routeName}.tsx`);
       const content = fs.readFileSync(filePath, "utf-8");
 
       const hasLoaderExport =
@@ -83,7 +97,7 @@ describe("webhooks.* loader 405 responses", () => {
         content.includes("export function loader");
 
       if (!hasLoaderExport) {
-        missingLoader.push(file);
+        missingLoader.push(routeName);
       }
     }
 
