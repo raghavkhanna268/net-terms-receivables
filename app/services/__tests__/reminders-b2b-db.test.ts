@@ -435,7 +435,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
       }
     });
 
-    it("falls back to Customer when both mainContactName and name are NULL", async () => {
+    it("falls back to Customer when mainContactName is NULL and name is empty", async () => {
       const { sendPaymentReminder } = await import("../reminders.server");
       const validEnv = {
         RESEND_API_KEY: "re_test_1234",
@@ -447,7 +447,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
 
       await sql`
         UPDATE "BuyerAccount"
-        SET "mainContactName" = NULL, name = NULL
+        SET "mainContactName" = NULL, name = ''
         WHERE id = ${B2B_ACCOUNT_ID}
       `;
 
