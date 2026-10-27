@@ -28,17 +28,17 @@
 
 import type { ActionFunctionArgs } from "react-router";
 import { safeLog } from "~/lib/log.server";
+import {
+  MAX_METRICS,
+  VALUE_BOUNDS,
+  type BoundedMetricName,
+} from "~/lib/web-vitals-bounds";
 
 /**
  * Maximum request body size in bytes (4 KB).
  * A typical report has 1-3 metrics, ~200 bytes total.
  */
 const MAX_BODY_SIZE = 4096;
-
-/**
- * Maximum metrics per request.
- */
-const MAX_METRICS = 10;
 
 /**
  * Allowed metric names (Core Web Vitals only).
@@ -50,18 +50,6 @@ const ALLOWED_NAMES = new Set(["LCP", "CLS", "INP"]);
  * Only alphanumeric, underscore, and hyphen allowed in segments.
  */
 const ROUTE_PATTERN = /^\/app(\/[A-Za-z0-9_-]+)*$/;
-
-/**
- * Value bounds per metric type.
- * - LCP: 0 to 60,000 ms (60 seconds max, way beyond poor threshold)
- * - CLS: 0 to 10 (scores above 1 are extremely poor, 10 is sanity cap)
- * - INP: 0 to 30,000 ms (30 seconds max)
- */
-const VALUE_BOUNDS: Record<string, { min: number; max: number }> = {
-  LCP: { min: 0, max: 60000 },
-  CLS: { min: 0, max: 10 },
-  INP: { min: 0, max: 30000 },
-};
 
 /**
  * Google's Web Vitals thresholds for rating computation.
@@ -147,7 +135,7 @@ function validateMetric(
     return `metrics[${index}].value: not a finite number`;
   }
 
-  const bounds = VALUE_BOUNDS[m.name];
+  const bounds = VALUE_BOUNDS[m.name as BoundedMetricName];
   if (m.value < bounds.min || m.value > bounds.max) {
     return `metrics[${index}].value: out of bounds`;
   }
