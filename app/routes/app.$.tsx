@@ -7,7 +7,7 @@
  */
 
 import type { LoaderFunctionArgs } from "react-router";
-import { Link, data } from "react-router";
+import { data } from "react-router";
 
 export const loader = async (_args: LoaderFunctionArgs) => {
   throw data(null, { status: 404 });
@@ -21,9 +21,7 @@ export function ErrorBoundary() {
           <s-text slot="subheading">
             The page you are looking for could not be found.
           </s-text>
-          <Link to="/app">
-            <s-button variant="primary">Go to app home</s-button>
-          </Link>
+          <s-button variant="primary" href="/app">Go to app home</s-button>
         </s-empty-state>
       </s-section>
     </s-page>

@@ -55,7 +55,7 @@ describe("Catch-all Route (app.$)", () => {
     expect(emptyState.props.heading).toBe("Page not found");
   });
 
-  it("ErrorBoundary contains link to /app", async () => {
+  it("ErrorBoundary contains s-button with href to /app", async () => {
     const { ErrorBoundary } = await import("../app.$");
 
     const result = ErrorBoundary();
@@ -64,18 +64,16 @@ describe("Catch-all Route (app.$)", () => {
     const emptyState = section.props.children;
     const children = emptyState.props.children;
 
-    const linkChild = Array.isArray(children)
-      ? children.find((c: { type?: { name?: string; displayName?: string } }) => c?.type?.name === "Link" || c?.type?.displayName === "Link")
-      : (children?.type as { name?: string; displayName?: string })?.name === "Link" || (children?.type as { name?: string; displayName?: string })?.displayName === "Link"
+    const buttonChild = Array.isArray(children)
+      ? children.find((c: { type?: string }) => c?.type === "s-button")
+      : children?.type === "s-button"
       ? children
       : null;
 
-    expect(linkChild).toBeDefined();
-    expect(linkChild.props.to).toBe("/app");
-
-    const button = linkChild.props.children;
-    expect(button.type).toBe("s-button");
-    expect(button.props.variant).toBe("primary");
-    expect(button.props.children).toContain("app home");
+    expect(buttonChild).toBeTruthy();
+    expect(buttonChild.type).toBe("s-button");
+    expect(buttonChild.props.variant).toBe("primary");
+    expect(buttonChild.props.href).toBe("/app");
+    expect(buttonChild.props.children).toContain("app home");
   });
 });
