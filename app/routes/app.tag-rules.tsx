@@ -537,7 +537,7 @@ export default function TagRulesPage() {
   if (finishingSetup) {
     return (
       <s-page heading="Tag Rules">
-        <s-link href="/" slot="breadcrumb-actions">
+        <s-link href="/app" slot="breadcrumb-actions">
           Back to Dashboard
         </s-link>
 
@@ -567,7 +567,7 @@ export default function TagRulesPage() {
   if (storeMode === "b2b") {
     return (
       <s-page heading="Tag Rules">
-        <s-link href="/" slot="breadcrumb-actions">
+        <s-link href="/app" slot="breadcrumb-actions">
           Back to Dashboard
         </s-link>
 
@@ -598,7 +598,7 @@ export default function TagRulesPage() {
 
   return (
     <s-page heading="Tag Rules">
-      <s-link href="/" slot="breadcrumb-actions">
+      <s-link href="/app" slot="breadcrumb-actions">
         Back to Dashboard
       </s-link>
 
