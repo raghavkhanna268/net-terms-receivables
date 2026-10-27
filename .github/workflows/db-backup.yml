@@ -5,8 +5,9 @@
 # nothing from the dump is printed: this repo is public, so Actions logs are
 # public. Restore steps: docs/runbooks/restore.md.
 #
-# Schedule: 21:00 UTC daily = 02:30 IST. Also runnable via workflow_dispatch
-# (main only).
+# Schedule: 21:17 UTC daily = 02:47 IST (off the top of the hour: GitHub
+# delays or drops scheduled runs at :00 under load). Also runnable via
+# workflow_dispatch (main only).
 #
 # Required secrets (if ANY is missing the run prints
 # `backup_skipped=true reason=secrets_missing missing_count=N` and exits 0):
@@ -24,7 +25,7 @@ name: DB Backup
 
 on:
   schedule:
-    - cron: '0 21 * * *'
+    - cron: '17 21 * * *'
   workflow_dispatch:
     inputs:
       prune_mode:

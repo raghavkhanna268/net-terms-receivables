@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (37 total):
+ * Files included (38 total):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -108,6 +108,7 @@ const DB_TEST_PATTERNS = [
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
+  "app/services/__tests__/customer-data-redaction-completeness-db.test.ts",
 
   // Sync DB tests (these use TEST_DATABASE_URL)
   "app/services/sync/__tests__/company-location.test.ts",
@@ -136,7 +137,11 @@ const DB_TEST_PATTERNS = [
   "app/lib/__tests__/offline-admin-db.test.ts",
   "app/lib/__tests__/offline-token.test.ts",
   "app/lib/__tests__/reinstall-sync-reset-db.test.ts",
+  "app/lib/__tests__/schema-trigger-guard-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
+
+  // Bank import edge-case DB tests
+  "app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts",
 
   // Script DB tests
   "scripts/__tests__/seed.test.ts",
@@ -158,6 +163,9 @@ const DB_TEST_PATTERNS = [
 
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
+
+  // Confirm-only reconcile flow DB tests
+  "tests/integration/confirm-only-reconcile-db.test.ts",
 
   // Confirm concurrency lock DB tests
   "tests/integration/confirm-concurrency-lock-db.test.ts",
