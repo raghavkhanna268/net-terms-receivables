@@ -13,7 +13,7 @@
  * - vi.useFakeTimers({ toFake: ["Date"] }) for shop-local clock control
  * - Real safeLog (no logger mock)
  * - Synthetic data only: example.com emails, test-*.myshopify.com shops,
- *   no real tokens, no gid:// identifiers
+ *   no real tokens, no Shopify global IDs
  *
  * Env is injected into the handlers via requestContext.run so the journey runs
  * exactly as the drain processor invokes it (handlers read getRequestEnv()).
@@ -660,10 +660,7 @@ describeWithDb("Reminder Send Journey (DB, end-to-end)", () => {
   // Case 7: Message enqueued, then shop reminders disabled before the handler
   //         processes the REMINDER_SEND message.
   //
-  // Expected behaviour: no Resend call. The one-shot REMINDER_SEND journey
-  // (handleReminderSend -> sendPaymentReminder) does not re-check the shop-level
-  // reminders toggle, so it sends anyway. Skipped pending follow-up; the real
-  // reason is documented in the PR report.
+  // Expected behaviour: no Resend call. Skipped pending follow-up.
   // ===========================================================================
   describe("Case 7: enqueued then shop disabled before processing", () => {
     it.skip("enqueued REMINDER_SEND with shop later disabled: no Resend call (pending follow-up)", async () => {
