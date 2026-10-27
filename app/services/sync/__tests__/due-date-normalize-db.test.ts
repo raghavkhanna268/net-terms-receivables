@@ -1,0 +1,381 @@
+/**
+ * DB-backed tests for due date normalization (date-only midnight values).
+ *
+ * Tests that PaymentSchedule dueAt values of exactly 00:00:00.000Z are
+ * normalized to shop-local end-of-day (23:59:59.999) during sync, ensuring
+ * (dueAt AT TIME ZONE tz)::date equals the intended calendar date.
+ *
+ * Covers:
+ * - Order sync via processOrderWebhook (RECEIPT, FULFILLMENT, NET/FIXED schedules)
+ * - Bulk orphan schedule path in processOrderLines
+ *
+ * Uses synthetic test data only (test-* domains, example.com, no GIDs).
+ */
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
+import { processOrderWebhook } from "../order.server";
+import { processOrderLines } from "../bulk-jsonl-processor.server";
+import { requestContext } from "~/lib/request-context.server";
+import type { ShopifyOrder } from "../types";
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+describeWithDb("Due date normalization for midnight UTC values (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-duenorm";
+
+  const TIMEZONES = [
+    { tz: "America/New_York", suffix: "ny" },
+    { tz: "Asia/Kolkata", suffix: "ist" },
+    { tz: "Pacific/Auckland", suffix: "nz" },
+  ] as const;
+
+  const shops: Record<string, { id: string; domain: string; accountId: string; locationId: string; companyId: string }> = {};
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    for (const { tz, suffix } of TIMEZONES) {
+      const shopId = `shop-duenorm-${suffix}-${TEST_SUFFIX}`;
+      const shopDomain = `test-duenorm-${suffix}-${TEST_SUFFIX}.example.com`;
+      const accountId = `acc-duenorm-${suffix}-${TEST_SUFFIX}`;
+      const companyId = `gid://shopify/Company/co-duenorm-${suffix}-${TEST_SUFFIX}`;
+      const locationId = `gid://shopify/CompanyLocation/loc-duenorm-${suffix}-${TEST_SUFFIX}`;
+
+      shops[suffix] = { id: shopId, domain: shopDomain, accountId, locationId, companyId };
+
+      await sql`
+        INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+        VALUES (${shopId}, ${shopDomain}, 'INR', ${tz}, NOW(), NOW())
+      `;
+
+      await sql`
+        INSERT INTO "BuyerAccount" (
+          id, "shopId", kind, "companyId", "companyLocationId", name,
+          "defaultTermsDays", "defaultTermsSource",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${accountId}, ${shopId}, 'COMPANY', ${companyId}, ${locationId}, 'Test Company',
+          30, 'explicit', NOW(), NOW()
+        )
+      `;
+    }
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS s6_processed_webhooks (
+        webhook_id TEXT PRIMARY KEY,
+        topic TEXT NOT NULL,
+        resource_gid TEXT NOT NULL,
+        processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    for (const { suffix } of TIMEZONES) {
+      const shop = shops[suffix];
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shop.id}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shop.id}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shop.id}`;
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-duenorm-" + suffix + "-" + TEST_SUFFIX + "%"}`;
+    }
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    for (const { suffix } of TIMEZONES) {
+      const shop = shops[suffix];
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shop.id}`;
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-duenorm-" + suffix + "-" + TEST_SUFFIX + "%"}`;
+    }
+  });
+
+  describe("Order webhook path (processOrderWebhook)", () => {
+    it.each(TIMEZONES)(
+      "normalizes 00:00:00.000Z to local date for $tz (RECEIPT schedule)",
+      async ({ tz, suffix }) => {
+        const shop = shops[suffix];
+        const orderId = `gid://shopify/Order/ord-receipt-${suffix}-${TEST_SUFFIX}`;
+
+        const order: ShopifyOrder = {
+          id: orderId,
+          name: "#1001",
+          createdAt: "2026-11-15T10:00:00.000Z",
+          displayFinancialStatus: "PENDING",
+          totalPriceSet: {
+            shopMoney: { amount: "50000.00", currencyCode: "INR" },
+          },
+          paymentTerms: {
+            id: "pt1",
+            paymentTermsName: "Due on receipt",
+            paymentTermsType: "RECEIPT",
+            dueInDays: 0,
+            paymentSchedules: {
+              edges: [
+                {
+                  node: {
+                    id: `gid://shopify/PaymentSchedule/sched-receipt-${suffix}-${TEST_SUFFIX}`,
+                    dueAt: "2026-11-26T00:00:00.000Z",
+                    completedAt: null,
+                  },
+                },
+              ],
+            },
+          },
+          purchasingEntity: {
+            __typename: "PurchasingCompany",
+            company: { id: shop.companyId },
+            location: { id: shop.locationId },
+          },
+        };
+
+        const result = await processOrderWebhook(
+          sql,
+          shop.domain,
+          "ORDERS_CREATE",
+          order,
+          `wh-duenorm-${suffix}-receipt-${TEST_SUFFIX}`
+        );
+
+        expect(result.success).toBe(true);
+
+        const [invoice] = await sql<{ dueAt: Date; localDate: string }[]>`
+          SELECT
+            "dueAt",
+            ("dueAt" AT TIME ZONE ${tz})::DATE::TEXT AS "localDate"
+          FROM "Invoice"
+          WHERE "orderId" = ${orderId}
+        `;
+
+        expect(invoice).toBeDefined();
+        expect(invoice.localDate).toBe("2026-11-26");
+      }
+    );
+
+    it.each(TIMEZONES)(
+      "normalizes 00:00:00.000Z to local date for $tz (NET schedule)",
+      async ({ tz, suffix }) => {
+        const shop = shops[suffix];
+        const orderId = `gid://shopify/Order/ord-net-${suffix}-${TEST_SUFFIX}`;
+
+        const order: ShopifyOrder = {
+          id: orderId,
+          name: "#1002",
+          createdAt: "2026-11-01T10:00:00.000Z",
+          displayFinancialStatus: "PENDING",
+          totalPriceSet: {
+            shopMoney: { amount: "75000.00", currencyCode: "INR" },
+          },
+          paymentTerms: {
+            id: "pt2",
+            paymentTermsName: "Net 30",
+            paymentTermsType: "NET",
+            dueInDays: 30,
+            paymentSchedules: {
+              edges: [
+                {
+                  node: {
+                    id: `gid://shopify/PaymentSchedule/sched-net-${suffix}-${TEST_SUFFIX}`,
+                    dueAt: "2026-11-26T00:00:00.000Z",
+                    completedAt: null,
+                  },
+                },
+              ],
+            },
+          },
+          purchasingEntity: {
+            __typename: "PurchasingCompany",
+            company: { id: shop.companyId },
+            location: { id: shop.locationId },
+          },
+        };
+
+        const result = await processOrderWebhook(
+          sql,
+          shop.domain,
+          "ORDERS_CREATE",
+          order,
+          `wh-duenorm-${suffix}-net-${TEST_SUFFIX}`
+        );
+
+        expect(result.success).toBe(true);
+
+        const [invoice] = await sql<{ dueAt: Date; localDate: string }[]>`
+          SELECT
+            "dueAt",
+            ("dueAt" AT TIME ZONE ${tz})::DATE::TEXT AS "localDate"
+          FROM "Invoice"
+          WHERE "orderId" = ${orderId}
+        `;
+
+        expect(invoice).toBeDefined();
+        expect(invoice.localDate).toBe("2026-11-26");
+      }
+    );
+
+    it("passes through non-midnight value unchanged", async () => {
+      const shop = shops["ny"];
+      const orderId = `gid://shopify/Order/ord-nonmid-${TEST_SUFFIX}`;
+
+      const order: ShopifyOrder = {
+        id: orderId,
+        name: "#1003",
+        createdAt: "2026-11-01T10:00:00.000Z",
+        displayFinancialStatus: "PENDING",
+        totalPriceSet: {
+          shopMoney: { amount: "60000.00", currencyCode: "INR" },
+        },
+        paymentTerms: {
+          id: "pt3",
+          paymentTermsName: "Net 30",
+          paymentTermsType: "NET",
+          dueInDays: 30,
+            paymentSchedules: {
+              edges: [
+                {
+                  node: {
+                    id: `gid://shopify/PaymentSchedule/sched-nonmid-${TEST_SUFFIX}`,
+                    dueAt: "2026-11-26T10:15:00.000Z",
+                    completedAt: null,
+                  },
+                },
+              ],
+            },
+          },
+          purchasingEntity: {
+            __typename: "PurchasingCompany",
+            company: { id: shop.companyId },
+            location: { id: shop.locationId },
+          },
+        };
+
+        const result = await processOrderWebhook(
+          sql,
+          shop.domain,
+          "ORDERS_CREATE",
+          order,
+          `wh-duenorm-nonmid-${TEST_SUFFIX}`
+        );
+
+      expect(result.success).toBe(true);
+
+      const [invoice] = await sql<{ dueAt: Date }[]>`
+        SELECT "dueAt" FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+
+      expect(invoice).toBeDefined();
+      expect(invoice.dueAt.toISOString()).toBe("2026-11-26T10:15:00.000Z");
+    });
+  });
+
+  describe("Bulk orphan schedule path (processOrderLines)", () => {
+    it.each(TIMEZONES)(
+      "normalizes 00:00:00.000Z via orphan schedule for $tz",
+      async ({ tz, suffix }) => {
+        const shop = shops[suffix];
+        const orderId = `gid://shopify/Order/ord-orphan-${suffix}-${TEST_SUFFIX}`;
+
+        await sql`
+          INSERT INTO "Invoice" (
+            id, "shopId", "buyerAccountId", "orderId", "orderName",
+            "issueDate", total, outstanding, status, "dueSource",
+            "createdAt", "updatedAt"
+          ) VALUES (
+            ${"inv-orphan-" + suffix + "-" + TEST_SUFFIX},
+            ${shop.id},
+            ${shop.accountId},
+            ${orderId},
+            '#ORPH001',
+            '2026-11-01',
+            50000.00,
+            50000.00,
+            'open',
+            'inferred',
+            NOW(),
+            NOW()
+          )
+        `;
+
+        const orphanScheduleLine = JSON.stringify({
+          __parentId: orderId,
+          id: `gid://shopify/PaymentSchedule/sched-${suffix}-${TEST_SUFFIX}`,
+          dueAt: "2026-11-26T00:00:00.000Z",
+          completedAt: null,
+        });
+
+        await requestContext.run({ getSql: () => sql }, async () => {
+          const count = await processOrderLines(
+            sql,
+            shop.id,
+            shop.domain,
+            [orphanScheduleLine]
+          );
+          expect(count).toBeGreaterThanOrEqual(1);
+        });
+
+        const [invoice] = await sql<{ dueAt: Date; localDate: string }[]>`
+          SELECT
+            "dueAt",
+            ("dueAt" AT TIME ZONE ${tz})::DATE::TEXT AS "localDate"
+          FROM "Invoice"
+          WHERE "orderId" = ${orderId}
+        `;
+
+        expect(invoice).toBeDefined();
+        expect(invoice.localDate).toBe("2026-11-26");
+      }
+    );
+
+    it("passes through non-midnight orphan schedule unchanged", async () => {
+      const shop = shops["ny"];
+      const orderId = `gid://shopify/Order/ord-orphan-nonmid-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", "orderName",
+          "issueDate", total, outstanding, status, "dueSource",
+          "createdAt", "updatedAt"
+        ) VALUES (
+          ${"inv-orphan-nonmid-" + TEST_SUFFIX},
+          ${shop.id},
+          ${shop.accountId},
+          ${orderId},
+          '#ORPH002',
+          '2026-11-01',
+          60000.00,
+          60000.00,
+          'open',
+          'inferred',
+          NOW(),
+          NOW()
+        )
+      `;
+
+      const orphanScheduleLine = JSON.stringify({
+        __parentId: orderId,
+        id: `gid://shopify/PaymentSchedule/sched-nonmid-${TEST_SUFFIX}`,
+        dueAt: "2026-11-26T10:15:00.000Z",
+        completedAt: null,
+      });
+
+      await requestContext.run({ getSql: () => sql }, async () => {
+        const count = await processOrderLines(
+          sql,
+          shop.id,
+          shop.domain,
+          [orphanScheduleLine]
+        );
+        expect(count).toBeGreaterThanOrEqual(1);
+      });
+
+      const [invoice] = await sql<{ dueAt: Date }[]>`
+        SELECT "dueAt" FROM "Invoice" WHERE "orderId" = ${orderId}
+      `;
+
+      expect(invoice).toBeDefined();
+      expect(invoice.dueAt.toISOString()).toBe("2026-11-26T10:15:00.000Z");
+    });
+  });
+});

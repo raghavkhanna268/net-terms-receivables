@@ -55,6 +55,7 @@ import {
   isTerminalFinancialStatus,
   type EligibilityContext,
 } from "~/lib/invoice-eligibility";
+import { normalizeScheduleDueAt } from "~/lib/due-date";
 import { isWebhookProcessed, markWebhookProcessed } from "./company.server";
 import { incrementOrderOutstandingMissing } from "../drain/reconcile-handlers.server";
 import { adminGraphQL, BULK_OPERATION_STATUS_QUERY } from "../drain/admin-client.server";
@@ -592,6 +593,16 @@ export async function processOrderLines(
     `;
     const invoiceByOrderId = new Map(existingOrphanInvoices.map((i) => [i.orderId, i.id]));
 
+    // Fetch shop timezone for due date normalization (date-only midnight values)
+    const DEFAULT_TIMEZONE = "Asia/Kolkata";
+    let shopTimezone = DEFAULT_TIMEZONE;
+    const [shopRow] = await sql<{ timezone: string }[]>`
+      SELECT timezone FROM "Shop" WHERE id = ${shopId}
+    `;
+    if (shopRow?.timezone) {
+      shopTimezone = shopRow.timezone;
+    }
+
     // Build arrays for batched UPDATE
     const updateIds: string[] = [];
     const updateDueAts: string[] = [];
@@ -600,8 +611,12 @@ export async function processOrderLines(
     for (const schedule of orphanSchedules) {
       const invoiceId = invoiceByOrderId.get(schedule.__parentId);
       if (invoiceId && schedule.dueAt) {
+        const normalizedDueAt = normalizeScheduleDueAt(
+          new Date(schedule.dueAt),
+          shopTimezone
+        );
         updateIds.push(invoiceId);
-        updateDueAts.push(schedule.dueAt);
+        updateDueAts.push(normalizedDueAt.toISOString());
         updateReasons.push("Payment schedule from Shopify (orphan reconcile)");
       }
     }
