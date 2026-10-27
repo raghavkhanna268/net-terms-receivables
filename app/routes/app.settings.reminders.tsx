@@ -17,7 +17,7 @@ import type {
 import { useLoaderData, useNavigation, Form } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
-import { getStoreSetupStatus, type StoreSetupStatus } from "~/lib/store-setup-state";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import {

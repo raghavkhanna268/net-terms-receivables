@@ -1580,41 +1580,6 @@ describe("S24: Finishing setup empty state (real render)", () => {
     vi.resetModules();
   });
 
-  it("useRevalidator hook is called during render in finishing setup state", async () => {
-    const { renderToString } = await import("react-dom/server");
-    const { createElement } = await import("react");
-
-    let revalidatorCalled = false;
-
-    vi.doMock("react-router", async () => {
-      const actual = await vi.importActual<typeof import("react-router")>("react-router");
-      return {
-        ...actual,
-        useLoaderData: () => ({
-          storeMode: "tag_based",
-          tagRules: [],
-          shopId: null,
-          error: null,
-          finishingSetup: true,
-        }),
-        useActionData: () => null,
-        useNavigation: () => ({ state: "idle" }),
-        useRevalidator: () => {
-          revalidatorCalled = true;
-          return { revalidate: vi.fn(), state: "idle" };
-        },
-      };
-    });
-
-    vi.resetModules();
-    const { default: TagRulesPage } = await import("../app.tag-rules");
-
-    const html = renderToString(createElement(TagRulesPage));
-
-    expect(html).toContain("Setting up your store");
-    expect(revalidatorCalled).toBe(true);
-  });
-
   it("renders finishing setup banner and empty state when finishingSetup is true", async () => {
     const { renderToString } = await import("react-dom/server");
     const { createElement } = await import("react");

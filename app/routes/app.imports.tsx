@@ -27,7 +27,7 @@ import { insertBankImportRows } from "~/services/bank-import.server";
 import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { getEffectiveCurrency } from "~/lib/currency-gate.server";
-import { getStoreSetupStatus, type StoreSetupStatus } from "~/lib/store-setup-state";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import {
