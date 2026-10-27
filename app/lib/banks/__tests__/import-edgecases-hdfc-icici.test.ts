@@ -1207,7 +1207,7 @@ describeWithDb("(4) Atomicity - sql.begin rollback (mirrors app.imports.tsx:374)
     expect(parseInt(paymentCount[0].count, 10)).toBe(1);
   });
 
-  it("batch with over-length UTR (257 chars) is rejected by service and leaves 0 rows", async () => {
+  it("over-length UTR (257 chars) is accepted (no DB length constraint) - all-or-nothing check", async () => {
     const overLengthUtr = "X".repeat(257);
     const credits = [
       {
@@ -1228,40 +1228,63 @@ describeWithDb("(4) Atomicity - sql.begin rollback (mirrors app.imports.tsx:374)
       },
     ];
 
-    let rejected = false;
-    try {
-      await sql.begin((tx) =>
+    const result = await sql.begin((tx) =>
+      insertBankImportRows(tx, {
+        shopId: testShopId,
+        bank: "HDFC",
+        fileName: "test-overlength.csv",
+        credits,
+        now: new Date(),
+      })
+    );
+    expect(result.inserted).toBe(2);
+
+    const paymentCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "Payment" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(paymentCount[0].count, 10)).toBe(2);
+  });
+
+  it("batch with NULL narration violates NOT NULL and rejects with 0 rows", async () => {
+    const credits = [
+      {
+        date: "2026-10-02",
+        amountPaise: 5000000,
+        rail: "NEFT" as const,
+        utr: makeSyntheticNeftRef("00000000113"),
+        payerName: "TEST VALID",
+        narration: "NEFT CR-TEST VALID",
+      },
+      {
+        date: "2026-10-03",
+        amountPaise: 7500000,
+        rail: "NEFT" as const,
+        utr: makeSyntheticNeftRef("00000000114"),
+        payerName: "TEST NULL NARRATION",
+        narration: null as unknown as string,
+      },
+    ];
+
+    await expect(
+      sql.begin((tx) =>
         insertBankImportRows(tx, {
           shopId: testShopId,
           bank: "HDFC",
-          fileName: "test-overlength.csv",
+          fileName: "test-null-narration.csv",
           credits,
           now: new Date(),
         })
-      );
-    } catch {
-      rejected = true;
-    }
+      )
+    ).rejects.toThrow();
 
-    if (!rejected) {
-      const paymentCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text as count FROM "Payment" WHERE "shopId" = ${testShopId}
-      `;
-      const count = parseInt(paymentCount[0].count, 10);
-      if (count === 1) {
-        expect.fail("Service accepted batch with over-length UTR and partially inserted rows");
-      }
-      expect(count).toBe(2);
-    } else {
-      const paymentCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text as count FROM "Payment" WHERE "shopId" = ${testShopId}
-      `;
-      expect(parseInt(paymentCount[0].count, 10)).toBe(0);
+    const paymentCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "Payment" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(paymentCount[0].count, 10)).toBe(0);
 
-      const importCount = await sql<{ count: string }[]>`
-        SELECT COUNT(*)::text as count FROM "BankImport" WHERE "shopId" = ${testShopId}
-      `;
-      expect(parseInt(importCount[0].count, 10)).toBe(0);
-    }
+    const importCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "BankImport" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(importCount[0].count, 10)).toBe(0);
   });
 });
