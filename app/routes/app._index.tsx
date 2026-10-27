@@ -821,7 +821,7 @@ export function BuyerInvoiceList({
                   </s-table-cell>
                   <s-table-cell>
                     {orderUrl ? (
-                      <s-link href={orderUrl}>View Order</s-link>
+                      <s-link href={orderUrl} target="_top">View Order</s-link>
                     ) : (
                       "—"
                     )}

@@ -637,7 +637,7 @@ function InvoiceTable({
               </s-table-cell>
               <s-table-cell>
                 {orderUrl ? (
-                  <s-link href={orderUrl}>View</s-link>
+                  <s-link href={orderUrl} target="_top">View</s-link>
                 ) : (
                   "—"
                 )}

@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, data } from "react-router";
+import { Outlet, useLoaderData, useRouteError, isRouteErrorResponse, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
@@ -141,7 +141,26 @@ export default function App() {
 }
 
 export function ErrorBoundary() {
-  return boundary.error(useRouteError());
+  const error = useRouteError();
+
+  if (isRouteErrorResponse(error) && error.status === 401) {
+    return boundary.error(error);
+  }
+
+  return (
+    <s-page heading="Something went wrong">
+      <s-section>
+        <s-banner tone="critical" heading="Unexpected Error">
+          <s-paragraph>
+            We encountered an issue loading this page.
+          </s-paragraph>
+          <s-stack direction="inline" gap="base">
+            <s-button href="/app">Go to Dashboard</s-button>
+          </s-stack>
+        </s-banner>
+      </s-section>
+    </s-page>
+  );
 }
 
 export const headers: HeadersFunction = (headersArgs) => {

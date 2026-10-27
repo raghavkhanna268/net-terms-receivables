@@ -291,6 +291,37 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
     });
   });
 
+  describe("order link format and target", () => {
+    it("renders order link with shopify://admin/orders href and target=_top", () => {
+      const loaderData = {
+        ...buildLoaderData({
+          isGated: false,
+          gatingEnforced: false,
+        }),
+        invoices: {
+          rows: [
+            {
+              id: "inv-1",
+              name: "INV-001",
+              orderId: "gid://shopify/Order/123",
+              dueAt: "2026-11-01T00:00:00Z",
+              outstandingPaise: "1000000",
+              currency: "INR",
+              daysPastDue: -5,
+            },
+          ],
+          totalCount: 1,
+        },
+      };
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain('href="shopify://admin/orders/123"');
+      expect(html).toContain('target="_top"');
+    });
+  });
+
   describe("copy polish: breadcrumbs and badges", () => {
     it("renders breadcrumb with href='/app' for normal account state", () => {
       const loaderData = buildLoaderData({

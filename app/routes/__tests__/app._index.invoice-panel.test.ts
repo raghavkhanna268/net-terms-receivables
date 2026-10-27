@@ -155,6 +155,22 @@ describe("BuyerInvoiceList render tests", () => {
       expect(html).toContain("INV-002");
     });
 
+    it("renders order link with shopify://admin/orders href and target=_top", async () => {
+      const { BuyerInvoiceList } = await import("../app._index");
+
+      const html = renderToString(
+        createElement(BuyerInvoiceList, {
+          invoices: mockInvoices,
+          buyerName: TEST_BUYER_NAME,
+          buyerAccountId: TEST_BUYER_ID,
+          onClose: CLOSE_URL,
+        })
+      );
+
+      expect(html).toContain('href="shopify://admin/orders/123"');
+      expect(html).toContain('target="_top"');
+    });
+
     it("renders View account button with secondary variant", async () => {
       const { BuyerInvoiceList } = await import("../app._index");
 
