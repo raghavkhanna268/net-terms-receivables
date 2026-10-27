@@ -265,14 +265,16 @@ describeWithDb("Tenant Isolation - Cross-tenant record IDs", () => {
   });
 
   describe("app.accounts.$id loader isolation", () => {
-    it("shop A session cannot read shop B's buyer account (negative)", async () => {
+    it("shop A session cannot read shop B's buyer account (negative, 404)", async () => {
       const args = createLoaderArgs(`/app/accounts/${BUYER_B_ID}`, { id: BUYER_B_ID });
       const { loader } = await import("../app.accounts.$id");
-      const result = (await loader(args as never)) as { account: unknown; error: string | null };
-      expect(result.account).toBeNull();
-      expect(result.error).toBe("Account not found");
-      const str = JSON.stringify(result);
-      expect(str).not.toContain(SHOP_B_BUYER_NAME);
+
+      try {
+        await loader(args as never);
+        expect.fail("Expected loader to throw 404 for cross-shop account access");
+      } catch (err) {
+        expect(err).toHaveProperty("init.status", 404);
+      }
     });
 
     it("shop A session CAN read shop A's buyer account (positive control)", async () => {
