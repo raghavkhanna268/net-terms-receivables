@@ -78,7 +78,10 @@ export interface OnboardingStepInputs {
   tagRuleCount: number;
   validation: ValidationInfo | null;
   paymentCustomization: PaymentCustomizationInfo | null;
-  resendApiKeyConfigured: boolean;
+  /** True only when BOTH RESEND_API_KEY and RESEND_FROM are configured. */
+  emailSendingConfigured: boolean;
+  /** True when shop has enabled reminders via s18_shop_reminder_settings. */
+  remindersEnabled: boolean;
   dismissedAt: Date | null;
 }
 
@@ -239,18 +242,33 @@ export function computePaymentCustomizationStep(
 
 /**
  * Compute step 5: Reminder sender configured.
- * Shows as "coming soon" when RESEND_API_KEY is not configured.
+ * Shows as "coming soon" when email sending is not configured.
+ * Shows as "pending" when sending is configured but reminders are disabled.
+ * Shows as "complete" only when BOTH sending is configured AND reminders are enabled.
  */
 export function computeReminderStep(
-  resendApiKeyConfigured: boolean
+  emailSendingConfigured: boolean,
+  remindersEnabled: boolean
 ): OnboardingStep {
-  if (!resendApiKeyConfigured) {
+  if (!emailSendingConfigured) {
     return {
       id: "reminders",
       title: "Email reminders",
       description: "Send automated payment reminder emails to buyers",
       status: "coming_soon",
       helpText: "Email reminders will be available when email sending is configured",
+    };
+  }
+
+  if (!remindersEnabled) {
+    return {
+      id: "reminders",
+      title: "Configure payment reminders",
+      description: "Set up automated reminder emails for upcoming and overdue invoices",
+      status: "pending",
+      helpText: "Email sending is ready",
+      actionUrl: "/app/settings/reminders",
+      actionLabel: "Enable reminders",
     };
   }
 
@@ -276,7 +294,7 @@ export function computeOnboardingState(
     computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),
-    computeReminderStep(inputs.resendApiKeyConfigured),
+    computeReminderStep(inputs.emailSendingConfigured, inputs.remindersEnabled),
   ];
 
   const completedCount = steps.filter(
@@ -309,6 +327,8 @@ export function shouldShowOnboarding(state: OnboardingState): boolean {
 /**
  * Fetch shop onboarding data from the database.
  * Returns null if the shop doesn't exist.
+ *
+ * Parallelizes the count queries after fetching the shop row.
  */
 export async function fetchShopOnboardingData(
   sql: Sql,
@@ -319,39 +339,43 @@ export async function fetchShopOnboardingData(
   buyerAccountCount: number;
   tagRuleCount: number;
   dismissedAt: Date | null;
+  currency: string | null;
 } | null> {
   const [shop] = await sql<
     {
       id: string;
       defaultTermsDays: number | null;
       onboardingDismissedAt: Date | null;
+      currency: string | null;
     }[]
   >`
-    SELECT id, "defaultTermsDays", onboarding_dismissed_at AS "onboardingDismissedAt"
+    SELECT id, "defaultTermsDays", onboarding_dismissed_at AS "onboardingDismissedAt", currency
     FROM "Shop"
     WHERE domain = ${shopDomain}
   `;
 
   if (!shop) return null;
 
-  const [accountCount] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "BuyerAccount"
-    WHERE "shopId" = ${shop.id}
-  `;
-
-  const [tagRuleCount] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text as count
-    FROM "AccountSource"
-    WHERE "shopId" = ${shop.id}
-  `;
+  const [accountCountResult, tagRuleCountResult] = await Promise.all([
+    sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count
+      FROM "BuyerAccount"
+      WHERE "shopId" = ${shop.id}
+    `,
+    sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count
+      FROM "AccountSource"
+      WHERE "shopId" = ${shop.id}
+    `,
+  ]);
 
   return {
     shopId: shop.id,
     defaultTermsDays: shop.defaultTermsDays,
-    buyerAccountCount: parseInt(accountCount?.count ?? "0", 10),
-    tagRuleCount: parseInt(tagRuleCount?.count ?? "0", 10),
+    buyerAccountCount: parseInt(accountCountResult[0]?.count ?? "0", 10),
+    tagRuleCount: parseInt(tagRuleCountResult[0]?.count ?? "0", 10),
     dismissedAt: shop.onboardingDismissedAt,
+    currency: shop.currency,
   };
 }
 

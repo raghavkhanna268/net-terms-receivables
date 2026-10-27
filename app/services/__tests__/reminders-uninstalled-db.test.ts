@@ -30,6 +30,9 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
   const TEST_CUSTOMER_ID = `gid://shopify/Customer/uninstall-${TEST_SUFFIX}`;
   const TEST_RULE_ID = `rule-uninstall-${TEST_SUFFIX}`;
 
+  const FIXED_TODAY = "2026-10-15";
+  const FIXED_TODAY_IST = { year: 2026, month: 10, day: 15, hour: 12, minute: 0 };
+
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
@@ -112,12 +115,12 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#UNINSTALL-SEND', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -169,14 +172,14 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_ACCOUNT_ID}, ${orderId},
           '#UNINSTALL-CATCHUP', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW() - INTERVAL '1 day', NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE - INTERVAL '1 day', NOW(), NOW()
         )
       `;
 
       // Create pre-existing delayed ReminderLog row
       await sql`
         INSERT INTO "ReminderLog" (id, "shopId", "ruleId", "invoiceId", status, "firstCappedAt")
-        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", NOW() - INTERVAL '1 day')
+        VALUES (${logId}, ${TEST_SHOP_ID}, ${TEST_RULE_ID}, ${invoiceId}, 'delayed'::"ReminderLogStatus", ${FIXED_TODAY}::DATE - INTERVAL '1 day')
       `;
 
       // Verify delayed row exists before catch-up
@@ -186,7 +189,7 @@ describeWithDb("S18 reminder uninstalled shop handling (DB)", () => {
       expect(before.length).toBe(1);
 
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {

@@ -6,7 +6,7 @@
 -- opted out (reminderOptOutAt IS NULL), that match an enabled ReminderRule offset
 -- (dueAt in shop tz + offsetDays) that falls in the next 7 shop-local days
 -- (today through today + 6), MINUS any (invoice, rule) pair that already has a
--- ReminderLog row. Counted per (invoice, rule) pair, per shop_idx.
+-- ReminderLog row. Counted per (invoice, rule) pair, per shop_kind.
 --
 -- Narrower columns:
 --   would_fire_email_7d: the same rows restricted to email rules (the only ones
@@ -33,20 +33,33 @@
 -- last section compares email would-fire per day (summed over shops, bucketed by
 -- each shop's local day) against the daily cap.
 --
--- shop_idx = DENSE_RANK over all Shop ids, as in s12-hold-coverage.sql. The first
--- section maps shop_idx to installed / currency class / reminders enabled so the
--- reader can tell the INR throwaway store from the USD main dev store.
--- Counts, enums, booleans and ids only. Vars: none.
+-- shop_kind: identity label from the canonical shop_labels CTE
+-- (scripts/ci/shop-labels.ts). 'main' = the shop whose domain is :'allowed'
+-- (ALLOWED_DEV_STORE), 'e2e' = :'e2e' (E2E_SHOP), 'other_N' = the rest ranked by
+-- Shop.id within this run only (N is stable within one run but does NOT identify
+-- a shop across runs), 'unknown' for every shop if a secret is empty or both are
+-- equal. Domains are compared, never printed.
+-- The first section maps shop_kind to installed / currency class / reminders enabled.
+-- Counts, enums and booleans only.
+-- Vars: allowed, e2e (masked secrets, passed by prod-readonly-query.yml).
 \set ON_ERROR_STOP 1
-BEGIN TRANSACTION READ ONLY;
+-- REPEATABLE READ: both sections read one snapshot, so the two
+-- shop_labels copies number other_N identically within this run.
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 
-\echo '== shops: shop_idx, installed, currency class, reminders enabled'
-WITH shops AS (
+\echo '== shops: shop_kind, installed, currency class, reminders enabled'
+WITH shop_labels AS (
   SELECT s.id AS shop_id,
-         DENSE_RANK() OVER (ORDER BY s.id) AS shop_idx
+         CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+              WHEN s.domain = :'allowed' THEN 'main'
+              WHEN s.domain = :'e2e' THEN 'e2e'
+              ELSE 'other_' || (ROW_NUMBER() OVER (
+                     PARTITION BY s.domain IN (:'allowed', :'e2e')
+                     ORDER BY s.id))::text
+         END AS shop_kind
   FROM "Shop" s
 )
-SELECT sh.shop_idx,
+SELECT sl.shop_kind,
        s."uninstalledAt" IS NULL AS installed,
        CASE WHEN s.currency = 'INR' THEN 'INR'
             WHEN s.currency = 'USD' THEN 'USD'
@@ -60,17 +73,23 @@ SELECT sh.shop_idx,
         WHERE r."shopId" = s.id AND r.enabled = true
           AND r.channel = 'email'::"ReminderChannel") AS enabled_email_rules
 FROM "Shop" s
-JOIN shops sh ON sh.shop_id = s.id
+JOIN shop_labels sl ON sl.shop_id = s.id
 ORDER BY 1;
 
-\echo '== would fire in the next 7 shop-local days, per shop_idx and recipient class'
-WITH shops AS (
+\echo '== would fire in the next 7 shop-local days, per shop_kind and recipient class'
+WITH shop_labels AS (
   SELECT s.id AS shop_id,
-         DENSE_RANK() OVER (ORDER BY s.id) AS shop_idx
+         CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+              WHEN s.domain = :'allowed' THEN 'main'
+              WHEN s.domain = :'e2e' THEN 'e2e'
+              ELSE 'other_' || (ROW_NUMBER() OVER (
+                     PARTITION BY s.domain IN (:'allowed', :'e2e')
+                     ORDER BY s.id))::text
+         END AS shop_kind
   FROM "Shop" s
 ),
 due AS (
-  SELECT sh.shop_idx,
+  SELECT sl.shop_kind,
          (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays"
            - (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE AS day_offset,
          lower(btrim(CASE WHEN ba.kind::TEXT = 'COMPANY' THEN ba."mainContactEmail"
@@ -81,7 +100,7 @@ due AS (
            AND s.currency = 'INR' AS enqueue_gates_ok
   FROM "ReminderRule" r
   INNER JOIN "Shop" s ON s.id = r."shopId"
-  INNER JOIN shops sh ON sh.shop_id = s.id
+  INNER JOIN shop_labels sl ON sl.shop_id = s.id
   LEFT JOIN s18_shop_reminder_settings srs ON srs.shop_id = r."shopId"
   INNER JOIN "Invoice" i
       ON i."shopId" = r."shopId"
@@ -104,7 +123,7 @@ due AS (
     )
 ),
 classed AS (
-  SELECT d.shop_idx,
+  SELECT d.shop_kind,
          d.day_offset,
          d.rcpt,
          d.is_email,
@@ -116,7 +135,7 @@ classed AS (
            AND d.rcpt IS NOT NULL AND d.rcpt <> '' AS gated_email
   FROM due d
 )
-SELECT c.shop_idx,
+SELECT c.shop_kind,
        c.recipient_class,
        COUNT(*) AS would_fire_7d,
        COUNT(*) FILTER (WHERE c.is_email) AS would_fire_email_7d,

@@ -157,16 +157,62 @@ describe("onboarding-steps", () => {
   });
 
   describe("computeReminderStep", () => {
-    it("returns coming_soon when RESEND_API_KEY is not configured", () => {
-      const step = computeReminderStep(false);
+    it("returns coming_soon when email sending is not configured", () => {
+      const step = computeReminderStep(false, false);
       expect(step.status).toBe("coming_soon");
       expect(step.helpText).toContain("will be available");
     });
 
-    it("returns complete when RESEND_API_KEY is configured", () => {
-      const step = computeReminderStep(true);
+    it("returns coming_soon when sending not configured even if reminders enabled", () => {
+      const step = computeReminderStep(false, true);
+      expect(step.status).toBe("coming_soon");
+      expect(step.helpText).toContain("will be available");
+    });
+
+    it("returns pending when sending configured but reminders disabled", () => {
+      const step = computeReminderStep(true, false);
+      expect(step.status).toBe("pending");
+      expect(step.helpText).toContain("Email sending is ready");
+      expect(step.actionUrl).toBe("/app/settings/reminders");
+      expect(step.actionLabel).toBe("Enable reminders");
+    });
+
+    it("returns complete when both sending configured AND reminders enabled", () => {
+      const step = computeReminderStep(true, true);
       expect(step.status).toBe("complete");
       expect(step.helpText).toContain("configured and ready");
+    });
+  });
+
+  describe("computeReminderStep with isEmailSendingConfigured", () => {
+    it("step is not-ready when only API key is set (sender missing)", async () => {
+      const { isEmailSendingConfigured } = await import("../email-sender-config.server");
+      const configured = isEmailSendingConfigured({
+        RESEND_API_KEY: "re_fake_key_for_test_only_12345",
+        RESEND_FROM: undefined,
+      });
+      const step = computeReminderStep(configured, true);
+      expect(step.status).toBe("coming_soon");
+    });
+
+    it("step is not-ready when only sender is set (API key missing)", async () => {
+      const { isEmailSendingConfigured } = await import("../email-sender-config.server");
+      const configured = isEmailSendingConfigured({
+        RESEND_API_KEY: undefined,
+        RESEND_FROM: "noreply@example.com",
+      });
+      const step = computeReminderStep(configured, true);
+      expect(step.status).toBe("coming_soon");
+    });
+
+    it("step is ready when both API key and sender are set and reminders enabled", async () => {
+      const { isEmailSendingConfigured } = await import("../email-sender-config.server");
+      const configured = isEmailSendingConfigured({
+        RESEND_API_KEY: "re_fake_key_for_test_only_12345",
+        RESEND_FROM: "noreply@example.com",
+      });
+      const step = computeReminderStep(configured, true);
+      expect(step.status).toBe("complete");
     });
   });
 
@@ -178,7 +224,8 @@ describe("onboarding-steps", () => {
       tagRuleCount: 0,
       validation: null,
       paymentCustomization: null,
-      resendApiKeyConfigured: false,
+      emailSendingConfigured: false,
+      remindersEnabled: false,
       dismissedAt: null,
     };
 
@@ -205,7 +252,8 @@ describe("onboarding-steps", () => {
           enabled: true,
           title: "Termwise Payment Hide",
         },
-        resendApiKeyConfigured: false, // coming_soon doesn't block completion
+        emailSendingConfigured: false, // coming_soon doesn't block completion
+        remindersEnabled: false,
       };
 
       const state = computeOnboardingState(inputs);
@@ -215,7 +263,7 @@ describe("onboarding-steps", () => {
     it("counts coming_soon as completed for progress", () => {
       const inputs: OnboardingStepInputs = {
         ...baseInputs,
-        resendApiKeyConfigured: false,
+        emailSendingConfigured: false,
       };
 
       const state = computeOnboardingState(inputs);
@@ -244,7 +292,8 @@ describe("onboarding-steps", () => {
       tagRuleCount: 0,
       validation: null,
       paymentCustomization: null,
-      resendApiKeyConfigured: false,
+      emailSendingConfigured: false,
+      remindersEnabled: false,
       dismissedAt: null,
     };
 
@@ -354,7 +403,8 @@ describe("onboarding-steps", () => {
           enabled: true,
           title: "Termwise Payment Hide",
         },
-        resendApiKeyConfigured: true,
+        emailSendingConfigured: true,
+        remindersEnabled: true,
         dismissedAt: null,
       };
 
@@ -375,7 +425,8 @@ describe("onboarding-steps", () => {
         tagRuleCount: 0,
         validation: null,
         paymentCustomization: null,
-        resendApiKeyConfigured: false,
+        emailSendingConfigured: false,
+        remindersEnabled: false,
         dismissedAt: null,
       };
 

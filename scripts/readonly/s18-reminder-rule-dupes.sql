@@ -4,7 +4,7 @@
 -- changed here; the dedupe itself is a separate, approved step.
 --
 -- A  one row per duplicate group (GROUP BY shopId, offsetDays, channel
---    HAVING COUNT(*) > 1): has_shop, offset_days, channel, n (rules in the
+--    HAVING COUNT(*) > 1): shop_kind, has_shop, offset_days, channel, n (rules in the
 --    group), distinct_create_minutes (distinct createdAt minutes; 1 = the
 --    copies were created in the same minute, e.g. a double submit / race),
 --    n_enabled, rules_with_logs and log_rows (ReminderLog rows on the group's
@@ -14,18 +14,30 @@
 -- C  shops affected, duplicate groups, rules in those groups, and excess rules
 --    (rules beyond the first per group = what a dedupe would remove).
 --
--- shop_idx = DENSE_RANK over all Shop ids, as in s12-hold-coverage.sql. Raw
--- shop / rule ids are never printed. offset_days is the rule's day offset
+-- shop_kind: identity label from the canonical shop_labels CTE
+-- (scripts/ci/shop-labels.ts). 'main' = the shop whose domain is :'allowed'
+-- (ALLOWED_DEV_STORE), 'e2e' = :'e2e' (E2E_SHOP), 'other_N' = the rest ranked by
+-- Shop.id within this run only (N is stable within one run but does NOT identify
+-- a shop across runs), 'unknown' for every shop if a secret is empty or both are
+-- equal. Domains are compared, never printed.
+-- Raw shop / rule ids are never printed. offset_days is the rule's day offset
 -- (merchant config, e.g. -3, 0, 7), printed only through a digits-only guard;
 -- channel is the ReminderChannel enum (native | email), guarded to those values.
--- No text columns are selected. Counts, enums, booleans and ids only. Vars: none.
+-- No text columns are selected. Counts, enums and booleans only.
+-- Vars: allowed, e2e (masked secrets, passed by prod-readonly-query.yml).
 \set ON_ERROR_STOP 1
 BEGIN TRANSACTION READ ONLY;
 
 \echo '== A duplicate ReminderRule groups (shopId, offsetDays, channel) with n > 1'
-WITH shops AS (
+WITH shop_labels AS (
   SELECT s.id AS shop_id,
-         DENSE_RANK() OVER (ORDER BY s.id) AS shop_idx
+         CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+              WHEN s.domain = :'allowed' THEN 'main'
+              WHEN s.domain = :'e2e' THEN 'e2e'
+              ELSE 'other_' || (ROW_NUMBER() OVER (
+                     PARTITION BY s.domain IN (:'allowed', :'e2e')
+                     ORDER BY s.id))::text
+         END AS shop_kind
   FROM "Shop" s
 ),
 grp AS (
@@ -53,7 +65,7 @@ logs AS (
   LEFT JOIN "ReminderLog" rl ON rl."ruleId" = r.id
   GROUP BY r."shopId", r."offsetDays", r.channel
 )
-SELECT sh.shop_idx,
+SELECT sl.shop_kind,
        g.grp_shop IS NOT NULL AS has_shop,
        CASE WHEN g.grp_offset::TEXT ~ '^-?[0-9]{1,4}$' THEN g.grp_offset::TEXT END AS offset_days,
        CASE WHEN g.grp_channel::TEXT IN ('native', 'email') THEN g.grp_channel::TEXT END AS channel,
@@ -63,12 +75,12 @@ SELECT sh.shop_idx,
        l.rules_with_logs,
        l.log_rows
 FROM grp g
-LEFT JOIN shops sh ON sh.shop_id = g.grp_shop
+LEFT JOIN shop_labels sl ON sl.shop_id = g.grp_shop
 LEFT JOIN logs l
     ON l.log_shop = g.grp_shop
     AND l.log_offset = g.grp_offset
     AND l.log_channel = g.grp_channel
-ORDER BY sh.shop_idx, g.grp_offset, g.grp_channel;
+ORDER BY sl.shop_kind, g.grp_offset, g.grp_channel;
 
 \echo '== B ReminderLog over rules in duplicate groups (totals)'
 WITH grp AS (

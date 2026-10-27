@@ -144,7 +144,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -170,7 +170,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - found one
       mockSql.mockResolvedValueOnce([{ id: "acc-company" }]);
       // Tag rules fetch
@@ -195,7 +195,7 @@ describe("Tag Rules Route", () => {
 
       const now = new Date();
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -254,7 +254,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -283,7 +283,7 @@ describe("Tag Rules Route", () => {
       (getUsageStats as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -314,7 +314,7 @@ describe("Tag Rules Route", () => {
       (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Database error"));
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -349,7 +349,7 @@ describe("Tag Rules Route", () => {
       });
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -378,7 +378,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -413,7 +413,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -449,7 +449,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -484,7 +484,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -519,7 +519,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds existing rule with different case
@@ -570,7 +570,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds no case-variant duplicate
@@ -617,7 +617,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -650,7 +650,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -685,7 +685,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -720,7 +720,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -755,7 +755,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -792,15 +792,15 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check for case-insensitive duplicate - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
-      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
-      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+      // Idempotency check - message already exists (skip enqueue)
+      mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -844,15 +844,15 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
-      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
-      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+      // Idempotency check - message already exists (skip enqueue)
+      mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -878,8 +878,8 @@ describe("Tag Rules Route", () => {
     });
   });
 
-  describe("action - first-tag-rule enqueue", () => {
-    it("enqueues customers reconcile when first tag rule is created (count=1)", async () => {
+  describe("action - tag-rule customers enqueue", () => {
+    it("enqueues customers reconcile when first tag rule is created", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { enqueueReconcileStage } = await import(
         "~/services/drain/reconcile-handlers.server"
@@ -887,15 +887,13 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "test-s8-first.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "test-s8-first.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "first-rule-id" }]);
-      // S8: Count tag rules - FIRST rule (count=1)
-      mockSql.mockResolvedValueOnce([{ count: "1" }]);
       // Idempotency check - no existing message
       mockSql.mockResolvedValueOnce([]);
 
@@ -931,7 +929,7 @@ describe("Tag Rules Route", () => {
       );
     });
 
-    it("does NOT enqueue customers reconcile when second tag rule is created (count=2)", async () => {
+    it("enqueues customers reconcile when second tag rule is created too", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { enqueueReconcileStage } = await import(
         "~/services/drain/reconcile-handlers.server"
@@ -940,15 +938,15 @@ describe("Tag Rules Route", () => {
       (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "test-s8-second.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "test-s8-second.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "second-rule-id" }]);
-      // S8: Count tag rules - SECOND rule (count=2)
-      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+      // Idempotency check - no existing message (second rule, but still enqueues)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -973,11 +971,62 @@ describe("Tag Rules Route", () => {
       expect(result.success).toBe(true);
       expect(result.createdRuleId).toBe("second-rule-id");
 
-      // Verify enqueueReconcileStage was NOT called
+      // Verify enqueueReconcileStage WAS called (every new rule enqueues)
+      expect(enqueueReconcileStage).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-s8-second.myshopify.com",
+        "customers",
+        expect.stringContaining("manual:")
+      );
+    });
+
+    it("does NOT enqueue when duplicate rule is rejected via ON CONFLICT", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-dup", domain: "test-s8-dup.myshopify.com", currency: "INR" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check finds no case-variant duplicate
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returns empty due to ON CONFLICT DO NOTHING (exact-case match)
+      mockSql.mockResolvedValueOnce([]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors?.tag).toContain("already exists");
+
+      // Verify enqueueReconcileStage was NOT called (duplicate rejected before enqueue)
       expect(enqueueReconcileStage).not.toHaveBeenCalled();
     });
 
-    it("first-tag-rule enqueue is idempotent (skips if message already queued)", async () => {
+    it("customers enqueue is idempotent (skips if message already queued)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { enqueueReconcileStage } = await import(
         "~/services/drain/reconcile-handlers.server"
@@ -986,15 +1035,13 @@ describe("Tag Rules Route", () => {
       (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "test-s8-idem.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "test-s8-idem.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "idem-rule-id" }]);
-      // S8: Count tag rules - FIRST rule (count=1)
-      mockSql.mockResolvedValueOnce([{ count: "1" }]);
       // Idempotency check - message ALREADY exists in queue
       mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg-123" }]);
 
@@ -1074,7 +1121,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -1109,7 +1156,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check - has COMPANY account (B2B)
       mockSql.mockResolvedValueOnce([{ id: "company-acc" }]);
 
@@ -1152,7 +1199,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds no duplicate
@@ -1193,7 +1240,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds no duplicate
@@ -1338,11 +1385,15 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
     const sensitiveTag = "wholesale-gold-tier";
 
     // Shop lookup
-    mockSql.mockResolvedValueOnce([{ id: "shop-xyz" }]);
+    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com", currency: "INR" }]);
     // Store mode check (tag_based)
+    mockSql.mockResolvedValueOnce([]);
+    // Pre-check for case-insensitive duplicate
     mockSql.mockResolvedValueOnce([]);
     // Insert
     mockSql.mockResolvedValueOnce([{ id: "rule-abc" }]);
+    // Idempotency check
+    mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg" }]);
 
     const formData = new FormData();
     formData.append("intent", "create_tag_rule");
@@ -1402,8 +1453,10 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
     const sensitiveTag = "secret-tier-99";
 
     // Shop lookup
-    mockSql.mockResolvedValueOnce([{ id: "shop-xyz" }]);
+    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com", currency: "INR" }]);
     // Store mode check (tag_based)
+    mockSql.mockResolvedValueOnce([]);
+    // Pre-check for case-insensitive duplicate
     mockSql.mockResolvedValueOnce([]);
     // Insert - throw error
     const dbError = new Error(
@@ -1527,42 +1580,6 @@ describe("S24: Finishing setup empty state (real render)", () => {
     vi.resetModules();
   });
 
-  it("useRevalidator hook is called during render in finishing setup state", async () => {
-    const { renderToString } = await import("react-dom/server");
-    const { createElement } = await import("react");
-
-    let revalidatorCalled = false;
-
-    vi.doMock("react-router", async () => {
-      const actual = await vi.importActual<typeof import("react-router")>("react-router");
-      return {
-        ...actual,
-        useLoaderData: () => ({
-          storeMode: "tag_based",
-          tagRules: [],
-          shopId: null,
-          error: null,
-          finishingSetup: true,
-        }),
-        useActionData: () => null,
-        useNavigation: () => ({ state: "idle" }),
-        useRevalidator: () => {
-          revalidatorCalled = true;
-          return { revalidate: vi.fn(), state: "idle" };
-        },
-      };
-    });
-
-    vi.resetModules();
-    const { default: TagRulesPage } = await import("../app.tag-rules");
-
-    const html = renderToString(createElement(TagRulesPage));
-
-    expect(html).toContain("s-button");
-    expect(html).toContain("Refresh");
-    expect(revalidatorCalled).toBe(true);
-  });
-
   it("renders finishing setup banner and empty state when finishingSetup is true", async () => {
     const { renderToString } = await import("react-dom/server");
     const { createElement } = await import("react");
@@ -1590,12 +1607,9 @@ describe("S24: Finishing setup empty state (real render)", () => {
     const html = renderToString(createElement(TagRulesPage));
 
     expect(html).toContain("s-banner");
-    expect(html).toContain("Finishing setup");
-    expect(html).toContain("finishing setting up your store");
-    expect(html).toContain("s-empty-state");
     expect(html).toContain("Setting up your store");
-    expect(html).toContain("s-button");
-    expect(html).toContain("Refresh");
+    expect(html).toContain("finishing setting up your store");
+    expect(html).not.toContain("s-empty-state");
   });
 
   it("does not render create form when finishingSetup is true", async () => {
@@ -1663,7 +1677,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
 
     const html = renderToString(createElement(TagRulesPage));
 
-    expect(html).not.toContain("Finishing setup");
+    expect(html).not.toContain("Setting up your store");
     expect(html).toContain("Create Tag Rule");
     expect(html).toContain('name="tag"');
     expect(html).toContain('name="defaultTermsDays"');

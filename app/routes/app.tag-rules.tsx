@@ -24,10 +24,13 @@ import type {
   LoaderFunctionArgs,
   ActionFunctionArgs,
 } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation, useRevalidator, data } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { safeLog, toErrorCode, shopHash } from "~/lib/log.server";
+import { getStoreSetupStatus, type StoreSetupStatus } from "~/lib/store-setup-state";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import { buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
@@ -70,6 +73,8 @@ interface LoaderData {
   shopId: string | null;
   error: string | null;
   finishingSetup: boolean;
+  notSupported: boolean;
+  storeSetupStatus: StoreSetupStatus;
   newAccountsPausedBanner: NewAccountsPausedBannerState;
 }
 
@@ -182,17 +187,21 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
+  const storeSetupStatus = getStoreSetupStatus(shop);
+
+  if (storeSetupStatus !== "supported") {
     return {
       storeMode: "tag_based" as StoreMode,
       tagRules: [],
-      shopId: null,
+      shopId: shop?.id ?? null,
       error: null,
-      finishingSetup: true,
+      finishingSetup: storeSetupStatus === "setting_up",
+      notSupported: storeSetupStatus === "not_supported",
+      storeSetupStatus,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -244,6 +253,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopId: shop.id,
       error: null,
       finishingSetup: false,
+      notSupported: false,
+      storeSetupStatus: "supported" as const,
       newAccountsPausedBanner,
     } satisfies LoaderData;
   } catch (err) {
@@ -258,6 +269,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopId: shop.id,
       error: "Failed to load tag rules",
       finishingSetup: false,
+      notSupported: false,
+      storeSetupStatus: "supported" as const,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -274,21 +287,33 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; domain: string }[]>`
-    SELECT id, domain FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; domain: string; currency: string | null }[]>`
+    SELECT id, domain, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
+  const storeSetupStatus = getStoreSetupStatus(shop);
+
+  if (storeSetupStatus === "setting_up") {
     return data(
       {
         success: false,
-        error: "Your store is still being set up. Please refresh in a moment.",
+        error: "Your store is still being set up. Please wait a moment and try again.",
       } satisfies ActionData,
       { status: 400 }
     );
   }
 
-  const storeMode = await detectStoreMode(sql, shop.id);
+  if (storeSetupStatus === "not_supported") {
+    return data(
+      {
+        success: false,
+        error: "Only INR currency is supported",
+      } satisfies ActionData,
+      { status: 400 }
+    );
+  }
+
+  const storeMode = await detectStoreMode(sql, shop!.id);
   if (storeMode === "b2b") {
     return data(
       {
@@ -410,25 +435,18 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       termsDays: parsedTermsDays,
     });
 
-    const [ruleCountResult] = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shop.id}
+    const [alreadyQueued] = await sql<{ msg_id: string }[]>`
+      SELECT msg_id::text FROM pgmq.q_s6_sync
+      WHERE message->>'shop' = ${shop.domain}
+        AND message->>'topic' = 'RECONCILE_CUSTOMERS'
+      LIMIT 1
     `;
-    const ruleCount = parseInt(ruleCountResult?.count ?? "0", 10);
-
-    if (ruleCount === 1) {
-      const [alreadyQueued] = await sql<{ msg_id: string }[]>`
-        SELECT msg_id::text FROM pgmq.q_s6_sync
-        WHERE message->>'shop' = ${shop.domain}
-          AND message->>'topic' = 'RECONCILE_CUSTOMERS'
-        LIMIT 1
-      `;
-      if (!alreadyQueued) {
-        const manualKey = `manual:${Date.now()}`;
-        await enqueueReconcileStage(sql, shop.domain, "customers", manualKey);
-        safeLog("info", "first_tag_rule_customers_enqueued", {
-          shopHash: await shopHash(shop.domain),
-        });
-      }
+    if (!alreadyQueued) {
+      const manualKey = `manual:${Date.now()}`;
+      await enqueueReconcileStage(sql, shop.domain, "customers", manualKey);
+      safeLog("info", "first_tag_rule_customers_enqueued", {
+        shopHash: await shopHash(shop.domain),
+      });
     }
 
     return {
@@ -508,10 +526,9 @@ function TagRuleTable({ rules }: { rules: TagRule[] }) {
 }
 
 export default function TagRulesPage() {
-  const { storeMode, tagRules, error, finishingSetup, newAccountsPausedBanner } = useLoaderData<typeof loader>();
+  const { storeMode, tagRules, error, finishingSetup, notSupported, newAccountsPausedBanner } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
-  const revalidator = useRevalidator();
   const isSubmitting = navigation.state === "submitting";
 
   const [tag, setTag] = useState("");
@@ -525,25 +542,23 @@ export default function TagRulesPage() {
         </s-link>
 
         <s-section>
-          <s-banner tone="info" heading="Finishing setup">
-            <s-text>
-              We&apos;re finishing setting up your store. Refresh in a moment.
-            </s-text>
-          </s-banner>
+          <StoreSettingUpBanner />
         </s-section>
+      </s-page>
+    );
+  }
+
+  if (notSupported) {
+    return (
+      <s-page heading="Tag Rules">
+        <s-link href="/" slot="breadcrumb-actions">
+          Back to Dashboard
+        </s-link>
 
         <s-section>
-          <s-empty-state heading="Setting up your store">
-            <s-text slot="subheading">
-              Tag rules will be available once setup is complete.
-            </s-text>
-            <s-button
-              slot="primary-action"
-              onClick={() => revalidator.revalidate()}
-            >
-              Refresh
-            </s-button>
-          </s-empty-state>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
         </s-section>
       </s-page>
     );

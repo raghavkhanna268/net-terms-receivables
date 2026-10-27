@@ -14,6 +14,17 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { syncClockToDb } from "../../../../tests/helpers/db-clock";
+
+/**
+ * Generate a letters-only random string (a-z) to avoid /\d{5,}/ assertion conflicts.
+ * Date.now().toString(36) can produce 5+ consecutive digits, failing digit-leak checks.
+ */
+function lettersOnlyId(len: number): string {
+  return Array.from({ length: len }, () =>
+    String.fromCharCode(97 + Math.floor(Math.random() * 26))
+  ).join("");
+}
 
 vi.mock("../admin-client.server", () => ({
   adminGraphQL: vi.fn(),
@@ -63,9 +74,26 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-s25";
+  let dbNow: Date;
+  const TEST_SUFFIX = lettersOnlyId(8) + "-s25";
   const TEST_SHOP_ID = `shop-s25-${TEST_SUFFIX}`;
   const TEST_SHOP_DOMAIN = `test-s25-${TEST_SUFFIX}.myshopify.com`;
+
+  function minutesAgo(n: number): Date {
+    return new Date(dbNow.getTime() - n * 60 * 1000);
+  }
+  function minutesFromNow(n: number): Date {
+    return new Date(dbNow.getTime() + n * 60 * 1000);
+  }
+  function hoursAgo(n: number): Date {
+    return new Date(dbNow.getTime() - n * 60 * 60 * 1000);
+  }
+  function daysAgo(n: number): Date {
+    return new Date(dbNow.getTime() - n * 24 * 60 * 60 * 1000);
+  }
+  function secondsFromNow(n: number): Date {
+    return new Date(dbNow.getTime() + n * 1000);
+  }
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -87,6 +115,9 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   });
 
   beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    dbNow = await syncClockToDb(sql);
+
     vi.clearAllMocks();
     vi.resetModules();
     await sql`DELETE FROM s6_dead_letter WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
@@ -94,6 +125,10 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
     await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM s6_bulk_operations WHERE shop = ${TEST_SHOP_DOMAIN}`;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe("claimBulkCompletion - exactly-once completion", () => {
@@ -172,7 +207,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         SELECT processing_lease_until, processing_lease_token FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
       `;
       expect(row.processing_lease_until).not.toBeNull();
-      expect(row.processing_lease_until!.getTime()).toBeGreaterThan(Date.now());
+      expect(row.processing_lease_until!.getTime()).toBeGreaterThan(dbNow.getTime());
       expect(row.processing_lease_token).toBe(token);
     });
 
@@ -180,7 +215,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/lease-held-${TEST_SUFFIX}`;
-      const futureLeaseTime = new Date(Date.now() + 60 * 1000);
+      const futureLeaseTime = minutesFromNow(1);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, processing_lease_until, processing_lease_token)
@@ -195,7 +230,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/lease-expired-${TEST_SUFFIX}`;
-      const pastLeaseTime = new Date(Date.now() - 60 * 1000);
+      const pastLeaseTime = minutesAgo(1);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, processing_lease_until, processing_lease_token)
@@ -345,7 +380,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/legacy-live-${TEST_SUFFIX}`;
-      const futureLeaseTime = new Date(Date.now() + 60 * 1000);
+      const futureLeaseTime = minutesFromNow(1);
 
       // Legacy row: processing_lease_until is set but processing_lease_token is NULL
       await sql`
@@ -362,7 +397,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { acquireProcessingLease } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/legacy-expired-${TEST_SUFFIX}`;
-      const pastLeaseTime = new Date(Date.now() - 60 * 1000);
+      const pastLeaseTime = minutesAgo(1);
 
       // Legacy row: processing_lease_until is expired and processing_lease_token is NULL
       await sql`
@@ -487,7 +522,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { claimReconcileStage } = await import("../reconcile-handlers.server");
 
       const chainKey = `2025-01-03-${TEST_SUFFIX}`;
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      const tenMinutesAgo = minutesAgo(10);
 
       await sql`
         INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, claimed_at)
@@ -518,7 +553,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { purgeOldReconcileClaims } = await import("../reconcile-handlers.server");
 
       const chainKey = `2025-old-${TEST_SUFFIX}`;
-      const fortyDaysAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+      const fortyDaysAgo = daysAgo(40);
 
       // Clean up all old claims globally first to get exact count
       await sql`DELETE FROM s6_reconcile_stage_claims WHERE claimed_at < now() - interval '30 days'`;
@@ -573,7 +608,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { findStaleBulkOperations } = await import("../bulk-op-recovery.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/finish-received-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, finish_received_at)
@@ -589,8 +624,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { findStaleBulkOperations } = await import("../bulk-op-recovery.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/active-lease-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const futureLease = new Date(Date.now() + 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
+      const futureLease = minutesFromNow(1);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, processing_lease_until)
@@ -606,8 +641,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { findStaleBulkOperations } = await import("../bulk-op-recovery.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/expired-lease-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const pastLease = new Date(Date.now() - 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
+      const pastLease = minutesAgo(1);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at, processing_lease_until)
@@ -626,7 +661,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { BULK_ERROR_CODES } = await import("~/services/sync/bulk-jsonl-processor.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/dlq-stale-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       await sql`
         INSERT INTO s6_bulk_operations (bulk_operation_id, shop, bulk_type, origin, started_at)
@@ -716,7 +751,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies" as const,
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         });
 
         // Run 3 concurrent deliveries through the PRODUCTION handler
@@ -903,7 +938,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       // 4. Time passed (claim is now old enough to be considered orphan)
 
       // Insert claim with OLD claimed_at (6 minutes ago) to simulate orphan
-      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
+      const sixMinutesAgo = minutesAgo(6);
       await sql`
         INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, bulk_operation_id, claimed_at)
         VALUES (${chainKey}, 'orders', ${TEST_SHOP_DOMAIN}, ${opId}, ${sixMinutesAgo})
@@ -997,7 +1032,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies" as const,
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
 
         await processBulkOperation(sql, message);
@@ -1071,7 +1106,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "orders" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       const result = await processBulkOperation(sql, message);
@@ -1117,7 +1152,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "orders" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       const result = await processBulkOperation(sql, message);
@@ -1135,7 +1170,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { findStaleBulkOperations } = await import("../bulk-op-recovery.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/finish-c6-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       // Insert without finish_received_at
       await sql`
@@ -1166,7 +1201,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const { adminGraphQL } = await import("../admin-client.server");
 
       const bulkOpId = `gid://shopify/BulkOperation/legacy-c7-${TEST_SUFFIX}`;
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      const twoHoursAgo = hoursAgo(2);
 
       // Clean up existing stale ops that might affect our count
       // (completed/closed ops only - don't touch active ops)
@@ -1248,7 +1283,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       await processBulkOperation(sql, message);
@@ -1328,7 +1363,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -1355,7 +1390,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const orphanOpId = `gid://shopify/BulkOperation/orphan-${TEST_SUFFIX}`;
 
       // Insert claim with OLD claimed_at (6 minutes ago) to be considered orphan
-      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
+      const sixMinutesAgo = minutesAgo(6);
       await sql`
         INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, bulk_operation_id, claimed_at)
         VALUES (${chainKey}, 'companies', ${TEST_SHOP_DOMAIN}, ${orphanOpId}, ${sixMinutesAgo})
@@ -1410,7 +1445,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       const chainKey = `${TEST_SHOP_DOMAIN}:2025-01-25`;
 
       // Insert orphan claim with OLD claimed_at (6 minutes ago)
-      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
+      const sixMinutesAgo = minutesAgo(6);
       await sql`
         INSERT INTO s6_reconcile_stage_claims (chain_key, stage, shop, bulk_operation_id, claimed_at)
         VALUES (${chainKey}, 'orders', ${TEST_SHOP_DOMAIN}, ${orphanOpId}, ${sixMinutesAgo})
@@ -1957,7 +1992,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies" as const,
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
         const result = await processBulkOperation(sql, message);
 
@@ -2032,7 +2067,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies",
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
 
         await sql`
@@ -2165,7 +2200,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies" as const,
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
         const result = await processBulkOperation(sql, message);
 
@@ -2576,7 +2611,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId: `recovery:${strandedOpId}`,
           bulkOperationId: strandedOpId,
           bulkType: "companies" as const,
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
 
         // Process through production handler - completes op and enqueues next stage
@@ -2905,7 +2940,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
             webhookId: `existing:${pendingMsgOpId}`,
             bulkOperationId: pendingMsgOpId,
             bulkType: "companies",
-            enqueuedAt: new Date().toISOString(),
+            enqueuedAt: dbNow.toISOString(),
           })})
         `;
 
@@ -3423,7 +3458,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies",
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
 
         await sql`
@@ -3712,7 +3747,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId: webhookId1,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const resultA = await processBulkOperation(sql, messageA);
       expect(resultA.success).toBe(true);
@@ -3761,7 +3796,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId: webhookId3,
         bulkOperationId: bulkOpId2,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const resultB = await processBulkOperation(sql, messageB);
       
@@ -3805,7 +3840,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
       
@@ -3866,7 +3901,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId: webhookIdA,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const resultA = await processBulkOperation(sql, messageA);
 
@@ -4027,7 +4062,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       // B takes over via SQL: new token and future lease_until
       const tokenB = crypto.randomUUID();
-      const futureLease = new Date(Date.now() + 60000);
+      const futureLease = secondsFromNow(60);
       await sql`
         UPDATE s6_bulk_operations
         SET processing_lease_token = ${tokenB},
@@ -4199,7 +4234,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -4245,7 +4280,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -4279,7 +4314,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -4315,7 +4350,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -4357,7 +4392,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -4399,7 +4434,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -4485,7 +4520,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
       const result = await processBulkOperation(sql, message);
 
@@ -4591,7 +4626,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies" as const,
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
 
         const result = await processBulkOperation(sql, message, 100, hooks);
@@ -4808,7 +4843,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           webhookId,
           bulkOperationId: bulkOpId,
           bulkType: "companies" as const,
-          enqueuedAt: new Date().toISOString(),
+          enqueuedAt: dbNow.toISOString(),
         };
 
         const result = await processBulkOperation(sql, message);
@@ -4902,7 +4937,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       await sql`
@@ -4982,7 +5017,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies",
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       await sql`
@@ -5153,7 +5188,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         webhookId,
         bulkOperationId: bulkOpId,
         bulkType: "companies" as const,
-        enqueuedAt: new Date().toISOString(),
+        enqueuedAt: dbNow.toISOString(),
       };
 
       const result = await processBulkOperation(sql, message);
