@@ -33,6 +33,7 @@ export const SHOP_LABEL_SCRIPTS = [
   "s12-hold-coverage",
   "s18-reminder-rule-dupes",
   "s18-reminders-due-7d",
+  "schedule-dueat-utc-time",
 ] as const;
 
 /** Values shop_kind may take. */
