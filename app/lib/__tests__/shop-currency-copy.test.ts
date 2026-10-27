@@ -10,7 +10,7 @@ describe("shop-currency-copy", () => {
   describe("CURRENCY_NOT_SUPPORTED_BANNER_COPY", () => {
     it("contains instruction to reload and open Setup Guide", () => {
       expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain(
-        "then reload this page. To start syncing your data, open the Setup Guide and click Start sync."
+        "Then reload this page. To start syncing your data, open the Setup Guide and click Start sync."
       );
     });
 
@@ -18,9 +18,9 @@ describe("shop-currency-copy", () => {
       expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toBe(
         "Termwise is built for Indian merchants and currently supports INR only. " +
         "To use it, the store owner must change the store currency to Indian Rupee (INR) in " +
-        "Shopify admin → Settings → General → Store defaults → Currency display → ⋯ → Change store currency, " +
-        "then reload this page. To start syncing your data, open the Setup Guide and click Start sync. " +
-        "If your store already has orders, Shopify asks you to confirm the change."
+        "Shopify admin → Settings → General → Store defaults → Currency display → ⋯ → Change store currency. " +
+        "If your store already has orders, Shopify asks you to confirm the change. " +
+        "Then reload this page. To start syncing your data, open the Setup Guide and click Start sync."
       );
     });
   });
