@@ -780,6 +780,7 @@ describeWithDb("S23-09: reinstall resets onboarding_dismissed_at (DB)", () => {
 describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)", () => {
   let sql: ReturnType<typeof postgres>;
   const TEST_SUFFIX = Date.now().toString(36) + "-runafterauth";
+  const FIXED_TIME = new Date("2026-10-20T14:00:00Z");
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -793,9 +794,12 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
   beforeEach(async () => {
     await sql`DELETE FROM "Shop" WHERE domain LIKE ${'%-' + TEST_SUFFIX + '.myshopify.com'}`;
     vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(FIXED_TIME);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.resetModules();
   });
 
@@ -850,14 +854,14 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
     const waitUntilPromises: Promise<unknown>[] = [];
     const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
 
-    runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+    await runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
 
     await Promise.all(waitUntilPromises);
     await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
 
     await sql`
       UPDATE "Shop"
-      SET "uninstalledAt" = NOW()
+      SET "uninstalledAt" = ${FIXED_TIME}
       WHERE domain = ${TEST_SHOP}
     `;
 
@@ -868,7 +872,7 @@ describeWithDb("runAfterAuth cross-isolate reinstall via getRequestSql mock (DB)
 
     waitUntilPromises.length = 0;
 
-    runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+    await runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
 
     await Promise.all(waitUntilPromises);
 
@@ -1990,6 +1994,17 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
   });
 
   describe("shop already in setup cache (only clearAndMaybeSetup path)", () => {
+    const FIXED_TIME = new Date("2026-10-20T14:00:00Z");
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(FIXED_TIME);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("reinstall with cached shop: clears metafield errors via clearAndMaybeSetup only", async () => {
       const TEST_SHOP = `test-cached-reinstall-${TEST_SUFFIX}.myshopify.com`;
       const errorDate = new Date("2026-10-15T12:00:00Z");
@@ -2008,7 +2023,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
         )
         VALUES (
           ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/test-cached', 'gid://shopify/CompanyLocation/test-cached',
+          ${'gid://shopify/Company/test-cached-' + TEST_SUFFIX}, ${'gid://shopify/CompanyLocation/test-cached-' + TEST_SUFFIX},
           'Cached Test Account', 'OK', 'no_session', ${errorDate},
           NOW(), NOW()
         )
@@ -2042,14 +2057,14 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
 
-      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+      await runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
 
       await Promise.all(waitUntilPromises);
       await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
 
       await sql`
         UPDATE "Shop"
-        SET "uninstalledAt" = NOW()
+        SET "uninstalledAt" = ${FIXED_TIME}
         WHERE domain = ${TEST_SHOP}
       `;
 
@@ -2060,7 +2075,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
 
       waitUntilPromises.length = 0;
 
-      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+      await runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
 
       await Promise.all(waitUntilPromises);
 
@@ -2098,7 +2113,7 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
         )
         VALUES (
           ${shopId}, 'COMPANY'::"AccountKind",
-          'gid://shopify/Company/test-cached-reauth', 'gid://shopify/CompanyLocation/test-cached-reauth',
+          ${'gid://shopify/Company/test-cached-reauth-' + TEST_SUFFIX}, ${'gid://shopify/CompanyLocation/test-cached-reauth-' + TEST_SUFFIX},
           'Cached Reauth Account', 'OK', 'access_denied', ${errorDate},
           NOW(), NOW()
         )
@@ -2132,14 +2147,14 @@ describeWithDb("full after-auth flow clears metafield errors on reinstall (DB)",
       const waitUntilPromises: Promise<unknown>[] = [];
       const mockWaitUntil = (p: Promise<unknown>) => waitUntilPromises.push(p);
 
-      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+      await runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
 
       await Promise.all(waitUntilPromises);
       await vi.waitFor(() => expect(_isShopSetupComplete(TEST_SHOP)).toBe(true));
 
       waitUntilPromises.length = 0;
 
-      runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
+      await runAfterAuth(TEST_SHOP, mockAdmin as Parameters<typeof runAfterAuth>[1], mockWaitUntil);
 
       await Promise.all(waitUntilPromises);
 
