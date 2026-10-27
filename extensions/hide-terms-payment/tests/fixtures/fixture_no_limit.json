@@ -1,0 +1,52 @@
+{
+  "cart": {
+    "cost": {
+      "totalAmount": {
+        "currencyCode": "INR"
+      }
+    },
+    "buyerIdentity": {
+      "customer": null,
+      "purchasingCompany": {
+        "location": {
+          "metafield": {
+            "jsonValue": {
+              "schemaVersion": 1,
+              "currencyCode": "INR",
+              "hold": false,
+              "holdReasonCode": null,
+              "limitPaise": "999999999999999",
+              "exposurePaise": "50000000",
+              "updatedAt": "2026-10-27T02:00:41.158Z"
+            }
+          }
+        }
+      }
+    }
+  },
+  "paymentMethods": [
+    {
+      "id": "gid://shopify/PaymentCustomizationPaymentMethod/1",
+      "name": "Credit Card"
+    },
+    {
+      "id": "gid://shopify/PaymentCustomizationPaymentMethod/2",
+      "name": "Deferred Payment"
+    },
+    {
+      "id": "gid://shopify/PaymentCustomizationPaymentMethod/3",
+      "name": "Net Terms"
+    }
+  ],
+  "paymentCustomization": {
+    "metafield": null
+  },
+  "shop": {
+    "metafield": {
+      "jsonValue": {
+        "schemaVersion": 1,
+        "currencyCode": "INR"
+      }
+    }
+  }
+}
