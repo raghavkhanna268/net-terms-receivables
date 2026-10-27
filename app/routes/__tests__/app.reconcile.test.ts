@@ -798,11 +798,11 @@ describe("Reconcile Route (M5)", () => {
       expect(runMatcher).not.toHaveBeenCalled();
     });
 
-    it("action returns error for unknown currency shop (XXX) and does not call confirm", async () => {
+    it("action returns setting-up error for unknown currency shop (XXX) and does not call confirm", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { confirmMatch } = await import("~/services/matcher.server");
 
-      // Return shop with unknown currency
+      // Return shop with unknown currency (XXX = setup placeholder)
       mockSql.mockResolvedValueOnce([{ id: "shop-xxx", currency: "XXX" }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
@@ -825,16 +825,17 @@ describe("Reconcile Route (M5)", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Currency not supported");
-      // Verify confirmMatch was NOT called due to currency guard
+      // XXX currency means setup is pending, not unsupported
+      expect(result.error).toContain("still being set up");
+      // Verify confirmMatch was NOT called due to setup guard
       expect(confirmMatch).not.toHaveBeenCalled();
     });
 
-    it("action returns error for null currency shop and does not call apply", async () => {
+    it("action returns setting-up error for null currency shop and does not call apply", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { applyMatch } = await import("~/services/apply.server");
 
-      // Return shop with null currency
+      // Return shop with null currency (setup in progress)
       mockSql.mockResolvedValueOnce([{ id: "shop-null", currency: null }]);
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
@@ -857,8 +858,9 @@ describe("Reconcile Route (M5)", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Currency not supported");
-      // Verify applyMatch was NOT called due to currency guard
+      // null currency means setup is pending, not unsupported
+      expect(result.error).toContain("still being set up");
+      // Verify applyMatch was NOT called due to setup guard
       expect(applyMatch).not.toHaveBeenCalled();
     });
 

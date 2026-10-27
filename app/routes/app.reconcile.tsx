@@ -40,6 +40,8 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 
 const PAGE_SIZE = 20;
 
@@ -174,6 +176,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
+  const storeSetupStatus = getStoreSetupStatus(shop);
+
   if (!shop) {
     return {
       shopCurrency: "INR",
@@ -182,9 +186,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       selectedPayment: null,
       pagination: { page: 1, pageSize: PAGE_SIZE, totalCount: 0 },
       view,
-      error: "Shop not found",
+      error: null,
       tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
       notSupported: false,
+      settingUp: true,
     };
   }
 
@@ -199,7 +204,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       view,
       error: null,
       tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 0 },
-      notSupported: true,
+      notSupported: storeSetupStatus === "not_supported",
+      settingUp: storeSetupStatus === "setting_up",
     };
   }
 
@@ -404,6 +410,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     error: null,
     tabCounts,
     notSupported: false,
+    settingUp: false,
   };
 };
 
@@ -421,8 +428,10 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
-    return { success: false, intent: null, error: "Shop not found" };
+  const actionSetupStatus = getStoreSetupStatus(shop);
+
+  if (!shop || actionSetupStatus === "setting_up") {
+    return { success: false, intent: null, error: "Your store is still being set up. Please wait a moment and try again." };
   }
 
   // #292/G7: Currency guard - refuse all reconcile actions for non-INR or unknown shops
@@ -1110,6 +1119,17 @@ export default function ReconcilePage() {
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
   const actionsDisabled = isSubmitting;
+
+  // #548: When store is setting up, show the shared banner
+  if ("settingUp" in loaderData && loaderData.settingUp) {
+    return (
+      <s-page heading="Payment Reconciliation">
+        <s-section>
+          <StoreSettingUpBanner />
+        </s-section>
+      </s-page>
+    );
+  }
 
   // #292: When currency not supported, show only the banner
   if ("notSupported" in loaderData && loaderData.notSupported) {

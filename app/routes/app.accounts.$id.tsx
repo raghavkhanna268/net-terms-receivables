@@ -54,6 +54,8 @@ import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { pluralizeWithCount } from "~/lib/copy-helpers";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -73,6 +75,7 @@ type SyncState = "pending_retry" | "needs_attention" | "synced";
 
 interface LoaderData {
   notSupported?: boolean;
+  settingUp?: boolean;
   shopCurrency?: string;
   account: {
     id: string;
@@ -189,6 +192,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
 
   if (!shop) {
     return {
+      settingUp: true,
       account: null,
       creditStatus: null,
       companyTotals: null,
@@ -202,7 +206,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
         bodyText: "",
         upgradeUrl: null,
       },
-      error: "Shop not found",
+      error: null,
     } satisfies LoaderData;
   }
 
@@ -443,8 +447,10 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
     SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
-    return { success: false, error: "Shop not found" } satisfies ActionData;
+  const actionSetupStatus = getStoreSetupStatus(shop);
+
+  if (!shop || actionSetupStatus === "setting_up") {
+    return { success: false, error: "Your store is still being set up. Please wait a moment and try again." } satisfies ActionData;
   }
 
   // #292: Check currency gate - reject all money edits for non-supported shops
@@ -664,6 +670,18 @@ export default function AccountPage() {
   useEffect(() => {
     setNoLimitChecked(serverNoLimit);
   }, [serverNoLimit]);
+
+  // #548: When store is setting up, show the shared banner
+  if (loaderData.settingUp) {
+    return (
+      <s-page heading="Account">
+        <s-link href="/app" slot="breadcrumb-actions">Back to Dashboard</s-link>
+        <s-section>
+          <StoreSettingUpBanner />
+        </s-section>
+      </s-page>
+    );
+  }
 
   // #292: When currency not supported, show only the banner
   if (loaderData.notSupported) {

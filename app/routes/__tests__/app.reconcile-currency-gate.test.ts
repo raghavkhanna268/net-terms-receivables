@@ -210,13 +210,14 @@ describe("#292 currency gate on /app/reconcile", () => {
       expect(mockGetSuggestedMatches).not.toHaveBeenCalled();
     });
 
-    it("XXX (unknown) shop: notSupported=true, fail-closed", async () => {
+    it("XXX (unknown) shop: settingUp=true, fail-closed", async () => {
       setupSqlMock("XXX");
 
       const { loader } = await import("../app.reconcile");
       const result = await loader(createLoaderArgs());
 
-      expect(result.notSupported).toBe(true);
+      expect(result.settingUp).toBe(true);
+      expect(result.notSupported).toBe(false);
       expect(result.shopCurrency).toBe("XXX");
       expect(result.payments).toHaveLength(0);
       expect(result.matches).toHaveLength(0);
@@ -226,13 +227,14 @@ describe("#292 currency gate on /app/reconcile", () => {
       assertNoMoneyKeysInPayload(serialized);
     });
 
-    it("NULL currency: notSupported=true, fail-closed", async () => {
+    it("NULL currency: settingUp=true, fail-closed", async () => {
       setupSqlMock(null);
 
       const { loader } = await import("../app.reconcile");
       const result = await loader(createLoaderArgs());
 
-      expect(result.notSupported).toBe(true);
+      expect(result.settingUp).toBe(true);
+      expect(result.notSupported).toBe(false);
       expect(result.shopCurrency).toBe("XXX");
       expect(result.payments).toHaveLength(0);
 
@@ -269,7 +271,7 @@ describe("#292 currency gate on /app/reconcile", () => {
       expect(mockRunMatcher).not.toHaveBeenCalled();
     });
 
-    it("XXX shop: rejects confirm with 'Currency not supported'", async () => {
+    it("XXX shop: rejects confirm with setting-up message", async () => {
       setupSqlMock("XXX");
 
       const formData = new FormData();
@@ -280,11 +282,11 @@ describe("#292 currency gate on /app/reconcile", () => {
       const result = await action(createActionArgs(formData));
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Currency not supported");
+      expect(result.error).toContain("still being set up");
       expect(mockConfirmMatch).not.toHaveBeenCalled();
     });
 
-    it("NULL currency: rejects reject with 'Currency not supported'", async () => {
+    it("NULL currency: rejects reject with setting-up message", async () => {
       setupSqlMock(null);
 
       const formData = new FormData();
@@ -295,7 +297,7 @@ describe("#292 currency gate on /app/reconcile", () => {
       const result = await action(createActionArgs(formData));
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Currency not supported");
+      expect(result.error).toContain("still being set up");
     });
 
     it("INR shop: allows run_matcher", async () => {

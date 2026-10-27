@@ -47,6 +47,7 @@ interface LoaderStep {
  */
 interface LoaderResult {
   error: string | null;
+  settingUp?: boolean;
   state: {
     steps: LoaderStep[];
     isComplete: boolean;
@@ -329,7 +330,7 @@ describe("app.onboarding", () => {
   });
 
   describe("loader", () => {
-    it("returns error when shop not found", async () => {
+    it("returns settingUp: true when shop not found", async () => {
       mockSql.mockImplementation(() => Promise.resolve([]));
 
       const { loader } = await import("../app.onboarding");
@@ -353,7 +354,8 @@ describe("app.onboarding", () => {
         params: {},
       } as unknown as LoaderFunctionArgs);
 
-      expect(result.error).toBe("Shop not found");
+      expect(result.settingUp).toBe(true);
+      expect(result.error).toBeNull();
       expect(result.state).toBeNull();
     });
 

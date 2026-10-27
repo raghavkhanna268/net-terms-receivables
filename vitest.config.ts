@@ -215,6 +215,11 @@ const DB_TEST_PATTERNS = [
 
   // Cross-shop (tenant) isolation DB tests
   "tests/integration/tenant-isolation-db.test.ts",
+
+  // #548 Setup state tests (shared banner when shop row missing)
+  "app/routes/__tests__/app.onboarding-setup-state-db.test.ts",
+  "app/routes/__tests__/app.reconcile-setup-state-db.test.ts",
+  "app/routes/__tests__/app.accounts.$id-setup-state-db.test.ts",
 ];
 
 export default defineConfig({
