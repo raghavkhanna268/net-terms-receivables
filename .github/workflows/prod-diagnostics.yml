@@ -85,6 +85,11 @@ on:
         required: false
         default: false
         type: boolean
+      held_webhook_split:
+        description: "Read-only: held orders / held accounts per shop_kind and webhook receipts per shop_kind by topic (fixed last 6h). Counts, enums and booleans only"
+        required: false
+        default: false
+        type: boolean
       e2e_second_shop:
         description: "Read-only: second-shop E2E mode (install/uninstall/reinstall test). Runs ONLY the e2e_second_shop job; shop comes from the E2E_SHOP secret or the single non-allowed Shop row (never an input, never printed)"
         required: false
@@ -419,6 +424,139 @@ jobs:
 
           echo ""
           echo "::notice::Post-redrive verification completed"
+
+      # Read-only. shop_kind (main / e2e / other_N / unknown) comes from the
+      # canonical shop_labels CTE (scripts/ci/shop-labels.ts) over the masked
+      # ALLOWED_DEV_STORE / E2E_SHOP secrets. Domains are only compared (in the
+      # CTE and in the webhook_receipts.shop join), never printed. The webhook
+      # lookback is a fixed 6 hours, not an input. Output: counts, enums and
+      # booleans only (no domains, GIDs, ids, money or emails).
+      # Pinned by scripts/ci/__tests__/prod-diagnostics-held-webhook-split*.test.ts.
+      - name: Held and webhook split by shop_kind (read-only)
+        if: ${{ inputs.held_webhook_split }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          if ! command -v psql &> /dev/null; then
+            echo "Installing PostgreSQL client..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+
+          # Split shop label secrets
+          # Same handling as the entity counts: validate before masking;
+          # invalid or unset -> "" and every shop is shop_kind=unknown.
+          LABEL_ALLOWED="${ALLOWED_DEV_STORE:-}"
+          if [ -n "$LABEL_ALLOWED" ]; then
+            if [[ ! "$LABEL_ALLOWED" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              LABEL_ALLOWED=""
+            else
+              echo "::add-mask::$LABEL_ALLOWED"
+            fi
+          fi
+          LABEL_E2E="${E2E_SHOP:-}"
+          if [ -n "$LABEL_E2E" ]; then
+            if [[ ! "$LABEL_E2E" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              LABEL_E2E=""
+            else
+              echo "::add-mask::$LABEL_E2E"
+            fi
+          fi
+          # End split shop label secrets
+
+          echo "=== Held and webhook split by shop_kind (read-only) ==="
+          echo "Read-only mode: enforced via PGOPTIONS and BEGIN TRANSACTION READ ONLY"
+          echo ""
+
+          # shop_kind = 'unknown' with shop_row=false: no Shop row matched
+          # (e.g. a receipt for an uninstalled/redacted shop). other_N is
+          # numbered by Shop.id and agrees across the sections of this run
+          # only; it does not identify a shop across runs.
+          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${LABEL_ALLOWED}" -v "e2e=${LABEL_E2E}" "$DATABASE_URL" <<'EOSQL'
+          BEGIN TRANSACTION READ ONLY;
+          \echo '== held orders per shop_kind (backstop action=held; all retained / last 6h / with invoice)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COALESCE(sl.shop_kind, 'unknown') AS shop_kind,
+                 (sl.shop_id IS NOT NULL) AS shop_row,
+                 COUNT(*) AS held_orders,
+                 COUNT(*) FILTER (WHERE b.processed_at > NOW() - INTERVAL '6 hours') AS held_orders_6h,
+                 COUNT(i.id) AS held_orders_with_invoice
+          FROM backstop_processed_orders b
+          LEFT JOIN shop_labels sl ON sl.shop_id = b.shop_id
+          LEFT JOIN "Invoice" i ON i."orderId" = b.order_gid AND i."shopId" = b.shop_id
+          WHERE b.action = 'held'
+          GROUP BY 1, 2
+          ORDER BY 1, 2;
+          \echo '== buyer accounts per shop_kind by holdState / manualHold / bypass (seed fixtures counted separately)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COALESCE(sl.shop_kind, 'unknown') AS shop_kind,
+                 CASE WHEN ba."holdState"::text IN ('OK', 'NEAR_LIMIT', 'HELD', 'BYPASS') THEN ba."holdState"::text ELSE 'other' END AS hold_state,
+                 (ba."manualHold" = true) AS manual_hold,
+                 (ba.bypass = true) AS bypass,
+                 COUNT(*) AS accounts,
+                 COUNT(*) FILTER (WHERE ba.id LIKE 'seed-account-%') AS seed_fixtures
+          FROM "BuyerAccount" ba
+          LEFT JOIN shop_labels sl ON sl.shop_id = ba."shopId"
+          GROUP BY 1, 2, 3, 4
+          ORDER BY 1, 2, 3, 4;
+          \echo '== webhook receipts per shop_kind by topic (last 6h)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COALESCE(sl.shop_kind, 'unknown') AS shop_kind,
+                 (sl.shop_id IS NOT NULL) AS shop_row,
+                 CASE WHEN wr.topic ~ '^[A-Z0-9_]{1,64}$' THEN wr.topic ELSE 'other' END AS topic,
+                 COUNT(*) AS receipts_6h
+          FROM webhook_receipts wr
+          LEFT JOIN "Shop" s ON s.domain = wr.shop
+          LEFT JOIN shop_labels sl ON sl.shop_id = s.id
+          WHERE wr.received_at > NOW() - INTERVAL '6 hours'
+          GROUP BY 1, 2, 3
+          ORDER BY 1, 2, 3;
+          ROLLBACK;
+          EOSQL
+
+          echo ""
+          echo "::notice::Held and webhook split completed"
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -2528,6 +2666,8 @@ jobs:
                   'dlq_' || COALESCE((SELECT lower(l.message->>'topic') FROM linked l ORDER BY l.dead_lettered_at, l.id LIMIT 1), 'unknown')
                 ELSE 'none' END),
             (10, 'e2e_bulk_ops_closed', (SELECT COUNT(*) FROM bulk WHERE closed_at IS NOT NULL)::text),
+            -- Completed per Shopify (completed_at set), whether or not closed. Sorted last.
+            (20, 'e2e_bulk_ops_completed', (SELECT COUNT(*) FROM bulk WHERE completed_at IS NOT NULL)::text),
             (11, 'e2e_bulk_finish_receipts', (SELECT COUNT(*) FROM webhook_receipts WHERE shop = :'shop' AND topic = 'BULK_OPERATIONS_FINISH')::text),
             (12, 'e2e_bulk_ops_listed', (SELECT COUNT(*) FROM bulk WHERE n <= 10)::text),
             (13, 'e2e_dlq_rows_listed', (SELECT COUNT(*) FROM dlq WHERE n <= 10)::text),
