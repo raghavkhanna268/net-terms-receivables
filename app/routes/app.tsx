@@ -1,10 +1,37 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, data } from "react-router";
+import { Outlet, useLoaderData, useRouteError, data, isRouteErrorResponse } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
+
+const RELOAD_GUARD_KEY_PREFIX = "auth_bounce_reload_";
+const RELOAD_GUARD_WINDOW_MS = 30_000;
+
+export function isAppBridgeOnlyOrEmptyResponse(errorData: unknown): boolean {
+  if (errorData === null || errorData === undefined || errorData === "") {
+    return true;
+  }
+  if (typeof errorData !== "string") {
+    return false;
+  }
+  const stripped = errorData.replace(/<!--[\s\S]*?-->/g, "").trim();
+  if (stripped === "") {
+    return true;
+  }
+  const withoutAppBridge = stripped
+    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
+    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*\/>/gi, "")
+    .replace(/<script[^>]*data-api-key="[^"]*"[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
+    .replace(/<script[^>]*data-api-key="[^"]*"[^>]*><\/script>/gi, "")
+    .trim();
+  if (withoutAppBridge === "") {
+    return true;
+  }
+  const withoutWhitespace = withoutAppBridge.replace(/\s+/g, "");
+  return withoutWhitespace === "";
+}
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Read cold once for this request - index will get same value with same context object
@@ -78,8 +105,94 @@ export default function App() {
   );
 }
 
+function AuthBounceReloadFallback({ onReload }: { onReload: () => void }) {
+  return (
+    <div style={{ padding: "2rem", textAlign: "center" }}>
+      <p>Something went wrong. Please try again.</p>
+      <s-button onClick={onReload}>Reload</s-button>
+    </div>
+  );
+}
+
+function ReloadingSpinner() {
+  return (
+    <div style={{ padding: "2rem", textAlign: "center" }}>
+      <s-spinner />
+      <p>Reloading…</p>
+    </div>
+  );
+}
+
 export function ErrorBoundary() {
-  return boundary.error(useRouteError());
+  const routeError = useRouteError();
+  const [showFallback, setShowFallback] = useState(false);
+  const [isReloading, setIsReloading] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (!isRouteErrorResponse(routeError)) {
+      return;
+    }
+    if (!isAppBridgeOnlyOrEmptyResponse(routeError.data)) {
+      return;
+    }
+
+    const pathname = window.location.pathname;
+    const guardKey = `${RELOAD_GUARD_KEY_PREFIX}${pathname}`;
+    let lastReload: number | null = null;
+
+    try {
+      const stored = sessionStorage.getItem(guardKey);
+      if (stored) {
+        lastReload = parseInt(stored, 10);
+      }
+    } catch {
+      setShowFallback(true);
+      return;
+    }
+
+    const now = Date.now();
+    if (lastReload !== null && now - lastReload < RELOAD_GUARD_WINDOW_MS) {
+      setShowFallback(true);
+      return;
+    }
+
+    try {
+      sessionStorage.setItem(guardKey, String(now));
+    } catch {
+      setShowFallback(true);
+      return;
+    }
+
+    setIsReloading(true);
+    window.location.reload();
+  }, [routeError]);
+
+  if (typeof window !== "undefined" && isRouteErrorResponse(routeError)) {
+    if (isAppBridgeOnlyOrEmptyResponse(routeError.data)) {
+      if (isReloading) {
+        return <ReloadingSpinner />;
+      }
+      if (showFallback) {
+        const handleReload = () => {
+          const pathname = window.location.pathname;
+          const guardKey = `${RELOAD_GUARD_KEY_PREFIX}${pathname}`;
+          try {
+            sessionStorage.removeItem(guardKey);
+          } catch {
+            // Ignore
+          }
+          window.location.reload();
+        };
+        return <AuthBounceReloadFallback onReload={handleReload} />;
+      }
+      return <ReloadingSpinner />;
+    }
+  }
+
+  return boundary.error(routeError);
 }
 
 export const headers: HeadersFunction = (headersArgs) => {
