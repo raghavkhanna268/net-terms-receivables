@@ -483,12 +483,11 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         SELECT COUNT(*)::text AS count FROM s6_dead_letter
         WHERE message->>'webhookId' = ${webhookIdA}
       `;
-      expect(parseInt(dlqCountA.count, 10)).toBeLessThanOrEqual(1);
+      expect(parseInt(dlqCountA.count, 10)).toBe(0);
     });
 
-    it("drain: bulk messages for uninstalled shop A are dropped with ZERO Admin calls (guard: shop currency check)", async () => {
+    it("drain: bulk messages for uninstalled shop A are archived with ZERO Admin calls (guard: uninstalledAt check in bulk continuation)", async () => {
       const bulkOpIdA = `bulk-a-${TEST_SUFFIX}`;
-      const bulkOpIdB = `bulk-b-${TEST_SUFFIX}`;
 
       await sql`
         SELECT pgmq.send('s6_bulk', ${sql.json({
@@ -496,17 +495,6 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
           shop: SHOP_A_DOMAIN,
           webhookId: `bulk-wh-a-${TEST_SUFFIX}`,
           bulkOperationId: `gid://shopify/BulkOperation/${bulkOpIdA}`,
-          bulkType: "orders",
-          enqueuedAt: new Date().toISOString(),
-        })})
-      `;
-
-      await sql`
-        SELECT pgmq.send('s6_bulk', ${sql.json({
-          topic: "BULK_OPERATIONS_FINISH",
-          shop: SHOP_B_DOMAIN,
-          webhookId: `bulk-wh-b-${TEST_SUFFIX}`,
-          bulkOperationId: `gid://shopify/BulkOperation/${bulkOpIdB}`,
           bulkType: "orders",
           enqueuedAt: new Date().toISOString(),
         })})
@@ -531,7 +519,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         SELECT COUNT(*)::text AS count FROM s6_dead_letter
         WHERE message->>'bulkOperationId' LIKE ${`%${bulkOpIdA}%`}
       `;
-      expect(parseInt(dlqCountA.count, 10)).toBeLessThanOrEqual(1);
+      expect(parseInt(dlqCountA.count, 10)).toBe(0);
     });
   });
 
@@ -613,7 +601,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it("positive control: installed shop (Shop B) does NOT skip for uninstalled (guard: uninstalledAt IS NULL)", async () => {
+    it("positive control: installed shop (Shop B) sends reminder, action='sent' and fetch called once (guard: uninstalledAt IS NULL)", async () => {
       const { sendPaymentReminder } = await import("~/services/reminders.server");
 
       mockFetch.mockResolvedValue({
@@ -649,8 +637,9 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
         validEnv
       );
 
-      const skipReason = result.skipReason ?? "";
-      expect(skipReason).not.toMatch(/uninstalled/i);
+      expect(result.success).toBe(true);
+      expect(result.action).toBe("sent");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1099,7 +1088,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       return getAllLogs().includes(`"event":"${eventName}"`);
     }
 
-    it("reinstall log uses shopHash, emits at least one safeLog with shopHash, no domain or webhookId (guard: safeLog in after-auth.server.ts)", async () => {
+    it("reinstall log emits shop_upserted event, no domain or webhookId (guard: safeLog in after-auth.server.ts)", async () => {
       const { upsertShopOnAuth } = await import("~/lib/after-auth.server");
       await upsertShopOnAuth(sql, SHOP_A_DOMAIN, "Asia/Kolkata", "INR");
 
@@ -1109,9 +1098,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       expect(allLogs).not.toContain(".myshopify.com");
       expect(allLogs).not.toContain("webhookId");
 
-      const hasShopHash = allLogs.includes('"shopHash"');
-      const hasShopUpserted = findLogWithEvent("shop_upserted");
-      expect(hasShopHash || hasShopUpserted).toBe(true);
+      expect(findLogWithEvent("shop_upserted")).toBe(true);
     });
 
     it("deleteShop log uses shopHash, emits safeLog event, no domain or webhookId (guard: safeLog in compliance.server.ts)", async () => {
