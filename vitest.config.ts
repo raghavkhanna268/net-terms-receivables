@@ -169,7 +169,6 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
   "app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts",
   "app/routes/__tests__/ledger-account-link-journey-db.test.ts",
-  "app/routes/__tests__/account-href-loader-db.test.ts",
   "app/routes/__tests__/merchant-form-validation-db.test.ts",
   "app/routes/__tests__/webhooks.compliance.customers.test.ts",
   "app/routes/__tests__/admin-render-smoke.test.tsx",
@@ -227,6 +226,9 @@ const DB_TEST_PATTERNS = [
 
   // Cross-shop (tenant) isolation DB tests
   "tests/integration/tenant-isolation-db.test.ts",
+
+  // Account href URL-encoding DB tests (loader finds decoded id)
+  "app/routes/__tests__/account-href-loader-db.test.ts",
 ];
 
 export default defineConfig({

@@ -1,12 +1,14 @@
 /**
  * Tests that encoded account hrefs route to app.accounts.$id, not app.$.
  *
- * When buyer account ids contain '/' or ':' (e.g. seed ids), the href must
- * be URL-encoded so React Router matches the $id param route, not the catch-all.
+ * When buyer account ids contain '/' or ':' (e.g. seed ids with embedded
+ * path separators), the href must be URL-encoded so React Router matches
+ * the $id param route, not the catch-all.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToString } from "react-dom/server";
 import { createElement, type ReactNode } from "react";
+import { matchRoutes, type RouteObject } from "react-router";
 import { accountHref } from "~/lib/account-href";
 
 const TEST_ID_WITH_SLASHES = "seed-test-0000-example/part:9";
@@ -24,14 +26,22 @@ vi.mock("@sentry/cloudflare", () => ({
   setContext: vi.fn(),
 }));
 
-vi.mock("react-router", async () => {
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return {
+    ...actual,
     useLoaderData: vi.fn(),
     useActionData: vi.fn(() => undefined),
     useNavigation: vi.fn(() => ({ state: "idle", formData: null })),
     data: vi.fn((d) => d),
     useRevalidator: vi.fn(() => ({ state: "idle", revalidate: vi.fn() })),
-    Await: ({ resolve: _resolve, children: _children }: { resolve: Promise<unknown>; children: (data: unknown) => ReactNode }) => {
+    Await: ({
+      resolve: _resolve,
+      children: _children,
+    }: {
+      resolve: Promise<unknown>;
+      children: (data: unknown) => ReactNode;
+    }) => {
       return createElement("div", {}, "Await placeholder");
     },
     Form: ({ children, ...props }: { children: ReactNode }) =>
@@ -40,11 +50,86 @@ vi.mock("react-router", async () => {
 });
 
 import { useLoaderData } from "react-router";
-const _mockUseLoaderData = vi.mocked(useLoaderData);
+const mockUseLoaderData = vi.mocked(useLoaderData);
+
+/**
+ * Build the route config that matches the app's flat routes under app/routes/.
+ *
+ * This config mirrors the React Router file-based routing convention:
+ * - app.accounts.$id.tsx → /app/accounts/:id
+ * - app.$.tsx → /app/* (catch-all splat)
+ */
+function buildAppRouteConfig(): RouteObject[] {
+  return [
+    {
+      id: "routes/app",
+      path: "app",
+      children: [
+        { id: "routes/app._index", index: true },
+        { id: "routes/app.accounts.$id", path: "accounts/:id" },
+        { id: "routes/app.reconcile", path: "reconcile" },
+        { id: "routes/app.imports", path: "imports" },
+        { id: "routes/app.settings.reminders", path: "settings/reminders" },
+        { id: "routes/app.tag-rules", path: "tag-rules" },
+        { id: "routes/app.onboarding", path: "onboarding" },
+        { id: "routes/app.welcome", path: "welcome" },
+        { id: "routes/app.plan", path: "plan" },
+        { id: "routes/app.data-requests", path: "data-requests" },
+        { id: "routes/app.data-requests.$id.download", path: "data-requests/:id/download" },
+        { id: "routes/app.$", path: "*" },
+      ],
+    },
+  ];
+}
 
 describe("Account href routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe("Real route matching with matchRoutes", () => {
+    const routes = buildAppRouteConfig();
+
+    it("encoded href matches routes/app.accounts.$id", () => {
+      const href = accountHref(TEST_ID_WITH_SLASHES);
+      const matches = matchRoutes(routes, href);
+
+      expect(matches).not.toBeNull();
+      expect(matches!.length).toBeGreaterThan(0);
+
+      const leafMatch = matches![matches!.length - 1];
+      expect(leafMatch.route.id).toBe("routes/app.accounts.$id");
+      expect(leafMatch.params.id).toBe(TEST_ID_WITH_SLASHES);
+    });
+
+    it("unencoded href matches routes/app.$ catch-all (the bug)", () => {
+      const unencoded = `/app/accounts/${TEST_ID_WITH_SLASHES}`;
+      const matches = matchRoutes(routes, unencoded);
+
+      expect(matches).not.toBeNull();
+      expect(matches!.length).toBeGreaterThan(0);
+
+      const leafMatch = matches![matches!.length - 1];
+      expect(leafMatch.route.id).toBe("routes/app.$");
+    });
+
+    it("params.id from matchRoutes decodes to original id", () => {
+      const href = accountHref(TEST_ID_WITH_SLASHES);
+      const matches = matchRoutes(routes, href);
+
+      const leafMatch = matches![matches!.length - 1];
+      expect(leafMatch.params.id).toBe(TEST_ID_WITH_SLASHES);
+    });
+
+    it("simple id (no special chars) matches routes/app.accounts.$id", () => {
+      const simpleId = "acc-simple-001";
+      const href = accountHref(simpleId);
+      const matches = matchRoutes(routes, href);
+
+      const leafMatch = matches![matches!.length - 1];
+      expect(leafMatch.route.id).toBe("routes/app.accounts.$id");
+      expect(leafMatch.params.id).toBe(simpleId);
+    });
   });
 
   describe("BuyerLedgerTable emits encoded href", () => {
@@ -164,30 +249,40 @@ describe("Account href routing", () => {
     });
   });
 
-  describe("Route matching simulation", () => {
-    it("encoded path has exactly 3 segments (app, accounts, encoded-id)", () => {
-      const href = accountHref(TEST_ID_WITH_SLASHES);
-      const segments = href.split("/").filter(Boolean);
+  describe("ReconcilePage pushing view emits encoded href", () => {
+    it("renders account link with encoded id in pushing matches", async () => {
+      const loaderData = {
+        shopCurrency: "INR",
+        payments: [],
+        matches: [
+          {
+            id: "match-test-001",
+            paymentId: "pay-test-001",
+            invoiceId: "inv-test-001",
+            invoiceName: "INV-2024-001",
+            amountPaise: "100000",
+            score: 85,
+            reasons: [{ type: "amount_exact", points: 20 }],
+            state: "pushing",
+            buyerName: "Test Corp",
+            buyerAccountId: TEST_ID_WITH_SLASHES,
+          },
+        ],
+        selectedPayment: null,
+        pagination: { page: 1, pageSize: 20, totalCount: 0 },
+        view: "pushing" as const,
+        error: null,
+        tabCounts: { suggested: 0, unmatched: 0, confirmed: 0, pushing: 1 },
+        notSupported: false,
+      };
+      mockUseLoaderData.mockReturnValue(loaderData);
 
-      expect(segments).toHaveLength(3);
-      expect(segments[0]).toBe("app");
-      expect(segments[1]).toBe("accounts");
-      expect(segments[2]).toBe(ENCODED_ID);
-    });
+      const ReconcilePage = (await import("../app.reconcile")).default;
+      const html = renderToString(createElement(ReconcilePage));
 
-    it("unencoded path would have more than 3 segments (would 404)", () => {
-      const unencoded = `/app/accounts/${TEST_ID_WITH_SLASHES}`;
-      const segments = unencoded.split("/").filter(Boolean);
-
-      expect(segments.length).toBeGreaterThan(3);
-    });
-
-    it("decoding the encoded segment recovers the original id", () => {
-      const href = accountHref(TEST_ID_WITH_SLASHES);
-      const encoded = href.replace("/app/accounts/", "");
-      const decoded = decodeURIComponent(encoded);
-
-      expect(decoded).toBe(TEST_ID_WITH_SLASHES);
+      expect(html).toContain(`href="${accountHref(TEST_ID_WITH_SLASHES)}"`);
+      expect(html).toContain(ENCODED_ID);
+      expect(html).not.toContain(`href="/app/accounts/${TEST_ID_WITH_SLASHES}"`);
     });
   });
 });

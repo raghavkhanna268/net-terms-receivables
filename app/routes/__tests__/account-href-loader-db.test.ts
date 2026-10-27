@@ -1,13 +1,14 @@
 /**
  * DB test: loader finds account given decoded params.id containing '/' and ':'.
  *
- * Verifies that when React Router decodes a URL-encoded id like
- * 'seed-test-0000-example%2Fpart%3A9' to 'seed-test-0000-example/part:9',
- * the loader's DB lookup succeeds.
+ * Verifies that when React Router decodes a URL-encoded id (e.g. ids with
+ * embedded path separators), the loader's DB lookup succeeds.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import postgres from "postgres";
+import { matchRoutes, type RouteObject } from "react-router";
 import { sqlOptions } from "~/lib/db-light.server";
+import { accountHref } from "~/lib/account-href";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -34,6 +35,23 @@ vi.mock("~/services/access-log.server", () => ({
 }));
 
 const TEST_ID_WITH_SLASHES = "seed-test-0000-example/part:9";
+
+/**
+ * Build the route config that matches the app's flat routes under app/routes/.
+ */
+function buildAppRouteConfig(): RouteObject[] {
+  return [
+    {
+      id: "routes/app",
+      path: "app",
+      children: [
+        { id: "routes/app._index", index: true },
+        { id: "routes/app.accounts.$id", path: "accounts/:id" },
+        { id: "routes/app.$", path: "*" },
+      ],
+    },
+  ];
+}
 
 describeWithDb("account-href loader DB test", () => {
   let sql: ReturnType<typeof postgres>;
@@ -74,6 +92,17 @@ describeWithDb("account-href loader DB test", () => {
     const { requestContext } = await import("~/lib/request-context.server");
     const { loader } = await import("../app.accounts.$id");
 
+    const href = accountHref(ACCOUNT_ID);
+    const routes = buildAppRouteConfig();
+    const matches = matchRoutes(routes, href);
+
+    expect(matches).not.toBeNull();
+    const leafMatch = matches![matches!.length - 1];
+    expect(leafMatch.route.id).toBe("routes/app.accounts.$id");
+
+    const decodedId = leafMatch.params.id!;
+    expect(decodedId).toBe(ACCOUNT_ID);
+
     const mockContext = {
       shopify: {
         authenticate: {
@@ -88,13 +117,13 @@ describeWithDb("account-href loader DB test", () => {
       },
     };
 
-    const url = new URL(`https://example.com/app/accounts/${encodeURIComponent(ACCOUNT_ID)}`);
+    const url = new URL(`https://example.com${href}`);
     const request = new Request(url.toString());
 
     const args = {
       request,
       context: mockContext,
-      params: { id: ACCOUNT_ID },
+      params: { id: decodedId },
       url,
       pattern: "/app/accounts/:id",
     };
