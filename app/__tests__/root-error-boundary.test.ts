@@ -35,11 +35,11 @@ describe("Root ErrorBoundary", () => {
   it("does NOT render error.data.message containing a marker string", async () => {
     const { useRouteError } = await import("react-router");
 
-    const secretMarker = "SECRET_INTERNAL_ERROR_DETAILS_12345";
+    const markerText = "INTERNAL_DETAIL_MARKER_12345";
     (useRouteError as ReturnType<typeof vi.fn>).mockReturnValue({
       status: 500,
       statusText: "Internal Server Error",
-      data: { message: secretMarker },
+      data: { message: markerText },
     });
 
     const { ErrorBoundary } = await import("../root");
@@ -47,8 +47,8 @@ describe("Root ErrorBoundary", () => {
 
     const stringified = JSON.stringify(result);
 
-    expect(stringified).not.toContain(secretMarker);
-    expect(stringified).not.toContain("SECRET_INTERNAL");
+    expect(stringified).not.toContain(markerText);
+    expect(stringified).not.toContain("INTERNAL_DETAIL");
   });
 
   it("shows 'Page not found' for 404 status", async () => {
@@ -70,7 +70,7 @@ describe("Root ErrorBoundary", () => {
     expect(stringified).not.toContain("nonexistent");
   });
 
-  it("shows 'You don't have access' for 401 status", async () => {
+  it("shows 'Access denied' title and 'You don't have access' for 401 status", async () => {
     const { useRouteError } = await import("react-router");
 
     (useRouteError as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -84,12 +84,13 @@ describe("Root ErrorBoundary", () => {
 
     const stringified = JSON.stringify(result);
 
+    expect(stringified).toContain("Access denied");
     expect(stringified).toContain("don't have access");
     expect(stringified).not.toContain("Bearer");
     expect(stringified).not.toContain("test-shop");
   });
 
-  it("shows 'You don't have access' for 403 status", async () => {
+  it("shows 'Access denied' title and 'You don't have access' for 403 status", async () => {
     const { useRouteError } = await import("react-router");
 
     (useRouteError as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -103,6 +104,7 @@ describe("Root ErrorBoundary", () => {
 
     const stringified = JSON.stringify(result);
 
+    expect(stringified).toContain("Access denied");
     expect(stringified).toContain("don't have access");
     expect(stringified).not.toContain("myshopify.com");
     expect(stringified).not.toContain("blocked");
@@ -188,7 +190,7 @@ describe("Root ErrorBoundary", () => {
     const { useRouteError } = await import("react-router");
 
     (useRouteError as ReturnType<typeof vi.fn>).mockReturnValue(
-      new Error("Sensitive internal error with user@example.com data")
+      new Error("Internal detail marker with user@example.com data")
     );
 
     const { ErrorBoundary } = await import("../root");
@@ -197,7 +199,7 @@ describe("Root ErrorBoundary", () => {
     const stringified = JSON.stringify(result);
 
     expect(stringified).toContain("Something went wrong. Please try again.");
-    expect(stringified).not.toContain("Sensitive");
+    expect(stringified).not.toContain("Internal detail");
     expect(stringified).not.toContain("@example.com");
   });
 });

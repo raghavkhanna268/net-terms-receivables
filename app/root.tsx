@@ -106,14 +106,14 @@ export default function App() {
 
 /**
  * Returns generic user-facing copy based on HTTP status code.
- * Never exposes error.data, error.message, or stack traces.
+ * Never exposes error data, messages, or stacks.
  */
 function getGenericErrorCopy(status: number): { title: string; message: string } {
   if (status === 404) {
     return { title: "404 Not Found", message: "Page not found" };
   }
   if (status === 401 || status === 403) {
-    return { title: `${status} Forbidden`, message: "You don't have access to this page" };
+    return { title: "Access denied", message: "You don't have access to this page" };
   }
   if (status >= 400 && status < 500) {
     return { title: `${status} Error`, message: "Something went wrong with this request" };
