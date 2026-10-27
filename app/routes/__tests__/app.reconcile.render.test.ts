@@ -14,6 +14,7 @@ import { createElement, type ReactNode } from "react";
 vi.mock("react-router", async () => {
   return {
     useLoaderData: vi.fn(),
+    useActionData: vi.fn(() => undefined),
     useNavigation: vi.fn(() => ({ state: "idle", formData: null })),
     data: vi.fn((d) => d),
     Form: ({ children, ...props }: { children: ReactNode; method?: string }) =>
