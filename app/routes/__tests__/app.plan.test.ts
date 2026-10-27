@@ -1080,3 +1080,99 @@ describe("Plan page copy polish", () => {
     expect(html).not.toContain("Test charge");
   });
 });
+
+/**
+ * Plan page upgrade paragraph conditional copy tests.
+ *
+ * Verifies:
+ * - Gating ON: shows "Upgrade to unlock more features and higher limits."
+ * - Gating OFF: shows "Every plan includes every feature. Compare plans to choose the one that fits your store."
+ */
+describe("Plan page upgrade paragraph conditional copy", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("gating ON: shows upgrade copy and not compare-plans copy", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: { companies: { current: 10, limit: 25 }, importsThisMonth: { current: 3, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("Upgrade to unlock more features and higher limits");
+    expect(html).not.toContain("Every plan includes every feature");
+  });
+
+  it("gating OFF: shows compare-plans copy and not upgrade copy", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: { companies: { current: 10, limit: 25 }, importsThisMonth: { current: 3, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: false,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("Every plan includes every feature");
+    expect(html).toContain("Compare plans to choose the one that fits your store");
+    expect(html).not.toContain("Upgrade to unlock more features and higher limits");
+  });
+
+  it("gating ON at limit: shows Limit Reached banner and not compare-plans copy", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: { companies: { current: 25, limit: 25 }, importsThisMonth: { current: 3, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-store",
+          upgradeUrl: "https://admin.shopify.com/store/test-store/charges/net-terms/pricing_plans",
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("Limit Reached");
+    expect(html).not.toContain("Every plan includes every feature");
+  });
+});
