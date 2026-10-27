@@ -102,18 +102,23 @@ vi.mock("~/services/compliance", async (importOriginal) => {
 
 import { action } from "../webhooks.compliance";
 
-function createMockActionArgs(request: Request): ActionFunctionArgs {
+function createMockActionArgs(
+  request: Request,
+  waitUntilMock?: ReturnType<typeof vi.fn>
+): ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> } {
+  const mockWaitUntil = waitUntilMock ?? vi.fn();
   return {
     request,
     params: {},
     context: {
-      cloudflare: { env: {}, ctx: {} },
+      cloudflare: { env: {}, ctx: { waitUntil: mockWaitUntil } },
       shopify: {},
       sessionStorage: mockSessionStorage,
     },
     url: new URL(request.url),
     pattern: "/webhooks/compliance",
-  } as unknown as ActionFunctionArgs;
+    _waitUntil: mockWaitUntil,
+  } as unknown as ActionFunctionArgs & { _waitUntil: ReturnType<typeof vi.fn> };
 }
 
 describe("webhooks.compliance real logging (no log.server mock)", () => {
@@ -409,7 +414,10 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const body = JSON.stringify(payload);
     const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
 
-    const response = await action(createMockActionArgs(request));
+    const args = createMockActionArgs(request);
+    const response = await action(args);
+    // Email work runs in background via waitUntil
+    await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();
@@ -430,7 +438,10 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const body = JSON.stringify(payload);
     const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
 
-    const response = await action(createMockActionArgs(request));
+    const args = createMockActionArgs(request);
+    const response = await action(args);
+    // Email work runs in background via waitUntil
+    await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();
@@ -453,7 +464,10 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const body = JSON.stringify(payload);
     const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
 
-    const response = await action(createMockActionArgs(request));
+    const args = createMockActionArgs(request);
+    const response = await action(args);
+    // Email work runs in background via waitUntil
+    await Promise.allSettled(args._waitUntil.mock.calls.map((c) => c[0]));
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();

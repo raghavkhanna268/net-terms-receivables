@@ -15,8 +15,10 @@ import {
   sendDataRequestNotification,
 } from "~/services/compliance";
 import { getOfflineAdminContext } from "~/lib/offline-admin.server";
-import { safeLog, shopHash } from "~/lib/log.server";
+import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 import type { Sql } from "~/lib/db-light.server";
+
+type WaitUntilFn = (promise: Promise<unknown>) => void;
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -83,7 +85,11 @@ async function fetchShopOwnerEmail(sql: Sql, shop: string): Promise<string | nul
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
  */
-export const action = async ({ request }: ActionFunctionArgs) => {
+export const action = async ({ request, context }: ActionFunctionArgs) => {
+  const cloudflare = (context as { cloudflare?: { ctx?: { waitUntil?: WaitUntilFn } } }).cloudflare;
+  const waitUntil: WaitUntilFn = cloudflare?.ctx?.waitUntil
+    ? (p) => cloudflare.ctx!.waitUntil!(p)
+    : () => {};
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[Compliance] SHOPIFY_API_SECRET not configured");
@@ -157,32 +163,45 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           `data request id=${id}`
       );
 
-      // Send email notification to shop owner (gated on RESEND_API_KEY)
-      // Fetch shop owner email via Admin API using offline session with proper locking
-      const shopOwnerEmail = await fetchShopOwnerEmail(sql, payloadShop);
+      // Email notification runs in the background via waitUntil.
+      // This allows the webhook to return 200 immediately after persisting the export.
+      waitUntil(
+        (async () => {
+          try {
+            const shopOwnerEmail = await fetchShopOwnerEmail(sql, payloadShop);
 
-      if (shopOwnerEmail) {
-        const emailResult = await sendDataRequestNotification(
-          payloadShop,
-          shopOwnerEmail,
-          requestId
-        );
-        if (emailResult.sent) {
-          console.log(
-            "[Compliance] customers/data_request: Email notification sent"
-          );
-        } else if (emailResult.error) {
-          console.log(
-            "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
-          );
-        }
-        // Note: skipped emails are logged inside sendDataRequestNotification
-      } else {
-        console.log(
-          `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
-        );
-      }
-      break;
+            if (shopOwnerEmail) {
+              const emailResult = await sendDataRequestNotification(
+                payloadShop,
+                shopOwnerEmail,
+                requestId
+              );
+              if (emailResult.sent) {
+                console.log(
+                  "[Compliance] customers/data_request: Email notification sent"
+                );
+              } else if (emailResult.error) {
+                console.log(
+                  "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
+                );
+              }
+            } else {
+              console.log(
+                `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
+              );
+            }
+          } catch (err) {
+            const hash = await shopHash(payloadShop);
+            safeLog("error", "data_request_email_failed", {
+              shopHash: hash,
+              requestId,
+              err: toErrorCode(err),
+            });
+          }
+        })()
+      );
+
+      return new Response(null, { status: 200 });
     }
 
     case "CUSTOMERS_REDACT": {
