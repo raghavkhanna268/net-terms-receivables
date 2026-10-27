@@ -365,6 +365,14 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       adminGraphQLMock.mockReset();
 
       adminGraphQLMock.mockImplementation(async (shop: string, query: string, variables?: Record<string, unknown>) => {
+        if (shop === SHOP_A_DOMAIN) {
+          return {
+            success: false,
+            error: "no_session",
+            errorCode: "no_session",
+            retryable: false,
+          };
+        }
         if (query.includes("OrderById") && variables?.id) {
           return {
             success: true,
