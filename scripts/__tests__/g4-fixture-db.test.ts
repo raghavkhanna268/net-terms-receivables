@@ -5,10 +5,11 @@
  * domains and example.com addresses only; no gid:// strings, amounts aside
  * from the fixture's own, and no real recipients.
  *
- * The guards read the DB clock (now()) directly, so the shop timezone is chosen
- * from the DB instant to place the shop-local time where each test needs it:
- * - write-window tests: local hour in 09-18 (minute irrelevant)
- * - cleanup tests: local minute outside the XX:44-XX:50 blackout (hour irrelevant)
+ * The write guard derives its window from the DB clock (now()), so the shop
+ * timezone is chosen from the DB instant to put the shop-local hour in 09-18.
+ * The cleanup guard is gated on the UTC minute (blocked at :14-:20 around the
+ * :15 enqueue), independent of the shop timezone; cleanup tests inject a fixed
+ * `now` with a safe UTC minute rather than trying to dodge the block via a zone.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import postgres from "postgres";
@@ -42,16 +43,12 @@ function etcZoneForLocalHour(dbNow: Date, targetHour: number): string {
   throw new Error("no zone for target hour");
 }
 
-/** A timezone whose shop-local minute is safely outside the cleanup blackout. */
-function tzForSafeMinute(dbNow: Date): string {
-  const utcMin = dbNow.getUTCMinutes();
-  // Buffer around the XX:44-XX:50 block to tolerate sub-minute drift.
-  if (utcMin >= 42 && utcMin <= 52) {
-    // Asia/Kolkata is +5:30 (no DST): shifts the minute by +30 into a safe band.
-    return "Asia/Kolkata";
-  }
-  return "Etc/GMT";
-}
+/**
+ * A fixed instant whose UTC minute (30) is safely outside the cleanup blackout
+ * (:14-:20). The cleanup guard only reads the UTC minute, so cleanup tests pass
+ * this as `now`; the shop timezone no longer affects whether cleanup is blocked.
+ */
+const SAFE_CLEANUP_NOW = new Date("2026-10-27T12:30:00Z");
 
 describeWithDb("G4 reminder fixture (DB)", () => {
   let sql: Sql;
@@ -182,7 +179,113 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     await cleanupByDomain(sql, domain);
   });
 
+  // A dry run never aborts on a failed pre-check: it reports each as a fixed-key
+  // enum/boolean, writes nothing, and succeeds (exit 0). Only real errors throw.
+  it("dry run outside the window reports the closed check and writes nothing", async () => {
+    const suffix = freshSuffix();
+    const { shopId, domain } = await insertShop({
+      suffix,
+      timezone: etcZoneForLocalHour(await dbNow(), 3), // 03:xx shop-local
+    });
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.fixture).toBe("would_write");
+    expect(result.checks.writeWindowOk).toBe(false);
+    expect(result.window.writeWindowOk).toBe(false);
+    const output = formatG4WriteOutput(result).join("\n");
+    expect(output).toContain("write_window_ok=false");
+    expect(output).toContain("g4_checks write_window_ok=false");
+    expect(output).not.toContain("@");
+
+    expect(await countFixtureRows(shopId)).toBe(0);
+    const settings = await sql`SELECT 1 FROM s18_shop_reminder_settings WHERE shop_id = ${shopId}`;
+    expect(settings.length).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("dry run with a sendable other buyer reports the check and writes nothing", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    // A myshopify.com-based address is synthetic yet NOT a reserved test domain,
+    // so the pre-flight treats it as deliverable.
+    const otherAccount = `other-acct-${suffix}`;
+    const otherInvoice = `other-inv-${suffix}`;
+    const otherOrder = `free-order-${suffix}`;
+    const otherRule = `other-rule-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Other Buyer', ${`buyer@${domain}`}, 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'OTHER-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.fixture).toBe("would_write");
+    expect(result.checks.otherSendableOk).toBe(false);
+    expect(result.sideEffects.otherSendableToday).toBe(1);
+    const output = formatG4WriteOutput(result).join("\n");
+    expect(output).toContain("g4_checks write_window_ok=true other_sendable_ok=false fixture_slot=free");
+    expect(output).not.toContain("@");
+
+    expect(await countFixtureRows(shopId)).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("dry run with a taken fixture slot reports the check and writes nothing", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+    const ids = g4FixtureIds(shopId);
+
+    // A foreign row (different id) already holds the fixture's (shop, location)
+    // slot. Its recipient is a reserved test domain, so it is not sendable.
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${`foreign-acct-${suffix}`}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${ids.location}, 'Foreign Holder', 'holder@example.com', 'OK', NOW(), NOW())
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.fixture).toBe("would_write");
+    expect(result.checks.fixtureSlot).toBe("taken");
+    const output = formatG4WriteOutput(result).join("\n");
+    expect(output).toContain("g4_checks write_window_ok=true other_sendable_ok=true fixture_slot=taken");
+    expect(output).not.toContain("@");
+
+    // Nothing written: the fixture's own rows do not exist.
+    expect(await countFixtureRows(shopId)).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
   // Guard: write window. Removing assertWithinWriteWindow lets this proceed and write.
+  // A LIVE write outside the window still aborts with the existing code.
   it("aborts outside the write window and writes nothing", async () => {
     const suffix = freshSuffix();
     const { shopId, domain } = await insertShop({
@@ -360,11 +463,15 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     const suffix = freshSuffix();
     const { shopId, domain } = await insertShop({
       suffix,
-      timezone: tzForSafeMinute(await dbNow()),
+      timezone: "Etc/GMT",
     });
     await seedFixtureForCleanup(shopId, "on");
 
-    const result = await runG4Cleanup(sql, { shopDomain: domain, dryRun: false });
+    const result = await runG4Cleanup(sql, {
+      shopDomain: domain,
+      dryRun: false,
+      now: SAFE_CLEANUP_NOW,
+    });
     expect(result.prior).toBe("on");
     expect(result.fixture).toBe("deleted");
 
@@ -380,11 +487,15 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     const suffix = freshSuffix();
     const { shopId, domain } = await insertShop({
       suffix,
-      timezone: tzForSafeMinute(await dbNow()),
+      timezone: "Etc/GMT",
     });
     await seedFixtureForCleanup(shopId, "off");
 
-    const result = await runG4Cleanup(sql, { shopDomain: domain, dryRun: false });
+    const result = await runG4Cleanup(sql, {
+      shopDomain: domain,
+      dryRun: false,
+      now: SAFE_CLEANUP_NOW,
+    });
     expect(result.prior).toBe("off");
 
     const [settings] = await sql<{ enabled: boolean }[]>`
@@ -399,11 +510,15 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     const suffix = freshSuffix();
     const { shopId, domain } = await insertShop({
       suffix,
-      timezone: tzForSafeMinute(await dbNow()),
+      timezone: "Etc/GMT",
     });
     await seedFixtureForCleanup(shopId, "absent");
 
-    const result = await runG4Cleanup(sql, { shopDomain: domain, dryRun: false });
+    const result = await runG4Cleanup(sql, {
+      shopDomain: domain,
+      dryRun: false,
+      now: SAFE_CLEANUP_NOW,
+    });
     expect(result.prior).toBe("absent");
 
     const settings = await sql`SELECT 1 FROM s18_shop_reminder_settings WHERE shop_id = ${shopId}`;
@@ -416,11 +531,15 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     const suffix = freshSuffix();
     const { shopId, domain } = await insertShop({
       suffix,
-      timezone: tzForSafeMinute(await dbNow()),
+      timezone: "Etc/GMT",
     });
     await seedFixtureForCleanup(shopId, "missing");
 
-    const result = await runG4Cleanup(sql, { shopDomain: domain, dryRun: false });
+    const result = await runG4Cleanup(sql, {
+      shopDomain: domain,
+      dryRun: false,
+      now: SAFE_CLEANUP_NOW,
+    });
     expect(result.prior).toBe("unknown");
 
     const [settings] = await sql<{ enabled: boolean }[]>`
@@ -437,7 +556,7 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     const suffix = freshSuffix();
     const { shopId, domain } = await insertShop({
       suffix,
-      timezone: tzForSafeMinute(await dbNow()),
+      timezone: "Etc/GMT",
     });
     await seedFixtureForCleanup(shopId, "off");
 
@@ -472,7 +591,11 @@ describeWithDb("G4 reminder fixture (DB)", () => {
       })}::jsonb)
     `;
 
-    const result = await runG4Cleanup(sql, { shopDomain: domain, dryRun: false });
+    const result = await runG4Cleanup(sql, {
+      shopDomain: domain,
+      dryRun: false,
+      now: SAFE_CLEANUP_NOW,
+    });
 
     const logs = await sql`SELECT 1 FROM "ReminderLog" WHERE "invoiceId" = ${otherInvoice}`;
     expect(logs.length).toBe(1);
