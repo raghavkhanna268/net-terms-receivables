@@ -1183,7 +1183,13 @@ describeWithDb("Critical Path: DB-backed tests", () => {
 
   let globalSendsSnapshot: { dailyCount: number; monthlyCount: number; sendDate: Date; sendMonth: string }[] = [];
 
+  const ENV_VARS_TO_TRACK = ["RESEND_API_KEY", "RESEND_FROM", "REMINDER_UNSUBSCRIBE_SECRET", "SHOPIFY_APP_URL", "RESEND_TEST_RECIPIENTS"] as const;
+  let envBefore: Record<string, string | undefined>;
+
   beforeAll(async () => {
+    envBefore = Object.fromEntries(
+      ENV_VARS_TO_TRACK.map(k => [k, Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined])
+    );
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
     const existingRows = await sql<{ daily_count: number; monthly_count: number; send_date: Date; send_month: string }[]>`
@@ -1707,11 +1713,10 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     }
   });
 
-  it("handleReminderSend test does not leak env vars", () => {
-    expect("RESEND_API_KEY" in process.env).toBe(false);
-    expect("RESEND_FROM" in process.env).toBe(false);
-    expect("REMINDER_UNSUBSCRIBE_SECRET" in process.env).toBe(false);
-    expect("SHOPIFY_APP_URL" in process.env).toBe(false);
-    expect("RESEND_TEST_RECIPIENTS" in process.env).toBe(false);
+  it("handleReminderSend test restores env vars to original state", () => {
+    const envAfter = Object.fromEntries(
+      ENV_VARS_TO_TRACK.map(k => [k, Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined])
+    );
+    expect(envAfter).toEqual(envBefore);
   });
 });
