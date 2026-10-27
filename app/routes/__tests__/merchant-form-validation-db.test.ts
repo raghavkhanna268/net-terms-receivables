@@ -104,6 +104,7 @@ vi.mock("~/services/reminder-status.server", () => ({
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
+  ApiVersion: { October26: "2026-10" },
 }));
 
 interface ActionResultData {
