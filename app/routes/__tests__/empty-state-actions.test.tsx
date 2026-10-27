@@ -356,3 +356,153 @@ describe("Setup Guide Table Layout", () => {
     expect(html).toContain("<s-table>");
   });
 });
+
+describe("Account Page Payment Reminders Copy", () => {
+  it("displays updated unsubscribe copy in Payment Reminders aside", async () => {
+    const mod = await import("../app.accounts.$id");
+    
+    mockUseLoaderData.mockReturnValue({
+      account: {
+        id: "buyer-1",
+        name: "Test Buyer",
+        kind: "COMPANY",
+        companyId: "company-1",
+        defaultTermsDays: 30,
+        defaultTermsSource: "explicit",
+        isGated: false,
+      },
+      creditStatus: {
+        creditLimitAmount: 100000,
+        creditLimitPaise: "10000000",
+        exposurePaise: "5000000",
+        draftExposurePaise: "0",
+        availableCreditPaise: "5000000",
+        currency: "INR",
+        holdState: "OK",
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        isOnHold: false,
+        holdReasonDisplay: null,
+        isOverLimit: false,
+        isOverdue: false,
+        utilizationPercent: 50,
+        syncPending: false,
+        syncErrorCode: null,
+        syncState: "synced",
+        hasDeadLetteredSync: false,
+        syncErrorInfo: null,
+      },
+      companyTotals: null,
+      invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: false,
+      reminderOptOut: { optedOut: false, optOutAt: null, optOutSource: null },
+      upgradeUrl: null,
+      newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+      error: null,
+    });
+
+    const html = renderToString(createElement(mod.default));
+
+    expect(html).toContain("one-click unsubscribe option");
+    expect(html).not.toContain("unsubscribe link in each reminder");
+  });
+
+  it("displays updated opt-out source suffix for email unsubscribe", async () => {
+    const mod = await import("../app.accounts.$id");
+    
+    mockUseLoaderData.mockReturnValue({
+      account: {
+        id: "buyer-1",
+        name: "Test Buyer",
+        kind: "COMPANY",
+        companyId: "company-1",
+        defaultTermsDays: 30,
+        defaultTermsSource: "explicit",
+        isGated: false,
+      },
+      creditStatus: {
+        creditLimitAmount: 100000,
+        creditLimitPaise: "10000000",
+        exposurePaise: "5000000",
+        draftExposurePaise: "0",
+        availableCreditPaise: "5000000",
+        currency: "INR",
+        holdState: "OK",
+        manualHold: false,
+        holdReasonCode: null,
+        holdNote: null,
+        isOnHold: false,
+        holdReasonDisplay: null,
+        isOverLimit: false,
+        isOverdue: false,
+        utilizationPercent: 50,
+        syncPending: false,
+        syncErrorCode: null,
+        syncState: "synced",
+        hasDeadLetteredSync: false,
+        syncErrorInfo: null,
+      },
+      companyTotals: null,
+      invoices: { rows: [], totalCount: 0 },
+      gatingEnforced: false,
+      reminderOptOut: {
+        optedOut: true,
+        optOutAt: "2024-01-15T10:00:00Z",
+        optOutSource: "link",
+      },
+      upgradeUrl: null,
+      newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+      error: null,
+    });
+
+    const html = renderToString(createElement(mod.default));
+
+    expect(html).toContain("via email unsubscribe");
+    expect(html).not.toContain("via email unsubscribe link");
+  });
+});
+
+describe("Plan Page Upgrade Copy", () => {
+  it("shows upgrade line when gating is enforced", async () => {
+    const mod = await import("../app.plan");
+    
+    mockUseLoaderData.mockReturnValue({
+      storeHandle: "test-store",
+      shopDomain: "test.myshopify.com",
+      plan: { key: "starter", name: "Starter", isTest: false },
+      usage: { companies: { current: 5, limit: 10 }, importsThisMonth: { current: 2, limit: 100 } },
+      gatedCount: 0,
+      gatingEnforced: true,
+      upgradeUrl: "https://example.com/upgrade",
+      newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+      error: null,
+    });
+
+    const html = renderToString(createElement(mod.default));
+
+    expect(html).toContain("Upgrade to unlock more features and higher limits");
+    expect(html).not.toContain("Every plan includes every feature");
+  });
+
+  it("shows every-feature line when gating is NOT enforced", async () => {
+    const mod = await import("../app.plan");
+    
+    mockUseLoaderData.mockReturnValue({
+      storeHandle: "test-store",
+      shopDomain: "test.myshopify.com",
+      plan: { key: "starter", name: "Starter", isTest: false },
+      usage: { companies: { current: 5, limit: 10 }, importsThisMonth: { current: 2, limit: 100 } },
+      gatedCount: 0,
+      gatingEnforced: false,
+      upgradeUrl: "https://example.com/upgrade",
+      newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+      error: null,
+    });
+
+    const html = renderToString(createElement(mod.default));
+
+    expect(html).toContain("Every plan includes every feature. Compare plans to choose the one that fits your store.");
+    expect(html).not.toContain("Upgrade to unlock more features and higher limits");
+  });
+});
