@@ -2,9 +2,8 @@
  * DB-backed integration tests for ARCHIVE_SAFE_UNINSTALLED_TOPICS allowlist.
  *
  * Tests that:
- * - Topics on the allowlist are archived for uninstalled shops (not DLQ'd)
- * - After reinstall (uninstalledAt cleared), reconcile restores the correct local state
- * - Topics NOT on the allowlist (DRAFT_ORDERS_*, CUSTOMERS_DELETE) DLQ as main does
+ * - Topics on the allowlist are archived for uninstalled shops (zero Admin calls, no DLQ)
+ * - Topics NOT on the allowlist take main's code path (handler is called)
  *
  * Uses REAL database, REAL log.server, and mocked Admin GraphQL responses.
  */
@@ -237,11 +236,12 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
     });
   });
 
-  describe("DLQ behavior for non-allowlisted topics (uninstalled shop)", () => {
-    it("DRAFT_ORDERS_DELETE: uninstalled shop DLQs with full message (not archived)", async () => {
+  describe("Non-allowlisted topics reach handler (main's behaviour)", () => {
+    it("DRAFT_ORDERS_DELETE: uninstalled shop reaches handler, local row deleted, 0 Admin calls, no DLQ", async () => {
       const suffix = testContext.suffix;
-      const domain = `test-draft-delete-dlq-${suffix}.example.com`;
-      const shopId = `shop-draft-delete-dlq-${suffix}`;
+      const domain = `test-draft-delete-handler-${suffix}.example.com`;
+      const shopId = `shop-draft-delete-handler-${suffix}`;
+      const draftOrderGid = `gid://shopify/DraftOrder/draft-delete-${suffix}`;
 
       try {
         const now = new Date();
@@ -252,49 +252,62 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
           VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
         `;
 
-        const webhookId = `wh-draft-delete-dlq-${suffix}`;
-        const resourceGid = `gid://shopify/DraftOrder/draft-delete-${suffix}`;
+        await sqlRef`
+          INSERT INTO s8_draft_orders (shop_id, draft_order_id, name, total, has_payment_terms, status, created_at)
+          VALUES (${shopId}, ${draftOrderGid}, '#D001', '1000.00', true, 'open', ${now})
+        `;
+
+        const [draftBefore] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM s8_draft_orders WHERE shop_id = ${shopId} AND draft_order_id = ${draftOrderGid}
+        `;
+        expect(draftBefore, "draft order exists before drain").toBeDefined();
+
+        const webhookId = `wh-draft-delete-handler-${suffix}`;
         const message = {
           shop: domain,
           topic: "DRAFT_ORDERS_DELETE",
           webhookId,
-          resourceGid,
+          resourceGid: draftOrderGid,
           enqueuedAt: new Date().toISOString(),
         };
 
-        await sqlRef`
-          INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-          VALUES (NOW() - interval '1 second', 4, NOW(), ${sqlRef.json(message)}::jsonb)
-        `;
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
 
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const callsForShop = adminGraphQLMock.mock.calls.filter((c) => c[0] === domain);
+        expect(callsForShop.length, "zero Admin calls for DRAFT_ORDERS_DELETE").toBe(0);
+
+        const [draftAfter] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM s8_draft_orders WHERE shop_id = ${shopId} AND draft_order_id = ${draftOrderGid}
+        `;
+        expect(draftAfter, "draft order deleted by handler").toBeUndefined();
 
         const [archiveCount] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
           WHERE message->>'webhookId' = ${webhookId}
         `;
-        expect(parseInt(archiveCount.count, 10), "message NOT archived").toBe(0);
+        expect(parseInt(archiveCount.count, 10), "message archived after handler success").toBe(1);
 
-        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
-          SELECT message, error
-          FROM s6_dead_letter
+        const [dlqCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
           WHERE message->>'webhookId' = ${webhookId}
         `;
-        expect(dlqRow, "DLQ entry exists").toBeDefined();
-        expect(dlqRow!.message.topic).toBe("DRAFT_ORDERS_DELETE");
-        expect(dlqRow!.message.shop).toBe(domain);
-        expect(dlqRow!.message.resourceGid).toBe(resourceGid);
-        expect(dlqRow!.message.sanitized).toBeUndefined();
+        expect(parseInt(dlqCount.count, 10), "no DLQ entry").toBe(0);
+
+        const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
+        expect(skipLog, "no skip log - handler was called").toBeNull();
       } finally {
         await cleanupTestData([domain], suffix);
       }
     });
 
-    it("CUSTOMERS_DELETE: uninstalled shop DLQs with full message (not archived)", async () => {
+    it("CUSTOMERS_DELETE: uninstalled shop reaches handler, tag_active=false, 0 Admin calls, no DLQ", async () => {
       const suffix = testContext.suffix;
-      const domain = `test-cust-delete-dlq-${suffix}.example.com`;
-      const shopId = `shop-cust-delete-dlq-${suffix}`;
+      const domain = `test-cust-delete-handler-${suffix}.example.com`;
+      const shopId = `shop-cust-delete-handler-${suffix}`;
+      const customerGid = `gid://shopify/Customer/cust-delete-${suffix}`;
 
       try {
         const now = new Date();
@@ -305,49 +318,63 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
           VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
         `;
 
-        const webhookId = `wh-cust-delete-dlq-${suffix}`;
-        const resourceGid = `gid://shopify/Customer/cust-delete-${suffix}`;
+        await sqlRef`
+          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at)
+          VALUES (${shopId}, ${customerGid}, '["net-terms"]'::jsonb, true, ${now})
+        `;
+
+        const [custBefore] = await sqlRef<[{ tag_active: boolean }?]>`
+          SELECT tag_active FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
+        `;
+        expect(custBefore?.tag_active, "tag_active is true before drain").toBe(true);
+
+        const webhookId = `wh-cust-delete-handler-${suffix}`;
         const message = {
           shop: domain,
           topic: "CUSTOMERS_DELETE",
           webhookId,
-          resourceGid,
+          resourceGid: customerGid,
           enqueuedAt: new Date().toISOString(),
         };
 
-        await sqlRef`
-          INSERT INTO pgmq.q_s6_sync (vt, read_ct, enqueued_at, message)
-          VALUES (NOW() - interval '1 second', 4, NOW(), ${sqlRef.json(message)}::jsonb)
-        `;
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
 
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const callsForShop = adminGraphQLMock.mock.calls.filter((c) => c[0] === domain);
+        expect(callsForShop.length, "zero Admin calls for CUSTOMERS_DELETE").toBe(0);
+
+        const [custAfter] = await sqlRef<[{ tag_active: boolean; tag_deactivated_at: Date | null }?]>`
+          SELECT tag_active, tag_deactivated_at FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
+        `;
+        expect(custAfter?.tag_active, "tag_active set to false by handler").toBe(false);
+        expect(custAfter?.tag_deactivated_at, "tag_deactivated_at set by handler").not.toBeNull();
 
         const [archiveCount] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
           WHERE message->>'webhookId' = ${webhookId}
         `;
-        expect(parseInt(archiveCount.count, 10), "message NOT archived").toBe(0);
+        expect(parseInt(archiveCount.count, 10), "message archived after handler success").toBe(1);
 
-        const [dlqRow] = await sqlRef<[{ message: Record<string, unknown>; error: string }?]>`
-          SELECT message, error
-          FROM s6_dead_letter
+        const [dlqCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
           WHERE message->>'webhookId' = ${webhookId}
         `;
-        expect(dlqRow, "DLQ entry exists").toBeDefined();
-        expect(dlqRow!.message.topic).toBe("CUSTOMERS_DELETE");
-        expect(dlqRow!.message.shop).toBe(domain);
-        expect(dlqRow!.message.resourceGid).toBe(resourceGid);
-        expect(dlqRow!.message.sanitized).toBeUndefined();
+        expect(parseInt(dlqCount.count, 10), "no DLQ entry").toBe(0);
+
+        const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
+        expect(skipLog, "no skip log - handler was called").toBeNull();
       } finally {
         await cleanupTestData([domain], suffix);
       }
     });
 
-    it("DRAFT_ORDERS_CREATE: uninstalled shop DLQs (not on allowlist)", async () => {
+    it("DRAFT_ORDERS_CREATE: uninstalled shop reaches handler, DLQs after max retries (main's behaviour)", async () => {
       const suffix = testContext.suffix;
-      const domain = `test-draft-create-dlq-${suffix}.example.com`;
-      const shopId = `shop-draft-create-dlq-${suffix}`;
+      const domain = `test-draft-create-handler-${suffix}.example.com`;
+      const shopId = `shop-draft-create-handler-${suffix}`;
+      const draftOrderGid = `gid://shopify/DraftOrder/draft-create-${suffix}`;
 
       try {
         const now = new Date();
@@ -358,12 +385,19 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
           VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
         `;
 
-        const webhookId = `wh-draft-create-dlq-${suffix}`;
+        adminGraphQLMock.mockResolvedValue({
+          success: false,
+          error: "No session found",
+          errorCode: "no_session",
+          retryable: true,
+        });
+
+        const webhookId = `wh-draft-create-handler-${suffix}`;
         const message = {
           shop: domain,
           topic: "DRAFT_ORDERS_CREATE",
           webhookId,
-          resourceGid: `gid://shopify/DraftOrder/draft-create-${suffix}`,
+          resourceGid: draftOrderGid,
           enqueuedAt: new Date().toISOString(),
         };
 
@@ -375,26 +409,27 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
 
-        const [archiveCount] = await sqlRef<[{ count: string }]>`
-          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
-          WHERE message->>'webhookId' = ${webhookId}
-        `;
-        expect(parseInt(archiveCount.count, 10), "message NOT archived").toBe(0);
+        const callsForShop = adminGraphQLMock.mock.calls.filter((c) => c[0] === domain);
+        expect(callsForShop.length, "Admin call attempted for DRAFT_ORDERS_CREATE").toBeGreaterThanOrEqual(1);
 
         const [dlqCount] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM s6_dead_letter
           WHERE message->>'webhookId' = ${webhookId}
         `;
-        expect(parseInt(dlqCount.count, 10), "DLQ entry exists").toBe(1);
+        expect(parseInt(dlqCount.count, 10), "DLQ entry exists after max retries").toBe(1);
+
+        const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
+        expect(skipLog, "no skip log - handler was called").toBeNull();
       } finally {
         await cleanupTestData([domain], suffix);
       }
     });
 
-    it("DRAFT_ORDERS_UPDATE: uninstalled shop DLQs (not on allowlist)", async () => {
+    it("DRAFT_ORDERS_UPDATE: uninstalled shop reaches handler, DLQs after max retries (main's behaviour)", async () => {
       const suffix = testContext.suffix;
-      const domain = `test-draft-update-dlq-${suffix}.example.com`;
-      const shopId = `shop-draft-update-dlq-${suffix}`;
+      const domain = `test-draft-update-handler-${suffix}.example.com`;
+      const shopId = `shop-draft-update-handler-${suffix}`;
+      const draftOrderGid = `gid://shopify/DraftOrder/draft-update-${suffix}`;
 
       try {
         const now = new Date();
@@ -405,12 +440,19 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
           VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
         `;
 
-        const webhookId = `wh-draft-update-dlq-${suffix}`;
+        adminGraphQLMock.mockResolvedValue({
+          success: false,
+          error: "No session found",
+          errorCode: "no_session",
+          retryable: true,
+        });
+
+        const webhookId = `wh-draft-update-handler-${suffix}`;
         const message = {
           shop: domain,
           topic: "DRAFT_ORDERS_UPDATE",
           webhookId,
-          resourceGid: `gid://shopify/DraftOrder/draft-update-${suffix}`,
+          resourceGid: draftOrderGid,
           enqueuedAt: new Date().toISOString(),
         };
 
@@ -422,25 +464,25 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
         const { runDrain } = await import("~/services/drain/processor.server");
         await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
 
-        const [archiveCount] = await sqlRef<[{ count: string }]>`
-          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
-          WHERE message->>'webhookId' = ${webhookId}
-        `;
-        expect(parseInt(archiveCount.count, 10), "message NOT archived").toBe(0);
+        const callsForShop = adminGraphQLMock.mock.calls.filter((c) => c[0] === domain);
+        expect(callsForShop.length, "Admin call attempted for DRAFT_ORDERS_UPDATE").toBeGreaterThanOrEqual(1);
 
         const [dlqCount] = await sqlRef<[{ count: string }]>`
           SELECT COUNT(*)::text as count FROM s6_dead_letter
           WHERE message->>'webhookId' = ${webhookId}
         `;
-        expect(parseInt(dlqCount.count, 10), "DLQ entry exists").toBe(1);
+        expect(parseInt(dlqCount.count, 10), "DLQ entry exists after max retries").toBe(1);
+
+        const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
+        expect(skipLog, "no skip log - handler was called").toBeNull();
       } finally {
         await cleanupTestData([domain], suffix);
       }
     });
   });
 
-  describe("COMPANIES_CREATE: N/A topic on allowlist", () => {
-    it("uninstalled shop archives, no state change (N/A - no local state created)", async () => {
+  describe("N/A topics: no local state change", () => {
+    it("COMPANIES_CREATE: uninstalled shop archives, no BuyerAccount created", async () => {
       const suffix = testContext.suffix;
       const domain = `test-companies-create-na-${suffix}.example.com`;
       const shopId = `shop-companies-create-na-${suffix}`;

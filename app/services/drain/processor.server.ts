@@ -1507,7 +1507,7 @@ async function processSyncQueue(
     // which will update existing rows without importing new amounts
 
     // Archive uninstalled shops ONLY for topics proven to recover via reconcile.
-    // Topics not on the allowlist DLQ with full message preserved.
+    // Topics not on the allowlist take main's code path (handler is called).
     if (shopInfo?.uninstalledAt !== null && shopInfo?.uninstalledAt !== undefined) {
       if (ARCHIVE_SAFE_UNINSTALLED_TOPICS.has(msg.message.topic)) {
         await archiveMessage(sql, S6_QUEUES.SYNC, msg.msg_id);
@@ -1519,21 +1519,7 @@ async function processSyncQueue(
         });
         continue;
       }
-      // Topic not on allowlist: DLQ immediately with full message (no sanitization)
-      if (msg.read_ct >= config.maxRetries) {
-        await moveToDeadLetter(
-          sql,
-          S6_QUEUES.SYNC,
-          msg.msg_id,
-          msg.message,
-          "shop_uninstalled",
-          msg.read_ct
-        );
-        result.deadLettered++;
-      } else {
-        result.failed++;
-      }
-      continue;
+      // Topic not on allowlist: fall through to handler (main's behaviour)
     }
 
     const handler = getSyncHandler(msg.message.topic);
