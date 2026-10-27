@@ -355,6 +355,7 @@ describeWithDb("scripts/backstop-backfill", () => {
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken")
         VALUES (${SESSION_ID + "-online"}, ${TEST_SHOP_DOMAIN}, 'state', true, 'read_products', 'shpua_online_token')
+        ON CONFLICT (id) DO NOTHING
       `;
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
@@ -366,6 +367,7 @@ describeWithDb("scripts/backstop-backfill", () => {
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
         VALUES (${SESSION_ID}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', ${new Date(dbNow.getTime() + 3600000).toISOString()})
+        ON CONFLICT (id) DO NOTHING
       `;
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
@@ -376,6 +378,7 @@ describeWithDb("scripts/backstop-backfill", () => {
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
         VALUES (${SESSION_ID + "-null"}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', NULL)
+        ON CONFLICT (id) DO NOTHING
       `;
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
@@ -387,6 +390,7 @@ describeWithDb("scripts/backstop-backfill", () => {
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
         VALUES (${SESSION_ID + "-expired"}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_expired_token', ${new Date(dbNow.getTime() - 3600000).toISOString()})
+        ON CONFLICT (id) DO NOTHING
       `;
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
@@ -429,6 +433,7 @@ describeWithDb("scripts/backstop-backfill", () => {
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
         VALUES (${"offline_" + TEST_SHOP_DOMAIN}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_dryrun_token', (NOW() AT TIME ZONE 'UTC') + INTERVAL '1 hour')
+        ON CONFLICT (id) DO NOTHING
       `;
     });
 

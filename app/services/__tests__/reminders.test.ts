@@ -175,11 +175,9 @@ describe("Payment Reminders (S18)", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     process.env = originalEnv;
-    consoleInfoSpy.mockRestore();
-    consoleLogSpy.mockRestore();
-    consoleErrorSpy.mockRestore();
   });
 
   describe("isReminderSendingEnabled", () => {
@@ -1603,9 +1601,9 @@ describe("sendPaymentReminder - buyerAccountId null handling", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     process.env = originalEnv;
-    consoleWarnSpy.mockRestore();
   });
 
   it("skips send and logs warning when getBuyerAccountId returns null", async () => {
@@ -1683,9 +1681,9 @@ describe("sendPaymentReminder - SHOPIFY_APP_URL gate", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     process.env = originalEnv;
-    consoleWarnSpy.mockRestore();
   });
 
   it("skips send and logs warning when SHOPIFY_APP_URL is missing", async () => {

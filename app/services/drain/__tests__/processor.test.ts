@@ -989,6 +989,7 @@ describe("Customer bulk query PII fields", () => {
 describe("S10b MUST-FIX #1: Error classification", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.resetModules();
   });
 
   it("retryable error followed by success completes and chains", async () => {
@@ -1773,6 +1774,7 @@ describe("S18 REMINDER_CATCHUP handler", () => {
 describe("DLQ shop_not_found sanitization (#239 part a)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.resetModules();
   });
 
   it("company-location shop_not_found returns errorCode for sanitization", async () => {
@@ -2035,6 +2037,7 @@ describe("DLQ shop_not_found sanitization (#239 part a)", () => {
 describe("No-session Shop-row check (#239 follow-up)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.resetModules();
   });
 
   describe("COMPANIES_* handlers", () => {
