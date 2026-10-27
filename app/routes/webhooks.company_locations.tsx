@@ -34,6 +34,8 @@ const ALLOWED_TOPICS = new Set([
   "COMPANY_LOCATIONS_DELETE",
 ]);
 
+export const loader = () => new Response(null, { status: 405, headers: { Allow: "POST" } });
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {

@@ -579,13 +579,10 @@ describe("webhooks.shop.update", () => {
 
     it("returns 405 for GET requests", async () => {
       const { loader } = await import("../webhooks.shop.update");
-      const response = await loader({
-        request: new Request("https://example.com/webhooks/shop/update"),
-        context: {},
-        params: {},
-      } as unknown as ActionFunctionArgs);
+      const response = await loader();
 
       expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe("POST");
     });
   });
 

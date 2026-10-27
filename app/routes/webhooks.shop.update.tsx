@@ -1,4 +1,4 @@
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { shopifyGraphQLQueue, type ShopifyClientResult } from "~/services/shopify-client.server";
@@ -164,9 +164,7 @@ async function processShopUpdate(
   return { status: "success" };
 }
 
-export const loader = async (_args: LoaderFunctionArgs) => {
-  return new Response(null, { status: 405, statusText: "Method Not Allowed" });
-};
+export const loader = () => new Response(null, { status: 405, headers: { Allow: "POST" } });
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;

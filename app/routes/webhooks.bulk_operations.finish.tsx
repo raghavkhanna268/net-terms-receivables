@@ -26,6 +26,8 @@ import { safeLog, shopHash } from "~/lib/log.server";
  * - companies: Company/CompanyLocation backfill
  * - orders: Orders with payment terms backfill
  */
+export const loader = () => new Response(null, { status: 405, headers: { Allow: "POST" } });
+
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const { shopify } = context;
 
