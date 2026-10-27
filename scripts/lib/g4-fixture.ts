@@ -13,6 +13,7 @@
  * @module
  */
 
+import { DateTime } from "luxon";
 import type postgres from "postgres";
 // Leaf module (no imports of its own); parses RESEND_TEST_RECIPIENTS the same way.
 import { parseRecipientAllowlist } from "../../app/services/recipient-allowlist.server";
@@ -24,6 +25,30 @@ export const G4_RECIPIENT_ENV = "G4_TEST_RECIPIENT" as const;
 
 /** Fixed line printed on write: cleanup must run the same day before this UTC time. */
 export const G4_CLEANUP_DUE_BEFORE = "02:00Z" as const;
+
+/**
+ * UTC minute at which the reminder enqueue runs every hour.
+ *
+ * The enqueue is a pg_cron job scheduled '15 * * * *' (UTC) and only enqueues
+ * when the shop-local hour is 09..18. Both facts live in the migration
+ * prisma/migrations/20261030000000_s18_payment_reminders/migration.sql (the
+ * latest revision of s18_enqueue_reminders() is
+ * prisma/migrations/20261122000000_s18_catchup_amount_ordering/migration.sql).
+ * The guards below are derived from this one constant, not from the box clock.
+ */
+export const REMINDER_ENQUEUE_UTC_MINUTE = 15;
+
+/** Shop-local hours during which the enqueue fires (s18_enqueue_reminders: 09..18). */
+const SEND_WINDOW_FIRST_HOUR = 9;
+const SEND_WINDOW_LAST_HOUR = 18;
+
+/**
+ * Cleanup blackout, in UTC minutes, bracketing the :15 enqueue so a reminder
+ * enqueued at that run cannot still fire after cleanup disables reminders.
+ * Same -1/+5 bracket the old shop-local rule used around its hourly run.
+ */
+const CLEANUP_BLACKOUT_FIRST_UTC_MINUTE = REMINDER_ENQUEUE_UTC_MINUTE - 1; // 14
+const CLEANUP_BLACKOUT_LAST_UTC_MINUTE = REMINDER_ENQUEUE_UTC_MINUTE + 5; // 20
 
 /** A single plain address, matching the shape an allowlist entry may take. */
 const SIMPLE_EMAIL = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
@@ -161,27 +186,134 @@ export function assertAllowlistEnforced(value: string | undefined): void {
   throw new Error("g4_allowlist_not_enforced");
 }
 
+/** Format a luxon zone offset (minutes east of UTC) as a signed "+HH:MM" string. */
+function formatOffset(offsetMinutes: number): string {
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const abs = Math.abs(offsetMinutes);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `${sign}${hh}:${mm}`;
+}
+
+/** The first enqueue run (UTC :15) strictly after `now`. */
+function nextEnqueueUtc(now: Date): DateTime {
+  const nowUtc = DateTime.fromJSDate(now, { zone: "utc" });
+  let run = nowUtc.set({ minute: REMINDER_ENQUEUE_UTC_MINUTE, second: 0, millisecond: 0 });
+  if (run <= nowUtc) {
+    run = run.plus({ hours: 1 });
+  }
+  return run;
+}
+
 /**
- * Write-window guard (shop-local): offset-0 reminders can only fire today when
- * the write lands between 09:00 and 18:45 shop-local. Throws
+ * The last enqueue run (UTC :15) that lands on `now`'s shop-local date with a
+ * shop-local hour in the send window, or null when the day has none. DST-safe:
+ * every candidate run is converted through the zone with luxon.
+ */
+function lastEnqueueLocalToday(now: Date, tz: string): DateTime | null {
+  const nowLocal = DateTime.fromJSDate(now, { zone: tz });
+  let run = DateTime.fromJSDate(now, { zone: "utc" })
+    .set({ minute: REMINDER_ENQUEUE_UTC_MINUTE, second: 0, millisecond: 0 })
+    .minus({ hours: 30 });
+  let best: DateTime | null = null;
+  for (let i = 0; i < 60; i++) {
+    const local = run.setZone(tz);
+    if (
+      local.hasSame(nowLocal, "day") &&
+      local.hour >= SEND_WINDOW_FIRST_HOUR &&
+      local.hour <= SEND_WINDOW_LAST_HOUR &&
+      (!best || local > best)
+    ) {
+      best = local;
+    }
+    run = run.plus({ hours: 1 });
+  }
+  return best;
+}
+
+/** Fixed-key, PII-free description of the write window (times and offsets only). */
+export interface G4WriteWindow {
+  /** Shop UTC offset at `now`, e.g. "+05:30" or "-04:00". */
+  shopTzOffset: string;
+  /** Next enqueue run in UTC, "HH:mm" (always the :15 run). */
+  nextEnqueueUtc: string;
+  /** That same run in shop-local time, "HH:mm". */
+  nextEnqueueLocal: string;
+  /** Latest in-window enqueue today in shop-local time, or null. */
+  lastEnqueueLocalToday: string | null;
+  /** Whether the write window is open now (see assertWithinWriteWindow). */
+  writeWindowOk: boolean;
+}
+
+/**
+ * Compute the write window from an instant and the shop timezone. A write is
+ * allowed only when the shop-local time is at or after 09:00 AND the next UTC
+ * :15 enqueue run (strictly after `now`) lands on the same shop-local date with
+ * a shop-local hour of 09..18 — i.e. that run would still enqueue today's
+ * offset-0 reminder. Pure and timezone-correct for any zone (luxon).
+ */
+export function computeG4WriteWindow(now: Date, tz: string): G4WriteWindow {
+  const nowLocal = DateTime.fromJSDate(now, { zone: tz });
+  const runUtc = nextEnqueueUtc(now);
+  const runLocal = runUtc.setZone(tz);
+
+  const afterOpen = nowLocal.hour >= SEND_WINDOW_FIRST_HOUR;
+  const sameLocalDate = runLocal.hasSame(nowLocal, "day");
+  const runHourInWindow =
+    runLocal.hour >= SEND_WINDOW_FIRST_HOUR && runLocal.hour <= SEND_WINDOW_LAST_HOUR;
+
+  const last = lastEnqueueLocalToday(now, tz);
+
+  return {
+    shopTzOffset: formatOffset(nowLocal.offset),
+    nextEnqueueUtc: runUtc.toFormat("HH:mm"),
+    nextEnqueueLocal: runLocal.toFormat("HH:mm"),
+    lastEnqueueLocalToday: last ? last.toFormat("HH:mm") : null,
+    writeWindowOk: afterOpen && sameLocalDate && runHourInWindow,
+  };
+}
+
+/**
+ * Write-window guard: offset-0 reminders can only fire today when the write
+ * lands inside the window computed by computeG4WriteWindow. Throws
  * `g4_outside_send_window` otherwise.
  */
-export function assertWithinWriteWindow(localHour: number, localMinute: number): void {
-  const minutes = localHour * 60 + localMinute;
-  const start = 9 * 60; // 09:00
-  const end = 18 * 60 + 45; // 18:45
-  if (minutes < start || minutes > end) {
+export function assertWithinWriteWindow(now: Date, tz: string): void {
+  if (!computeG4WriteWindow(now, tz).writeWindowOk) {
     throw new Error("g4_outside_send_window");
   }
 }
 
+/** Fixed-key, PII-free description of the cleanup window (UTC minute only). */
+export interface G4CleanupWindow {
+  /** Current UTC minute (00..59). */
+  utcMinute: number;
+  /** Whether cleanup is blocked now (see assertNotCleanupBlackout). */
+  blocked: boolean;
+}
+
 /**
- * Cleanup blackout guard (shop-local): a reminder enqueued at the last :45 run
- * still sends after cleanup disables reminders, so refuse to clean up during
- * the XX:44–XX:50 shop-local block. Throws `g4_cleanup_wait`.
+ * Compute the cleanup window from an instant. Cleanup is blocked when the
+ * current UTC minute brackets the :15 enqueue (14..20 inclusive), regardless of
+ * the shop timezone. Pure.
  */
-export function assertNotCleanupBlackout(localMinute: number): void {
-  if (localMinute >= 44 && localMinute <= 50) {
+export function computeG4CleanupWindow(now: Date): G4CleanupWindow {
+  const utcMinute = now.getUTCMinutes();
+  return {
+    utcMinute,
+    blocked:
+      utcMinute >= CLEANUP_BLACKOUT_FIRST_UTC_MINUTE &&
+      utcMinute <= CLEANUP_BLACKOUT_LAST_UTC_MINUTE,
+  };
+}
+
+/**
+ * Cleanup blackout guard: a reminder enqueued at the :15 run still sends after
+ * cleanup disables reminders, so refuse to clean up while the current UTC minute
+ * is in the blackout bracket. Throws `g4_cleanup_wait`.
+ */
+export function assertNotCleanupBlackout(now: Date): void {
+  if (computeG4CleanupWindow(now).blocked) {
     throw new Error("g4_cleanup_wait");
   }
 }
@@ -205,8 +337,8 @@ interface StoreRow {
   id: string;
   tz: string;
   currency: string;
-  localHour: number;
-  localMinute: number;
+  /** The DB clock (now()) captured at store resolution; the guards' single clock. */
+  dbNow: Date;
   remindersSetting: RemindersSetting;
 }
 
@@ -226,8 +358,7 @@ async function resolveStore(
       id: string;
       tz: string;
       currency: string;
-      local_hour: number;
-      local_minute: number;
+      db_now: Date;
       reminders_setting: string | null;
     }[]
   >`
@@ -235,8 +366,7 @@ async function resolveStore(
       s.id,
       public.s18_safe_timezone(s.timezone) AS tz,
       s.currency,
-      EXTRACT(HOUR FROM (now() AT TIME ZONE public.s18_safe_timezone(s.timezone)))::int AS local_hour,
-      EXTRACT(MINUTE FROM (now() AT TIME ZONE public.s18_safe_timezone(s.timezone)))::int AS local_minute,
+      now() AS db_now,
       (SELECT CASE WHEN enabled THEN 'on' ELSE 'off' END
          FROM s18_shop_reminder_settings WHERE shop_id = s.id) AS reminders_setting
     FROM "Shop" s
@@ -256,8 +386,7 @@ async function resolveStore(
     id: row.id,
     tz: row.tz,
     currency: row.currency,
-    localHour: row.local_hour,
-    localMinute: row.local_minute,
+    dbNow: row.db_now,
     remindersSetting: (row.reminders_setting ?? "absent") as RemindersSetting,
   };
 }
@@ -357,6 +486,26 @@ async function countFixtureLogs(tx: Sql, fixtureInvoiceId: string): Promise<numb
   return row.c;
 }
 
+/**
+ * Whether a foreign row already holds the fixture's (shop, location) slot.
+ * Read-only mirror of the live buyer upsert's conflict guard: the upsert only
+ * adopts our own id, so a different id on that slot makes the live write throw
+ * g4_fixture_slot_taken. Used so a dry run can report the slot without writing.
+ */
+async function isFixtureSlotTaken(
+  tx: Sql,
+  shopId: string,
+  companyLocationId: string,
+  accountId: string
+): Promise<boolean> {
+  const [row] = await tx<{ c: number }[]>`
+    SELECT count(*)::int AS c FROM "BuyerAccount"
+    WHERE "shopId" = ${shopId} AND "companyLocationId" = ${companyLocationId}
+      AND id <> ${accountId}
+  `;
+  return row.c > 0;
+}
+
 /** Non-fixture ReminderLog rows on the shop (invoiceId <> fixture), grouped by status. */
 async function nonFixtureReminderLogByStatus(
   tx: Sql,
@@ -389,6 +538,24 @@ async function countNonFixtureQueued(
   return row.c;
 }
 
+/**
+ * Fixed-key, PII-free result of the write pre-checks. A dry run always reports
+ * these (never aborting on a failed check); a live write enforces them instead,
+ * throwing the matching existing `g4_*` code.
+ */
+export interface G4WriteChecks {
+  /** Write window open now (false ⇒ live write throws g4_outside_send_window). */
+  writeWindowOk: boolean;
+  /** No other deliverable buyer due today (false ⇒ live throws g4_other_buyers_due). */
+  otherSendableOk: boolean;
+  /**
+   * Whether the fixture slot is free. "taken" when a foreign row holds the
+   * (shop, location) slot (live ⇒ g4_fixture_slot_taken) or the fixture invoice
+   * already has a ReminderLog (live ⇒ g4_fixture_already_used).
+   */
+  fixtureSlot: "free" | "taken";
+}
+
 export interface G4WriteResult {
   mode: "write";
   dryRun: boolean;
@@ -399,19 +566,29 @@ export interface G4WriteResult {
   reminders: "on" | "unchanged";
   queued: number;
   sideEffects: G4SideEffects;
+  /** The pre-check outcomes (reported on a dry run, enforced on a live write). */
+  checks: G4WriteChecks;
+  /** The write window (times/offsets only) used to gate this run. */
+  window: G4WriteWindow;
 }
 
 export interface G4WriteParams {
   shopDomain: string;
   recipient: string;
   dryRun: boolean;
+  /** Test seam: overrides the guard clock. Defaults to the DB now() (one clock). */
+  now?: Date;
 }
 
 /**
  * Write the G4 fixture in a single transaction (or a READ ONLY dry run).
  * Order: capture prior setting, buyer, rule, invoice, reminders ON last.
- * Refuses outside the write window and when other sendable buyers are due today
- * or the fixture was already used.
+ *
+ * A live write still aborts, with the existing `g4_*` codes, outside the write
+ * window, when another deliverable buyer is due today, or when the fixture slot
+ * is taken/already used. A dry run never aborts on those pre-checks: it reports
+ * each as a fixed-key enum/boolean (G4WriteChecks) and returns, so only a real
+ * error (store not resolving, not INR, or a DB error) makes a dry run fail.
  */
 export async function runG4Write(sql: Sql, params: G4WriteParams): Promise<G4WriteResult> {
   const { shopDomain, recipient, dryRun } = params;
@@ -420,22 +597,30 @@ export async function runG4Write(sql: Sql, params: G4WriteParams): Promise<G4Wri
     if (store.currency !== "INR") {
       throw new Error("g4_store_not_inr");
     }
-    assertWithinWriteWindow(store.localHour, store.localMinute);
+    const now = params.now ?? store.dbNow;
+    const window = computeG4WriteWindow(now, store.tz);
+
+    // A real write aborts immediately when outside the window, before any reads
+    // or writes. A dry run keeps going so it can still report the window check.
+    if (!dryRun && !window.writeWindowOk) {
+      throw new Error("g4_outside_send_window");
+    }
 
     const ids = g4FixtureIds(store.id);
     const sideEffects = await collectG4SideEffects(tx, store.id, ids.invoice, store.tz);
     const queued = await countQueuedReminders(tx, store.id);
     const fixtureLogs = await countFixtureLogs(tx, ids.invoice);
+    const slotTaken = await isFixtureSlotTaken(tx, store.id, ids.location, ids.account);
 
-    // Abort ONLY when a non-fixture due-today recipient looks deliverable.
-    if (sideEffects.otherSendableToday > 0) {
-      throw new Error("g4_other_buyers_due");
-    }
-    if (fixtureLogs > 0) {
-      throw new Error("g4_fixture_already_used");
-    }
+    const checks: G4WriteChecks = {
+      writeWindowOk: window.writeWindowOk,
+      otherSendableOk: sideEffects.otherSendableToday === 0,
+      fixtureSlot: slotTaken || fixtureLogs > 0 ? "taken" : "free",
+    };
 
     if (dryRun) {
+      // READ ONLY: report every pre-check without aborting. Only real errors
+      // (handled above / by the DB) make a dry run fail.
       return {
         mode: "write",
         dryRun: true,
@@ -446,7 +631,18 @@ export async function runG4Write(sql: Sql, params: G4WriteParams): Promise<G4Wri
         reminders: "unchanged",
         queued,
         sideEffects,
+        checks,
+        window,
       } satisfies G4WriteResult;
+    }
+
+    // Live write: enforce the remaining pre-checks with the existing codes.
+    // Abort ONLY when a non-fixture due-today recipient looks deliverable.
+    if (sideEffects.otherSendableToday > 0) {
+      throw new Error("g4_other_buyers_due");
+    }
+    if (fixtureLogs > 0) {
+      throw new Error("g4_fixture_already_used");
     }
 
     // (1) record prior setting once (ON CONFLICT keeps the first capture)
@@ -535,6 +731,8 @@ export async function runG4Write(sql: Sql, params: G4WriteParams): Promise<G4Wri
       reminders: "on",
       queued,
       sideEffects,
+      checks,
+      window,
     } satisfies G4WriteResult;
   };
   return dryRun ? sql.begin("READ ONLY", work) : sql.begin(work);
@@ -551,23 +749,29 @@ export interface G4CleanupResult {
   nonfixtureReminderLogByStatus: Record<string, number>;
   /** Non-fixture reminder queue messages on the shop (invoiceId <> fixture). */
   nonfixtureQueued: number;
+  /** The cleanup window (UTC minute only) used to gate this run. */
+  window: G4CleanupWindow;
 }
 
 export interface G4CleanupParams {
   shopDomain: string;
   dryRun: boolean;
+  /** Test seam: overrides the guard clock. Defaults to the DB now() (one clock). */
+  now?: Date;
 }
 
 /**
  * Clean up the G4 fixture: restore the previous reminder setting FIRST, then
- * delete only the fixture's own seed-tagged rows. Refuses during the
- * XX:44–XX:50 shop-local blackout and when a Match blocks invoice deletion.
+ * delete only the fixture's own seed-tagged rows. Refuses during the UTC-minute
+ * blackout around the :15 enqueue and when a Match blocks invoice deletion.
  */
 export async function runG4Cleanup(sql: Sql, params: G4CleanupParams): Promise<G4CleanupResult> {
   const { shopDomain, dryRun } = params;
   const work = async (tx: Sql): Promise<G4CleanupResult> => {
     const store = await resolveStore(tx, shopDomain, false, !dryRun);
-    assertNotCleanupBlackout(store.localMinute);
+    const now = params.now ?? store.dbNow;
+    assertNotCleanupBlackout(now);
+    const window = computeG4CleanupWindow(now);
 
     const ids = g4FixtureIds(store.id);
     const queued = await countQueuedReminders(tx, store.id);
@@ -604,6 +808,7 @@ export async function runG4Cleanup(sql: Sql, params: G4CleanupParams): Promise<G
         queued,
         nonfixtureReminderLogByStatus,
         nonfixtureQueued,
+        window,
       } satisfies G4CleanupResult;
     }
 
@@ -651,6 +856,7 @@ export async function runG4Cleanup(sql: Sql, params: G4CleanupParams): Promise<G
       queued,
       nonfixtureReminderLogByStatus,
       nonfixtureQueued,
+      window,
     } satisfies G4CleanupResult;
   };
   return dryRun ? sql.begin("READ ONLY", work) : sql.begin(work);
@@ -671,12 +877,39 @@ function formatG4SideEffects(s: G4SideEffects): string[] {
   ];
 }
 
+/** Format the write window as a fixed-key, PII-free line (times and offsets only). */
+export function formatG4WindowLine(w: G4WriteWindow): string {
+  return (
+    `g4_window shop_tz_offset=${w.shopTzOffset} ` +
+    `next_enqueue_utc=${w.nextEnqueueUtc}Z ` +
+    `next_enqueue_local=${w.nextEnqueueLocal} ` +
+    `last_enqueue_local_today=${w.lastEnqueueLocalToday ?? "none"} ` +
+    `write_window_ok=${w.writeWindowOk}`
+  );
+}
+
+/** Format the dry-run pre-checks as a fixed-key, PII-free line (enums/booleans only). */
+export function formatG4ChecksLine(c: G4WriteChecks): string {
+  return (
+    `g4_checks write_window_ok=${c.writeWindowOk} ` +
+    `other_sendable_ok=${c.otherSendableOk} ` +
+    `fixture_slot=${c.fixtureSlot}`
+  );
+}
+
+/** Format the cleanup window as a fixed-key, PII-free line (UTC minute only). */
+export function formatG4CleanupWindowLine(w: G4CleanupWindow): string {
+  return `g4_cleanup_window utc_minute=${String(w.utcMinute).padStart(2, "0")} blocked=${w.blocked}`;
+}
+
 /** Format a write result as fixed-key, PII-free output lines. */
 export function formatG4WriteOutput(r: G4WriteResult): string[] {
   return [
+    formatG4WindowLine(r.window),
     `g4_fixture mode=write dry_run=${r.dryRun} store=${r.store} prior=${r.prior} ` +
       `rule=${r.rule} fixture=${r.fixture} reminders=${r.reminders} queued=${r.queued}`,
     `cleanup_due_before=${G4_CLEANUP_DUE_BEFORE}`,
+    formatG4ChecksLine(r.checks),
     ...formatG4SideEffects(r.sideEffects),
   ];
 }
@@ -691,6 +924,7 @@ export function formatG4CleanupOutput(r: G4CleanupResult): string[] {
   return [
     `g4_fixture mode=cleanup dry_run=${r.dryRun} store=${r.store} prior=${r.prior} ` +
       `fixture=${r.fixture} queued=${r.queued}`,
+    formatG4CleanupWindowLine(r.window),
     `g4_cleanup_sideeffects nonfixture_reminderlog ${logLine}`,
     `g4_cleanup_sideeffects nonfixture_queued=${r.nonfixtureQueued}`,
   ];
