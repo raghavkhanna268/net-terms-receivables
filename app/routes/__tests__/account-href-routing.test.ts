@@ -31,7 +31,7 @@ vi.mock("react-router", async () => {
     useNavigation: vi.fn(() => ({ state: "idle", formData: null })),
     data: vi.fn((d) => d),
     useRevalidator: vi.fn(() => ({ state: "idle", revalidate: vi.fn() })),
-    Await: ({ resolve, children }: { resolve: Promise<unknown>; children: (data: unknown) => ReactNode }) => {
+    Await: ({ resolve: _resolve, children: _children }: { resolve: Promise<unknown>; children: (data: unknown) => ReactNode }) => {
       return createElement("div", {}, "Await placeholder");
     },
     Form: ({ children, ...props }: { children: ReactNode }) =>
@@ -40,7 +40,7 @@ vi.mock("react-router", async () => {
 });
 
 import { useLoaderData } from "react-router";
-const mockUseLoaderData = vi.mocked(useLoaderData);
+const _mockUseLoaderData = vi.mocked(useLoaderData);
 
 describe("Account href routing", () => {
   beforeEach(() => {
