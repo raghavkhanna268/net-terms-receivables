@@ -529,6 +529,105 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
       }
     });
 
+    it("COMPANIES_UPDATE: installed shop handler changes no BuyerAccount", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-companies-update-installed-${suffix}.example.com`;
+      const shopId = `shop-companies-update-installed-${suffix}`;
+      const companyGid = `gid://shopify/Company/companies-update-${suffix}`;
+      const locationGid = `gid://shopify/CompanyLocation/cl-update-${suffix}`;
+      const accountId = `ba-companies-update-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+        await sqlRef`
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+          VALUES (${accountId}, ${shopId}, 'COMPANY', ${companyGid}, ${locationGid}, 'Original Name', ${now}, ${now})
+        `;
+
+        const [accountBefore] = await sqlRef<[{ name: string; updatedAt: Date }]>`
+          SELECT name, "updatedAt" FROM "BuyerAccount" WHERE id = ${accountId}
+        `;
+
+        const { processCompanyWebhook } = await import("~/services/sync/company.server");
+        const result = await processCompanyWebhook(
+          sqlRef,
+          domain,
+          "COMPANIES_UPDATE",
+          { id: companyGid, name: "Updated Company Name", externalId: null },
+          `wh-companies-update-${suffix}`
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+
+        const [accountAfter] = await sqlRef<[{ name: string; updatedAt: Date }]>`
+          SELECT name, "updatedAt" FROM "BuyerAccount" WHERE id = ${accountId}
+        `;
+        expect(accountAfter.name, "BuyerAccount name unchanged").toBe(accountBefore.name);
+      } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
+    it("COMPANIES_DELETE: installed shop handler changes no BuyerAccount", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-companies-delete-installed-${suffix}.example.com`;
+      const shopId = `shop-companies-delete-installed-${suffix}`;
+      const companyGid = `gid://shopify/Company/companies-delete-${suffix}`;
+      const locationGid = `gid://shopify/CompanyLocation/cl-delete-${suffix}`;
+      const accountId = `ba-companies-delete-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+        await sqlRef`
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+          VALUES (${accountId}, ${shopId}, 'COMPANY', ${companyGid}, ${locationGid}, 'Test Buyer', ${now}, ${now})
+        `;
+
+        const [accountBefore] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "BuyerAccount" WHERE id = ${accountId}
+        `;
+        expect(accountBefore, "BuyerAccount exists before").toBeDefined();
+
+        const { processCompanyWebhook } = await import("~/services/sync/company.server");
+        const result = await processCompanyWebhook(
+          sqlRef,
+          domain,
+          "COMPANIES_DELETE",
+          { id: companyGid, name: "Test Company", externalId: null },
+          `wh-companies-delete-${suffix}`
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("skipped");
+
+        const [accountAfter] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "BuyerAccount" WHERE id = ${accountId}
+        `;
+        expect(accountAfter, "BuyerAccount preserved (not deleted)").toBeDefined();
+      } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
     it("COMPANY_LOCATIONS_DELETE: installed shop handler preserves BuyerAccount", async () => {
       const suffix = testContext.suffix;
       const domain = `test-cl-delete-installed-${suffix}.example.com`;
@@ -718,15 +817,15 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
       }
     });
 
-    it("ORDERS_CANCELLED (cancelled-but-not-refunded): archived webhook + reconcile restores cancelled status", async () => {
+    it("ORDERS_CANCELLED (displayFinancialStatus=PAID, cancelledAt set): reconcile restores cancelled status", async () => {
       const suffix = testContext.suffix;
-      const domain = `test-orders-cancelled-recovery-${suffix}.example.com`;
-      const shopId = `shop-orders-cancelled-recovery-${suffix}`;
-      const orderId = `gid://shopify/Order/cancelled-recovery-${suffix}`;
-      const invoiceId = `inv-cancelled-recovery-${suffix}`;
-      const accountId = `ba-cancelled-recovery-${suffix}`;
-      const companyId = `gid://shopify/Company/company-cancelled-${suffix}`;
-      const companyLocationId = `gid://shopify/CompanyLocation/cl-cancelled-${suffix}`;
+      const domain = `test-orders-cancelled-paid-${suffix}.example.com`;
+      const shopId = `shop-orders-cancelled-paid-${suffix}`;
+      const orderId = `gid://shopify/Order/cancelled-paid-${suffix}`;
+      const invoiceId = `inv-cancelled-paid-${suffix}`;
+      const accountId = `ba-cancelled-paid-${suffix}`;
+      const companyId = `gid://shopify/Company/company-cancelled-paid-${suffix}`;
+      const companyLocationId = `gid://shopify/CompanyLocation/cl-cancelled-paid-${suffix}`;
 
       try {
         const now = new Date();
@@ -889,6 +988,317 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
         expect(invoiceAfterReconcile.outstanding, "reconcile restores partial payment outstanding").toBe("5000.00");
         expect(invoiceAfterReconcile.status, "status remains open for partial payment").toBe("open");
       } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
+    it("ORDERS_CREATE: archived webhook + reconcile creates invoice matching handler", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-orders-create-recovery-${suffix}.example.com`;
+      const shopId = `shop-orders-create-recovery-${suffix}`;
+      const orderId = `gid://shopify/Order/create-recovery-${suffix}`;
+      const accountId = `ba-create-recovery-${suffix}`;
+      const companyId = `gid://shopify/Company/company-create-${suffix}`;
+      const companyLocationId = `gid://shopify/CompanyLocation/cl-create-${suffix}`;
+
+      try {
+        const now = new Date();
+        const orderCreatedAt = new Date(Date.now() - 2 * 60 * 60 * 1000);
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+        await sqlRef`
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+          VALUES (${accountId}, ${shopId}, 'COMPANY', ${companyId}, ${companyLocationId}, 'Test Buyer', ${now}, ${now})
+        `;
+
+        const orderData = {
+          id: orderId,
+          name: "#CREATE1",
+          createdAt: orderCreatedAt.toISOString(),
+          displayFinancialStatus: "PENDING",
+          totalPriceSet: { shopMoney: { amount: "15000.00", currencyCode: "INR" } },
+          totalOutstandingSet: { shopMoney: { amount: "15000.00", currencyCode: "INR" } },
+          purchasingEntity: {
+            __typename: "PurchasingCompany",
+            company: { id: companyId },
+            location: { id: companyLocationId },
+          },
+          paymentTerms: {
+            id: "gid://shopify/PaymentTerms/pt-create-" + suffix,
+            paymentSchedules: {
+              edges: [{ node: { id: "gid://shopify/PaymentSchedule/ps-create-" + suffix, dueAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() } }],
+            },
+          },
+        };
+
+        const [invoiceBefore] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "Invoice" WHERE "shopId" = ${shopId} AND "orderId" = ${orderId}
+        `;
+        expect(invoiceBefore, "no invoice before").toBeUndefined();
+
+        const uninstalledAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = ${uninstalledAt} WHERE id = ${shopId}`;
+
+        const webhookId = `wh-orders-create-recovery-${suffix}`;
+        const message = {
+          shop: domain,
+          topic: "ORDERS_CREATE",
+          webhookId,
+          resourceGid: orderId,
+          enqueuedAt: new Date().toISOString(),
+        };
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [invoiceAfterArchive] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "Invoice" WHERE "shopId" = ${shopId} AND "orderId" = ${orderId}
+        `;
+        expect(invoiceAfterArchive, "no invoice created after archive").toBeUndefined();
+
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${shopId}`;
+
+        const { processOrderLines } = await import("~/services/sync/bulk-jsonl-processor.server");
+        await processOrderLines(sqlRef, shopId, domain, [JSON.stringify(orderData)]);
+
+        const [invoiceAfterReconcile] = await sqlRef<[{ status: string; total: string; outstanding: string; buyerAccountId: string }]>`
+          SELECT status::"InvoiceStatus", total::text, outstanding::text, "buyerAccountId"
+          FROM "Invoice" WHERE "shopId" = ${shopId} AND "orderId" = ${orderId}
+        `;
+        expect(invoiceAfterReconcile, "reconcile creates invoice").toBeDefined();
+        expect(invoiceAfterReconcile.status, "status is open for PENDING order").toBe("open");
+        expect(invoiceAfterReconcile.total, "total matches order").toBe("15000.00");
+        expect(invoiceAfterReconcile.outstanding, "outstanding matches order").toBe("15000.00");
+        expect(invoiceAfterReconcile.buyerAccountId, "buyer account linked").toBe(accountId);
+      } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
+    it("ORDERS_CANCELLED (displayFinancialStatus=PENDING, cancelledAt set): reconcile restores cancelled status", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-orders-cancelled-pending-${suffix}.example.com`;
+      const shopId = `shop-orders-cancelled-pending-${suffix}`;
+      const orderId = `gid://shopify/Order/cancelled-pending-${suffix}`;
+      const invoiceId = `inv-cancelled-pending-${suffix}`;
+      const accountId = `ba-cancelled-pending-${suffix}`;
+      const companyId = `gid://shopify/Company/company-cancelled-pending-${suffix}`;
+      const companyLocationId = `gid://shopify/CompanyLocation/cl-cancelled-pending-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+        await sqlRef`
+          INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "createdAt", "updatedAt")
+          VALUES (${accountId}, ${shopId}, 'COMPANY', ${companyId}, ${companyLocationId}, 'Test Buyer', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Invoice" (
+            id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+            "issuedAt", status, "createdAt", "updatedAt"
+          ) VALUES (
+            ${invoiceId}, ${shopId}, ${accountId}, ${orderId}, '#CANCELLED_PENDING',
+            '3000.00', '3000.00', ${now}, 'open', ${now}, ${now}
+          )
+        `;
+
+        const uninstalledAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = ${uninstalledAt} WHERE id = ${shopId}`;
+
+        const webhookId = `wh-orders-cancelled-pending-${suffix}`;
+        const message = {
+          shop: domain,
+          topic: "ORDERS_CANCELLED",
+          webhookId,
+          resourceGid: orderId,
+          enqueuedAt: new Date().toISOString(),
+        };
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [invoiceAfterArchive] = await sqlRef<[{ status: string; outstanding: string }]>`
+          SELECT status::"InvoiceStatus", outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+        `;
+        expect(invoiceAfterArchive.status, "invoice unchanged after archive").toBe("open");
+
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${shopId}`;
+
+        const { processOrderLines } = await import("~/services/sync/bulk-jsonl-processor.server");
+        const cancelledAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+        const jsonlLine = JSON.stringify({
+          id: orderId,
+          name: "#CANCELLED_PENDING",
+          createdAt: now.toISOString(),
+          cancelledAt: cancelledAt,
+          displayFinancialStatus: "PENDING",
+          totalPriceSet: { shopMoney: { amount: "3000.00", currencyCode: "INR" } },
+          totalOutstandingSet: { shopMoney: { amount: "3000.00", currencyCode: "INR" } },
+        });
+        await processOrderLines(sqlRef, shopId, domain, [jsonlLine]);
+
+        const [invoiceAfterReconcile] = await sqlRef<[{ status: string; outstanding: string }]>`
+          SELECT status::"InvoiceStatus", outstanding::text FROM "Invoice" WHERE id = ${invoiceId}
+        `;
+        expect(invoiceAfterReconcile.status, "reconcile restores cancelled (cancelledAt takes precedence over PENDING)").toBe("cancelled");
+        expect(invoiceAfterReconcile.outstanding, "outstanding zeroed for cancelled").toBe("0.00");
+      } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
+    it("COMPANY_LOCATIONS_CREATE: archived webhook + reconcile creates BuyerAccount", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-cl-create-recovery-${suffix}.example.com`;
+      const shopId = `shop-cl-create-recovery-${suffix}`;
+      const locationId = `gid://shopify/CompanyLocation/cl-create-recovery-${suffix}`;
+      const companyId = `gid://shopify/Company/company-cl-create-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+
+        const [accountBefore] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "BuyerAccount" WHERE "shopId" = ${shopId} AND "companyLocationId" = ${locationId}
+        `;
+        expect(accountBefore, "no BuyerAccount before").toBeUndefined();
+
+        const uninstalledAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = ${uninstalledAt} WHERE id = ${shopId}`;
+
+        const webhookId = `wh-cl-create-recovery-${suffix}`;
+        const message = {
+          shop: domain,
+          topic: "COMPANY_LOCATIONS_CREATE",
+          webhookId,
+          resourceGid: locationId,
+          enqueuedAt: new Date().toISOString(),
+        };
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [accountAfterArchive] = await sqlRef<[{ id: string }?]>`
+          SELECT id FROM "BuyerAccount" WHERE "shopId" = ${shopId} AND "companyLocationId" = ${locationId}
+        `;
+        expect(accountAfterArchive, "no BuyerAccount created after archive").toBeUndefined();
+
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${shopId}`;
+
+        const { mapCompanyLocationToBuyerAccount, bulkUpsertBuyerAccounts } = await import("~/services/sync/company-location.server");
+        const mappedAccount = mapCompanyLocationToBuyerAccount(shopId, {
+          id: locationId,
+          name: "New Location",
+          company: { id: companyId },
+        }, {}, true);
+        await bulkUpsertBuyerAccounts(sqlRef, [mappedAccount]);
+
+        const [accountAfterReconcile] = await sqlRef<[{ id: string; name: string; companyId: string }?]>`
+          SELECT id, name, "companyId" FROM "BuyerAccount"
+          WHERE "shopId" = ${shopId} AND "companyLocationId" = ${locationId}
+        `;
+        expect(accountAfterReconcile, "reconcile creates BuyerAccount").toBeDefined();
+        expect(accountAfterReconcile!.name).toBe("New Location");
+        expect(accountAfterReconcile!.companyId).toBe(companyId);
+      } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
+    it("CUSTOMERS_CREATE: archived webhook + reconcile creates customer row", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-customers-create-recovery-${suffix}.example.com`;
+      const shopId = `shop-customers-create-recovery-${suffix}`;
+      const customerId = `gid://shopify/Customer/cust-create-recovery-${suffix}`;
+
+      try {
+        const now = new Date();
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
+          VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
+        `;
+        await sqlRef`
+          INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+          VALUES (${'as-create-' + suffix}, ${shopId}, 'wholesale', 30, ${now}, ${now})
+        `;
+
+        const [custBefore] = await sqlRef<[{ id: string }?]>`
+          SELECT customer_id as id FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerId}
+        `;
+        expect(custBefore, "no customer row before").toBeUndefined();
+
+        const uninstalledAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = ${uninstalledAt} WHERE id = ${shopId}`;
+
+        const webhookId = `wh-customers-create-recovery-${suffix}`;
+        const message = {
+          shop: domain,
+          topic: "CUSTOMERS_CREATE",
+          webhookId,
+          resourceGid: customerId,
+          enqueuedAt: new Date().toISOString(),
+        };
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const [custAfterArchive] = await sqlRef<[{ id: string }?]>`
+          SELECT customer_id as id FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerId}
+        `;
+        expect(custAfterArchive, "no customer row created after archive").toBeUndefined();
+
+        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${shopId}`;
+
+        const { processBulkCustomer } = await import("~/services/sync/customer.server");
+        await processBulkCustomer(sqlRef, domain, {
+          id: customerId,
+          displayName: "New Wholesale Customer",
+          email: "wholesale@example.com",
+          tags: ["wholesale", "preferred"],
+        });
+
+        const [custAfterReconcile] = await sqlRef<[{ tag_active: boolean; tags: unknown }?]>`
+          SELECT tag_active, tags FROM s8_tagged_customers
+          WHERE shop_id = ${shopId} AND customer_id = ${customerId}
+        `;
+        expect(custAfterReconcile, "reconcile creates customer row").toBeDefined();
+        expect(custAfterReconcile!.tag_active, "tag_active is true").toBe(true);
+        const tags = custAfterReconcile!.tags as string[];
+        expect(tags).toContain("wholesale");
+      } finally {
+        await sqlRef`DELETE FROM "AccountSource" WHERE id = ${'as-create-' + suffix}`;
         await cleanupTestData([domain], suffix);
       }
     });
