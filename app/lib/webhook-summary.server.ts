@@ -7,10 +7,11 @@
  * enqueue failures, and thrown errors (logged as 500, then rethrown).
  *
  * The summary carries only three fields and never any shop/domain/id/payload:
- * - topic:  the normalized topic if it is in the route's declared topic list,
- *           otherwise the literal "unexpected". Raw header input is never logged.
- * - status: the HTTP status the route actually returns, as an integer.
- * - ms:     wall-clock duration in whole milliseconds.
+ * - topic:      the normalized topic if it is in the route's declared topic
+ *               list, otherwise the literal "unexpected". Raw header input is
+ *               never logged.
+ * - status:     the HTTP status the route actually returns, as an integer.
+ * - durationMs: wall-clock duration in whole milliseconds.
  *
  * Wrapping the action (rather than calling the logger at each return) guarantees
  * no exit path is missed.
@@ -60,8 +61,8 @@ function resolveTopic(request: Request, allowedTopics: ReadonlySet<string>): str
  * Emit the single summary line.
  */
 function emitSummary(topic: string, status: number, startMs: number): void {
-  const ms = Math.max(0, Math.round(Date.now() - startMs));
-  safeLog("info", WEBHOOK_HANDLED_EVENT, { topic, status, ms });
+  const durationMs = Math.max(0, Math.round(Date.now() - startMs));
+  safeLog("info", WEBHOOK_HANDLED_EVENT, { topic, status, durationMs });
 }
 
 /**

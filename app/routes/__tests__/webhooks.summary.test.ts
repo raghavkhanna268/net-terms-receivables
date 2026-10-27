@@ -3,8 +3,9 @@
  *
  * Verifies that every webhook route emits EXACTLY ONE `webhook_handled` summary
  * line on EVERY exit path, that the summary field object has EXACTLY the keys
- * {topic, status, ms} with integer status/ms, and that the topic is the declared
- * (normalized) topic when known or the literal "unexpected" otherwise.
+ * {topic, status, durationMs} with integer status/durationMs, and that the topic
+ * is the declared (normalized) topic when known or the literal "unexpected"
+ * otherwise.
  *
  * Uses the real safeLog (no logger mock) and asserts against real console
  * output. Synthetic data only: example.com URLs, test-*.myshopify.com shops,
@@ -237,14 +238,14 @@ function expectExactlyOneSummary(expectedStatus: number, expectedTopic: string):
   const summaries = getSummaries();
   expect(summaries).toHaveLength(1);
   const fields = summaries[0];
-  // EXACTLY the keys {topic, status, ms}, nothing more, nothing less.
-  expect(Object.keys(fields).sort()).toStrictEqual(["ms", "status", "topic"]);
+  // EXACTLY the keys {topic, status, durationMs}, nothing more, nothing less.
+  expect(Object.keys(fields).sort()).toStrictEqual(["durationMs", "status", "topic"]);
   // Integer types.
   expect(typeof fields.status).toBe("number");
   expect(Number.isInteger(fields.status)).toBe(true);
-  expect(typeof fields.ms).toBe("number");
-  expect(Number.isInteger(fields.ms)).toBe(true);
-  expect(fields.ms as number).toBeGreaterThanOrEqual(0);
+  expect(typeof fields.durationMs).toBe("number");
+  expect(Number.isInteger(fields.durationMs)).toBe(true);
+  expect(fields.durationMs as number).toBeGreaterThanOrEqual(0);
   // Right status and topic.
   expect(fields.status).toBe(expectedStatus);
   expect(fields.topic).toBe(expectedTopic);
