@@ -14,7 +14,9 @@ import { act } from "react";
  * 1. Shows indicator when navigation.state is 'loading' after delay
  * 2. Hides indicator when navigation.state is 'idle'
  * 3. Present under the layout regardless of child route
- * 4. Accessibility attributes (role=status, aria-live)
+ * 4. Accessibility attributes (role=status, aria-live, aria-label)
+ * 5. CSS fallback for color variable
+ * 6. Respects prefers-reduced-motion
  */
 
 let mockNavigationState = { state: "idle" as "idle" | "loading" | "submitting" };
@@ -164,7 +166,7 @@ describe("NavigationIndicator", () => {
       expect(container.querySelector('[role="status"]')).toBeNull();
     });
 
-    it("has correct accessibility attributes", async () => {
+    it("has correct accessibility attributes including aria-label", async () => {
       mockReactRouter();
       mockNavigationState = { state: "loading" };
 
@@ -182,6 +184,49 @@ describe("NavigationIndicator", () => {
       const indicator = container.querySelector('[role="status"]');
       expect(indicator).not.toBeNull();
       expect(indicator?.getAttribute("aria-live")).toBe("polite");
+      expect(indicator?.getAttribute("aria-label")).toBe("Loading");
+    });
+
+    it("uses CSS variable with fallback color in inline style", async () => {
+      mockReactRouter();
+      mockNavigationState = { state: "loading" };
+
+      const { NavigationIndicator } = await import("../NavigationIndicator");
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(createElement(NavigationIndicator));
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+      });
+
+      const bar = container.querySelector(".nav-indicator-bar") as HTMLElement;
+      expect(bar).not.toBeNull();
+      expect(bar.style.background).toContain("var(--p-color-bg-fill-brand, #303030)");
+    });
+
+    it("includes prefers-reduced-motion media query in styles", async () => {
+      mockReactRouter();
+      mockNavigationState = { state: "loading" };
+
+      const { NavigationIndicator } = await import("../NavigationIndicator");
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(createElement(NavigationIndicator));
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+      });
+
+      const styleElement = container.querySelector("style");
+      expect(styleElement).not.toBeNull();
+      const styleContent = styleElement?.textContent || "";
+      expect(styleContent).toContain("@media (prefers-reduced-motion: reduce)");
+      expect(styleContent).toContain("animation: none");
     });
 
     it("has fixed positioning at top", async () => {
