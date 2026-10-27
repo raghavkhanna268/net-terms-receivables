@@ -1864,4 +1864,67 @@ mod tests {
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 2, "pinned behaviour: manualPaymentMethodName as number");
     }
+
+    // Pin default patterns against observed input names.
+    //
+    // With no config metafield the Function uses Configuration::default(), so
+    // the shipped DEFAULT_DEFERRED_PATTERNS apply. These tests pin, for a fixed
+    // set of observed input payment-method names, that a held buyer hides
+    // exactly the deferred names (index 0 and index 2) and a non-held buyer
+    // hides nothing. The patterns are not changed.
+    fn observed_input_names() -> [(&'static str, &'static str); 3] {
+        [
+            ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Deferred"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/2", "(for testing) Bogus Gateway"),
+            ("gid://shopify/PaymentCustomizationPaymentMethod/3", "Net terms"),
+        ]
+    }
+
+    #[test]
+    fn pins_default_patterns_against_observed_input_names_held() {
+        let payment_methods = observed_input_names();
+        // No config metafield -> Configuration::default() -> default patterns.
+        let input = make_b2b_input(Some(held_metafield()), &payment_methods);
+        let result = run_test(&input).unwrap();
+
+        assert_eq!(
+            result.operations.len(),
+            2,
+            "held buyer: exactly the two deferred names (index 0 and index 2) should be hidden",
+        );
+
+        let hidden: Vec<&str> = result
+            .operations
+            .iter()
+            .map(|op| match op {
+                schema::Operation::PaymentMethodHide(hide_op) => hide_op.payment_method_id.as_str(),
+            })
+            .collect();
+
+        assert!(
+            hidden.contains(&payment_methods[0].0),
+            "index 0 ('Deferred') should be hidden",
+        );
+        assert!(
+            hidden.contains(&payment_methods[2].0),
+            "index 2 ('Net terms') should be hidden",
+        );
+        assert!(
+            !hidden.contains(&payment_methods[1].0),
+            "index 1 (gateway) must not be hidden",
+        );
+    }
+
+    #[test]
+    fn pins_default_patterns_against_observed_input_names_not_held() {
+        let payment_methods = observed_input_names();
+        // No config metafield -> Configuration::default() -> default patterns.
+        let input = make_b2b_input(Some(ok_metafield()), &payment_methods);
+        let result = run_test(&input).unwrap();
+
+        assert!(
+            result.operations.is_empty(),
+            "non-held buyer: no payment method should be hidden",
+        );
+    }
 }

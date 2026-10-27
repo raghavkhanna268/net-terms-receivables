@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (95 total, counting expanded globs):
+ * Files included (96 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -98,6 +98,9 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - tests/integration/confirm-reimport-pin-db.test.ts
  * - tests/integration/bank-upload-robustness-db.test.ts
  * - tests/integration/ingestion-paths-db.test.ts
+ *
+ * Reviewer coverage-gap tests:
+ * - tests/integration/reviewer-gaps-tagrules-protection-db.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
@@ -201,6 +204,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm-only reconcile flow DB tests
   "tests/integration/confirm-only-reconcile-db.test.ts",
+
+  // Reviewer coverage-gap DB tests (tag-rule enqueue/#498 dedupe + checkout protection install)
+  "tests/integration/reviewer-gaps-tagrules-protection-db.test.ts",
 ];
 
 export default defineConfig({
