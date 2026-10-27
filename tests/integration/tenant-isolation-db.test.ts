@@ -145,7 +145,6 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   const SHOP_B_PAYMENT_NARRATION = `${ISO_B_MARKER}_NARRATION`;
   const SHOP_B_TAG_RULE_TAG = `${ISO_B_MARKER}_TAG`;
   const SHOP_B_IMPORT_FILENAME = `${ISO_B_MARKER}_import.csv`;
-  const SHOP_B_EXPORT_DATA = JSON.stringify({ customerId: "cust-b-1", marker: ISO_B_MARKER });
 
   const B_MARKERS = [
     ISO_B_MARKER,
@@ -403,13 +402,12 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
     const customerAGid = buildGid("Customer", `cust-a-1`);
     const customerBGid = buildGid("Customer", `cust-b-1`);
-    const exportDataA = JSON.stringify({ customerId: "cust-a-1" });
 
     await sql`
       INSERT INTO s22_data_requests (id, shop_id, customer_gid, request_id, status, received_at, expires_at, export_data)
       VALUES
-        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, ${customerAGid}, 'req-a-id', 'completed', NOW(), NOW() + interval '30 days', ${exportDataA}::jsonb),
-        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, ${customerBGid}, 'req-b-id', 'completed', NOW(), NOW() + interval '30 days', ${SHOP_B_EXPORT_DATA}::jsonb)
+        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, ${customerAGid}, 'req-a-id', 'completed', NOW(), NOW() + interval '30 days', ${sql.json({ customerId: "cust-a-1" })}),
+        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, ${customerBGid}, 'req-b-id', 'completed', NOW(), NOW() + interval '30 days', ${sql.json({ customerId: "cust-b-1", marker: ISO_B_MARKER })})
     `;
 
     await sql`
@@ -425,6 +423,57 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
         (${SHOP_A_ID}, true, NOW(), NOW()),
         (${SHOP_B_ID}, true, NOW(), NOW())
     `;
+
+    // Seed-sanity checks: verify expected row counts for every seeded table for both shops
+    const [shopA] = await sql`SELECT COUNT(*)::int as count FROM "Shop" WHERE id = ${SHOP_A_ID}`;
+    const [shopB] = await sql`SELECT COUNT(*)::int as count FROM "Shop" WHERE id = ${SHOP_B_ID}`;
+    if (shopA.count !== 1) throw new Error(`Seed sanity: Shop A expected 1 row, got ${shopA.count}`);
+    if (shopB.count !== 1) throw new Error(`Seed sanity: Shop B expected 1 row, got ${shopB.count}`);
+
+    const [buyerA] = await sql`SELECT COUNT(*)::int as count FROM "BuyerAccount" WHERE "shopId" = ${SHOP_A_ID}`;
+    const [buyerB] = await sql`SELECT COUNT(*)::int as count FROM "BuyerAccount" WHERE "shopId" = ${SHOP_B_ID}`;
+    if (buyerA.count !== 1) throw new Error(`Seed sanity: BuyerAccount A expected 1 row, got ${buyerA.count}`);
+    if (buyerB.count !== 2) throw new Error(`Seed sanity: BuyerAccount B expected 2 rows, got ${buyerB.count}`);
+
+    const [invoiceA] = await sql`SELECT COUNT(*)::int as count FROM "Invoice" WHERE "shopId" = ${SHOP_A_ID}`;
+    const [invoiceB] = await sql`SELECT COUNT(*)::int as count FROM "Invoice" WHERE "shopId" = ${SHOP_B_ID}`;
+    if (invoiceA.count !== 1) throw new Error(`Seed sanity: Invoice A expected 1 row, got ${invoiceA.count}`);
+    if (invoiceB.count !== 1) throw new Error(`Seed sanity: Invoice B expected 1 row, got ${invoiceB.count}`);
+
+    const [importA] = await sql`SELECT COUNT(*)::int as count FROM "BankImport" WHERE "shopId" = ${SHOP_A_ID}`;
+    const [importB] = await sql`SELECT COUNT(*)::int as count FROM "BankImport" WHERE "shopId" = ${SHOP_B_ID}`;
+    if (importA.count !== 1) throw new Error(`Seed sanity: BankImport A expected 1 row, got ${importA.count}`);
+    if (importB.count !== 1) throw new Error(`Seed sanity: BankImport B expected 1 row, got ${importB.count}`);
+
+    const [paymentA] = await sql`SELECT COUNT(*)::int as count FROM "Payment" WHERE "shopId" = ${SHOP_A_ID}`;
+    const [paymentB] = await sql`SELECT COUNT(*)::int as count FROM "Payment" WHERE "shopId" = ${SHOP_B_ID}`;
+    if (paymentA.count !== 1) throw new Error(`Seed sanity: Payment A expected 1 row, got ${paymentA.count}`);
+    if (paymentB.count !== 1) throw new Error(`Seed sanity: Payment B expected 1 row, got ${paymentB.count}`);
+
+    const [matchA] = await sql`SELECT COUNT(*)::int as count FROM "Match" WHERE "shopId" = ${SHOP_A_ID}`;
+    const [matchB] = await sql`SELECT COUNT(*)::int as count FROM "Match" WHERE "shopId" = ${SHOP_B_ID}`;
+    if (matchA.count !== 1) throw new Error(`Seed sanity: Match A expected 1 row, got ${matchA.count}`);
+    if (matchB.count !== 1) throw new Error(`Seed sanity: Match B expected 1 row, got ${matchB.count}`);
+
+    const [ruleA] = await sql`SELECT COUNT(*)::int as count FROM "ReminderRule" WHERE "shopId" = ${SHOP_A_ID}`;
+    const [ruleB] = await sql`SELECT COUNT(*)::int as count FROM "ReminderRule" WHERE "shopId" = ${SHOP_B_ID}`;
+    if (ruleA.count !== 1) throw new Error(`Seed sanity: ReminderRule A expected 1 row, got ${ruleA.count}`);
+    if (ruleB.count !== 1) throw new Error(`Seed sanity: ReminderRule B expected 1 row, got ${ruleB.count}`);
+
+    const [dataReqA] = await sql`SELECT COUNT(*)::int as count FROM s22_data_requests WHERE shop_id = ${SHOP_A_ID}`;
+    const [dataReqB] = await sql`SELECT COUNT(*)::int as count FROM s22_data_requests WHERE shop_id = ${SHOP_B_ID}`;
+    if (dataReqA.count !== 1) throw new Error(`Seed sanity: s22_data_requests A expected 1 row, got ${dataReqA.count}`);
+    if (dataReqB.count !== 1) throw new Error(`Seed sanity: s22_data_requests B expected 1 row, got ${dataReqB.count}`);
+
+    const [tagA] = await sql`SELECT COUNT(*)::int as count FROM "AccountSource" WHERE "shopId" = ${SHOP_A_ID}`;
+    const [tagB] = await sql`SELECT COUNT(*)::int as count FROM "AccountSource" WHERE "shopId" = ${SHOP_B_ID}`;
+    if (tagA.count !== 1) throw new Error(`Seed sanity: AccountSource A expected 1 row, got ${tagA.count}`);
+    if (tagB.count !== 1) throw new Error(`Seed sanity: AccountSource B expected 1 row, got ${tagB.count}`);
+
+    const [settingsA] = await sql`SELECT COUNT(*)::int as count FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
+    const [settingsB] = await sql`SELECT COUNT(*)::int as count FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_B_ID}`;
+    if (settingsA.count !== 1) throw new Error(`Seed sanity: s18_shop_reminder_settings A expected 1 row, got ${settingsA.count}`);
+    if (settingsB.count !== 1) throw new Error(`Seed sanity: s18_shop_reminder_settings B expected 1 row, got ${settingsB.count}`);
   });
 
   afterAll(async () => {
