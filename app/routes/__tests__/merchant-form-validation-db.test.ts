@@ -709,8 +709,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       } as unknown;
     }
 
-    it.skip("enable reminders persists to DB", async () => {
-      // pending fix, see internal tracker
+    it("enable reminders persists to DB", async () => {
       await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`
         INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
@@ -740,8 +739,7 @@ describeWithDb("Merchant form validation (DB)", () => {
       expect(settings.enabled).toBe(true);
     });
 
-    it.skip("disable reminders persists to DB", async () => {
-      // pending fix, see internal tracker
+    it("disable reminders persists to DB", async () => {
       await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id = ${SHOP_A_ID}`;
       await sql`
         INSERT INTO s18_shop_reminder_settings (shop_id, enabled, created_at, updated_at)
