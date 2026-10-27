@@ -1889,9 +1889,9 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       }
     });
 
-    it("(ii) processBulkOperation E2E multi-chunk (N>chunk): at least 2 progress saves, lines_processed == objectCount, unseen closed", async () => {
+    it("(ii) processBulkOperation E2E multi-chunk (JSONL > 512KB): fetch called >=2 times with distinct Range starts, lines_processed == objectCount, unseen closed", async () => {
       const { adminGraphQL } = await import("../../drain/admin-client.server");
-      const { processBulkOperation } = await import("../bulk-jsonl-processor.server");
+      const { processBulkOperation, DEFAULT_CHUNK_SIZE } = await import("../bulk-jsonl-processor.server");
       const { processBulkDraftOrder } = await import("../draft-order.server");
       const mockAdminGraphQL = vi.mocked(adminGraphQL);
       const mockProcessBulkDraftOrder = vi.mocked(processBulkDraftOrder);
@@ -1918,6 +1918,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
+      const padding = "X".repeat(100_000);
       const makeLine = (id: string, name: string, idx: number) => JSON.stringify({
         id,
         name,
@@ -1925,18 +1926,20 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         status: "open",
         totalPriceSet: { shopMoney: { amount: "1000.00", currencyCode: "INR" } },
         paymentTerms: { id: `pt${idx}`, paymentTermsName: "Net 30", paymentTermsType: "NET" },
+        customAttributes: [{ key: "padding", value: padding }],
       });
 
+      const lineCount = 8;
       const lines = [
         makeLine(draftSeenId, "#E2E-MULTI-SEEN", 0),
-        makeLine(`draft-order-e2e-multi-extra1-${TEST_SUFFIX}`, "#EXTRA1", 1),
-        makeLine(`draft-order-e2e-multi-extra2-${TEST_SUFFIX}`, "#EXTRA2", 2),
-        makeLine(`draft-order-e2e-multi-extra3-${TEST_SUFFIX}`, "#EXTRA3", 3),
-        makeLine(`draft-order-e2e-multi-extra4-${TEST_SUFFIX}`, "#EXTRA4", 4),
-        makeLine(`draft-order-e2e-multi-extra5-${TEST_SUFFIX}`, "#EXTRA5", 5),
+        ...Array.from({ length: lineCount - 1 }, (_, i) =>
+          makeLine(`draft-order-e2e-multi-extra${i + 1}-${TEST_SUFFIX}`, `#EXTRA${i + 1}`, i + 1)
+        ),
       ];
       const jsonlContent = lines.join("\n");
       const jsonlBytes = new TextEncoder().encode(jsonlContent);
+
+      expect(jsonlBytes.length).toBeGreaterThan(DEFAULT_CHUNK_SIZE);
 
       mockAdminGraphQL.mockResolvedValue({
         success: true,
@@ -1944,7 +1947,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
           node: {
             id: bulkOpId,
             status: "COMPLETED",
-            objectCount: "6",
+            objectCount: String(lineCount),
             fileSize: jsonlBytes.length,
             url: "https://example.com/results.jsonl",
             errorCode: null,
@@ -1967,6 +1970,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       });
 
       const originalFetch = global.fetch;
+      const rangeStarts: number[] = [];
       global.fetch = vi.fn().mockImplementation((_url: string, options: RequestInit) => {
         const rangeHeader = (options.headers as Record<string, string>)?.Range || "";
         const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d+)/);
@@ -1974,6 +1978,8 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         const requestedEnd = rangeMatch ? parseInt(rangeMatch[2], 10) : jsonlBytes.length - 1;
         const actualEnd = Math.min(requestedEnd, jsonlBytes.length - 1);
         const chunk = jsonlBytes.slice(start, actualEnd + 1);
+
+        rangeStarts.push(start);
 
         return Promise.resolve({
           status: 206,
@@ -1987,23 +1993,34 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
       });
 
       try {
-        const result = await processBulkOperation(sql, {
-          topic: "BULK_OPERATIONS_FINISH",
-          shop: TEST_SHOP_DOMAIN,
-          webhookId,
-          enqueuedAt: new Date().toISOString(),
-          bulkOperationId: bulkOpId,
-          bulkType: "draft_orders",
-        });
+        let result;
+        let iterations = 0;
+        const maxIterations = 10;
+        do {
+          result = await processBulkOperation(sql, {
+            topic: "BULK_OPERATIONS_FINISH",
+            shop: TEST_SHOP_DOMAIN,
+            webhookId: `${webhookId}-${iterations}`,
+            enqueuedAt: new Date().toISOString(),
+            bulkOperationId: bulkOpId,
+            bulkType: "draft_orders",
+          });
+          iterations++;
+          expect(result.success).toBe(true);
+        } while (result.status === "progress" && iterations < maxIterations);
 
-        expect(result.success).toBe(true);
         expect(result.status).toBe("complete");
+        expect(iterations).toBeGreaterThanOrEqual(2);
+
+        expect(rangeStarts.length).toBeGreaterThanOrEqual(2);
+        const uniqueStarts = new Set(rangeStarts);
+        expect(uniqueStarts.size).toBeGreaterThanOrEqual(2);
 
         const [opRow] = await sql<{ lines_processed: string | null; lines_read: string | null }[]>`
           SELECT lines_processed, lines_read FROM s6_bulk_operations WHERE bulk_operation_id = ${bulkOpId}
         `;
-        expect(opRow.lines_processed).toBe("6");
-        expect(opRow.lines_read).toBe("6");
+        expect(opRow.lines_processed).toBe(String(lineCount));
+        expect(opRow.lines_read).toBe(String(lineCount));
 
         const [seenDraft] = await sql<{ status: string; last_seen_bulk_op_id: string | null }[]>`
           SELECT status, last_seen_bulk_op_id FROM s8_draft_orders WHERE draft_order_id = ${draftSeenId}
