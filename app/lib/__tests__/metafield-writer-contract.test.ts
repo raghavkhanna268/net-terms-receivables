@@ -15,9 +15,10 @@
  *
  * Writers Covered:
  * - credit_status: updateCreditStatus (EXERCISED), syncCreditStatusMetafield (EXERCISED),
- *   recomputeCreditStatus (EXERCISED via syncCreditStatusMetafield)
- * - shop_config: writeShopConfigMetafield (EXERCISED), checkAndRecoverCurrency (EXERCISED)
- * - hide-terms-config: NO TS WRITER EXISTS (manifest-only, config via Shopify Admin UI)
+ *   recomputeCreditStatus (MANIFEST-ONLY, routes through syncCreditStatusMetafield)
+ * - shop_config: writeShopConfigMetafield (EXERCISED), checkAndRecoverCurrency (EXERCISED),
+ *   syncShopInfo (MANIFEST-ONLY, calls writeShopConfigMetafield)
+ * - hide-terms-config: NO TS WRITER EXISTS (config via Shopify Admin UI)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
