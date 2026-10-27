@@ -337,7 +337,7 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
     expect(truncatedLine).toMatch(/^suggestion_lines_truncated=(true|false)$/);
   });
 
-  it("suggestion lines use row numbers from fixture CSV (13-15 for credits)", async () => {
+  it("suggestion lines use exact row numbers from fixture CSV (13-15 for credits, no r0)", async () => {
     const c = collector();
     await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
     const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
@@ -345,7 +345,10 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
       const m = l.match(/^suggestion=r(\d+)_/);
       return m ? Number(m[1]) : 0;
     });
-    expect(rows.some((r) => r === 13 || r === 14 || r === 15)).toBe(true);
+    const uniqueRows = [...new Set(rows)].sort((a, b) => a - b);
+    expect(uniqueRows).toEqual([13, 14, 15]);
+    expect(rows.every((r) => r > 0)).toBe(true);
+    expect(rows.some((r) => r === 0)).toBe(false);
   });
 
   it("suggestion lines for seed invoices use order_<digits> label", async () => {
