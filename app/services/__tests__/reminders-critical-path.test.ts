@@ -138,7 +138,7 @@ function createMockSql() {
 const FAKE_RESEND_KEY = "re_test_FAKE_KEY_123";
 
 describe("Critical Path: Reminder Sending Gates", () => {
-  const originalEnv = process.env;
+  const originalEnv = { ...process.env };
   let mockSql: ReturnType<typeof createMockSql>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
@@ -1244,17 +1244,25 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
 
+    await sql`DELETE FROM s18_global_sends WHERE send_key = 'global'`;
     if (globalSendsSnapshot) {
       await sql`
-        UPDATE s18_global_sends
-        SET daily_count = ${globalSendsSnapshot.dailyCount},
-            monthly_count = ${globalSendsSnapshot.monthlyCount},
-            send_date = ${globalSendsSnapshot.sendDate},
-            send_month = ${globalSendsSnapshot.sendMonth}
-        WHERE send_key = 'global'
+        INSERT INTO s18_global_sends (send_key, send_date, send_month, daily_count, monthly_count, updated_at)
+        VALUES (
+          'global',
+          ${globalSendsSnapshot.sendDate},
+          ${globalSendsSnapshot.sendMonth},
+          ${globalSendsSnapshot.dailyCount},
+          ${globalSendsSnapshot.monthlyCount},
+          NOW()
+        )
       `;
-    } else {
-      await sql`DELETE FROM s18_global_sends WHERE send_key = 'global'`;
+      const [restored] = await sql<{ daily_count: number; monthly_count: number; send_date: Date; send_month: string }[]>`
+        SELECT daily_count, monthly_count, send_date, send_month FROM s18_global_sends WHERE send_key = 'global'
+      `;
+      if (!restored || restored.daily_count !== globalSendsSnapshot.dailyCount || restored.monthly_count !== globalSendsSnapshot.monthlyCount) {
+        throw new Error(`s18_global_sends restore failed: expected ${JSON.stringify(globalSendsSnapshot)}, got ${JSON.stringify(restored)}`);
+      }
     }
 
     await sql.end();
@@ -1612,7 +1620,11 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-24T06:30:00Z"));
 
-    const originalEnv = process.env;
+    const savedResendKey = process.env.RESEND_API_KEY;
+    const savedResendFrom = process.env.RESEND_FROM;
+    const savedUnsubscribeSecret = process.env.REMINDER_UNSUBSCRIBE_SECRET;
+    const savedAppUrl = process.env.SHOPIFY_APP_URL;
+    const savedTestRecipients = process.env.RESEND_TEST_RECIPIENTS;
     (process.env as Record<string, string | undefined>).RESEND_API_KEY = FAKE_RESEND_KEY;
     (process.env as Record<string, string | undefined>).RESEND_FROM = "reminders@example.com";
     (process.env as Record<string, string | undefined>).REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
@@ -1671,7 +1683,11 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     expect(logs.length).toBe(1);
     expect(logs[0].status).toBe("sent");
 
-    process.env = originalEnv;
+    (process.env as Record<string, string | undefined>).RESEND_API_KEY = savedResendKey;
+    (process.env as Record<string, string | undefined>).RESEND_FROM = savedResendFrom;
+    (process.env as Record<string, string | undefined>).REMINDER_UNSUBSCRIBE_SECRET = savedUnsubscribeSecret;
+    (process.env as Record<string, string | undefined>).SHOPIFY_APP_URL = savedAppUrl;
+    (process.env as Record<string, string | undefined>).RESEND_TEST_RECIPIENTS = savedTestRecipients;
     vi.useRealTimers();
   });
 });
