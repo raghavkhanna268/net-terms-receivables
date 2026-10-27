@@ -331,7 +331,7 @@ describe("app.accounts.$id loader syncState", () => {
   });
 
   describe("account not found", () => {
-    it("returns null creditStatus when account not found", async () => {
+    it("throws 404 when account not found", async () => {
       mockSql.mockImplementation((strings: TemplateStringsArray, ..._values: unknown[]) => {
         const query = strings.join("?");
 
@@ -349,9 +349,13 @@ describe("app.accounts.$id loader syncState", () => {
       mockGetCreditStatusDisplay.mockResolvedValue(null);
 
       const { loader } = await import("../app.accounts.$id");
-      const result = await loader(createLoaderArgs("non-existent"));
 
-      expect(result.creditStatus).toBeNull();
+      try {
+        await loader(createLoaderArgs("non-existent"));
+        expect.fail("Expected loader to throw 404");
+      } catch (error) {
+        expect(error).toHaveProperty("init.status", 404);
+      }
     });
   });
 
@@ -666,7 +670,7 @@ describe("app.accounts.$id loader syncState", () => {
   });
 
   describe("cross-shop isolation", () => {
-    it("account from different shop returns not found, no credit-status or dead-letter queries", async () => {
+    it("account from different shop throws 404, no credit-status or dead-letter queries", async () => {
       const OTHER_ACCOUNT_ID = "other-shop-acc-999";
       let deadLetterQueryCount = 0;
 
@@ -692,11 +696,13 @@ describe("app.accounts.$id loader syncState", () => {
       mockGetCreditStatusDisplay.mockResolvedValue(null);
 
       const { loader } = await import("../app.accounts.$id");
-      const result = await loader(createLoaderArgs(OTHER_ACCOUNT_ID));
 
-      expect(result.error).toBe("Account not found");
-      expect(result.account).toBeNull();
-      expect(result.creditStatus).toBeNull();
+      try {
+        await loader(createLoaderArgs(OTHER_ACCOUNT_ID));
+        expect.fail("Expected loader to throw 404");
+      } catch (error) {
+        expect(error).toHaveProperty("init.status", 404);
+      }
 
       expect(mockGetCreditStatusDisplay).not.toHaveBeenCalled();
       expect(deadLetterQueryCount).toBe(0);

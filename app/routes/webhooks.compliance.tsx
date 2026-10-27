@@ -83,6 +83,8 @@ async function fetchShopOwnerEmail(sql: Sql, shop: string): Promise<string | nul
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
  */
+export const loader = () => new Response(null, { status: 405, headers: { Allow: "POST" } });
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {

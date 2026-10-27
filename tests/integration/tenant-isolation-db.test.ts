@@ -512,20 +512,18 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   });
 
   describe("app.accounts.$id - buyer account isolation", () => {
-    it("shop A loader cannot read shop B's buyer account (negative)", async () => {
+    it("shop A loader cannot read shop B's buyer account (negative, 404)", async () => {
       expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createLoaderArgs(`/app/accounts/${BUYER_B_ID}`, { id: BUYER_B_ID });
       const { loader } = await import("../../app/routes/app.accounts.$id.js");
-      const result = await withRequestContext(async () =>
-        (await loader(args as never)) as { account: unknown; error: string | null }
-      );
 
-      expect(result.account).toBeNull();
-      expect(result.error).toBe("Account not found");
-
-      const { found, marker } = containsAnyMarker(result);
-      expect(found, `Response contains B marker: ${marker}`).toBe(false);
+      try {
+        await withRequestContext(async () => loader(args as never));
+        expect.fail("Expected loader to throw 404 for cross-shop account access");
+      } catch (err) {
+        expect(err).toHaveProperty("init.status", 404);
+      }
 
       const hashAfter = await hashBRows();
       expect(hashAfter).toBe(hashBefore);

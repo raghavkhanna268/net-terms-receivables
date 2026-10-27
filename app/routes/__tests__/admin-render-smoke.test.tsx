@@ -80,7 +80,7 @@ vi.mock("react-router", () => ({
   useRouteError: vi.fn(() => null),
   useFetcher: mockUseFetcher,
   isRouteErrorResponse: vi.fn(() => false),
-  data: vi.fn((d) => d),
+  data: vi.fn((d, init) => ({ type: "DataWithResponseInit", data: d, init })),
   Await: ({
     resolve,
     children,
@@ -174,6 +174,7 @@ interface TestableRouteConfig extends BaseRouteConfig {
   currencyGate: "gated" | { exempt: string };
   expectedRedirect?: Partial<Record<ShopState, RedirectExpectation>>;
   expectedError?: Partial<Record<ShopState, ErrorExpectation>>;
+  expected404?: Partial<Record<ShopState, boolean>>;
   expectsSeededMoney?: boolean;
   seededMoneyValues?: string[];
   seededTextValues?: string[];
@@ -268,8 +269,8 @@ const APP_ROUTES: RouteTestConfig[] = [
     expectsSeededMoney: true,
     seededMoneyValues: ["₹1,23,456.00"],
     seededTextValues: ["Test Buyer Corp INR"],
-    expectedError: {
-      fresh: { error: "Account not found" },
+    expected404: {
+      fresh: true,
     },
   },
   {
@@ -594,6 +595,21 @@ describeWithDb("Admin Render Smoke Tests", () => {
           } catch (err) {
             if (err instanceof Response && (err.status === 302 || err.status === 303)) {
               redirectResponse = err;
+            } else if (
+              typeof err === "object" &&
+              err !== null &&
+              "type" in err &&
+              (err as { type: string }).type === "DataWithResponseInit" &&
+              "init" in err &&
+              (err as { init: { status?: number } }).init?.status === 404
+            ) {
+              const expects404 = route.expected404?.[state];
+              if (expects404) {
+                return;
+              }
+              throw new Error(
+                `Loader threw 404 for ${route.name} in state ${state} but expected404.${state} was not declared.`
+              );
             } else {
               throw new Error(
                 `Loader threw unexpected error for ${route.name} in state ${state}: ${err instanceof Error ? err.message : String(err)}`

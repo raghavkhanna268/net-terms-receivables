@@ -250,22 +250,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   `;
 
   if (!accountRow) {
-    return {
-      account: null,
-      creditStatus: null,
-      companyTotals: null,
-      invoices: { rows: [], totalCount: 0 },
-      gatingEnforced: isGatingEnforced(),
-      reminderOptOut: null,
-      upgradeUrl,
-      newAccountsPausedBanner: {
-        show: false,
-        heading: "",
-        bodyText: "",
-        upgradeUrl: null,
-      },
-      error: "Account not found",
-    } satisfies LoaderData;
+    throw data(null, { status: 404 });
   }
 
   const isGated = !isAccountActive(accountRow.gatedAt);
@@ -1132,6 +1117,21 @@ export default function AccountPage() {
         <s-paragraph>
           Turning reminders back on does not resend skipped reminders. The next scheduled reminder sends normally.
         </s-paragraph>
+      </s-section>
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  return (
+    <s-page heading="Account not found">
+      <s-section>
+        <s-empty-state heading="Account not found">
+          <s-text slot="subheading">
+            The account you are looking for could not be found.
+          </s-text>
+          <s-button variant="primary" href="/app">Back</s-button>
+        </s-empty-state>
       </s-section>
     </s-page>
   );

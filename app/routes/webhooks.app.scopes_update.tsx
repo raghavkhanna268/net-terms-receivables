@@ -16,6 +16,8 @@ import {
  *
  * CPU savings: ~5-10ms by avoiding session DB round-trip.
  */
+export const loader = () => new Response(null, { status: 405, headers: { Allow: "POST" } });
+
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {

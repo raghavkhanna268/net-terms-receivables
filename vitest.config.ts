@@ -215,6 +215,9 @@ const DB_TEST_PATTERNS = [
 
   // Cross-shop (tenant) isolation DB tests
   "tests/integration/tenant-isolation-db.test.ts",
+
+  // Account not-found 404 DB tests
+  "app/routes/__tests__/app.accounts.$id-notfound-db.test.ts",
 ];
 
 export default defineConfig({

@@ -42,6 +42,8 @@ import { evictShopFromSetupCache } from "~/lib/after-auth.server";
  * Error handling: Returns 500 on session delete or uninstalledAt write failure
  * so Shopify retries. Processed webhooks and receipt purge failure is non-fatal.
  */
+export const loader = () => new Response(null, { status: 405, headers: { Allow: "POST" } });
+
 export const action = async ({ request, context }: ActionFunctionArgs) => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
