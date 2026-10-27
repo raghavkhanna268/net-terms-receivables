@@ -13,6 +13,13 @@
 -- Vars:
 --   since (ISO-8601 UTC of the sweep run, e.g. 2026-10-24T19:00:00Z). The sweep's dedupe key
 --         date is since's UTC date.
+--   allowed, e2e (masked secrets, passed by prod-readonly-query.yml) for shop_kind.
+-- shop_kind: identity label from the canonical shop_labels CTE
+-- (scripts/ci/shop-labels.ts). 'main' = the shop whose domain is :'allowed'
+-- (ALLOWED_DEV_STORE), 'e2e' = :'e2e' (E2E_SHOP), 'other_N' = the rest ranked by
+-- Shop.id within this run only (N is stable within one run but does NOT identify
+-- a shop across runs), 'unknown' for every shop if a secret is empty or both are
+-- equal. Domains are compared, never printed.
 -- Orphan locations (sections B and C) are derived inside SQL from COMPANY_LOCATIONS_DELETE
 -- webhook receipts, not passed as psql variables.
 -- @col kind, "holdState", proname, dep_table: enum
@@ -34,10 +41,22 @@ SELECT proname,
 FROM pg_proc WHERE proname = 'enqueue_credit_status_recomputes';
 
 \echo '== H1 shop-level defaultTermsDays (config_int, clamped) per shop'
-SELECT DENSE_RANK() OVER (ORDER BY s.id) AS shop_idx,
+WITH shop_labels AS (
+  SELECT s.id AS shop_id,
+         CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+              WHEN s.domain = :'allowed' THEN 'main'
+              WHEN s.domain = :'e2e' THEN 'e2e'
+              ELSE 'other_' || (ROW_NUMBER() OVER (
+                     PARTITION BY s.domain IN (:'allowed', :'e2e')
+                     ORDER BY s.id))::text
+         END AS shop_kind
+  FROM "Shop" s
+)
+SELECT sl.shop_kind,
        s."uninstalledAt" IS NULL AS installed,
        CASE WHEN s."defaultTermsDays" BETWEEN 0 AND 365 THEN s."defaultTermsDays" END AS "defaultTermsDays"
 FROM "Shop" s
+JOIN shop_labels sl ON sl.shop_id = s.id
 ORDER BY 1;
 
 \echo '== A per BuyerAccount with >= 1 past-due unpaid invoice (aggregated)'

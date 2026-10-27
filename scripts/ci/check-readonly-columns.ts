@@ -38,6 +38,9 @@
  *         comparison, IS [NOT] NULL, EXISTS, LIKE, IN, bool_and/bool_or,
  *         TRUE/FALSE                      -> boolean
  *         string literal                  -> enum
+ *         'prefix' || (ROW_NUMBER/RANK/DENSE_RANK() OVER (...))[::text]
+ *           (prefix ^[a-z][a-z0-9_]{0,31}$, e.g. shop_kind other_N)
+ *                                         -> enum
  *         CASE whose results are all literals / NULL / guarded passthroughs
  *           (WHEN x ~ '^[...]{1,N}$' THEN x, or WHEN x IN ('a','b') THEN x)
  *                                         -> enum
@@ -68,6 +71,12 @@
  *      raw error/reason, money (amount/price/balance/outstanding/limit) or a
  *      token/secret. An annotation cannot override this; map the value to an
  *      enum/boolean/count in SQL instead.
+ *   4b. Session credential columns (SESSION_CREDENTIAL_COLUMNS: the OAuth
+ *      tokens, their expiry times and the OAuth state) may only feed a
+ *      DERIVED boolean or count, e.g. `bool_or(se."refreshToken" IS NOT NULL)`
+ *      or `se."refreshTokenExpires" > NOW()`. Any other use (passthrough,
+ *      annotation, convention, CASE result, to_char, ...) is rejected as
+ *      `sensitive`, so a token value or an expiry time can never be printed.
  *      Also rejected: SELECT * (`star`), SUM/AVG and other unclassifiable
  *      expressions (`unclassified`), statements that are not SELECT/WITH/
  *      SHOW/BEGIN/COMMIT/ROLLBACK, e.g. SET (`unsupported_statement`), unparseable
@@ -109,6 +118,22 @@ export type Kind = (typeof KINDS)[number];
  * Adding a name here needs Team Lead / QA sign-off.
  */
 export const CONFIG_INT_COLUMNS: readonly string[] = ["defaultTermsDays"];
+
+/**
+ * Session (prisma/schema.prisma model Session) columns that hold a credential
+ * or its expiry time. Matched case-insensitively against every column the
+ * output expression reads; allowed only inside a derived boolean/count.
+ */
+export const SESSION_CREDENTIAL_COLUMNS: readonly string[] = [
+  "accessToken",
+  "refreshToken",
+  "refreshTokenExpires",
+  "expires",
+  "state",
+];
+const SESSION_CREDENTIAL_SET = new Set(
+  SESSION_CREDENTIAL_COLUMNS.map((c) => c.toLowerCase()),
+);
 
 export type Issue =
   | "sensitive"
@@ -879,6 +904,11 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
     });
     if (bool) return "boolean";
   }
+  // 'prefix' || (ROW_NUMBER|RANK|DENSE_RANK() OVER (...))[::text] -> enum.
+  // A short lower-case literal plus a window row index, e.g. the shop
+  // identity label 'other_' || ROW_NUMBER() OVER (...). The OVER clause is
+  // not a passthrough (only the index is printed), so it adds no sources.
+  if (isLabelPlusRank(e)) return "enum";
   if (e.length === 1) {
     const tk = e[0];
     if (isKw(tk, "true", "false")) return "boolean";
@@ -1000,6 +1030,36 @@ function deriveKind(exprIn: Tok[], ctx: Ctx): Kind | null {
   }
   collectSources(e, ctx);
   return null;
+}
+
+/** Literal prefix allowed in 'prefix' || <rank> OVER (...) labels. */
+export const LABEL_PREFIX_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+/**
+ * True for exactly `'prefix' || <rank>` where prefix matches LABEL_PREFIX_RE
+ * and <rank> is ROW_NUMBER() / RANK() / DENSE_RANK() OVER (...), optionally
+ * parenthesised and/or cast ::text / ::varchar. Nothing else may follow.
+ */
+function isLabelPlusRank(e: Tok[]): boolean {
+  if (e.length < 7) return false;
+  if (e[0].t !== "string" || !LABEL_PREFIX_RE.test(e[0].v)) return false;
+  if (!(e[1].t === "op" && e[1].v === "||")) return false;
+  let r = unwrap(e.slice(2));
+  const rd = depths(r);
+  const castAt = r.findIndex((tk, k) => rd[k] === 0 && isP(tk, "::"));
+  if (castAt >= 0) {
+    const ty = r.slice(castAt + 1);
+    if (!(ty.length === 1 && isKw(ty[0], "text", "varchar"))) return false;
+    r = unwrap(r.slice(0, castAt));
+  }
+  if (!(r[0]?.t === "ident" && ["row_number", "rank", "dense_rank"].includes(r[0].v)))
+    return false;
+  if (!(isP(r[1], "(") && isP(r[2], ")") && isKw(r[3], "over") && isP(r[4], "(")))
+    return false;
+  // the OVER ( ... ) group must close on the last token
+  const d = depths(r);
+  return isP(r[r.length - 1], ")") && d[r.length - 1] === d[4] &&
+    r.slice(5, -1).every((_, k) => d[k + 5] > d[4]);
 }
 
 /** Record identifiers and JSON keys referenced by a passthrough expression. */
@@ -1405,6 +1465,25 @@ function classifyColumn(
   // sensitive check: skip only for derived count/boolean (they cannot carry the value)
   const derivedSafe =
     via === "derived" && (kind === "count" || kind === "boolean");
+  // 4b: Session credential / expiry columns only inside a derived boolean/count
+  if (!derivedSafe) {
+    const all: Ctx = { sources: [], bare: [] };
+    collectSources(expr, all);
+    const cred = [...all.sources, ...ctx.sources].find((src) =>
+      SESSION_CREDENTIAL_SET.has(src.toLowerCase()),
+    );
+    if (cred) {
+      return {
+        kind,
+        via,
+        used,
+        violation: {
+          issue: "sensitive",
+          detail: `reads Session credential column ${cred} outside a derived boolean/count`,
+        },
+      };
+    }
+  }
   if (!derivedSafe) {
     const hits = [nm, ...ctx.sources]
       .map((s) => [s, sensitiveWord(s)] as const)

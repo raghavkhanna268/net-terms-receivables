@@ -6,7 +6,7 @@
 - Idempotency via `ReminderLog` unique index on `(ruleId, invoiceId)`
 - Send window: 09:00-19:00 in shop's local timezone
 
-**The Resend key stays unset until Raghav accepts Resend's DPA**, so the unset-key path (section A) is the **release-blocking** path. Everything below is **required behaviour**.
+**The Resend API key is set on production by decision.** Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12); executed copy available in the Resend dashboard (product-owner ruling, 2026-10-26). `RESEND_API_KEY` and `RESEND_TEST_RECIPIENTS` set as Worker secrets (DevOps names-only wrangler secret list, 2026-10-26 19:44 IST). `RESEND_FROM` pending #427 (ships as wrangler.jsonc var). `RESEND_TEST_RECIPIENTS` restricts all sends to the test recipient until G4. Everything below is **required behaviour**.
 
 > **Assumptions (no spec in repo):**
 > - Reminders are scheduled by pg_cron (for example a daily `s18_payment_reminders` job at a fixed IST hour). The job enqueues per-invoice reminder jobs for open invoices at configured offsets: before due, on due, and N days overdue.
@@ -59,7 +59,7 @@ This plan verifies that:
 ## 4. Protected customer data, scopes and data minimization (DPDP)
 - **PCD-1:** Only customer **Email and Name** (`email`, `displayName`) are used, and only with `CUSTOMER_PII_FIELDS=1`. **Phone and address are a fail.** No new customer fields are fetched.
 - **PCD-2:** Email is read from the DB or Shopify at send time. It is not copied into reminder log or idempotency tables (store `invoiceId` and `offset` only).
-- **SCOPE-1:** Exactly the 11 production scopes. **No `write_payment_terms`, no `write_draft_orders`.** Sending email needs no Shopify scope. The scope-sync check passes.
+- **SCOPE-1:** Exactly the 9 production scopes. **No `write_payment_terms`, no `write_draft_orders`.** Sending email needs no Shopify scope. The scope-sync check passes.
 - **DPDP-1 (minimization / purpose limitation):** Reminders go only to buyers with an existing net-terms relationship. Data sent to Resend is limited to the recipient email, name and invoice summary.
 - **DPDP-2 (processor):** **No data is sent to Resend until the DPA is accepted.** This is enforced by the unset key (section A). Document Resend as a processor in `docs/privacy.md` before the key is set.
 - **DPDP-3:** `customers/redact` removes the buyer from future reminders and purges any reminder records keyed to them. Logs contain no email addresses (assert with a regex over the `console.*` spy).
@@ -71,7 +71,7 @@ This plan verifies that:
 - Run the Worker boot test with the secret absent.
 
 ## 6. Done criteria
-- [x] **S18-01 through S18-07 pass.** This is the release gate while the DPA is pending.
+- [x] **S18-01 through S18-07 pass.** Resend DPA in effect via acceptance of Resend's Terms of Service (DPA preamble and §12) (product-owner ruling, 2026-10-26).
   - S18-01: `app/services/__tests__/reminders.test.ts:234` - no fetch when key unset
   - S18-02: `app/services/__tests__/reminders.test.ts:167-177` - empty/whitespace treated as unset
   - S18-05: `app/services/__tests__/reminders.test.ts:252-256` - logs "reminders_disabled"
@@ -90,7 +90,7 @@ This plan verifies that:
 - [x] **Cap enforcement is atomic.** 
   - Daily cap: `app/services/__tests__/reminders-cap-db.test.ts:112-156` - 100 sequential succeed, 101st returns daily_cap; concurrent at 99 gives exactly 1
   - Monthly cap: `app/services/__tests__/reminders-cap-db.test.ts:158-216` - reservations 2996..3000 succeed, 3001 returns monthly_cap; concurrent at boundary gives exactly remaining count
-- [ ] DevOps confirms the `RESEND_API_KEY` secret is **absent** in the prod Worker (`wrangler secret list`) until Raghav confirms the DPA.
+- [x] DevOps names-only `wrangler secret list` on prod (2026-10-26 19:44 IST) shows `RESEND_API_KEY`, `RESEND_TEST_RECIPIENTS`; key set by product-owner decision; `RESEND_TEST_RECIPIENTS` restricts sends to the test recipient until G4. `RESEND_FROM` pending #427 (ships as wrangler.jsonc var).
 
 ## 7. Resend Free Tier Limits
 

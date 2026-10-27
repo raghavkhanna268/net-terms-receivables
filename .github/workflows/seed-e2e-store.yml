@@ -2,8 +2,10 @@
 #
 # SECURITY CONSTRAINTS (do not weaken):
 # - Manual dispatch only, and the job runs only on refs/heads/main
-# - Inputs are booleans only (dry_run defaults to true). There is NO shop or
-#   domain input: the store comes only from the E2E_SHOP repo secret
+# - Inputs are booleans and one enum (dry_run defaults to true; g4_fixture
+#   defaults to none). There is NO shop or domain input: the store comes only
+#   from the E2E_SHOP repo secret. The G4 recipient comes only from the
+#   G4_TEST_RECIPIENT repo secret, mapped into env (never an input, never echoed)
 # - E2E_SHOP is masked at once; the guard (scripts/ci/e2e-shop-guard.sh) fails
 #   closed if it is empty, not a *.myshopify.com domain, or equal to the main
 #   dev store (ALLOWED_DEV_STORE secret). Neither value is ever printed
@@ -34,9 +36,19 @@ on:
         description: 'Also seed the reviewer demo company/orders (--reviewer-demo)'
         type: boolean
         default: false
+      g4_fixture:
+        description: 'G4 reminder fixture: none, write, or cleanup. Writes need dry_run=false.'
+        type: choice
+        options:
+          - none
+          - write
+          - cleanup
+        default: none
 
 permissions:
   contents: read
+  # Read-only: resolve the last successful Deploy run SHA for the drift check.
+  actions: read
 
 concurrency:
   group: seed-e2e-store
@@ -55,6 +67,7 @@ jobs:
       # It is resolved from the E2E_SHOP secret and masked.
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
       INPUT_REVIEWER_DEMO: ${{ inputs.reviewer_demo }}
+      INPUT_G4_FIXTURE: ${{ inputs.g4_fixture }}
 
     steps:
       - name: Checkout
@@ -248,10 +261,55 @@ jobs:
 
           echo "has_token=true" >> "$GITHUB_OUTPUT"
 
+      - name: Mask G4 recipient and resolve deployed SHA
+        if: inputs.g4_fixture == 'write'
+        env:
+          # Repo secret, never a workflow input and never echoed.
+          G4_TEST_RECIPIENT: ${{ secrets.G4_TEST_RECIPIENT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Mask every comma entry (and its lowercase form) before anything else.
+          IFS=',' read -ra ENTRIES <<< "${G4_TEST_RECIPIENT:-}"
+          for e in "${ENTRIES[@]}"; do
+            t="$(printf '%s' "$e" | tr -d '[:space:]')"
+            if [ -n "$t" ]; then
+              echo "::add-mask::$t"
+              echo "::add-mask::$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')"
+            fi
+          done
+          # Drift check input: head SHA of the last successful Deploy run on main.
+          DEPLOY_SHA=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty')
+          if [ -z "$DEPLOY_SHA" ]; then
+            echo "::error::g4_deploy_sha_unresolved"
+            exit 1
+          fi
+          # The checkout is shallow (fetch-depth 1), so the deployed commit is
+          # usually absent and seed.ts's `git show $DEPLOY_SHA:wrangler.jsonc`
+          # drift check would fail. Fetch exactly that one commit (depth 1, no
+          # tags). persist-credentials is false, so authenticate this single
+          # fetch with the job token via an http header (as actions/checkout
+          # does). Fail closed if the commit can't be fetched. This fetches a
+          # single commit, never the full history.
+          GH_AUTH_B64="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$GH_AUTH_B64"
+          if ! git -c "http.https://github.com/.extraheader=Authorization: Basic $GH_AUTH_B64" \
+            fetch --no-tags --depth=1 origin "$DEPLOY_SHA"; then
+            echo "::error::g4_deploy_sha_fetch_failed"
+            exit 1
+          fi
+          echo "G4_DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+
       - name: Run seed script
         env:
           SHOPIFY_ADMIN_TOKEN: ${{ env.SHOPIFY_ADMIN_TOKEN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          # Recipient mapped into env only (never an input, never echoed).
+          G4_TEST_RECIPIENT: ${{ secrets.G4_TEST_RECIPIENT }}
+          # Deployed SHA for the allowlist drift check (empty unless g4=write).
+          G4_DEPLOY_SHA: ${{ env.G4_DEPLOY_SHA }}
         run: |
           set -euo pipefail
 
@@ -260,10 +318,27 @@ jobs:
           if [ "$INPUT_DRY_RUN" = "true" ]; then
             ARGS+=("--dry-run")
           fi
-          if [ "$INPUT_REVIEWER_DEMO" = "true" ]; then
-            ARGS+=("--reviewer-demo")
-          fi
+          # Map the G4 fixture choice to a seed flag. Writes still require
+          # dry_run=false; normal seeding is skipped when the G4 branch runs.
+          case "$INPUT_G4_FIXTURE" in
+            write)
+              ARGS+=("--g4-reminder-fixture")
+              ;;
+            cleanup)
+              ARGS+=("--g4-reminder-fixture-cleanup")
+              ;;
+            none)
+              if [ "$INPUT_REVIEWER_DEMO" = "true" ]; then
+                ARGS+=("--reviewer-demo")
+              fi
+              ;;
+            *)
+              echo "::error::g4_fixture_invalid_choice"
+              exit 1
+              ;;
+          esac
           echo "dry_run=$INPUT_DRY_RUN"
+          echo "g4_fixture=$INPUT_G4_FIXTURE"
           echo "reviewer_demo=$INPUT_REVIEWER_DEMO"
           # Public logs: redact GIDs, order names, amounts, emails and domains
           # (pipefail keeps seed.ts's exit code).

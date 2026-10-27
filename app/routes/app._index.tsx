@@ -26,11 +26,15 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
-import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
+import { pluralizeWithCount } from "~/lib/copy-helpers";
+import { getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
+import { processPlanWelcome } from "~/services/plan-welcome.server";
 
 const PAGE_SIZE = 20;
 
@@ -184,27 +188,15 @@ async function checkOnboardingRedirect(
   shopId: string
 ): Promise<boolean> {
   try {
-    const [shop] = await sql<{ onboarding_dismissed_at: Date | null }[]>`
-      SELECT onboarding_dismissed_at FROM "Shop" WHERE id = ${shopId}
+    const [result] = await sql<{ should_redirect: boolean }[]>`
+      SELECT 
+        s.onboarding_dismissed_at IS NULL 
+        AND NOT EXISTS (SELECT 1 FROM "BuyerAccount" WHERE "shopId" = ${shopId})
+        AND NOT EXISTS (SELECT 1 FROM "AccountSource" WHERE "shopId" = ${shopId}) AS should_redirect
+      FROM "Shop" s
+      WHERE s.id = ${shopId}
     `;
-
-    if (shop?.onboarding_dismissed_at !== null) {
-      return false;
-    }
-
-    const buyerCountResult = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-    `;
-    const buyerCount = parseInt(buyerCountResult[0]?.count ?? "0", 10);
-    if (buyerCount > 0) return false;
-
-    const tagRuleCountResult = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shopId}
-    `;
-    const tagRuleCount = parseInt(tagRuleCountResult[0]?.count ?? "0", 10);
-    if (tagRuleCount > 0) return false;
-
-    return true;
+    return result?.should_redirect ?? false;
   } catch {
     return false;
   }
@@ -418,6 +410,14 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shopDomain = session.shop;
 
   const url = new URL(request.url);
+
+  const urlPlanHandle = url.searchParams.get("plan_handle");
+  const urlChargeId = url.searchParams.get("charge_id");
+  const urlShopParam = url.searchParams.get("shop");
+  if (urlPlanHandle || urlChargeId) {
+    await processPlanWelcome(sql, shopDomain, urlShopParam, urlPlanHandle, urlChargeId);
+  }
+
   const page = parsePositiveInt(url.searchParams.get("page"), 1);
   const sortBy = parseSortBy(url.searchParams.get("sortBy"));
   const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
@@ -431,13 +431,20 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
   timing.endPhase("shop_lookup");
 
-  const currencyResult = shop
-    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
-    : null;
+  const [currencyResult, onboardingCheckResult] = await Promise.all([
+    shop
+      ? checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
+      : Promise.resolve(null),
+    shop && !skipOnboarding
+      ? checkOnboardingRedirect(sql, shop.id)
+      : Promise.resolve(false),
+  ]);
+
   const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
-  const currencySupported = isCurrencyGateOpen(shopCurrency);
+  const storeSetupStatus = getStoreSetupStatus(shop ? { currency: shopCurrency } : null);
+  const currencySupported = storeSetupStatus === "supported";
   if (!currencySupported) {
     timing.endPhase("loader_total");
     timing.logAllPhases();
@@ -449,6 +456,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     const notSupportedStoreHandle = shopDomain.replace(".myshopify.com", "");
     return data({
       notSupported: true,
+      storeSetupStatus,
       shopName: notSupportedStoreHandle,
       shopDomain,
       storeHandle: notSupportedStoreHandle,
@@ -468,12 +476,24 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     }, { headers });
   }
 
-  if (shop && !skipOnboarding) {
-    timing.startPhase("onboarding_checks");
-    const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
-    timing.endPhase("onboarding_checks");
-    if (shouldRedirect) {
+  if (onboardingCheckResult) {
+    timing.endPhase("loader_total");
+    const serverTiming = timing.toHeaderValue();
+    try {
       throw shopifyRedirect("/app/onboarding");
+    } catch (e) {
+      if (e instanceof Response) {
+        const headers = new Headers(e.headers);
+        if (serverTiming) {
+          headers.set("Server-Timing", serverTiming);
+        }
+        throw new Response(e.body, {
+          status: e.status,
+          statusText: e.statusText,
+          headers,
+        });
+      }
+      throw e;
     }
   }
 
@@ -566,7 +586,7 @@ function AgingBucketSummary({
           <s-text type="strong">Total Overdue: </s-text>
           <s-text tone="critical">{formatPaiseAmount(totalOverdue, currency)}</s-text>
           {totals.oldestOverdueDays && (
-            <s-text> (oldest: {totals.oldestOverdueDays} days)</s-text>
+            <s-text> (oldest: {pluralizeWithCount(totals.oldestOverdueDays, "day")})</s-text>
           )}
         </s-paragraph>
       )}
@@ -677,10 +697,10 @@ export function BuyerLedgerTable({
             return (
               <s-table-row key={`${row.buyer_account_id}-${row.currency}`}>
                 <s-table-cell>
-                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
+                  <s-link href={`/app/accounts/${row.buyer_account_id}`}>
                     {row.buyer_name}
                   </s-link>
-                  {gatingEnforced && row.is_gated && <s-badge tone="warning">over plan limit</s-badge>}
+                  {gatingEnforced && row.is_gated && <s-badge tone="warning">Over plan limit</s-badge>}
                 </s-table-cell>
                 <s-table-cell>
                   {creditLimit !== null
@@ -688,7 +708,9 @@ export function BuyerLedgerTable({
                     : "No limit"}
                 </s-table-cell>
                 <s-table-cell>
-                  {formatPaiseAmount(outstanding, row.currency)}
+                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
+                    {formatPaiseAmount(outstanding, row.currency)}
+                  </s-link>
                 </s-table-cell>
                 <s-table-cell>
                   {overdue > 0n ? (
@@ -701,7 +723,7 @@ export function BuyerLedgerTable({
                 </s-table-cell>
                 <s-table-cell>
                   {row.oldest_overdue_days !== null
-                    ? `${row.oldest_overdue_days} days`
+                    ? pluralizeWithCount(row.oldest_overdue_days, "day")
                     : "—"}
                 </s-table-cell>
                 <s-table-cell>
@@ -710,7 +732,7 @@ export function BuyerLedgerTable({
                   ) : row.hold_state === "NEAR_LIMIT" ? (
                     <s-badge tone="warning">Near Limit</s-badge>
                   ) : row.hold_state === "BYPASS" ? (
-                    <s-badge tone="info">Bypass</s-badge>
+                    <s-badge tone="info">Credit check paused</s-badge>
                   ) : (
                     <s-badge>OK</s-badge>
                   )}
@@ -732,13 +754,15 @@ export function BuyerLedgerTable({
   );
 }
 
-function BuyerInvoiceList({
+export function BuyerInvoiceList({
   invoices,
   buyerName,
+  buyerAccountId,
   onClose,
 }: {
   invoices: BuyerInvoiceRow[];
   buyerName: string;
+  buyerAccountId: string;
   onClose: string;
 }) {
   if (invoices.length === 0) {
@@ -749,7 +773,10 @@ function BuyerInvoiceList({
             This buyer has no outstanding invoices.
           </s-text>
         </s-empty-state>
-        <s-button href={onClose}>Back to Ledger</s-button>
+        <s-stack direction="inline">
+          <s-button href={onClose}>Back to Ledger</s-button>
+          <s-button href={`/app/accounts/${buyerAccountId}`} variant="secondary">View account</s-button>
+        </s-stack>
       </s-section>
     );
   }
@@ -785,11 +812,11 @@ function BuyerInvoiceList({
                   </s-table-cell>
                   <s-table-cell>
                     {inv.days_past_due > 0 ? (
-                      <s-text tone="critical">{inv.days_past_due} days</s-text>
+                      <s-text tone="critical">{pluralizeWithCount(inv.days_past_due, "day")}</s-text>
                     ) : inv.days_past_due === 0 ? (
                       "Due today"
                     ) : (
-                      `${Math.abs(inv.days_past_due)} days left`
+                      `${pluralizeWithCount(Math.abs(inv.days_past_due), "day")} left`
                     )}
                   </s-table-cell>
                   <s-table-cell>
@@ -804,7 +831,10 @@ function BuyerInvoiceList({
             })}
           </s-table-body>
         </s-table>
-        <s-button href={onClose}>Back to Ledger</s-button>
+        <s-stack direction="inline">
+          <s-button href={onClose}>Back to Ledger</s-button>
+          <s-button href={`/app/accounts/${buyerAccountId}`} variant="secondary">View account</s-button>
+        </s-stack>
       </s-stack>
     </s-section>
   );
@@ -889,7 +919,7 @@ export function DashboardErrorBanner() {
       <s-section heading="Receivables Summary">
         <s-empty-state heading="Data unavailable">
           <s-text slot="subheading">
-            Unable to load receivables data. Click retry above to reload.
+            Couldn&apos;t load receivables. Select Retry to try again.
           </s-text>
         </s-empty-state>
       </s-section>
@@ -897,7 +927,7 @@ export function DashboardErrorBanner() {
       <s-section heading="Buyer Ledger">
         <s-empty-state heading="Data unavailable">
           <s-text slot="subheading">
-            Unable to load buyer ledger. Click retry above to reload.
+            Couldn&apos;t load buyer ledger. Select Retry to try again.
           </s-text>
         </s-empty-state>
       </s-section>
@@ -916,6 +946,7 @@ function DashboardContent({
   sortBy,
   sortOrder,
   onlyOverLimit,
+  selectedBuyerId,
 }: {
   dashboardData: DeferredDashboardData;
   gatingEnforced: boolean;
@@ -923,6 +954,7 @@ function DashboardContent({
   sortBy: SortBy;
   sortOrder: SortOrder;
   onlyOverLimit: boolean;
+  selectedBuyerId: string | null;
 }) {
   const {
     plan,
@@ -1027,10 +1059,11 @@ function DashboardContent({
           </s-section>
 
           {/* Buyer Invoice Drill-down */}
-          {selectedBuyerInvoices && (
+          {selectedBuyerInvoices && selectedBuyerId && (
             <BuyerInvoiceList
               invoices={selectedBuyerInvoices.rows}
               buyerName={selectedBuyerInvoices.buyerName}
+              buyerAccountId={selectedBuyerId}
               onClose={closeInvoiceListUrl}
             />
           )}
@@ -1100,6 +1133,7 @@ function DashboardContent({
 }
 
 export default function Index() {
+  const loaderData = useLoaderData<typeof loader>();
   const {
     upgradeUrl,
     gatingEnforced,
@@ -1109,9 +1143,20 @@ export default function Index() {
     currencySupported,
     currencyFlipBlocked,
     dashboardData,
-  } = useLoaderData<typeof loader>();
+    selectedBuyerId,
+  } = loaderData;
 
   if (!currencySupported) {
+    const storeSetupStatus = "storeSetupStatus" in loaderData ? loaderData.storeSetupStatus : "not_supported";
+    if (storeSetupStatus === "setting_up") {
+      return (
+        <s-page heading="Termwise: Net Terms & Credit">
+          <s-section>
+            <StoreSettingUpBanner />
+          </s-section>
+        </s-page>
+      );
+    }
     return (
       <s-page heading="Termwise: Net Terms & Credit">
         <s-section>
@@ -1142,6 +1187,7 @@ export default function Index() {
               sortBy={sortBy}
               sortOrder={sortOrder}
               onlyOverLimit={onlyOverLimit}
+              selectedBuyerId={selectedBuyerId}
             />
           )}
         </Await>

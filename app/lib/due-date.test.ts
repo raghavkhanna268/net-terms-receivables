@@ -4,6 +4,7 @@ import {
   inferDueDate,
   addDaysAndGetEndOfDay,
   endOfLocalDay,
+  normalizeScheduleDueAt,
   INFERENCE_ORDER,
   type InferDueDateInput,
 } from "./due-date";
@@ -1117,6 +1118,108 @@ describe("due-date", () => {
         expect(result.dueAt).toBeNull();
         expect(result.dueSource).toBe("none");
         expect(result.basis).toBeNull();
+      });
+    });
+  });
+
+  describe("normalizeScheduleDueAt", () => {
+    describe("exact midnight UTC normalization", () => {
+      it("converts 00:00:00.000Z to end-of-local-day for America/New_York", () => {
+        const midnightUtc = new Date("2026-11-26T00:00:00.000Z");
+        const result = normalizeScheduleDueAt(midnightUtc, "America/New_York");
+        // Nov 26 2026 is in EST (-5), so EOD is 04:59:59.999Z on Nov 27
+        expect(result.toISOString()).toBe("2026-11-27T04:59:59.999Z");
+        // Verify local date is Nov 26
+        const formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          year: "numeric",
+          month: "numeric",
+          day: "numeric",
+        });
+        const parts = formatter.formatToParts(result);
+        const day = parts.find((p) => p.type === "day")?.value;
+        const month = parts.find((p) => p.type === "month")?.value;
+        expect(month).toBe("11");
+        expect(day).toBe("26");
+      });
+
+      it("converts 00:00:00.000Z to end-of-local-day for Asia/Kolkata", () => {
+        const midnightUtc = new Date("2026-11-26T00:00:00.000Z");
+        const result = normalizeScheduleDueAt(midnightUtc, "Asia/Kolkata");
+        // IST is +5:30, so EOD is 18:29:59.999Z on Nov 26
+        expect(result.toISOString()).toBe("2026-11-26T18:29:59.999Z");
+        // Verify local date is Nov 26
+        const formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "Asia/Kolkata",
+          year: "numeric",
+          month: "numeric",
+          day: "numeric",
+        });
+        const parts = formatter.formatToParts(result);
+        const day = parts.find((p) => p.type === "day")?.value;
+        const month = parts.find((p) => p.type === "month")?.value;
+        expect(month).toBe("11");
+        expect(day).toBe("26");
+      });
+
+      it("converts 00:00:00.000Z to end-of-local-day for Pacific/Auckland", () => {
+        const midnightUtc = new Date("2026-11-26T00:00:00.000Z");
+        const result = normalizeScheduleDueAt(midnightUtc, "Pacific/Auckland");
+        // Nov 26 2026 is in NZDT (+13), so EOD is 10:59:59.999Z on Nov 26
+        expect(result.toISOString()).toBe("2026-11-26T10:59:59.999Z");
+        // Verify local date is Nov 26
+        const formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "Pacific/Auckland",
+          year: "numeric",
+          month: "numeric",
+          day: "numeric",
+        });
+        const parts = formatter.formatToParts(result);
+        const day = parts.find((p) => p.type === "day")?.value;
+        const month = parts.find((p) => p.type === "month")?.value;
+        expect(month).toBe("11");
+        expect(day).toBe("26");
+      });
+    });
+
+    describe("non-midnight passthrough", () => {
+      it("passes through non-midnight value unchanged (10:15:00.000Z)", () => {
+        const nonMidnight = new Date("2026-11-26T10:15:00.000Z");
+        const result = normalizeScheduleDueAt(nonMidnight, "America/New_York");
+        expect(result.toISOString()).toBe("2026-11-26T10:15:00.000Z");
+        expect(result.getTime()).toBe(nonMidnight.getTime());
+      });
+
+      it("passes through .001Z unchanged (not treated as midnight)", () => {
+        const almostMidnight = new Date("2026-11-26T00:00:00.001Z");
+        const result = normalizeScheduleDueAt(almostMidnight, "America/New_York");
+        expect(result.toISOString()).toBe("2026-11-26T00:00:00.001Z");
+        expect(result.getTime()).toBe(almostMidnight.getTime());
+      });
+
+      it("passes through 23:59:59.999Z unchanged", () => {
+        const endOfDay = new Date("2026-11-26T23:59:59.999Z");
+        const result = normalizeScheduleDueAt(endOfDay, "America/New_York");
+        expect(result.toISOString()).toBe("2026-11-26T23:59:59.999Z");
+        expect(result.getTime()).toBe(endOfDay.getTime());
+      });
+
+      it("passes through 12:00:00.000Z unchanged", () => {
+        const noon = new Date("2026-11-26T12:00:00.000Z");
+        const result = normalizeScheduleDueAt(noon, "America/New_York");
+        expect(result.toISOString()).toBe("2026-11-26T12:00:00.000Z");
+        expect(result.getTime()).toBe(noon.getTime());
+      });
+    });
+
+    describe("invalid timezone fallback", () => {
+      it("uses invalid timezone gracefully (Intl throws on unknown zones)", () => {
+        const midnightUtc = new Date("2026-11-26T00:00:00.000Z");
+        // Invalid timezone will cause Intl.DateTimeFormat to throw
+        // The function should propagate this error (caller validates timezone)
+        expect(() => {
+          normalizeScheduleDueAt(midnightUtc, "Invalid/Timezone");
+        }).toThrow();
       });
     });
   });

@@ -18,6 +18,10 @@ export interface PaymentReminderEmailProps {
   dueDate: string;
   merchantName: string;
   reminderType: string;
+  /** Store display name for footer (shop.name if fetched, else handle label) */
+  storeDisplayName?: string;
+  /** Whether a Reply-To address is set (controls reply sentence in footer) */
+  hasReplyTo?: boolean;
 }
 
 /**
@@ -28,8 +32,18 @@ export interface PaymentReminderEmailProps {
 export function renderPaymentReminderEmail(
   props: PaymentReminderEmailProps
 ): string {
-  const { invoiceName, buyerName, amount, dueDate, merchantName, reminderType } =
-    props;
+  const {
+    invoiceName,
+    buyerName,
+    amount,
+    dueDate,
+    merchantName,
+    reminderType,
+    storeDisplayName,
+    hasReplyTo,
+  } = props;
+
+  const displayName = storeDisplayName ?? merchantName;
 
   const isOverdue = reminderType.toLowerCase().includes("overdue");
   const isDueToday = reminderType.toLowerCase().includes("today");
@@ -122,7 +136,7 @@ export function renderPaymentReminderEmail(
           <tr>
             <td style="background-color: #f9fafb; padding: 20px 24px; border-top: 1px solid #e5e7eb;">
               <p style="margin: 0 0 8px; color: #6b7280; font-size: 14px; text-align: center;">
-                For questions about this invoice, please contact <strong>${escapeHtml(merchantName)}</strong>.
+                You're receiving this because you have an open invoice with ${escapeHtml(displayName)}.${hasReplyTo ? " Questions about this invoice? Just reply to this email." : ""}
               </p>
               <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center;">
                 This is an automated reminder from Termwise.

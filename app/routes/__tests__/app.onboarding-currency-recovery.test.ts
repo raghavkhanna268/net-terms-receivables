@@ -12,6 +12,23 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
  * 5. The flipBlocked banner is shown on onboarding when blocked
  */
 
+/**
+ * Helper to extract loader data from data() result.
+ * Handles both data() wrapper and plain objects.
+ */
+function extractLoaderData<T>(result: unknown): T {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: T }).data;
+  }
+  return result as T;
+}
+
 const createMockSqlFn = () =>
   vi.fn().mockImplementation(() => Promise.resolve([]));
 
@@ -38,6 +55,10 @@ vi.mock("~/services/plan.server", () => ({
     plan: { key: "free" },
     subscriptionName: "Free",
     isTest: false,
+  }),
+  resolvePlanWithStatus: vi.fn().mockResolvedValue({
+    plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+    status: "none",
   }),
 }));
 
@@ -108,6 +129,7 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
           id: TEST_SHOP_ID,
           defaultTermsDays: 30,
           onboardingDismissedAt: null,
+          currency: storedCurrency,
         }]);
       }
       if (query.includes("SELECT currency") && query.includes("Shop")) {
@@ -192,7 +214,8 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
     setupGraphqlMock("INR");
 
     const { loader } = await import("../app.onboarding");
-    const result = await loader(createLoaderArgs());
+    const rawResult = await loader(createLoaderArgs());
+    const result = extractLoaderData<{ currencySupported: boolean; currencyFlipBlocked: boolean }>(rawResult);
 
     expect(result.currencySupported).toBe(true);
     expect(result.currencyFlipBlocked).toBe(false);
@@ -212,7 +235,8 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
     setupGraphqlMock("USD");
 
     const { loader } = await import("../app.onboarding");
-    const result = await loader(createLoaderArgs());
+    const rawResult = await loader(createLoaderArgs());
+    const result = extractLoaderData<{ currencySupported: boolean }>(rawResult);
 
     expect(result.currencySupported).toBe(false);
 
@@ -226,7 +250,8 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
     setupGraphqlMock("USD");
 
     const { loader } = await import("../app.onboarding");
-    const result = await loader(createLoaderArgs());
+    const rawResult = await loader(createLoaderArgs());
+    const result = extractLoaderData<{ currencySupported: boolean; currencyFlipBlocked: boolean }>(rawResult);
 
     expect(result.currencySupported).toBe(false);
     expect(result.currencyFlipBlocked).toBe(false);
@@ -240,7 +265,8 @@ describe("#292 G1: currency recovery in onboarding loader", () => {
     setupGraphqlMock("INR");
 
     const { loader } = await import("../app.onboarding");
-    const result = await loader(createLoaderArgs());
+    const rawResult = await loader(createLoaderArgs());
+    const result = extractLoaderData<{ currencySupported: boolean; currencyFlipBlocked: boolean }>(rawResult);
 
     // Currency flip should be blocked
     expect(result.currencyFlipBlocked).toBe(true);

@@ -63,10 +63,18 @@ vi.mock("~/services/credit-status.server", () => ({
   getCreditStatusDisplay: vi.fn().mockResolvedValue(null),
   getCompanyTotals: vi.fn().mockResolvedValue(null),
   updateCreditStatus: vi.fn(),
+  parseCreditLimitString: vi.fn().mockReturnValue({ valid: true, value: 0 }),
 }));
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
+}));
+
+vi.mock("~/services/plan-welcome.server", () => ({
+  processPlanWelcome: vi.fn().mockResolvedValue({
+    refreshed: false,
+    skipped: true,
+  }),
 }));
 
 const TEST_SHOP = "test-shop.myshopify.com";
