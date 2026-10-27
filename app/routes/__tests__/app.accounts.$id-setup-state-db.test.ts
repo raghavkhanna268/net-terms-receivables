@@ -61,11 +61,6 @@ vi.mock("~/lib/aging-queries.server", () => ({
   getBuyerInvoices: vi.fn().mockResolvedValue({ rows: [], totalCount: 0 }),
 }));
 
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  toErrorCode: vi.fn((e) => String(e)),
-}));
-
 vi.mock("~/lib/plan-url", () => ({
   getAppHandle: vi.fn().mockReturnValue("test-handle"),
   buildPlanSelectionUrl: vi.fn().mockReturnValue("https://example.com/plan"),

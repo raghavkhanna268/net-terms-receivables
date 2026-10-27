@@ -29,12 +29,6 @@ vi.mock("~/services/gating.server", () => ({
   getUsageStats: vi.fn(),
 }));
 
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  toErrorCode: vi.fn((e) => String(e)),
-  shopHash: vi.fn().mockResolvedValue("test-hash"),
-}));
-
 vi.mock("~/lib/validation-registration.server", () => ({
   ensureValidation: vi.fn(),
 }));
