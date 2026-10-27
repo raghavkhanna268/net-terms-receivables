@@ -1540,4 +1540,281 @@ mod tests {
             "fixture_no_limit: buyer with no limit set (unlimited credit) should ALLOW"
         );
     }
+
+    // =========================================================================
+    // Edge-Case Tests: Metafield parsing and type coercion
+    // =========================================================================
+
+    /// Empty string metafield (not a JSON object).
+    #[test]
+    fn test_metafield_empty_string() {
+        let input = make_input("100.00", "INR", Some(r#""""#), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield empty string");
+    }
+
+    /// Array metafield (not a JSON object).
+    #[test]
+    fn test_metafield_array() {
+        let input = make_input("100.00", "INR", Some(r#"[1, 2, 3]"#), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield array");
+    }
+
+    /// Number metafield (not a JSON object).
+    #[test]
+    fn test_metafield_number() {
+        let input = make_input("100.00", "INR", Some(r#"12345"#), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield number");
+    }
+
+    /// Boolean metafield (not a JSON object).
+    #[test]
+    fn test_metafield_boolean() {
+        let input = make_input("100.00", "INR", Some(r#"true"#), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield boolean");
+    }
+
+    /// hold field as string "true" instead of boolean, under limit.
+    #[test]
+    fn test_hold_string_true_under_limit() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "true", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as string true, under limit");
+    }
+
+    /// hold field as string "HOLD", under limit.
+    #[test]
+    fn test_hold_string_hold_under_limit() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "HOLD", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as string HOLD, under limit");
+    }
+
+    /// hold field as empty string, under limit.
+    #[test]
+    fn test_hold_empty_string_under_limit() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as empty string, under limit");
+    }
+
+    /// hold field as number 1, under limit.
+    #[test]
+    fn test_hold_number_under_limit() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": 1, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as number, under limit");
+    }
+
+    /// schemaVersion field as string "1" with hold=true.
+    #[test]
+    fn test_schema_version_string_with_hold_true() {
+        let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "pinned behaviour: schemaVersion string with hold true");
+    }
+
+    /// schemaVersion field as string "1", not held, under limit.
+    #[test]
+    fn test_schema_version_string_not_held() {
+        let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion string, not held");
+    }
+
+    /// schemaVersion as 0 with hold=true.
+    #[test]
+    fn test_schema_version_zero_with_hold_true() {
+        let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "pinned behaviour: schemaVersion zero with hold true");
+    }
+
+    /// schemaVersion as 0, not held, under limit.
+    #[test]
+    fn test_schema_version_zero_not_held() {
+        let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion zero, not held");
+    }
+
+    /// schemaVersion as -1, not held, under limit.
+    #[test]
+    fn test_schema_version_negative_not_held() {
+        let metafield = r#"{"schemaVersion": -1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion negative, not held");
+    }
+
+    /// currencyCode field missing, under limit.
+    #[test]
+    fn test_currency_code_missing_under_limit() {
+        let metafield = r#"{"schemaVersion": 1, "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: currencyCode missing, under limit");
+    }
+
+    /// currencyCode as number, under limit.
+    #[test]
+    fn test_currency_code_number_under_limit() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": 356, "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: currencyCode as number, under limit");
+    }
+
+    /// limitPaise as empty string.
+    #[test]
+    fn test_limit_paise_empty_string() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise empty string");
+    }
+
+    /// limitPaise as number instead of string.
+    #[test]
+    fn test_limit_paise_number() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": 10000000, "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise as number");
+    }
+
+    /// limitPaise as non-numeric string "abc".
+    #[test]
+    fn test_limit_paise_non_numeric() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "abc", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise non-numeric");
+    }
+
+    /// exposurePaise as empty string.
+    #[test]
+    fn test_exposure_paise_empty_string() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise empty string");
+    }
+
+    /// exposurePaise as number instead of string.
+    #[test]
+    fn test_exposure_paise_number() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": 5000000, "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise as number");
+    }
+
+    /// exposurePaise as non-numeric string "abc".
+    #[test]
+    fn test_exposure_paise_non_numeric() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "abc", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("60000.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise non-numeric");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: Boundary amounts
+    // =========================================================================
+
+    /// Negative limitPaise string (parse_paise only accepts unsigned integers).
+    #[test]
+    fn test_limit_paise_negative() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "-10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise negative");
+    }
+
+    /// Negative exposurePaise string.
+    #[test]
+    fn test_exposure_paise_negative() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "-5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: exposurePaise negative");
+    }
+
+    /// Very large limitPaise (near u64 max).
+    #[test]
+    fn test_limit_paise_very_large() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "18446744073709551615", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("100.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: limitPaise very large");
+    }
+
+    /// Zero exposure, zero limit, cart > 0.
+    #[test]
+    fn test_zero_exposure_zero_limit_with_cart() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "0", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("0.01", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "pinned behaviour: zero limit with cart");
+    }
+
+    /// Zero cart, zero exposure, zero limit.
+    #[test]
+    fn test_zero_cart_zero_exposure_zero_limit() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "0", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_input("0.00", "INR", Some(metafield), false, "CHECKOUT_COMPLETION");
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: zero cart, zero limit");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: shop_config parsing
+    // =========================================================================
+
+    /// Empty string shop_config with held buyer.
+    #[test]
+    fn test_empty_string_shop_config_held_buyer() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "amount": "100.00", "currencyCode": "INR" } },
+                "buyerIdentity": {
+                    "customer": { "metafield": { "jsonValue": {"schemaVersion": 1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "0", "updatedAt": "2026-10-23T00:00:00Z"} } },
+                    "purchasingCompany": null
+                }
+            },
+            "buyerJourney": { "step": "CHECKOUT_COMPLETION" },
+            "shop": { "metafield": { "jsonValue": "" } }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert_eq!(result.operations.len(), 1, "pinned behaviour: empty string shop_config with held buyer");
+    }
+
+    /// shop_config with schemaVersion as string, over-limit buyer.
+    #[test]
+    fn test_shop_config_schema_version_string_over_limit() {
+        let input = make_input_with_step_and_shop_config(
+            "60000.00",
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": false, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#),
+            false,
+            Some("CHECKOUT_COMPLETION"),
+            Some(r#"{"schemaVersion": "1", "currencyCode": "INR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 1, "pinned behaviour: shop_config schemaVersion string, over-limit");
+    }
 }

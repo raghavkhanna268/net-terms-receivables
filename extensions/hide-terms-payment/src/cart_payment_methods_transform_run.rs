@@ -1661,4 +1661,264 @@ mod tests {
             "fixture_no_limit: buyer with no limit set (unlimited, not held) should SHOW net terms"
         );
     }
+
+    // =========================================================================
+    // Edge-Case Tests: Metafield parsing and type coercion
+    // =========================================================================
+
+    /// Empty string metafield (not a JSON object).
+    #[test]
+    fn test_metafield_empty_string() {
+        let input = make_b2b_input(Some(r#""""#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield empty string");
+    }
+
+    /// Array metafield (not a JSON object).
+    #[test]
+    fn test_metafield_array() {
+        let input = make_b2b_input(Some(r#"[1, 2, 3]"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield array");
+    }
+
+    /// Number metafield (not a JSON object).
+    #[test]
+    fn test_metafield_number() {
+        let input = make_b2b_input(Some(r#"12345"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield number");
+    }
+
+    /// Boolean metafield (not a JSON object).
+    #[test]
+    fn test_metafield_boolean() {
+        let input = make_b2b_input(Some(r#"true"#), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: metafield boolean");
+    }
+
+    /// hold field as string "true" instead of boolean.
+    #[test]
+    fn test_hold_string_true() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "true", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as string true");
+    }
+
+    /// hold field as string "HOLD".
+    #[test]
+    fn test_hold_string_hold() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "HOLD", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as string HOLD");
+    }
+
+    /// hold field as empty string.
+    #[test]
+    fn test_hold_empty_string() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": "", "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as empty string");
+    }
+
+    /// hold field as number 1.
+    #[test]
+    fn test_hold_number() {
+        let metafield = r#"{"schemaVersion": 1, "currencyCode": "INR", "hold": 1, "holdReasonCode": null, "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: hold as number");
+    }
+
+    /// schemaVersion field as string "1" instead of number.
+    #[test]
+    fn test_schema_version_string() {
+        let metafield = r#"{"schemaVersion": "1", "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion as string");
+    }
+
+    /// schemaVersion field as 0.
+    #[test]
+    fn test_schema_version_zero() {
+        let metafield = r#"{"schemaVersion": 0, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion zero");
+    }
+
+    /// schemaVersion field as -1.
+    #[test]
+    fn test_schema_version_negative() {
+        let metafield = r#"{"schemaVersion": -1, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion negative");
+    }
+
+    /// schemaVersion field as very large number.
+    #[test]
+    fn test_schema_version_very_large() {
+        let metafield = r#"{"schemaVersion": 999999, "currencyCode": "INR", "hold": true, "holdReasonCode": "MANUAL_HOLD", "limitPaise": "10000000", "exposurePaise": "5000000", "updatedAt": "2026-10-23T00:00:00Z"}"#;
+        let input = make_b2b_input(Some(metafield), &default_payment_methods());
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: schemaVersion very large");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: shop_config parsing
+    // =========================================================================
+
+    /// Empty string shop_config with INR cart.
+    #[test]
+    fn test_empty_string_shop_config_inr_cart() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "INR" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Deferred Payment" }
+            ],
+            "paymentCustomization": null,
+            "shop": { "metafield": { "jsonValue": "" } }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: empty string shop_config with INR cart");
+    }
+
+    /// Empty string shop_config with USD cart.
+    #[test]
+    fn test_empty_string_shop_config_usd_cart() {
+        let input = r#"
+        {
+            "cart": {
+                "cost": { "totalAmount": { "currencyCode": "USD" } },
+                "buyerIdentity": {
+                    "customer": null,
+                    "purchasingCompany": {
+                        "location": { "metafield": { "jsonValue": {"schemaVersion": 1, "hold": false} } }
+                    }
+                }
+            },
+            "paymentMethods": [
+                { "id": "gid://shopify/PaymentCustomizationPaymentMethod/1", "name": "Deferred Payment" }
+            ],
+            "paymentCustomization": null,
+            "shop": { "metafield": { "jsonValue": "" } }
+        }
+        "#;
+        let result = run_test(input).unwrap();
+        assert_eq!(result.operations.len(), 1, "pinned behaviour: empty string shop_config with USD cart");
+    }
+
+    /// shop_config with schemaVersion as string, INR cart.
+    #[test]
+    fn test_shop_config_schema_version_string_inr_cart() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": "1", "currencyCode": "INR"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: shop_config schemaVersion string with INR cart");
+    }
+
+    /// shop_config with schemaVersion as string, USD cart.
+    #[test]
+    fn test_shop_config_schema_version_string_usd_cart() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "USD",
+            Some(r#"{"schemaVersion": "1", "currencyCode": "USD"}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: shop_config schemaVersion string with USD cart");
+    }
+
+    /// shop_config with currencyCode as number, INR cart.
+    #[test]
+    fn test_shop_config_currency_number_inr_cart() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": 356}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert!(result.operations.is_empty(), "pinned behaviour: shop_config currencyCode as number with INR cart");
+    }
+
+    /// shop_config with empty currencyCode.
+    #[test]
+    fn test_shop_config_empty_currency() {
+        let input = make_b2b_input_full(
+            Some(ok_metafield()),
+            &default_payment_methods(),
+            None,
+            "INR",
+            Some(r#"{"schemaVersion": 1, "currencyCode": ""}"#),
+        );
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: shop_config with empty currencyCode");
+    }
+
+    // =========================================================================
+    // Edge-Case Tests: hide-terms-config parsing
+    // =========================================================================
+
+    /// hide-terms-config as empty object.
+    #[test]
+    fn test_hide_config_empty_object() {
+        let metafield = held_metafield();
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(r#"{}"#));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: empty hide-config object");
+    }
+
+    /// hide-terms-config as number.
+    #[test]
+    fn test_hide_config_number() {
+        let metafield = held_metafield();
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(r#"12345"#));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: hide-config as number");
+    }
+
+    /// hide-terms-config with deferredPaymentPatterns as string.
+    #[test]
+    fn test_hide_config_patterns_string() {
+        let metafield = held_metafield();
+        let config = r#"{"deferredPaymentPatterns": "deferred"}"#;
+        let input = make_b2b_input_with_config(Some(metafield), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: deferredPaymentPatterns as string");
+    }
+
+    /// hide-terms-config with manualPaymentMethodName as number.
+    #[test]
+    fn test_hide_config_manual_method_number() {
+        let metafield = held_metafield();
+        let config = r#"{"manualPaymentMethodName": 12345}"#;
+        let input = make_customer_input(Some(metafield), &default_payment_methods(), Some(config));
+        let result = run_test(&input).unwrap();
+        assert_eq!(result.operations.len(), 2, "pinned behaviour: manualPaymentMethodName as number");
+    }
 }
