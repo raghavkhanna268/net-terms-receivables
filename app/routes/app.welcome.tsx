@@ -8,7 +8,7 @@
  *
  * Security:
  * - Shop comes ONLY from authenticated session, never from URL params
- * - plan_handle validated against strict allowlist (starter, growth, unlimited)
+ * - plan_handle triggers refresh when non-empty (trimmed, max 32 chars)
  * - Foreign-shop params are silently ignored
  *
  * Failure handling:
@@ -18,6 +18,7 @@
 
 import type { LoaderFunctionArgs, HeadersFunction } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { safeLog } from "~/lib/log.server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { processPlanWelcome } from "~/services/plan-welcome.server";
 
@@ -32,7 +33,21 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const planHandle = url.searchParams.get("plan_handle");
   const chargeId = url.searchParams.get("charge_id");
 
-  await processPlanWelcome(sql, sessionShop, urlShopParam, planHandle, chargeId);
+  const { refreshed, skipped, reason } = await processPlanWelcome(
+    sql,
+    sessionShop,
+    urlShopParam,
+    planHandle,
+    chargeId
+  );
+
+  safeLog("info", "plan_welcome_processed", {
+    refreshed,
+    skipped,
+    reason,
+    hasPlanHandle: !!(planHandle && planHandle.trim()),
+    hasChargeId: !!(chargeId && chargeId.trim()),
+  });
 
   // Redirect with blank plan_handle and charge_id so the redirect helper
   // (@shopify/shopify-app-react-router) doesn't copy the request's values
