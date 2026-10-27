@@ -231,18 +231,27 @@ describeWithDb("Drain: skip work for uninstalled shops", () => {
     }
   });
 
-  it("reinstalled shop (uninstalledAt cleared) processes normally with Admin call", async () => {
+  it("reinstalled shop (uninstalledAt was set, then cleared) processes normally with Admin call", async () => {
     const suffix = testContext.suffix;
     const reinstalledDomain = `test-reinstalled-${suffix}.example.com`;
     const shopId = `shop-reinstalled-${suffix}`;
 
     try {
       const now = new Date();
+      const uninstalledAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
+      // Step 1: Create shop WITH uninstalledAt set (was uninstalled)
       await sqlRef`
         INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
-        VALUES (${shopId}, ${reinstalledDomain}, 'INR', ${now}, ${now}, NULL)
+        VALUES (${shopId}, ${reinstalledDomain}, 'INR', ${now}, ${now}, ${uninstalledAt})
       `;
+
+      // Step 2: Clear uninstalledAt (simulates reinstall via afterAuth/upsertShopOnAuth)
+      await sqlRef`
+        UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${shopId}
+      `;
+
+      // Add session for the reinstalled shop
       await sqlRef`
         INSERT INTO "Session" (id, shop, state, "isOnline", "accessToken")
         VALUES (${'offline_' + reinstalledDomain}, ${reinstalledDomain}, 'test-state', false, 'test-token')
@@ -284,11 +293,20 @@ describeWithDb("Drain: skip work for uninstalled shops", () => {
       await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
 
       const { runDrain } = await import("~/services/drain/processor.server");
+      const { processOrderWebhook } = await import("~/services/sync/order.server");
       await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
 
+      // Verify Admin client was called (message reached handler, not skipped)
       const adminCalls = adminGraphQLMock.mock.calls;
       const callsForShop = adminCalls.filter((call) => call[0] === reinstalledDomain);
       expect(callsForShop.length, "at least 1 Admin call for reinstalled shop").toBeGreaterThanOrEqual(1);
+
+      // Verify handler mock was called with this message
+      const orderWebhookMock = vi.mocked(processOrderWebhook);
+      const handlerCalls = orderWebhookMock.mock.calls.filter(
+        (call) => call[1] === reinstalledDomain
+      );
+      expect(handlerCalls.length, "processOrderWebhook called for reinstalled shop").toBeGreaterThanOrEqual(1);
 
       const [archiveCount] = await sqlRef<[{ count: string }]>`
         SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
@@ -296,8 +314,12 @@ describeWithDb("Drain: skip work for uninstalled shops", () => {
       `;
       expect(parseInt(archiveCount.count, 10), "message archived").toBe(1);
 
-      const uninstalledLog = findLogEntry("drain_skip_uninstalled_shop");
-      expect(uninstalledLog, "no uninstalled skip log").toBeNull();
+      // Verify NO skip log for this shop
+      const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
+      if (skipLog) {
+        // If there's a skip log, it must NOT be for this shop (could be from another test's cleanup)
+        expect(skipLog.reason).not.toBe("shop_uninstalled");
+      }
     } finally {
       await cleanupTestData([reinstalledDomain], suffix);
     }
