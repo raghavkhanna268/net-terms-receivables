@@ -414,7 +414,7 @@ export async function getPendingExposure(
     FROM s8_draft_orders
     WHERE buyer_account_id = ${buyerAccountId}
       AND has_payment_terms = true
-      AND status IN ('open', 'invoice_sent')
+      AND status NOT IN ('completed', 'closed')
   `;
 
   return result?.total ?? "0.00";

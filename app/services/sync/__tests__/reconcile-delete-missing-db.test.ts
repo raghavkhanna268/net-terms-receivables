@@ -19,7 +19,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
-import { closeMissingDraftOrders } from "../draft-order.server";
+import { closeMissingDraftOrders, getPendingExposure } from "../draft-order.server";
 import { deactivateMissingTaggedCustomers } from "../customer.server";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -499,6 +499,44 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
 
       expect(closedCount).toBe(0);
       expect(deactivatedCount).toBe(0);
+    });
+  });
+
+  describe("getPendingExposure excludes closed status", () => {
+    it("excludes 'closed' status from exposure, same as 'completed'", async () => {
+      const draftOpen = `gid://shopify/DraftOrder/exp-open-${TEST_SUFFIX}`;
+      const draftSent = `gid://shopify/DraftOrder/exp-sent-${TEST_SUFFIX}`;
+      const draftCompleted = `gid://shopify/DraftOrder/exp-completed-${TEST_SUFFIX}`;
+      const draftClosed = `gid://shopify/DraftOrder/exp-closed-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
+        VALUES
+          (${TEST_SHOP_ID}, ${draftOpen}, ${TEST_ACCOUNT_ID}, '#OPEN', '1000.00', true, 'open', NOW(), NOW()),
+          (${TEST_SHOP_ID}, ${draftSent}, ${TEST_ACCOUNT_ID}, '#SENT', '2000.00', true, 'invoice_sent', NOW(), NOW()),
+          (${TEST_SHOP_ID}, ${draftCompleted}, ${TEST_ACCOUNT_ID}, '#COMPLETED', '3000.00', true, 'completed', NOW(), NOW()),
+          (${TEST_SHOP_ID}, ${draftClosed}, ${TEST_ACCOUNT_ID}, '#CLOSED', '4000.00', true, 'closed', NOW(), NOW())
+      `;
+
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+
+      expect(exposure).toBe("3000.00");
+    });
+
+    it("exposure is unchanged for open and invoice_sent statuses", async () => {
+      const draft1 = `gid://shopify/DraftOrder/exp-unchanged1-${TEST_SUFFIX}`;
+      const draft2 = `gid://shopify/DraftOrder/exp-unchanged2-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_draft_orders (shop_id, draft_order_id, buyer_account_id, name, total, has_payment_terms, status, created_at, updated_at)
+        VALUES
+          (${TEST_SHOP_ID}, ${draft1}, ${TEST_ACCOUNT_ID}, '#U1', '5000.00', true, 'open', NOW(), NOW()),
+          (${TEST_SHOP_ID}, ${draft2}, ${TEST_ACCOUNT_ID}, '#U2', '7000.00', true, 'invoice_sent', NOW(), NOW())
+      `;
+
+      const exposure = await getPendingExposure(sql, TEST_ACCOUNT_ID);
+
+      expect(exposure).toBe("12000.00");
     });
   });
 });
