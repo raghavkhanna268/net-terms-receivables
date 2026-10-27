@@ -140,26 +140,31 @@ export default function App() {
   );
 }
 
+const POLARIS_URL = "https://cdn.shopify.com/shopifycloud/polaris-2.js";
+
 export function ErrorBoundary() {
   const error = useRouteError();
 
-  if (isRouteErrorResponse(error) && error.status === 401) {
+  if (isRouteErrorResponse(error) && (error.status < 400 || error.status === 401)) {
     return boundary.error(error);
   }
 
   return (
-    <s-page heading="Something went wrong">
-      <s-section>
-        <s-banner tone="critical" heading="Unexpected Error">
-          <s-paragraph>
-            We encountered an issue loading this page.
-          </s-paragraph>
-          <s-stack direction="inline" gap="base">
-            <s-button href="/app">Go to Dashboard</s-button>
-          </s-stack>
-        </s-banner>
-      </s-section>
-    </s-page>
+    <>
+      <script src={POLARIS_URL} />
+      <s-page heading="Something went wrong">
+        <s-section>
+          <s-banner tone="critical" heading="Unexpected Error">
+            <s-paragraph>
+              We encountered an issue loading this page.
+            </s-paragraph>
+            <s-stack direction="inline" gap="base">
+              <s-button href="/app">Go to Dashboard</s-button>
+            </s-stack>
+          </s-banner>
+        </s-section>
+      </s-page>
+    </>
   );
 }
 
