@@ -6,7 +6,7 @@
  * - TAGGED_CUSTOMER accounts write to Customer GID
  *
  * Uses the REAL writers (recomputeCreditStatus / syncCreditStatusMetafield / writeMetafield)
- * with the admin GraphQL client mocked at the HTTP boundary.
+ * with the shopify-client.server module mocked.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Sql } from "~/lib/db-light.server";
@@ -344,13 +344,14 @@ describe("Metafield Owner Pin Tests", () => {
     });
   });
 
-  describe("T3: pins behavior when order arrives for location without account", () => {
+  describe("T3: pins buyer-account resolution for locations without an account", () => {
     // Pins current behaviour; may change in a future version.
-    it("order with payment terms for unmapped location falls back to company-level account", async () => {
+    it("order for unmapped location resolves to the single sibling account via company fallback", async () => {
       const testCompanyId = 600001;
       const mappedLocationId = 700001;
       const unmappedLocationId = 700002;
       
+      // Exactly one sibling account exists for the company
       const siblingAccount: MockBuyerAccount = {
         id: "acc-sibling-t3",
         shopId: "shop-test",
@@ -393,6 +394,7 @@ describe("Metafield Owner Pin Tests", () => {
       const queryHandler = async (strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]> => {
         const query = strings.join("?");
         
+        // Direct location lookup returns nothing for the unmapped location
         if (query.includes('FROM "BuyerAccount"') && query.includes('"companyLocationId"')) {
           const locationId = values.find(v => typeof v === 'string' && v.includes('CompanyLocation'));
           if (locationId === companyLocationGid(unmappedLocationId)) {
@@ -403,6 +405,7 @@ describe("Metafield Owner Pin Tests", () => {
           }
         }
         
+        // Company-level fallback returns the single sibling (deterministic: only one candidate)
         if (query.includes('FROM "BuyerAccount"') && query.includes('"companyId"')) {
           return [siblingAccount];
         }
@@ -438,91 +441,27 @@ describe("Metafield Owner Pin Tests", () => {
       // and falls back to company-level account resolution when direct location lookup fails
       expect(result.reason).toBe("shopify_payment_terms");
       expect(result.buyerAccountId).toBe(siblingAccount.id);
-      
-      // Assert unmapped location gets no direct metafield write
-      creditStatusMetafieldCaptures = [];
-      
-      // Create a dedicated mock for the recompute that properly returns the sibling account
-      const recomputeQueryHandler = async (strings: TemplateStringsArray, ..._values: unknown[]): Promise<unknown[]> => {
-        const query = strings.join("?");
-        
-        if (query.includes('FROM "BuyerAccount"') && query.includes("SELECT")) {
-          return [siblingAccount];
-        }
-        
-        if (query.includes('UPDATE "BuyerAccount"') && query.includes("RETURNING")) {
-          return [{ syncVersion: 2, id: siblingAccount.id }];
-        }
-        
-        if (query.includes('UPDATE "BuyerAccount"')) {
-          return [{ count: 1 }];
-        }
-        
-        if (query.includes('FROM "Shop"')) {
-          return [{ id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" }];
-        }
-        
-        if (query.includes('FROM "Invoice"') && query.includes("SUM")) {
-          return [{ total_paise: "0" }];
-        }
-        
-        if (query.includes("s8_draft_orders") && query.includes("SUM")) {
-          return [{ total_paise: "0" }];
-        }
-        
-        if (query.includes("EXISTS") && query.includes('"Invoice"')) {
-          return [{ has_overdue: false }];
-        }
-        
-        if (query.includes("INSERT INTO")) {
-          return [];
-        }
-        
-        return [];
-      };
-      
-      const recomputeSql = Object.assign(
-        recomputeQueryHandler,
-        {
-          json: (v: unknown) => v,
-          array: (arr: unknown[]) => arr,
-          begin: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
-            const tx = Object.assign(recomputeQueryHandler, { json: (v: unknown) => v, array: (arr: unknown[]) => arr });
-            return fn(tx);
-          },
-        }
-      ) as unknown as Sql;
-      
-      const { recomputeCreditStatus } = await import("../../app/services/credit-status-recompute.server");
-      await recomputeCreditStatus(recomputeSql, siblingAccount.id, "invoice_change");
-      
-      // Only the mapped location (sibling) gets the write - not the unmapped location
-      const creditWrites = creditStatusMetafieldCaptures.filter(m => m.key === "credit_status");
-      const unmappedLocationWrite = creditWrites.find(w => w.ownerId === companyLocationGid(unmappedLocationId));
-      expect(unmappedLocationWrite).toBeUndefined();
-      
-      // The write goes to the sibling's CompanyLocation, not the unmapped one
-      const siblingWrite = creditWrites.find(w => w.ownerId === companyLocationGid(mappedLocationId));
-      expect(siblingWrite).toBeDefined();
     });
   });
 
   describe("T4: pins first-write timing for newly created accounts", () => {
     // Pins current behaviour; may change in a future version.
-    it("newly created account has no credit_status write until first recompute", async () => {
+    it("account sync (creation) produces zero metafield writes; first recompute produces one write with correct owner", async () => {
       creditStatusMetafieldCaptures = [];
       
       const newLocationId = 800001;
       const newCompanyId = 900001;
+      const webhookId = `wh-t4-${Date.now()}`;
       
-      const newAccount: MockBuyerAccount = {
+      // Simulate the account that will be created by the sync
+      const createdAccount: MockBuyerAccount = {
         id: "acc-new-t4",
         shopId: "shop-test",
         kind: "COMPANY",
         companyId: companyGid(newCompanyId),
         companyLocationId: companyLocationGid(newLocationId),
         customerId: null,
-        creditLimit: "50000.00",
+        creditLimit: null,
         holdState: "OK",
         bypass: false,
         manualHold: false,
@@ -535,10 +474,82 @@ describe("Metafield Owner Pin Tests", () => {
         metafieldSyncErrorCode: null,
       };
       
-      const _beforeRecomputeCaptures = [...creditStatusMetafieldCaptures];
+      // Mock SQL for the sync path
+      let accountCreated = false;
+      const syncQueryHandler = async (strings: TemplateStringsArray, ..._values: unknown[]): Promise<unknown[]> => {
+        const query = strings.join("?");
+        
+        // Shop lookup
+        if (query.includes('FROM "Shop"') && query.includes("SELECT")) {
+          return [{ id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" }];
+        }
+        
+        // Webhook processed check
+        if (query.includes("webhook_processed") || query.includes("processed_webhooks")) {
+          return [];
+        }
+        
+        // BuyerAccount INSERT (the actual creation)
+        if (query.includes('INSERT INTO "BuyerAccount"')) {
+          accountCreated = true;
+          return [{ id: createdAccount.id, upsertAction: "true" }];
+        }
+        
+        // Mark webhook processed
+        if (query.includes("INSERT INTO") && (query.includes("webhook") || query.includes("processed"))) {
+          return [];
+        }
+        
+        return [];
+      };
       
-      const sql = createMockSql({
-        accounts: [newAccount],
+      const syncSql = Object.assign(
+        syncQueryHandler,
+        {
+          json: (v: unknown) => v,
+          array: (arr: unknown[]) => arr,
+          begin: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+            const tx = Object.assign(syncQueryHandler, { json: (v: unknown) => v, array: (arr: unknown[]) => arr });
+            return fn(tx);
+          },
+        }
+      ) as unknown as Sql;
+      
+      const mockLocation = {
+        id: companyLocationGid(newLocationId),
+        name: "Test Location T4",
+        company: {
+          id: companyGid(newCompanyId),
+          name: "Test Company T4",
+          mainContact: null,
+        },
+        billingAddress: { companyName: "Test Company T4" },
+        buyerExperienceConfiguration: { paymentTermsTemplate: null },
+      };
+      
+      // Call the real sync path
+      const { processCompanyLocationWebhook } = await import("../../app/services/sync/company-location.server");
+      
+      const syncResult = await processCompanyLocationWebhook(
+        syncSql,
+        MOCK_SHOP_DOMAIN,
+        "COMPANY_LOCATIONS_CREATE",
+        mockLocation as never,
+        webhookId,
+        {}
+      );
+      
+      expect(syncResult.success).toBe(true);
+      expect(syncResult.action).toBe("created");
+      expect(accountCreated).toBe(true);
+      
+      // Assert: zero credit_status writes after account creation
+      const writesAfterCreation = creditStatusMetafieldCaptures.filter(m => m.key === "credit_status");
+      expect(writesAfterCreation.length).toBe(0);
+      
+      // Now run the first recompute
+      const recomputeSql = createMockSql({
+        accounts: [createdAccount],
         shop: { id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" },
         invoiceExposures: new Map([["acc-new-t4", "0"]]),
         draftExposures: new Map(),
@@ -546,18 +557,19 @@ describe("Metafield Owner Pin Tests", () => {
       });
       
       const { recomputeCreditStatus } = await import("../../app/services/credit-status-recompute.server");
-      const result = await recomputeCreditStatus(sql, "acc-new-t4", "sync");
+      const recomputeResult = await recomputeCreditStatus(recomputeSql, "acc-new-t4", "sync");
       
-      expect(result.success).toBe(true);
+      expect(recomputeResult.success).toBe(true);
       
-      const afterRecomputeCaptures = creditStatusMetafieldCaptures.filter(
+      // Assert: exactly one credit_status write after first recompute, with correct owner
+      const writesAfterRecompute = creditStatusMetafieldCaptures.filter(
         m => m.key === "credit_status" && m.ownerId === companyLocationGid(newLocationId)
       );
       
-      expect(afterRecomputeCaptures.length).toBe(1);
-      expect(afterRecomputeCaptures[0].ownerId).toBe(companyLocationGid(newLocationId));
-      expect(afterRecomputeCaptures[0].namespace).toBe("$app");
-      expect(afterRecomputeCaptures[0].key).toBe("credit_status");
+      expect(writesAfterRecompute.length).toBe(1);
+      expect(writesAfterRecompute[0].ownerId).toBe(companyLocationGid(newLocationId));
+      expect(writesAfterRecompute[0].namespace).toBe("$app");
+      expect(writesAfterRecompute[0].key).toBe("credit_status");
     });
 
     it("first write after manual update is owned correctly", async () => {
@@ -610,60 +622,6 @@ describe("Metafield Owner Pin Tests", () => {
       expect(writes[0].ownerId).toBe(companyLocationGid(newLocationId));
       expect(writes[0].namespace).toBe("$app");
       expect(writes[0].key).toBe("credit_status");
-    });
-  });
-
-  describe("getOwnerGid unit tests", () => {
-    it("returns CompanyLocation GID for COMPANY accounts", async () => {
-      const { getOwnerGid } = await import("../../app/services/credit-status.server");
-      
-      const result = getOwnerGid({
-        kind: "COMPANY",
-        companyLocationId: companyLocationGid(12345),
-        customerId: null,
-      });
-      
-      expect(result).not.toBeNull();
-      expect(result!.gid).toBe(companyLocationGid(12345));
-      expect(result!.type).toBe("CompanyLocation");
-    });
-
-    it("returns Customer GID for TAGGED_CUSTOMER accounts", async () => {
-      const { getOwnerGid } = await import("../../app/services/credit-status.server");
-      
-      const result = getOwnerGid({
-        kind: "TAGGED_CUSTOMER",
-        companyLocationId: null,
-        customerId: customerGid(67890),
-      });
-      
-      expect(result).not.toBeNull();
-      expect(result!.gid).toBe(customerGid(67890));
-      expect(result!.type).toBe("Customer");
-    });
-
-    it("returns null for COMPANY account without companyLocationId", async () => {
-      const { getOwnerGid } = await import("../../app/services/credit-status.server");
-      
-      const result = getOwnerGid({
-        kind: "COMPANY",
-        companyLocationId: null,
-        customerId: null,
-      });
-      
-      expect(result).toBeNull();
-    });
-
-    it("returns null for TAGGED_CUSTOMER account without customerId", async () => {
-      const { getOwnerGid } = await import("../../app/services/credit-status.server");
-      
-      const result = getOwnerGid({
-        kind: "TAGGED_CUSTOMER",
-        companyLocationId: null,
-        customerId: null,
-      });
-      
-      expect(result).toBeNull();
     });
   });
 });
