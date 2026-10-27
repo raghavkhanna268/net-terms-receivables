@@ -29,9 +29,9 @@ on:
   workflow_dispatch:
     inputs:
       prune_mode:
-        description: 'Retention pruning mode (dry_run prints counts only; delete removes eligible objects)'
+        description: 'Retention pruning mode (delete removes eligible objects; dry_run prints counts only)'
         required: false
-        default: 'dry_run'
+        default: 'delete'
         type: choice
         options:
           - dry_run
@@ -260,11 +260,14 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          # Scheduled runs prune for real (Team Lead OK 2026-10-26 after the
-          # first dry run). Manual dispatches default to dry_run via the input.
-          PRUNE_MODE: ${{ github.event_name == 'schedule' && 'delete' || inputs.prune_mode || 'dry_run' }}
+          # Scheduled runs and default manual dispatches prune for real (Team
+          # Lead OK). Choose prune_mode=dry_run on a manual dispatch for counts
+          # only. Any other value is rejected by the script (exit non-zero).
+          PRUNE_MODE: ${{ inputs.prune_mode || 'delete' }}
         run: |
           set -euo pipefail
-          # db/ prefix only, keep-newest-7, >30d by upload time, any delete
-          # failure exits non-zero, counts-only output (scripts/ops/prune-backups.ts).
+          # db/ prefix only, keep-newest-7 (re-checked before deleting),
+          # >30d by upload time, no deletes if <7 listed, list failure or any
+          # delete failure exits non-zero, counts-only output
+          # (scripts/ops/prune-backups.ts).
           node --experimental-strip-types scripts/ops/prune-backups.ts
