@@ -135,7 +135,7 @@ const TERMINAL_TOPICS = new Set([
  * RECOVERS (state restored by bulk reconcile):
  * - ORDERS_*: RECONCILE_ORDERS re-reads displayFinancialStatus from Shopify
  * - COMPANY_LOCATIONS_*: RECONCILE_COMPANIES re-upserts all locations
- * - CUSTOMERS_CREATE/UPDATE: RECONCILE_CUSTOMERS re-upserts matching customers
+ * - CUSTOMERS_CREATE: RECONCILE_CUSTOMERS re-upserts matching customers
  *
  * N/A (no local state modified):
  * - COMPANIES_*: No BuyerAccount created; only marks webhook processed
@@ -144,6 +144,9 @@ const TERMINAL_TOPICS = new Set([
  * NOT on this list (follow main's handler path):
  * - DRAFT_ORDERS_*: Handler runs with 0 Admin calls (DELETE/UPDATE local state)
  * - CUSTOMERS_DELETE: Handler sets tag_active=false with 0 Admin calls
+ * - CUSTOMERS_UPDATE: When tag removed, handler sets tag_active=false; reconcile
+ *   only exports currently-tagged customers (getBulkCustomersQuery) so cannot
+ *   restore the deactivation
  */
 export const ARCHIVE_SAFE_UNINSTALLED_TOPICS = new Set([
   "ORDERS_CREATE",
@@ -157,7 +160,6 @@ export const ARCHIVE_SAFE_UNINSTALLED_TOPICS = new Set([
   "COMPANY_LOCATIONS_UPDATE",
   "COMPANY_LOCATIONS_DELETE",
   "CUSTOMERS_CREATE",
-  "CUSTOMERS_UPDATE",
 ]);
 
 /**

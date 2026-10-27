@@ -160,14 +160,14 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
       expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("COMPANY_LOCATIONS_UPDATE")).toBe(true);
       expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("COMPANY_LOCATIONS_DELETE")).toBe(true);
       expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("CUSTOMERS_CREATE")).toBe(true);
-      expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("CUSTOMERS_UPDATE")).toBe(true);
     });
 
-    it("does NOT include DRAFT_ORDERS_* or CUSTOMERS_DELETE", () => {
+    it("does NOT include DRAFT_ORDERS_*, CUSTOMERS_DELETE, or CUSTOMERS_UPDATE", () => {
       expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("DRAFT_ORDERS_CREATE")).toBe(false);
       expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("DRAFT_ORDERS_UPDATE")).toBe(false);
       expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("DRAFT_ORDERS_DELETE")).toBe(false);
       expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("CUSTOMERS_DELETE")).toBe(false);
+      expect(ARCHIVE_SAFE_UNINSTALLED_TOPICS.has("CUSTOMERS_UPDATE")).toBe(false);
     });
   });
 
@@ -184,7 +184,6 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
       "COMPANY_LOCATIONS_UPDATE",
       "COMPANY_LOCATIONS_DELETE",
       "CUSTOMERS_CREATE",
-      "CUSTOMERS_UPDATE",
     ] as const)("%s: uninstalled shop archives message, zero Admin calls, no DLQ", async (topic) => {
       const suffix = testContext.suffix;
       const domain = `test-${topic.toLowerCase()}-${suffix}.example.com`;
@@ -478,6 +477,90 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
         const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
         expect(skipLog, "no skip log - handler was called").toBeNull();
       } finally {
+        await cleanupTestData([domain], suffix);
+      }
+    });
+
+    it("CUSTOMERS_UPDATE (tag removed): uninstalled shop reaches handler, tag_active=false, 0 Admin calls", async () => {
+      const suffix = testContext.suffix;
+      const domain = `test-cust-update-tag-removed-${suffix}.example.com`;
+      const shopId = `shop-cust-update-tag-removed-${suffix}`;
+      const customerGid = `gid://shopify/Customer/cust-update-tag-removed-${suffix}`;
+
+      try {
+        const now = new Date();
+        const uninstalledAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+        await sqlRef`
+          INSERT INTO "Shop" (id, domain, currency, "createdAt", "updatedAt", "uninstalledAt")
+          VALUES (${shopId}, ${domain}, 'INR', ${now}, ${now}, ${uninstalledAt})
+        `;
+
+        await sqlRef`
+          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at)
+          VALUES (${shopId}, ${customerGid}, '["net-terms"]'::jsonb, true, ${now})
+        `;
+        await sqlRef`
+          INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
+          VALUES (${'as-cust-update-' + suffix}, ${shopId}, 'net-terms', 30, ${now}, ${now})
+        `;
+
+        const [custBefore] = await sqlRef<[{ tag_active: boolean }?]>`
+          SELECT tag_active FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
+        `;
+        expect(custBefore?.tag_active, "tag_active is true before drain").toBe(true);
+
+        adminGraphQLMock.mockResolvedValue({
+          success: true,
+          data: {
+            customer: {
+              id: customerGid,
+              displayName: "Test Customer",
+              email: "test@example.com",
+              tags: [],
+            },
+          },
+        });
+
+        const webhookId = `wh-cust-update-tag-removed-${suffix}`;
+        const message = {
+          shop: domain,
+          topic: "CUSTOMERS_UPDATE",
+          webhookId,
+          resourceGid: customerGid,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
+
+        const { runDrain } = await import("~/services/drain/processor.server");
+        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
+
+        const callsForShop = adminGraphQLMock.mock.calls.filter((c) => c[0] === domain);
+        expect(callsForShop.length, "Admin call made for CUSTOMERS_UPDATE (not on allowlist)").toBeGreaterThanOrEqual(1);
+
+        const [custAfter] = await sqlRef<[{ tag_active: boolean; tag_deactivated_at: Date | null }?]>`
+          SELECT tag_active, tag_deactivated_at FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerGid}
+        `;
+        expect(custAfter?.tag_active, "tag_active set to false by handler (tag removed)").toBe(false);
+        expect(custAfter?.tag_deactivated_at, "tag_deactivated_at set by handler").not.toBeNull();
+
+        const [archiveCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.a_s6_sync
+          WHERE message->>'webhookId' = ${webhookId}
+        `;
+        expect(parseInt(archiveCount.count, 10), "message archived after handler success").toBe(1);
+
+        const [dlqCount] = await sqlRef<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
+          WHERE message->>'webhookId' = ${webhookId}
+        `;
+        expect(parseInt(dlqCount.count, 10), "no DLQ entry").toBe(0);
+
+        const skipLog = findLogEntry("order_webhook_uninstalled_shop_acked");
+        expect(skipLog, "no skip log - handler was called").toBeNull();
+      } finally {
+        await sqlRef`DELETE FROM "AccountSource" WHERE id = ${'as-cust-update-' + suffix}`;
         await cleanupTestData([domain], suffix);
       }
     });
@@ -1304,11 +1387,11 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
       }
     });
 
-    it("CUSTOMERS_UPDATE: archived webhook + reconcile restores tag_active state", async () => {
+    it("CUSTOMERS_UPDATE (tag removed): reconcile does NOT re-activate untagged customer", async () => {
       const suffix = testContext.suffix;
-      const domain = `test-customers-update-recovery-${suffix}.example.com`;
-      const shopId = `shop-customers-update-recovery-${suffix}`;
-      const customerId = `gid://shopify/Customer/cust-update-${suffix}`;
+      const domain = `test-customers-update-no-reactivate-${suffix}.example.com`;
+      const shopId = `shop-customers-update-no-reactivate-${suffix}`;
+      const customerId = `gid://shopify/Customer/cust-update-no-reactivate-${suffix}`;
 
       try {
         const now = new Date();
@@ -1322,59 +1405,35 @@ describeWithDb("Allowlist: ARCHIVE_SAFE_UNINSTALLED_TOPICS", () => {
           VALUES (${'offline_' + domain}, ${domain}, 'test-state', false, 'test-token')
         `;
         await sqlRef`
-          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, created_at)
-          VALUES (${shopId}, ${customerId}, '["net-terms"]'::jsonb, true, ${now})
+          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, created_at)
+          VALUES (${shopId}, ${customerId}, '[]'::jsonb, false, ${now}, ${now})
         `;
         await sqlRef`
           INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
-          VALUES (${'as-' + suffix}, ${shopId}, 'net-terms', 30, ${now}, ${now})
+          VALUES (${'as-no-reactivate-' + suffix}, ${shopId}, 'net-terms', 30, ${now}, ${now})
         `;
 
         const [custBefore] = await sqlRef<[{ tag_active: boolean }]>`
           SELECT tag_active FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerId}
         `;
-        expect(custBefore.tag_active).toBe(true);
-
-        const uninstalledAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = ${uninstalledAt} WHERE id = ${shopId}`;
-
-        const webhookId = `wh-customers-update-recovery-${suffix}`;
-        const message = {
-          shop: domain,
-          topic: "CUSTOMERS_UPDATE",
-          webhookId,
-          resourceGid: customerId,
-          enqueuedAt: new Date().toISOString(),
-        };
-        await sqlRef`SELECT pgmq.send(${S6_QUEUES.SYNC}, ${sqlRef.json(message)})`;
-
-        const { runDrain } = await import("~/services/drain/processor.server");
-        await runDrain(sqlRef, { batchSize: 10, timeBudgetMs: 5000 });
-
-        const [custAfterArchive] = await sqlRef<[{ tag_active: boolean }]>`
-          SELECT tag_active FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerId}
-        `;
-        expect(custAfterArchive.tag_active, "tag_active unchanged after archive").toBe(true);
-
-        await sqlRef`UPDATE "Shop" SET "uninstalledAt" = NULL WHERE id = ${shopId}`;
+        expect(custBefore.tag_active, "tag_active is false before reconcile").toBe(false);
 
         const { processBulkCustomer } = await import("~/services/sync/customer.server");
         await processBulkCustomer(sqlRef, domain, {
           id: customerId,
-          displayName: "Test Customer",
-          email: "test@example.com",
-          tags: ["net-terms", "vip"],
+          displayName: "Test Customer Without Tag",
+          email: "nonetterms@example.com",
+          tags: [],
         });
 
         const [custAfterReconcile] = await sqlRef<[{ tag_active: boolean; tags: unknown }]>`
           SELECT tag_active, tags FROM s8_tagged_customers WHERE shop_id = ${shopId} AND customer_id = ${customerId}
         `;
-        expect(custAfterReconcile.tag_active, "reconcile preserves tag_active").toBe(true);
+        expect(custAfterReconcile.tag_active, "reconcile does NOT re-activate untagged customer").toBe(false);
         const tags = custAfterReconcile.tags as string[];
-        expect(tags, "reconcile updates tags").toContain("net-terms");
-        expect(tags, "reconcile includes new tags").toContain("vip");
+        expect(tags, "tags remain empty").toHaveLength(0);
       } finally {
-        await sqlRef`DELETE FROM "AccountSource" WHERE id = ${'as-' + suffix}`;
+        await sqlRef`DELETE FROM "AccountSource" WHERE id = ${'as-no-reactivate-' + suffix}`;
         await cleanupTestData([domain], suffix);
       }
     });
