@@ -27,11 +27,6 @@ vi.mock("~/lib/recompute-enqueue.server", () => ({
   enqueueCreditStatusRecompute: vi.fn().mockResolvedValue(true),
 }));
 
-vi.mock("~/lib/log.server", () => ({
-  safeLog: vi.fn(),
-  toErrorCode: vi.fn((e) => String(e)),
-}));
-
 vi.mock("~/services/access-log.server", () => ({
   recordAccess: vi.fn(),
   getActorFromSessionToken: vi.fn(() => "test-actor"),
