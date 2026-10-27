@@ -327,7 +327,7 @@ describe("Bank Import Critical Path Tests", () => {
       expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("store owner must change the store currency to Indian Rupee (INR)");
       expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Settings → General → Store defaults → Currency display");
       expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("Change store currency");
-      expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("reload this page");
+      expect(CURRENCY_NOT_SUPPORTED_BANNER_COPY).toContain("reopen the app");
     });
   });
 

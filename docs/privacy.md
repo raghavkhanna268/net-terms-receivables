@@ -55,7 +55,7 @@ The app accesses buyer name and email, which Shopify classifies as protected cus
 
 **Minimisation:** When a customer no longer matches a net-terms tag and has no open invoices, we clear their email and name. We do this when the tag is removed; if invoices are still open then, the email and name are kept until the customer's erasure request or until 48 hours after uninstall.
 
-Buyer accounts for Shopify B2B companies use the company or location name and do not store a contact's email or name.
+Buyer accounts for Shopify B2B companies use the company or location name and store the main contact's name and email only; no phone or address.
 
 ### 2.4 Bank Statement Data
 
@@ -211,7 +211,7 @@ When a merchant uninstalls the app:
 ### 7.2 Customer Data Request
 
 When a customer requests their data:
-1. **Verify** payload shop matches header shop (returns 401 on mismatch)
+1. **Verify** payload shop matches header shop (returns 400 on mismatch)
 2. **Look up** all customer data scoped to that shop:
    - Tagged customer data: ID, tags, status, email, display name
    - Draft orders linked to customer's buyer account
@@ -241,7 +241,7 @@ When a customer requests their data:
 ### 7.3 Customer Redact
 
 When a customer must be deleted (GDPR/CCPA erasure request):
-1. **Verify** payload shop matches header shop (returns 401 on mismatch)
+1. **Verify** payload shop matches header shop (returns 400 on mismatch)
 2. **All operations run in a single database transaction** for atomicity. If any step fails, the entire redaction rolls back, allowing Shopify's retry mechanism to safely re-execute.
 3. **Delete** tagged customer row for the customer
 4. **Null** B2B main contact fields on buyer accounts where mainContactCustomerId matches the customer:
@@ -265,7 +265,7 @@ When a customer must be deleted (GDPR/CCPA erasure request):
 ### 7.4 Shop Redact
 
 When 48 hours have passed after uninstall:
-1. **Verify** payload shop matches header shop (returns 401 on mismatch)
+1. **Verify** payload shop matches header shop (returns 400 on mismatch)
 2. **Delete** all OAuth sessions for the shop
 3. **Delete** shop row — **all shop data cascades via database foreign key constraints**:
    - All buyer accounts, invoices, payments, matches
@@ -273,7 +273,7 @@ When 48 hours have passed after uninstall:
    - All data request records (exports purged even if not yet expired)
    - All audit events and operational data
 
-**Message queue note:** Queued messages cannot be purged per-shop (documented limitation). Messages for deleted shops are safely ignored by the processor.
+**Message queue note:** Queued and archived messages for the shop are purged within the same transaction that deletes the shop row.
 
 ---
 

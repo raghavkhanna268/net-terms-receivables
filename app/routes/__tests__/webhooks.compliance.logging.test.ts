@@ -59,9 +59,21 @@ const mockSql = Object.assign(
   }
 );
 
+const mockGetRequestWaitUntil = vi.fn();
+
 vi.mock("~/lib/request-context.server", () => ({
   getRequestSql: vi.fn(() => mockSql),
+  getRequestWaitUntil: () => mockGetRequestWaitUntil(),
 }));
+
+// Track waitUntil promises for tests to await
+let capturedWaitUntilPromises: Promise<unknown>[] = [];
+
+function setupWaitUntilMock(): void {
+  capturedWaitUntilPromises = [];
+  const mockWaitUntil = vi.fn((p: Promise<unknown>) => { capturedWaitUntilPromises.push(p); });
+  mockGetRequestWaitUntil.mockReturnValue(mockWaitUntil);
+}
 
 const mockDeleteWebhookReceiptsForShop = vi.fn().mockResolvedValue(0);
 vi.mock("~/lib/webhook-receipts.server", () => ({
@@ -130,6 +142,8 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     process.env = { ...originalEnv, SHOPIFY_API_KEY: "test-api-key", SHOPIFY_API_SECRET: SYNTHETIC_TEST_SECRET };
     // Reset mock to default for each test
     mockGetOfflineAdminContext.mockResolvedValue({ success: true, admin: mockAdmin, retryable: false });
+    // Set up waitUntil mock
+    setupWaitUntilMock();
 
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
@@ -409,7 +423,10 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const body = JSON.stringify(payload);
     const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
 
-    const response = await action(createMockActionArgs(request));
+    const args = createMockActionArgs(request);
+    const response = await action(args);
+    // Email work runs in background via waitUntil
+    await Promise.allSettled(capturedWaitUntilPromises);
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();
@@ -430,7 +447,10 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const body = JSON.stringify(payload);
     const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
 
-    const response = await action(createMockActionArgs(request));
+    const args = createMockActionArgs(request);
+    const response = await action(args);
+    // Email work runs in background via waitUntil
+    await Promise.allSettled(capturedWaitUntilPromises);
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();
@@ -453,7 +473,10 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const body = JSON.stringify(payload);
     const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
 
-    const response = await action(createMockActionArgs(request));
+    const args = createMockActionArgs(request);
+    const response = await action(args);
+    // Email work runs in background via waitUntil
+    await Promise.allSettled(capturedWaitUntilPromises);
     expect(response.status).toBe(200);
 
     const allOutput = getAllConsoleOutput();

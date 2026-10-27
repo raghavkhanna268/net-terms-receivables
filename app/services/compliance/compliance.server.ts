@@ -548,7 +548,7 @@ export async function redactCustomer(
 /**
  * Customer data export for data_request webhook.
  *
- * IMPORTANT: This export is limited to Protected Customer Data Level 1 fields:
+ * IMPORTANT: This export is limited to Protected Customer Data Level 2 fields:
  * - Email and display name (when CUSTOMER_PII_FIELDS is enabled)
  * - NO phone numbers or addresses are ever stored or exported
  *
