@@ -23,6 +23,7 @@ import { sqlOptions } from "../../app/lib/db-light.server.js";
 import { assertNoQueueLeftovers } from "../helpers/queue-leftovers.js";
 import { buildGid } from "../helpers/gid.js";
 import { generateUnsubscribeToken } from "../../app/services/reminder-unsubscribe-token.server.js";
+import { requestContext } from "../../app/lib/request-context.server.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -493,14 +494,13 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     await sql.end();
   });
 
+  function withRequestContext<T>(fn: () => Promise<T>): Promise<T> {
+    return requestContext.run({ getSql: () => sql, waitUntil: undefined }, fn);
+  }
+
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-
-    vi.doMock("~/lib/request-context.server", () => ({
-      getRequestSql: () => sql,
-      getRequestWaitUntil: () => undefined,
-    }));
 
     await sql`UPDATE "Match" SET state = 'suggested' WHERE id IN (${MATCH_A_ID}, ${MATCH_B_ID})`;
     await sql`UPDATE "BuyerAccount" SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = NULL WHERE id = ${BUYER_B_OPTOUT_ID}`;
@@ -516,7 +516,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const hashBefore = await hashBRows();
       const args = createLoaderArgs(`/app/accounts/${BUYER_B_ID}`, { id: BUYER_B_ID });
       const { loader } = await import("../../app/routes/app.accounts.$id.js");
-      const result = (await loader(args as never)) as { account: unknown; error: string | null };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { account: unknown; error: string | null }
+      );
 
       expect(result.account).toBeNull();
       expect(result.error).toBe("Account not found");
@@ -532,7 +534,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createLoaderArgs(`/app/accounts/${BUYER_A_ID}`, { id: BUYER_A_ID });
       const { loader } = await import("../../app/routes/app.accounts.$id.js");
-      const result = (await loader(args as never)) as { account: { id: string; name: string } | null; error: string | null };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { account: { id: string; name: string } | null; error: string | null }
+      );
 
       expect(result.error).toBeNull();
       expect(result.account).not.toBeNull();
@@ -550,7 +554,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       );
 
       const { action } = await import("../../app/routes/app.accounts.$id.js");
-      const result = await action(args as never);
+      const result = await withRequestContext(() => action(args as never));
 
       const r = result as { success: boolean; error?: string };
       expect(r.success).toBe(false);
@@ -569,7 +573,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       );
 
       const { action } = await import("../../app/routes/app.accounts.$id.js");
-      const result = await action(args as never);
+      const result = await withRequestContext(() => action(args as never));
 
       const r = result as { success: boolean; error?: string };
       expect(r.success).toBe(true);
@@ -593,7 +597,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       );
 
       const { action } = await import("../../app/routes/app.accounts.$id.js");
-      const result = await action(args as never);
+      const result = await withRequestContext(() => action(args as never));
 
       const r = result as { success: boolean; error?: string };
       expect(r.success).toBe(false);
@@ -613,7 +617,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const hashBefore = await hashBRows();
       const args = createLoaderArgs(`/app/data-requests/req-b-id/download`, { id: "req-b-id" });
       const mod = await import("../../app/routes/app.data-requests.$id.download.js");
-      const result = await mod.loader(args as never);
+      const result = await withRequestContext(() => mod.loader(args as never));
 
       expect(result).toBeInstanceOf(Response);
       const r = result as Response;
@@ -627,7 +631,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createLoaderArgs(`/app/data-requests/req-a-id/download`, { id: "req-a-id" });
       const mod = await import("../../app/routes/app.data-requests.$id.download.js");
-      const result = await mod.loader(args as never);
+      const result = await withRequestContext(() => mod.loader(args as never));
 
       expect(result).toBeInstanceOf(Response);
       const r = result as Response;
@@ -645,7 +649,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const hashBefore = await hashBRows();
       const args = createActionArgs("/app/reconcile", { intent: "confirm", matchId: MATCH_B_ID });
       const { action } = await import("../../app/routes/app.reconcile.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(false);
 
@@ -657,7 +663,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createActionArgs("/app/reconcile", { intent: "confirm", matchId: MATCH_A_ID });
       const { action } = await import("../../app/routes/app.reconcile.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(true);
 
@@ -672,7 +680,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const hashBefore = await hashBRows();
       const args = createActionArgs("/app/reconcile", { intent: "reject", matchId: MATCH_B_ID });
       const { action } = await import("../../app/routes/app.reconcile.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(false);
 
@@ -687,7 +697,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
       const args = createActionArgs("/app/reconcile", { intent: "apply", matchId: MATCH_B_ID });
       const { action } = await import("../../app/routes/app.reconcile.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(false);
 
@@ -704,7 +716,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
       const args = createActionArgs("/app/reconcile", { intent: "unmatch", matchId: MATCH_B_ID });
       const { action } = await import("../../app/routes/app.reconcile.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(false);
 
@@ -727,7 +741,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       } as unknown;
 
       const { loader } = await import("../../app/routes/app.reconcile.js");
-      const result = (await loader(args as never)) as { selectedPayment: unknown };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { selectedPayment: unknown }
+      );
 
       expect(result.selectedPayment).toBeNull();
 
@@ -750,7 +766,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       } as unknown;
 
       const { loader } = await import("../../app/routes/app.reconcile.js");
-      const result = (await loader(args as never)) as { selectedPayment: { payment: { id: string } } | null };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { selectedPayment: { payment: { id: string } } | null }
+      );
 
       expect(result.selectedPayment).not.toBeNull();
       expect(result.selectedPayment!.payment.id).toBe(PAYMENT_A_ID);
@@ -761,7 +779,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const args = createLoaderArgs("/app/reconcile");
 
       const { loader } = await import("../../app/routes/app.reconcile.js");
-      const result = await loader(args as never);
+      const result = await withRequestContext(() => loader(args as never));
 
       const str = JSON.stringify(result);
       expect(str).toContain(MATCH_A_ID);
@@ -782,7 +800,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       });
 
       const { action } = await import("../../app/routes/app.settings.reminders.js");
-      const result = (await action(args as never)) as { success: boolean; error?: string };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean; error?: string }
+      );
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("Rule not found");
@@ -801,7 +821,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       });
 
       const { action } = await import("../../app/routes/app.settings.reminders.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(true);
 
@@ -820,7 +842,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       });
 
       const { action } = await import("../../app/routes/app.settings.reminders.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(false);
 
@@ -843,7 +867,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       } as unknown;
 
       const { loader } = await import("../../app/routes/app._index.js");
-      const rawResult = await loader(args as never);
+      const rawResult = await withRequestContext(() => loader(args as never));
       const result = extractLoaderResult<{
         dashboardData: Promise<{
           selectedBuyerInvoices: { rows: unknown[]; totalCount: number; buyerName: string } | null;
@@ -877,7 +901,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       } as unknown;
 
       const { loader } = await import("../../app/routes/app._index.js");
-      const rawResult = await loader(args as never);
+      const rawResult = await withRequestContext(() => loader(args as never));
       const result = extractLoaderResult<{
         dashboardData: Promise<{ selectedBuyerInvoices: { buyerName: string } | null }> | null;
       }>(rawResult);
@@ -900,7 +924,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       } as unknown;
 
       const { loader } = await import("../../app/routes/app._index.js");
-      const rawResult = await loader(args as never);
+      const rawResult = await withRequestContext(() => loader(args as never));
       const result = extractLoaderResult<{
         dashboardData: Promise<{ buyerLedger: { rows: Array<{ name: string; id: string }> } | null }> | null;
       }>(rawResult);
@@ -924,7 +948,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createLoaderArgs("/app/data-requests");
       const { loader } = await import("../../app/routes/app.data-requests.js");
-      const result = (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }> };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }> }
+      );
 
       expect(result.dataRequests).toBeDefined();
 
@@ -945,7 +971,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
       const args = createLoaderArgs("/app/data-requests");
       const { loader } = await import("../../app/routes/app.data-requests.js");
-      const result = (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }>; error: string | null };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }>; error: string | null }
+      );
 
       expect(result.error, `Loader returned error: ${result.error}`).toBeNull();
 
@@ -960,7 +988,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const hashBefore = await hashBRows();
       const { loader } = await import("../../app/routes/app.imports.js");
       const args = createLoaderArgs("/app/imports");
-      const result = await loader(args as never);
+      const result = await withRequestContext(() => loader(args as never));
 
       expect(result).toBeDefined();
 
@@ -977,7 +1005,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createLoaderArgs("/app/tag-rules");
       const { loader } = await import("../../app/routes/app.tag-rules.js");
-      const result = (await loader(args as never)) as { tagRules: Array<{ id: string; tag: string }> };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { tagRules: Array<{ id: string; tag: string }> }
+      );
 
       expect(result.tagRules).toBeDefined();
 
@@ -992,7 +1022,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createLoaderArgs("/app/tag-rules");
       const { loader } = await import("../../app/routes/app.tag-rules.js");
-      const result = (await loader(args as never)) as { tagRules: Array<{ id: string; tag: string }> };
+      const result = await withRequestContext(async () =>
+        (await loader(args as never)) as { tagRules: Array<{ id: string; tag: string }> }
+      );
 
       const aRules = result.tagRules.filter(r => r.id === TAG_RULE_A_ID || r.tag === "net30-a");
       expect(aRules.length).toBeGreaterThan(0);
@@ -1004,7 +1036,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createLoaderArgs("/app/plan");
       const { loader } = await import("../../app/routes/app.plan.js");
-      const result = await loader(args as never);
+      const result = await withRequestContext(() => loader(args as never));
 
       expect(result).toBeDefined();
 
@@ -1022,11 +1054,6 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const crossShopToken = generateUnsubscribeToken(SHOP_A_ID, BUYER_B_OPTOUT_ID, UNSUBSCRIBE_SECRET);
       expect(crossShopToken).not.toBeNull();
 
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestSql: () => sql,
-        getRequestWaitUntil: () => undefined,
-      }));
-
       const hashBefore = await hashBRows();
 
       const args = createPublicActionArgs(
@@ -1035,7 +1062,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
         { token: crossShopToken! }
       );
       const { action } = await import("../../app/routes/unsubscribe.js");
-      const result = (await action(args as never)) as { success: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean }
+      );
 
       expect(result.success).toBe(true);
 
@@ -1051,11 +1080,6 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const tokenForBuyerB = generateUnsubscribeToken(SHOP_B_ID, BUYER_B_ID, UNSUBSCRIBE_SECRET);
       expect(tokenForBuyerB).not.toBeNull();
 
-      vi.doMock("~/lib/request-context.server", () => ({
-        getRequestSql: () => sql,
-        getRequestWaitUntil: () => undefined,
-      }));
-
       const hashBefore = await hashBRows();
       const beforeA = await sql`SELECT "reminderOptOutAt" FROM "BuyerAccount" WHERE id = ${BUYER_A_ID}`;
       const wasOptedOutA = beforeA[0].reminderOptOutAt !== null;
@@ -1066,7 +1090,9 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
         { token: tokenForBuyerB! }
       );
       const { action } = await import("../../app/routes/unsubscribe.js");
-      const result = (await action(args as never)) as { success: boolean; alreadyOptedOut: boolean };
+      const result = await withRequestContext(async () =>
+        (await action(args as never)) as { success: boolean; alreadyOptedOut: boolean }
+      );
 
       expect(result.success).toBe(true);
 
@@ -1082,7 +1108,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect.hasAssertions();
       const args = createPublicLoaderArgs("/unsubscribe", { token: "invalid-token" });
       const { loader } = await import("../../app/routes/unsubscribe.js");
-      const result = await loader(args as never);
+      const result = await withRequestContext(() => loader(args as never));
 
       expect((result as { valid: boolean }).valid).toBe(false);
 
