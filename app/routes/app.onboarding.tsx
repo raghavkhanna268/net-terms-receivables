@@ -21,6 +21,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { getUsageStats, isGatingEnforced } from "~/services/gating.server";
 import { buildNewAccountsPausedBannerState, type NewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
+import { resolvePlanWithStatus, type PlanResolutionStatus } from "~/services/plan.server";
 import {
   fetchShopOnboardingData,
   computeOnboardingState,
@@ -425,7 +426,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Currency recovery and Admin checks run in parallel; sync state runs alongside untimed.
   const storedCurrency = dbData.currency ?? NO_CURRENCY_SENTINEL;
 
-  const [adminResults, syncState, reminderSettings] = await Promise.all([
+  const [adminResults, syncState, reminderSettings, planResult] = await Promise.all([
     (async () => {
       timing.startPhase("onboarding_checks");
       const results = await Promise.all([
@@ -439,6 +440,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     })(),
     getInitialSyncStateWithRecovery(sql, shopDomain),
     getShopReminderSettings(sql, dbData.shopId),
+    resolvePlanWithStatus(sql, shopDomain).catch(() => ({ status: "error" as PlanResolutionStatus })),
   ]);
 
   const [currencyResult, validationResult, paymentCustomizationResult, metafieldStatus] = adminResults;
@@ -454,6 +456,12 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const emailSendingConfigured = isEmailSendingConfigured();
   const remindersEnabled = reminderSettings?.enabled ?? false;
 
+  const planSelectionUrl = (() => {
+    const handle = getAppHandle();
+    if (handle === null) return null;
+    return buildPlanSelectionUrl(shopDomain, handle);
+  })();
+
   const inputs: OnboardingStepInputs = {
     shopId: dbData.shopId,
     defaultTermsDays: dbData.defaultTermsDays,
@@ -464,6 +472,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     emailSendingConfigured,
     remindersEnabled,
     dismissedAt: dbData.dismissedAt,
+    planStatus: planResult.status,
+    planSelectionUrl,
   };
 
   const state = computeOnboardingState(inputs);
@@ -909,7 +919,7 @@ function OnboardingChecklist({
               </s-table-cell>
               <s-table-cell>
                 {step.actionUrl && step.status !== "coming_soon" && (
-                  <s-link href={step.actionUrl}>{step.actionLabel}</s-link>
+                  <s-link href={step.actionUrl} target={step.actionTarget}>{step.actionLabel}</s-link>
                 )}
               </s-table-cell>
             </s-table-row>
