@@ -170,6 +170,9 @@ const DB_TEST_PATTERNS = [
   "app/lib/__tests__/schema-trigger-guard-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
+  // Bank import edge-case DB tests
+  "app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts",
+
   // Script DB tests
   "scripts/__tests__/seed.test.ts",
   "scripts/__tests__/backstop-backfill.test.ts",
