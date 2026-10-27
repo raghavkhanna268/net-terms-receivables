@@ -6,7 +6,7 @@ import { createElement } from "react";
  * Tests for plan page loader (S21).
  *
  * These tests call the actual loader with mocked dependencies and verify:
- * 1. Returns plan data from resolvePlan
+ * 1. Returns plan data from resolvePlanForDisplay
  * 2. Returns usage stats from getUsageStats
  * 3. Returns gated count from getGatedAccountCount
  * 4. Returns gatingEnforced from isGatingEnforced
@@ -15,7 +15,7 @@ import { createElement } from "react";
  */
 
 vi.mock("~/services/plan.server", () => ({
-  resolvePlan: vi.fn(),
+  resolvePlanForDisplay: vi.fn(),
 }));
 
 vi.mock("~/services/gating.server", () => ({
@@ -59,7 +59,7 @@ describe("Plan Page Loader", () => {
   });
 
   it("returns plan data when shop exists", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanForDisplay } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
       "~/services/gating.server"
     );
@@ -68,7 +68,7 @@ describe("Plan Page Loader", () => {
     mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (resolvePlanForDisplay as ReturnType<typeof vi.fn>).mockResolvedValue({
       plan: { key: "growth", limits: { companies: 100, importsPerMonth: -1 } },
       subscriptionId: "gid://shopify/AppSubscription/123",
       subscriptionName: "Growth",
@@ -131,8 +131,8 @@ describe("Plan Page Loader", () => {
     expect(result.error).toBeNull();
   });
 
-  it("returns error when resolvePlan throws", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+  it("returns error when resolvePlanForDisplay throws", async () => {
+    const { resolvePlanForDisplay } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
       "~/services/gating.server"
     );
@@ -142,7 +142,7 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
     (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
-    (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(
+    (resolvePlanForDisplay as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("Database error")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -166,7 +166,7 @@ describe("Plan Page Loader", () => {
 
   it("P7: error logging uses safeLog JSON with toErrorCode (per #174)", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanForDisplay } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
       "~/services/gating.server"
     );
@@ -176,7 +176,7 @@ describe("Plan Page Loader", () => {
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
     (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
-    (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(
+    (resolvePlanForDisplay as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("Database connection timed out")
     );
     (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -205,7 +205,7 @@ describe("Plan Page Loader", () => {
   });
 
   it("returns gatingEnforced false when flag is off", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanForDisplay } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
       "~/services/gating.server"
     );
@@ -214,7 +214,7 @@ describe("Plan Page Loader", () => {
     mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (resolvePlanForDisplay as ReturnType<typeof vi.fn>).mockResolvedValue({
       plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
       subscriptionId: "sub-123",
       subscriptionName: "Starter",
@@ -253,7 +253,7 @@ describe("Plan Page Loader", () => {
   });
 
   it("returns null usage and no banner when getUsageStats fails", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanForDisplay } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
       "~/services/gating.server"
     );
@@ -262,7 +262,7 @@ describe("Plan Page Loader", () => {
     mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (resolvePlanForDisplay as ReturnType<typeof vi.fn>).mockResolvedValue({
       plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
       subscriptionId: "sub-123",
       subscriptionName: "Starter",
@@ -293,7 +293,7 @@ describe("Plan Page Loader", () => {
   });
 
   it("does not include subscriptionId or fromCache in returned plan", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanForDisplay } = await import("~/services/plan.server");
     const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
       "~/services/gating.server"
     );
@@ -302,7 +302,7 @@ describe("Plan Page Loader", () => {
     mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (resolvePlanForDisplay as ReturnType<typeof vi.fn>).mockResolvedValue({
       plan: { key: "starter", limits: { companies: 25, importsPerMonth: -1 } },
       subscriptionId: "gid://shopify/AppSubscription/456",
       subscriptionName: "Starter",

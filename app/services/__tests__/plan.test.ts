@@ -34,8 +34,10 @@ import { adminGraphQL as _adminGraphQL } from "../drain/admin-client.server";
 import { captureExceptionWithTags as _captureExceptionWithTags, captureMessage as _captureMessage } from "~/lib/sentry";
 import {
   resolvePlan,
+  resolvePlanForDisplay,
   getPlanByShopId,
   _resetInFlightRefreshesForTesting,
+  _resetForcedRefreshTrackingForTesting,
   _isRefreshInFlight,
   getPlanSource,
   AdminInstallationPlanSource,
@@ -1368,3 +1370,356 @@ describe("PlanSource Interface", () => {
 });
 
 // DB integration tests for legacy cached plan_key values are in plan-cache-db.test.ts
+
+// =============================================================================
+// resolvePlanForDisplay Tests
+// =============================================================================
+
+describe("resolvePlanForDisplay", () => {
+  const TEST_SHOP = "test-display.myshopify.com";
+  const TEST_SHOP_ID = "shop-display-123";
+
+  let mockSql: ReturnType<typeof createMockSql>;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockSql = createMockSql();
+    _resetInFlightRefreshesForTesting();
+    _resetForcedRefreshTrackingForTesting();
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("returns cached plan without Admin call when cache is fresher than 60s", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const freshCacheTime = new Date(Date.now() - 30_000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "growth",
+      subscription_id: "gid://shopify/AppSubscription/123",
+      subscription_name: "Growth",
+      is_test: false,
+      plan_cached_at: freshCacheTime,
+    }]);
+
+    const result = await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP);
+
+    expect(result.plan.key).toBe("growth");
+    expect(result.fromCache).toBe(true);
+    expect(adminGraphQL).not.toHaveBeenCalled();
+  });
+
+  it("makes forced Admin call when cache is older than 60s", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const staleCacheTime = new Date(Date.now() - 90_000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "starter",
+      subscription_id: "gid://shopify/AppSubscription/old",
+      subscription_name: "Starter",
+      is_test: false,
+      plan_cached_at: staleCacheTime,
+    }]);
+
+    adminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: {
+        currentAppInstallation: {
+          activeSubscriptions: [{
+            id: "gid://shopify/AppSubscription/new",
+            name: "Growth",
+            status: "ACTIVE",
+            test: false,
+            lineItems: [],
+          }],
+        },
+      },
+    });
+
+    const result = await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP);
+
+    expect(result.plan.key).toBe("growth");
+    expect(result.fromCache).toBe(false);
+    expect(adminGraphQL).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns cached plan when fetch fails and logs plan_fetch_failed_using_cache", async () => {
+    const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const staleCacheTime = new Date(Date.now() - 90_000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "growth",
+      subscription_id: "gid://shopify/AppSubscription/cached",
+      subscription_name: "Growth",
+      is_test: false,
+      plan_cached_at: staleCacheTime,
+    }]);
+
+    adminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Shopify API timeout",
+      retryable: true,
+    });
+
+    const result = await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP);
+
+    expect(result.plan.key).toBe("growth");
+    expect(result.fromCache).toBe(true);
+
+    const allLogs = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(allLogs).toContain("plan_fetch_failed_using_cache");
+
+    consoleSpy.mockRestore();
+  });
+
+  it("skips Admin call within 60s after failed fetch", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const staleCacheTime = new Date(Date.now() - 90_000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "growth",
+      subscription_id: "gid://shopify/AppSubscription/cached",
+      subscription_name: "Growth",
+      is_test: false,
+      plan_cached_at: staleCacheTime,
+    }]);
+
+    adminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Shopify API timeout",
+      retryable: true,
+    });
+
+    let currentTime = Date.now();
+    const nowFn = () => currentTime;
+
+    await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP, { now: nowFn });
+    expect(adminGraphQL).toHaveBeenCalledTimes(1);
+
+    adminGraphQL.mockClear();
+
+    currentTime += 30_000;
+    const result = await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP, { now: nowFn });
+
+    expect(result.plan.key).toBe("growth");
+    expect(result.fromCache).toBe(true);
+    expect(adminGraphQL).not.toHaveBeenCalled();
+  });
+
+  it("retries Admin call after 60s following failed fetch", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const staleCacheTime = new Date(Date.now() - 90_000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "growth",
+      subscription_id: "gid://shopify/AppSubscription/cached",
+      subscription_name: "Growth",
+      is_test: false,
+      plan_cached_at: staleCacheTime,
+    }]);
+
+    adminGraphQL
+      .mockResolvedValueOnce({
+        success: false,
+        error: "Shopify API timeout",
+        retryable: true,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          currentAppInstallation: {
+            activeSubscriptions: [{
+              id: "gid://shopify/AppSubscription/new",
+              name: "Unlimited",
+              status: "ACTIVE",
+              test: false,
+              lineItems: [],
+            }],
+          },
+        },
+      });
+
+    let currentTime = Date.now();
+    const nowFn = () => currentTime;
+
+    await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP, { now: nowFn });
+    expect(adminGraphQL).toHaveBeenCalledTimes(1);
+
+    adminGraphQL.mockClear();
+
+    currentTime += 70_000;
+    const result = await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP, { now: nowFn });
+
+    expect(result.plan.key).toBe("unlimited");
+    expect(result.fromCache).toBe(false);
+    expect(adminGraphQL).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates concurrent calls to make at most one Admin call", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const staleCacheTime = new Date(Date.now() - 90_000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "starter",
+      subscription_id: "gid://shopify/AppSubscription/old",
+      subscription_name: "Starter",
+      is_test: false,
+      plan_cached_at: staleCacheTime,
+    }]);
+
+    let resolveAdminCall: () => void;
+    const adminCallPromise = new Promise<void>((resolve) => {
+      resolveAdminCall = resolve;
+    });
+
+    adminGraphQL.mockImplementation(async () => {
+      await adminCallPromise;
+      return {
+        success: true,
+        data: {
+          currentAppInstallation: {
+            activeSubscriptions: [{
+              id: "gid://shopify/AppSubscription/new",
+              name: "Growth",
+              status: "ACTIVE",
+              test: false,
+              lineItems: [],
+            }],
+          },
+        },
+      };
+    });
+
+    const promise1 = resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP);
+    const promise2 = resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP);
+
+    resolveAdminCall!();
+
+    const [result1, result2] = await Promise.all([promise1, promise2]);
+
+    expect(result1.plan.key).toBe("growth");
+    expect(result2.plan.key).toBe("growth");
+    expect(adminGraphQL).toHaveBeenCalledTimes(1);
+  });
+
+  it("delegates to resolvePlan when no row exists", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: null,
+      subscription_id: null,
+      subscription_name: null,
+      is_test: null,
+      plan_cached_at: null,
+    }]);
+
+    adminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: {
+        currentAppInstallation: {
+          activeSubscriptions: [{
+            id: "gid://shopify/AppSubscription/123",
+            name: "Starter",
+            status: "ACTIVE",
+            test: false,
+            lineItems: [],
+          }],
+        },
+      },
+    });
+
+    const result = await resolvePlanForDisplay(mockSql as unknown as Sql, TEST_SHOP);
+
+    expect(result.plan.key).toBe("starter");
+    expect(result.fromCache).toBe(false);
+    expect(adminGraphQL).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects injected now function for cache age calculation", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const cacheTime = new Date(1000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "growth",
+      subscription_id: "gid://shopify/AppSubscription/123",
+      subscription_name: "Growth",
+      is_test: false,
+      plan_cached_at: cacheTime,
+    }]);
+
+    const nowFn = () => 50_000;
+    const result = await resolvePlanForDisplay(
+      mockSql as unknown as Sql,
+      TEST_SHOP,
+      { now: nowFn, minAgeMs: 60_000 }
+    );
+
+    expect(result.plan.key).toBe("growth");
+    expect(result.fromCache).toBe(true);
+    expect(adminGraphQL).not.toHaveBeenCalled();
+  });
+
+  it("respects custom minAgeMs option", async () => {
+    mockSql.setMockResult("shop_id", [{ id: TEST_SHOP_ID }]);
+
+    const cacheTime = new Date(Date.now() - 10_000);
+    mockSql.setMockResult("shop_plan", [{
+      plan_key: "starter",
+      subscription_id: "gid://shopify/AppSubscription/old",
+      subscription_name: "Starter",
+      is_test: false,
+      plan_cached_at: cacheTime,
+    }]);
+
+    adminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: {
+        currentAppInstallation: {
+          activeSubscriptions: [{
+            id: "gid://shopify/AppSubscription/new",
+            name: "Growth",
+            status: "ACTIVE",
+            test: false,
+            lineItems: [],
+          }],
+        },
+      },
+    });
+
+    const result = await resolvePlanForDisplay(
+      mockSql as unknown as Sql,
+      TEST_SHOP,
+      { minAgeMs: 5_000 }
+    );
+
+    expect(result.plan.key).toBe("growth");
+    expect(result.fromCache).toBe(false);
+    expect(adminGraphQL).toHaveBeenCalledTimes(1);
+  });
+});
+
+// =============================================================================
+// Plan Page Loader Integration Test
+// =============================================================================
+
+describe("Plan Page Loader uses resolvePlanForDisplay", () => {
+  it("Plan page imports resolvePlanForDisplay (not resolvePlan)", async () => {
+    const { readFileSync } = await import("fs");
+    const planSource = readFileSync("app/routes/app.plan.tsx", "utf-8");
+
+    expect(planSource).toContain("resolvePlanForDisplay");
+    expect(planSource).toContain("import { resolvePlanForDisplay");
+    expect(planSource).not.toMatch(/import\s*{\s*resolvePlan\s*[,}]/);
+  });
+
+  it("Dashboard page still uses resolvePlan (not resolvePlanForDisplay)", async () => {
+    const { readFileSync } = await import("fs");
+    const dashboardSource = readFileSync("app/routes/app._index.tsx", "utf-8");
+
+    expect(dashboardSource).toContain("import { resolvePlan");
+    expect(dashboardSource).not.toContain("resolvePlanForDisplay");
+  });
+});
