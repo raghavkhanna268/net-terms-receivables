@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
 
 /**
  * Webhook handler for order lifecycle events.
@@ -42,7 +43,7 @@ const ALLOWED_TOPICS = new Set([
   "ORDERS_PAID",
 ]);
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+const webhookAction = async ({ request }: ActionFunctionArgs): Promise<Response> => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[webhooks.orders] SHOPIFY_API_SECRET not configured");
@@ -97,3 +98,5 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);

@@ -3,6 +3,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { refreshPlanCache } from "~/services/plan.server";
 import { reactivateGatedAccounts } from "~/services/gating.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
 
 /**
  * Webhook handler for APP_SUBSCRIPTIONS_UPDATE.
@@ -31,7 +32,7 @@ export const loader = async (_args: LoaderFunctionArgs) => {
   return new Response(null, { status: 405, statusText: "Method Not Allowed" });
 };
 
-export const action = async ({ request, context }: ActionFunctionArgs) => {
+const webhookAction = async ({ request, context }: ActionFunctionArgs): Promise<Response> => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error(
@@ -89,3 +90,5 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);

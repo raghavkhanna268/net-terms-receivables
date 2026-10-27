@@ -6,6 +6,7 @@ import { writeShopConfigMetafield } from "~/services/shop-config.server";
 import { validateCurrencyCode, NO_CURRENCY_SENTINEL, SUPPORTED_SHOP_CURRENCY } from "~/lib/shop-currency.server";
 import { safeLog, shopHash } from "~/lib/log.server";
 import { decideShopCurrencyUpdate, hasFinancialRows } from "~/lib/shop-currency-guard.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
 import type { Sql } from "~/lib/db-light.server";
 
 /**
@@ -168,7 +169,7 @@ export const loader = async (_args: LoaderFunctionArgs) => {
   return new Response(null, { status: 405, statusText: "Method Not Allowed" });
 };
 
-export const action = async ({ request, context }: ActionFunctionArgs) => {
+const webhookAction = async ({ request, context }: ActionFunctionArgs): Promise<Response> => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[webhooks.shop.update] SHOPIFY_API_SECRET not configured");
@@ -208,3 +209,5 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);

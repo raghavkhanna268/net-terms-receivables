@@ -3,6 +3,7 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.server";
 import { safeLog } from "~/lib/log.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
 
 /**
  * Build a Shopify DraftOrder GID from a numeric id.
@@ -64,7 +65,7 @@ const ALLOWED_TOPICS = new Set([
   "DRAFT_ORDERS_DELETE",
 ]);
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+const webhookAction = async ({ request }: ActionFunctionArgs): Promise<Response> => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[webhooks.draft_orders] SHOPIFY_API_SECRET not configured");
@@ -125,3 +126,5 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);
