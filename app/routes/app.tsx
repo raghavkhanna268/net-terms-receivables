@@ -19,7 +19,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   timing.endPhase("auth_layout");
 
   // Bind waitUntil to ctx to avoid "Illegal invocation" on workerd
-  runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
+  // Gap 1: runAfterAuth is now awaited so critical reinstall work (clearing
+  // uninstalledAt and registration) completes BEFORE the page renders.
+  // This ensures onboarding shows true state on the first load after reinstall.
+  await runAfterAuth(session.shop, admin, (p) => cloudflare.ctx.waitUntil(p));
 
   // Log auth_layout timing
   timing.logAllPhases();

@@ -799,8 +799,8 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
-      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
-      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+      // Idempotency check - message already exists (skip enqueue)
+      mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -851,8 +851,8 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "new-rule-id" }]);
-      // S8: Count tag rules (first-tag-rule check) - more than 1 means not first
-      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+      // Idempotency check - message already exists (skip enqueue)
+      mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg" }]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -878,8 +878,8 @@ describe("Tag Rules Route", () => {
     });
   });
 
-  describe("action - first-tag-rule enqueue", () => {
-    it("enqueues customers reconcile when first tag rule is created (count=1)", async () => {
+  describe("action - tag-rule customers enqueue", () => {
+    it("enqueues customers reconcile when first tag rule is created", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { enqueueReconcileStage } = await import(
         "~/services/drain/reconcile-handlers.server"
@@ -894,8 +894,6 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "first-rule-id" }]);
-      // S8: Count tag rules - FIRST rule (count=1)
-      mockSql.mockResolvedValueOnce([{ count: "1" }]);
       // Idempotency check - no existing message
       mockSql.mockResolvedValueOnce([]);
 
@@ -931,7 +929,7 @@ describe("Tag Rules Route", () => {
       );
     });
 
-    it("does NOT enqueue customers reconcile when second tag rule is created (count=2)", async () => {
+    it("enqueues customers reconcile when second tag rule is created too", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { enqueueReconcileStage } = await import(
         "~/services/drain/reconcile-handlers.server"
@@ -947,8 +945,8 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "second-rule-id" }]);
-      // S8: Count tag rules - SECOND rule (count=2)
-      mockSql.mockResolvedValueOnce([{ count: "2" }]);
+      // Idempotency check - no existing message (second rule, but still enqueues)
+      mockSql.mockResolvedValueOnce([]);
 
       const formData = new FormData();
       formData.append("intent", "create_tag_rule");
@@ -973,11 +971,62 @@ describe("Tag Rules Route", () => {
       expect(result.success).toBe(true);
       expect(result.createdRuleId).toBe("second-rule-id");
 
-      // Verify enqueueReconcileStage was NOT called
+      // Verify enqueueReconcileStage WAS called (every new rule enqueues)
+      expect(enqueueReconcileStage).toHaveBeenCalledWith(
+        expect.anything(),
+        "test-s8-second.myshopify.com",
+        "customers",
+        expect.stringContaining("manual:")
+      );
+    });
+
+    it("does NOT enqueue when duplicate rule is rejected via ON CONFLICT", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { enqueueReconcileStage } = await import(
+        "~/services/drain/reconcile-handlers.server"
+      );
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+      (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
+
+      // Shop lookup
+      mockSql.mockResolvedValueOnce([{ id: "shop-dup", domain: "test-s8-dup.myshopify.com" }]);
+      // Store mode check (tag_based)
+      mockSql.mockResolvedValueOnce([]);
+      // Pre-check finds no case-variant duplicate
+      mockSql.mockResolvedValueOnce([]);
+      // Insert returns empty due to ON CONFLICT DO NOTHING (exact-case match)
+      mockSql.mockResolvedValueOnce([]);
+
+      const formData = new FormData();
+      formData.append("intent", "create_tag_rule");
+      formData.append("tag", "net30");
+      formData.append("defaultTermsDays", "30");
+
+      const postRequest = new Request("https://example.com/app/tag-rules", {
+        method: "POST",
+        body: formData,
+      });
+
+      const { action } = await import("../app.tag-rules");
+      const rawResult = await action({
+        request: postRequest,
+        context: mockContext as never,
+        params: {},
+        url: mockUrl,
+        pattern: mockPattern,
+      });
+
+      const result = extractActionData(rawResult);
+      const status = extractStatus(rawResult);
+      expect(status).toBe(400);
+      expect(result.success).toBe(false);
+      expect(result.fieldErrors?.tag).toContain("already exists");
+
+      // Verify enqueueReconcileStage was NOT called (duplicate rejected before enqueue)
       expect(enqueueReconcileStage).not.toHaveBeenCalled();
     });
 
-    it("first-tag-rule enqueue is idempotent (skips if message already queued)", async () => {
+    it("customers enqueue is idempotent (skips if message already queued)", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");
       const { enqueueReconcileStage } = await import(
         "~/services/drain/reconcile-handlers.server"
@@ -993,8 +1042,6 @@ describe("Tag Rules Route", () => {
       mockSql.mockResolvedValueOnce([]);
       // Insert returning id
       mockSql.mockResolvedValueOnce([{ id: "idem-rule-id" }]);
-      // S8: Count tag rules - FIRST rule (count=1)
-      mockSql.mockResolvedValueOnce([{ count: "1" }]);
       // Idempotency check - message ALREADY exists in queue
       mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg-123" }]);
 
@@ -1338,11 +1385,15 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
     const sensitiveTag = "wholesale-gold-tier";
 
     // Shop lookup
-    mockSql.mockResolvedValueOnce([{ id: "shop-xyz" }]);
+    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com" }]);
     // Store mode check (tag_based)
+    mockSql.mockResolvedValueOnce([]);
+    // Pre-check for case-insensitive duplicate
     mockSql.mockResolvedValueOnce([]);
     // Insert
     mockSql.mockResolvedValueOnce([{ id: "rule-abc" }]);
+    // Idempotency check
+    mockSql.mockResolvedValueOnce([{ msg_id: "existing-msg" }]);
 
     const formData = new FormData();
     formData.append("intent", "create_tag_rule");
@@ -1402,8 +1453,10 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
     const sensitiveTag = "secret-tier-99";
 
     // Shop lookup
-    mockSql.mockResolvedValueOnce([{ id: "shop-xyz" }]);
+    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com" }]);
     // Store mode check (tag_based)
+    mockSql.mockResolvedValueOnce([]);
+    // Pre-check for case-insensitive duplicate
     mockSql.mockResolvedValueOnce([]);
     // Insert - throw error
     const dbError = new Error(
