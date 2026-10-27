@@ -1,0 +1,135 @@
+/**
+ * DB test: loader finds account given decoded params.id containing '/' and ':'.
+ *
+ * Verifies that when React Router decodes a URL-encoded id like
+ * 'seed-test-0000-example%2Fpart%3A9' to 'seed-test-0000-example/part:9',
+ * the loader's DB lookup succeeds.
+ */
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import postgres from "postgres";
+import { sqlOptions } from "~/lib/db-light.server";
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
+
+vi.mock("@shopify/shopify-app-react-router/server", () => ({
+  boundary: { headers: vi.fn(() => ({})) },
+}));
+
+vi.mock("@sentry/cloudflare", () => ({
+  captureException: vi.fn(),
+  captureMessage: vi.fn(),
+  setUser: vi.fn(),
+  setContext: vi.fn(),
+}));
+
+vi.mock("~/lib/recompute-enqueue.server", () => ({
+  enqueueCreditStatusRecompute: vi.fn().mockResolvedValue(true),
+}));
+
+vi.mock("~/lib/log.server", () => ({
+  safeLog: vi.fn(),
+  toErrorCode: vi.fn((e) => String(e)),
+}));
+
+vi.mock("~/services/access-log.server", () => ({
+  recordAccess: vi.fn(),
+  getActorFromSessionToken: vi.fn(() => "test-actor"),
+}));
+
+const TEST_ID_WITH_SLASHES = "seed-test-0000-example/part:9";
+
+describeWithDb("account-href loader DB test", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-href";
+
+  const SHOP_ID = `shop-href-${TEST_SUFFIX}`;
+  const SHOP_DOMAIN = `href-${TEST_SUFFIX}.myshopify.com`;
+  const ACCOUNT_ID = `${TEST_ID_WITH_SLASHES}-${TEST_SUFFIX}`;
+  const COMPANY_ID = `company-href-${TEST_SUFFIX}`;
+  const LOCATION_ID = `location-href-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "holdState", "createdAt", "updatedAt"
+      ) VALUES (
+        ${ACCOUNT_ID}, ${SHOP_ID}, 'COMPANY', ${COMPANY_ID}, ${LOCATION_ID},
+        'Test Account With Slashes', 'OK', NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "BuyerAccount" WHERE id = ${ACCOUNT_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("loader finds account when params.id is decoded (contains '/' and ':')", async () => {
+    const { requestContext } = await import("~/lib/request-context.server");
+    const { loader } = await import("../app.accounts.$id");
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: SHOP_DOMAIN, accessToken: "test-token" },
+            sessionToken: { sub: "12345" },
+          }),
+        },
+      },
+      cloudflare: {
+        env: {},
+      },
+    };
+
+    const url = new URL(`https://example.com/app/accounts/${encodeURIComponent(ACCOUNT_ID)}`);
+    const request = new Request(url.toString());
+
+    const args = {
+      request,
+      context: mockContext,
+      params: { id: ACCOUNT_ID },
+      url,
+      pattern: "/app/accounts/:id",
+    };
+
+    const result = await requestContext.run({ getSql: () => sql }, async () => {
+      return loader(args as never);
+    });
+
+    const data = extractLoaderResult<{ account: { id: string; name: string } | null; error: string | null }>(result);
+
+    expect(data.error).toBeNull();
+    expect(data.account).not.toBeNull();
+    expect(data.account?.id).toBe(ACCOUNT_ID);
+    expect(data.account?.name).toBe("Test Account With Slashes");
+  });
+
+  it("account id contains the special characters", () => {
+    expect(ACCOUNT_ID).toContain("/");
+    expect(ACCOUNT_ID).toContain(":");
+  });
+});
+
+function extractLoaderResult<T>(result: unknown): T {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "type" in result &&
+    (result as { type: string }).type === "DataWithResponseInit" &&
+    "data" in result
+  ) {
+    return (result as { data: T }).data;
+  }
+  return result as T;
+}
