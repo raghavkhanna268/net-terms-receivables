@@ -209,11 +209,12 @@ describeWithDb("S18 reminder settings re-check at send time (DB)", () => {
       WHERE shop_id = ${TEST_SHOP_ID}
     `;
 
+    const env = process.env as Record<string, string | undefined>;
     const savedEnv: Record<string, string | undefined> = {};
     const envKeys = ["RESEND_API_KEY", "RESEND_FROM", "REMINDER_UNSUBSCRIBE_SECRET", "SHOPIFY_APP_URL", "RESEND_TEST_RECIPIENTS"] as const;
     for (const key of envKeys) {
-      savedEnv[key] = process.env[key];
-      process.env[key] = validEnv[key as keyof typeof validEnv];
+      savedEnv[key] = env[key];
+      env[key] = validEnv[key as keyof typeof validEnv];
     }
 
     const luxon = await import("luxon");
@@ -256,8 +257,8 @@ describeWithDb("S18 reminder settings re-check at send time (DB)", () => {
     } finally {
       luxonSpy.mockRestore();
       for (const key of envKeys) {
-        if (savedEnv[key] === undefined) delete process.env[key];
-        else process.env[key] = savedEnv[key];
+        if (savedEnv[key] === undefined) delete env[key];
+        else env[key] = savedEnv[key];
       }
     }
   });
