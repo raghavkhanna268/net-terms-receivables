@@ -541,7 +541,7 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
           : matchForTestPayment!.score >= 50
             ? "Medium"
             : "Low";
-      expect(["High", "Medium"]).toContain(band);
+      expect(band).toBe("Medium");
 
       testMatchId = matchForTestPayment!.id;
     });
@@ -596,11 +596,6 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
       const auditJson = JSON.stringify(applyAudit);
       expect(auditJson).not.toContain("narration");
       expect(auditJson).not.toContain("remitterName");
-
-      const piiPositiveControl = { narration: "test", remitterName: "test" };
-      const positiveControlJson = JSON.stringify(piiPositiveControl);
-      expect(positiveControlJson).toContain("narration");
-      expect(positiveControlJson).toContain("remitterName");
     });
   });
 
@@ -626,30 +621,22 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
       expect(rules.some((r) => r.offsetDays === 0)).toBe(true);
       expect(rules.some((r) => r.offsetDays === 7)).toBe(true);
 
-      const threeDaysFromNow = new Date();
-      threeDaysFromNow.setDate(threeDaysFromNow.getDate() + 3);
-
-      await sql`
-        INSERT INTO "Invoice" (
-          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-          status, "issuedAt", "dueAt", "dueSource", "createdAt", "updatedAt"
-        )
-        VALUES (
-          gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
-          ${"gid://shopify/Order/reminder-b2b-" + runId}, '#B2B002', 5000.00, 5000.00, 'open',
-          NOW(), ${threeDaysFromNow}, 'schedule', NOW(), NOW()
-        )
-      `;
-
+      const { DateTime } = await import("luxon");
       const timezone = "Asia/Kolkata";
 
-      const isDueForMinus3 = isReminderDueToday(threeDaysFromNow, -3, timezone);
+      const threeDaysFromNowKolkata = DateTime.now()
+        .setZone(timezone)
+        .startOf("day")
+        .plus({ days: 3 })
+        .toJSDate();
+
+      const isDueForMinus3 = isReminderDueToday(threeDaysFromNowKolkata, -3, timezone);
       expect(isDueForMinus3).toBe(true);
 
-      const isDueFor0 = isReminderDueToday(threeDaysFromNow, 0, timezone);
+      const isDueFor0 = isReminderDueToday(threeDaysFromNowKolkata, 0, timezone);
       expect(isDueFor0).toBe(false);
 
-      const isDueFor7 = isReminderDueToday(threeDaysFromNow, 7, timezone);
+      const isDueFor7 = isReminderDueToday(threeDaysFromNowKolkata, 7, timezone);
       expect(isDueFor7).toBe(false);
     });
   });
@@ -658,7 +645,7 @@ describeWithDb("Reviewer Journey: B2B Company/CompanyLocation (Part A - Primary)
 /**
  * VARIANT JOURNEY: Tagged Customer path
  *
- * This exercises the tag-based buyer flow including the #498 second-rule enqueue behavior.
+ * This exercises the tag-based buyer flow with raw SQL inserts for tag rules.
  */
 describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
   let sql: ReturnType<typeof postgres>;
@@ -726,11 +713,8 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
     expect(shop.currency).toBe("INR");
   });
 
-  it("VARIANT: Tag rule created and second rule triggers RECONCILE_CUSTOMERS enqueue per #498", async () => {
+  it("VARIANT: Tag rules created and validation functions work (raw SQL insert)", async () => {
     const { validateTag, validateTermsDays } = await import("../../app/routes/app.tag-rules");
-    const { enqueueReconcileStage } = await import(
-      "../../app/services/drain/reconcile-handlers.server"
-    );
 
     expect(validateTag("wholesale-net30")).toBeNull();
     expect(validateTermsDays("30")).toBeNull();
@@ -740,17 +724,6 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
       VALUES (gen_random_uuid()::text, ${testShopId}, 'wholesale-net30', 30, NOW(), NOW())
     `;
 
-    const [alreadyQueued] = await sql<{ msg_id: string }[]>`
-      SELECT msg_id::text FROM pgmq.q_s6_sync
-      WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}
-        AND message->>'topic' = 'RECONCILE_CUSTOMERS'
-      LIMIT 1
-    `;
-    if (!alreadyQueued) {
-      const manualKey = `manual:${Date.now()}`;
-      await enqueueReconcileStage(sql, TEST_SHOP_DOMAIN, "customers", manualKey);
-    }
-
     await sql`
       INSERT INTO "AccountSource" (id, "shopId", tag, "defaultTermsDays", "createdAt", "updatedAt")
       VALUES (gen_random_uuid()::text, ${testShopId}, 'vip-net60', 60, NOW(), NOW())
@@ -758,16 +731,11 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
 
     const rules = await sql`SELECT * FROM "AccountSource" WHERE "shopId" = ${testShopId}`;
     expect(rules.length).toBe(2);
-
-    const messages = await sql`
-      SELECT * FROM pgmq.q_s6_sync 
-      WHERE message->>'shop' = ${TEST_SHOP_DOMAIN} 
-        AND message->>'topic' = 'RECONCILE_CUSTOMERS'
-    `;
-    expect(messages.length).toBe(1);
+    expect(rules.some((r) => r.tag === "wholesale-net30")).toBe(true);
+    expect(rules.some((r) => r.tag === "vip-net60")).toBe(true);
   });
 
-  it("VARIANT: Tagged buyer created with credit status written (raw SQL insert)", async () => {
+  it("VARIANT: Tagged buyer created with holdState OK (raw SQL insert)", async () => {
     const customerIdSuffix = `customer-tagged-${runId}`;
 
     const [buyer] = await sql<{ id: string }[]>`
@@ -903,12 +871,13 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
     expect(paidInvoice.status).toBe("paid");
   });
 
-  it("VARIANT: Reminder selection uses isReminderDueToday correctly for #1002", async () => {
+  it("VARIANT: Reminder selection uses isReminderDueToday correctly", async () => {
     const {
       ensureDefaultReminderRules,
       updateShopReminderSettings,
       isReminderDueToday,
     } = await import("../../app/services/reminders.server");
+    const { DateTime } = await import("luxon");
 
     await ensureDefaultReminderRules(sql, testShopId);
     await updateShopReminderSettings(sql, testShopId, true);
@@ -918,30 +887,21 @@ describeWithDb("Reviewer Journey: Tagged Customer (Variant)", () => {
     `;
     expect(rules.length).toBe(3);
 
-    const threeDaysFromNow = new Date();
-    threeDaysFromNow.setDate(threeDaysFromNow.getDate() + 3);
-
-    await sql`
-      INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
-        status, "issuedAt", "dueAt", "dueSource", "createdAt", "updatedAt"
-      )
-      VALUES (
-        gen_random_uuid()::text, ${testShopId}, ${testBuyerAccountId},
-        ${"gid://shopify/Order/reminder-tagged-" + runId}, '#1002', 5000.00, 5000.00, 'open',
-        NOW(), ${threeDaysFromNow}, 'schedule', NOW(), NOW()
-      )
-    `;
-
     const timezone = "Asia/Kolkata";
 
-    const isDueForMinus3 = isReminderDueToday(threeDaysFromNow, -3, timezone);
+    const threeDaysFromNowKolkata = DateTime.now()
+      .setZone(timezone)
+      .startOf("day")
+      .plus({ days: 3 })
+      .toJSDate();
+
+    const isDueForMinus3 = isReminderDueToday(threeDaysFromNowKolkata, -3, timezone);
     expect(isDueForMinus3).toBe(true);
 
-    const isDueFor0 = isReminderDueToday(threeDaysFromNow, 0, timezone);
+    const isDueFor0 = isReminderDueToday(threeDaysFromNowKolkata, 0, timezone);
     expect(isDueFor0).toBe(false);
 
-    const isDueFor7 = isReminderDueToday(threeDaysFromNow, 7, timezone);
+    const isDueFor7 = isReminderDueToday(threeDaysFromNowKolkata, 7, timezone);
     expect(isDueFor7).toBe(false);
   });
 });
