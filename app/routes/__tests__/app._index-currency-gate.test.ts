@@ -158,7 +158,7 @@ describe("#292 currency gate on /app loader", () => {
     }
   }
 
-  it("USD shop: notSupported=true, no money fields in payload, money queries not run", async () => {
+  it("USD shop: storeSetupStatus=not_supported, no money fields in payload, money queries not run", async () => {
     setupSqlMock("USD");
 
     const { loader } = await import("../app._index");
@@ -167,6 +167,7 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("not_supported");
     expect(result.shopCurrency).toBe("USD");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
@@ -180,7 +181,7 @@ describe("#292 currency gate on /app loader", () => {
     expect(mockGetBuyerLedger).not.toHaveBeenCalled();
   });
 
-  it("XXX (unknown) shop: notSupported=true, no money fields, fail-closed", async () => {
+  it("XXX (unknown) shop: storeSetupStatus=setting_up, no money fields, fail-closed", async () => {
     setupSqlMock("XXX");
 
     const { loader } = await import("../app._index");
@@ -189,6 +190,7 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("setting_up");
     expect(result.shopCurrency).toBe("XXX");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
@@ -200,7 +202,7 @@ describe("#292 currency gate on /app loader", () => {
     expect(mockGetShopAgingTotals).not.toHaveBeenCalled();
   });
 
-  it("NULL currency: notSupported=true, no money fields, fail-closed", async () => {
+  it("NULL currency: storeSetupStatus=setting_up, no money fields, fail-closed", async () => {
     setupSqlMock(null);
 
     const { loader } = await import("../app._index");
@@ -209,6 +211,7 @@ describe("#292 currency gate on /app loader", () => {
 
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("setting_up");
     expect(result.shopCurrency).toBe("XXX");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();
@@ -237,7 +240,7 @@ describe("#292 currency gate on /app loader", () => {
     expect(mockGetBuyerLedger).toHaveBeenCalled();
   });
 
-  it("no Shop row: notSupported=true, fail-closed with XXX sentinel", async () => {
+  it("no Shop row: storeSetupStatus=setting_up, fail-closed with XXX sentinel", async () => {
     // Simulate no shop row found
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
@@ -255,9 +258,10 @@ describe("#292 currency gate on /app loader", () => {
     const dataResponse = await loader(createLoaderArgs());
     const result = dataResponse.data as Record<string, unknown>;
 
-    // Fail-closed: no Shop row triggers currency gate with XXX sentinel
+    // Fail-closed: no Shop row triggers setting_up state
     expect(result.notSupported).toBe(true);
     expect(result.currencySupported).toBe(false);
+    expect(result.storeSetupStatus).toBe("setting_up");
     expect(result.shopCurrency).toBe("XXX");
     expect(result.agingTotals).toBeNull();
     expect(result.buyerLedger).toBeNull();

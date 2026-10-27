@@ -85,6 +85,16 @@ on:
         required: false
         default: false
         type: boolean
+      held_webhook_split:
+        description: "Read-only: held orders / held accounts per shop_kind and webhook receipts per shop_kind by topic (fixed last 6h). Counts, enums and booleans only"
+        required: false
+        default: false
+        type: boolean
+      reminders:
+        description: "Read-only: S18 reminder counts (shops enabled per shop_kind, due today per offset class/channel (raw offset for main/e2e only), ReminderLog by status 7d, enqueue/drain pg_cron runs 24h, e2e shop timezone, main offline session health). Counts, enums, booleans and cron timestamps only"
+        required: false
+        default: false
+        type: boolean
       e2e_second_shop:
         description: "Read-only: second-shop E2E mode (install/uninstall/reinstall test). Runs ONLY the e2e_second_shop job; shop comes from the E2E_SHOP secret or the single non-allowed Shop row (never an input, never printed)"
         required: false
@@ -419,6 +429,410 @@ jobs:
 
           echo ""
           echo "::notice::Post-redrive verification completed"
+
+      # Read-only. shop_kind (main / e2e / other_N / unknown) comes from the
+      # canonical shop_labels CTE (scripts/ci/shop-labels.ts) over the masked
+      # ALLOWED_DEV_STORE / E2E_SHOP secrets. Domains are only compared (in the
+      # CTE and in the webhook_receipts.shop join), never printed. The webhook
+      # lookback is a fixed 6 hours, not an input. Output: counts, enums and
+      # booleans only (no domains, GIDs, ids, money or emails).
+      # Pinned by scripts/ci/__tests__/prod-diagnostics-held-webhook-split*.test.ts.
+      - name: Held and webhook split by shop_kind (read-only)
+        if: ${{ inputs.held_webhook_split }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          if ! command -v psql &> /dev/null; then
+            echo "Installing PostgreSQL client..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+
+          # Split shop label secrets
+          # Same handling as the entity counts: validate before masking;
+          # invalid or unset -> "" and every shop is shop_kind=unknown.
+          LABEL_ALLOWED="${ALLOWED_DEV_STORE:-}"
+          if [ -n "$LABEL_ALLOWED" ]; then
+            if [[ ! "$LABEL_ALLOWED" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              LABEL_ALLOWED=""
+            else
+              echo "::add-mask::$LABEL_ALLOWED"
+            fi
+          fi
+          LABEL_E2E="${E2E_SHOP:-}"
+          if [ -n "$LABEL_E2E" ]; then
+            if [[ ! "$LABEL_E2E" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              LABEL_E2E=""
+            else
+              echo "::add-mask::$LABEL_E2E"
+            fi
+          fi
+          # End split shop label secrets
+
+          echo "=== Held and webhook split by shop_kind (read-only) ==="
+          echo "Read-only mode: enforced via PGOPTIONS and BEGIN TRANSACTION READ ONLY"
+          echo ""
+
+          # shop_kind = 'unknown' with shop_row=false: no Shop row matched
+          # (e.g. a receipt for an uninstalled/redacted shop). other_N is
+          # numbered by Shop.id and agrees across the sections of this run
+          # only; it does not identify a shop across runs.
+          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${LABEL_ALLOWED}" -v "e2e=${LABEL_E2E}" "$DATABASE_URL" <<'EOSQL'
+          BEGIN TRANSACTION READ ONLY;
+          \echo '== held orders per shop_kind (backstop action=held; all retained / last 6h / with invoice)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COALESCE(sl.shop_kind, 'unknown') AS shop_kind,
+                 (sl.shop_id IS NOT NULL) AS shop_row,
+                 COUNT(*) AS held_orders,
+                 COUNT(*) FILTER (WHERE b.processed_at > NOW() - INTERVAL '6 hours') AS held_orders_6h,
+                 COUNT(i.id) AS held_orders_with_invoice
+          FROM backstop_processed_orders b
+          LEFT JOIN shop_labels sl ON sl.shop_id = b.shop_id
+          LEFT JOIN "Invoice" i ON i."orderId" = b.order_gid AND i."shopId" = b.shop_id
+          WHERE b.action = 'held'
+          GROUP BY 1, 2
+          ORDER BY 1, 2;
+          \echo '== buyer accounts per shop_kind by holdState / manualHold / bypass (seed fixtures counted separately)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COALESCE(sl.shop_kind, 'unknown') AS shop_kind,
+                 CASE WHEN ba."holdState"::text IN ('OK', 'NEAR_LIMIT', 'HELD', 'BYPASS') THEN ba."holdState"::text ELSE 'other' END AS hold_state,
+                 (ba."manualHold" = true) AS manual_hold,
+                 (ba.bypass = true) AS bypass,
+                 COUNT(*) AS accounts,
+                 COUNT(*) FILTER (WHERE ba.id LIKE 'seed-account-%') AS seed_fixtures
+          FROM "BuyerAccount" ba
+          LEFT JOIN shop_labels sl ON sl.shop_id = ba."shopId"
+          GROUP BY 1, 2, 3, 4
+          ORDER BY 1, 2, 3, 4;
+          \echo '== webhook receipts per shop_kind by topic (last 6h)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COALESCE(sl.shop_kind, 'unknown') AS shop_kind,
+                 (sl.shop_id IS NOT NULL) AS shop_row,
+                 CASE WHEN wr.topic ~ '^[A-Z0-9_]{1,64}$' THEN wr.topic ELSE 'other' END AS topic,
+                 COUNT(*) AS receipts_6h
+          FROM webhook_receipts wr
+          LEFT JOIN "Shop" s ON s.domain = wr.shop
+          LEFT JOIN shop_labels sl ON sl.shop_id = s.id
+          WHERE wr.received_at > NOW() - INTERVAL '6 hours'
+          GROUP BY 1, 2, 3
+          ORDER BY 1, 2, 3;
+          ROLLBACK;
+          EOSQL
+
+          echo ""
+          echo "::notice::Held and webhook split completed"
+
+      # Read-only. S18 payment-reminder counts for G4 (why nothing reaches
+      # Resend). shop_kind comes from the canonical shop_labels CTE
+      # (scripts/ci/shop-labels.ts) over the masked ALLOWED_DEV_STORE /
+      # E2E_SHOP secrets; the e2e shop's timezone is selected by that same
+      # E2E_SHOP match in SQL (Shop has no reliable seed marker), never by an
+      # input or id. Due-today mirrors s18_enqueue_reminders() Part 3
+      # (prisma/migrations/20261122000000_s18_catchup_amount_ordering
+      # :128-151) in each shop's own timezone. pg_cron jobs are picked by
+      # jobname (20261030000000_s18_payment_reminders :231-235,
+      # 20261024010000_s10_drain_cron :165-169); never prints cron.job.command
+      # or return_message. Windows are hard-coded (7 days, 24 hours).
+      # Output: counts, enums, booleans and UTC cron timestamps only (no
+      # domains, GIDs, ids, money or emails).
+      # Pinned by scripts/ci/__tests__/prod-diagnostics-reminders.test.ts.
+      - name: Reminders counts (read-only)
+        if: ${{ inputs.reminders }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_MIGRATIONS }}
+          ALLOWED_DEV_STORE: ${{ secrets.ALLOWED_DEV_STORE }}
+          E2E_SHOP: ${{ secrets.E2E_SHOP }}
+          PGOPTIONS: "-c default_transaction_read_only=on"
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL_MIGRATIONS secret not set"
+            exit 1
+          fi
+
+          if ! command -v psql &> /dev/null; then
+            echo "Installing PostgreSQL client..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          source scripts/ci/psql-redacted.sh  # redact DB host from psql stderr (#190 F2)
+
+          # Split shop label secrets
+          # Same handling as the entity counts: validate before masking;
+          # invalid or unset -> "" and every shop is shop_kind=unknown.
+          LABEL_ALLOWED="${ALLOWED_DEV_STORE:-}"
+          if [ -n "$LABEL_ALLOWED" ]; then
+            if [[ ! "$LABEL_ALLOWED" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              LABEL_ALLOWED=""
+            else
+              echo "::add-mask::$LABEL_ALLOWED"
+            fi
+          fi
+          LABEL_E2E="${E2E_SHOP:-}"
+          if [ -n "$LABEL_E2E" ]; then
+            if [[ ! "$LABEL_E2E" =~ ^[a-z0-9-]+\.myshopify\.com$ ]]; then
+              LABEL_E2E=""
+            else
+              echo "::add-mask::$LABEL_E2E"
+            fi
+          fi
+          # End split shop label secrets
+
+          echo "=== Reminders counts (read-only) ==="
+          echo "Read-only mode: enforced via PGOPTIONS and BEGIN TRANSACTION READ ONLY"
+          echo ""
+
+          # REPEATABLE READ: every section reads one snapshot, so the
+          # shop_labels copies number other_N identically within this run.
+          # other_N does not identify a shop across runs.
+          psql -X -q -v ON_ERROR_STOP=1 -v "allowed=${LABEL_ALLOWED}" -v "e2e=${LABEL_E2E}" "$DATABASE_URL" <<'EOSQL'
+          BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+          \echo '== 1. shops per shop_kind: installed, reminders enabled (s18_shop_reminder_settings), settings row present'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT sl.shop_kind,
+                 (s."uninstalledAt" IS NULL) AS installed,
+                 EXISTS (
+                   SELECT 1 FROM s18_shop_reminder_settings srs
+                   WHERE srs.shop_id = s.id AND srs.enabled = true
+                 ) AS reminders_enabled,
+                 EXISTS (
+                   SELECT 1 FROM s18_shop_reminder_settings srs
+                   WHERE srs.shop_id = s.id
+                 ) AS settings_row,
+                 COUNT(*) AS shops
+          FROM "Shop" s
+          JOIN shop_labels sl ON sl.shop_id = s.id
+          GROUP BY 1, 2, 3, 4
+          ORDER BY 1, 2, 3, 4;
+          \echo '== 2. due today per rule (offset_class before_due/on_due/after_due, raw offset_days for main/e2e only, channel), each shop''s own timezone; enqueue = 20261122 Part 3 selection'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          ),
+          due AS (
+            SELECT sl.shop_kind,
+                   CASE WHEN r."offsetDays" < 0 THEN 'before_due'
+                        WHEN r."offsetDays" = 0 THEN 'on_due'
+                        WHEN r."offsetDays" > 0 THEN 'after_due'
+                   END AS offset_class,
+                   r."offsetDays" AS rule_offset,
+                   r.channel AS rule_channel,
+                   COALESCE(srs.enabled, false) AS settings_on,
+                   (s."uninstalledAt" IS NULL) AS shop_installed,
+                   EXTRACT(HOUR FROM (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))) BETWEEN 9 AND 18 AS in_window,
+                   EXISTS (
+                     SELECT 1 FROM "ReminderLog" rl
+                     WHERE rl."ruleId" = r.id AND rl."invoiceId" = i.id
+                   ) AS logged,
+                   (i.outstanding > 0) AS unpaid
+            FROM "ReminderRule" r
+            INNER JOIN "Shop" s ON s.id = r."shopId"
+            INNER JOIN shop_labels sl ON sl.shop_id = s.id
+            LEFT JOIN s18_shop_reminder_settings srs ON srs.shop_id = r."shopId"
+            INNER JOIN "Invoice" i
+                ON i."shopId" = r."shopId"
+                AND i.status = 'open'
+                AND i."dueAt" IS NOT NULL
+            INNER JOIN "BuyerAccount" ba
+                ON ba.id = i."buyerAccountId"
+                AND ba."shopId" = i."shopId"
+            WHERE r.enabled = true
+              AND (i."dueAt" AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE + r."offsetDays"
+                  = (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))::DATE
+          )
+          SELECT d.shop_kind,
+                 d.offset_class AS offset_class,
+                 CASE WHEN d.shop_kind IN ('main', 'e2e')
+                      THEN CASE WHEN d.rule_offset::TEXT ~ '^-?[0-9]{1,4}$' THEN d.rule_offset::TEXT END
+                 END AS offset_days,
+                 CASE WHEN d.rule_channel::TEXT IN ('native', 'email') THEN d.rule_channel::TEXT END AS channel,
+                 COUNT(*) AS due_today,
+                 COUNT(*) FILTER (WHERE d.unpaid) AS due_today_unpaid,
+                 COUNT(*) FILTER (WHERE d.logged) AS due_today_already_logged,
+                 COUNT(*) FILTER (WHERE d.settings_on AND d.shop_installed
+                                    AND d.rule_channel = 'email'::"ReminderChannel"
+                                    AND NOT d.logged) AS enqueue_eligible_today,
+                 COUNT(*) FILTER (WHERE d.settings_on AND d.shop_installed
+                                    AND d.rule_channel = 'email'::"ReminderChannel"
+                                    AND NOT d.logged AND d.in_window) AS enqueue_eligible_now
+          FROM due d
+          GROUP BY 1, 2, 3, 4
+          ORDER BY 1, 2, 3, 4;
+          \echo '== 3. ReminderLog by status per shop_kind (last 7d by COALESCE(sentAt, firstCappedAt); undated = both NULL)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COALESCE(sl.shop_kind, 'unknown') AS shop_kind,
+                 CASE WHEN rl.status::TEXT IN ('sent', 'delayed', 'skipped_daily_limit', 'skipped_opted_out')
+                      THEN rl.status::TEXT ELSE 'other' END AS log_status,
+                 COUNT(*) FILTER (WHERE COALESCE(rl."sentAt", rl."firstCappedAt") > NOW() - INTERVAL '7 days') AS logs_7d,
+                 COUNT(*) FILTER (WHERE rl."sentAt" IS NULL AND rl."firstCappedAt" IS NULL) AS logs_undated,
+                 COUNT(*) AS logs_all_time
+          FROM "ReminderLog" rl
+          LEFT JOIN shop_labels sl ON sl.shop_id = rl."shopId"
+          GROUP BY 1, 2
+          ORDER BY 1, 2;
+          \echo '== 5. e2e shop (E2E_SHOP secret match) timezone; 0 e2e_shop_rows = secret unset/invalid or no row'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COUNT(*) AS e2e_shop_rows,
+                 MAX(CASE WHEN s.timezone IN ('Asia/Kolkata', 'Asia/Calcutta', 'UTC', 'Etc/UTC',
+                                              'Asia/Dubai', 'Asia/Singapore', 'Europe/London',
+                                              'America/New_York', 'America/Chicago',
+                                              'America/Los_Angeles', 'Australia/Sydney')
+                          THEN s.timezone
+                          WHEN s.timezone IS NULL THEN 'null'
+                          WHEN public.s18_safe_timezone(s.timezone) = s.timezone THEN 'other_valid'
+                          ELSE 'invalid'
+                     END) AS e2e_timezone,
+                 bool_or(public.s18_safe_timezone(s.timezone) IN ('Asia/Kolkata', 'Asia/Calcutta')) AS e2e_effective_tz_ist,
+                 bool_or(EXTRACT(HOUR FROM (NOW() AT TIME ZONE public.s18_safe_timezone(s.timezone))) BETWEEN 9 AND 18) AS e2e_in_send_window_now,
+                 bool_or(s."uninstalledAt" IS NULL) AS e2e_installed,
+                 bool_or(s.currency = 'INR') AS e2e_currency_inr,
+                 bool_or(s.id LIKE 'seed-shop-%') AS e2e_seed_id_prefix
+          FROM "Shop" s
+          JOIN shop_labels sl ON sl.shop_id = s.id
+          WHERE sl.shop_kind = 'e2e';
+          \echo '== 6. main dev store (ALLOWED_DEV_STORE secret match) offline Session health, booleans only (no token values, no expiry times)'
+          WITH shop_labels AS (
+            SELECT s.id AS shop_id,
+                   CASE WHEN :'allowed' = '' OR :'e2e' = '' OR :'allowed' = :'e2e' THEN 'unknown'
+                        WHEN s.domain = :'allowed' THEN 'main'
+                        WHEN s.domain = :'e2e' THEN 'e2e'
+                        ELSE 'other_' || (ROW_NUMBER() OVER (
+                               PARTITION BY s.domain IN (:'allowed', :'e2e')
+                               ORDER BY s.id))::text
+                   END AS shop_kind
+            FROM "Shop" s
+          )
+          SELECT COUNT(DISTINCT s.id) > 0 AS main_shop_row_present,
+                 COUNT(se.id) > 0 AS session_row_present,
+                 COALESCE(bool_or(se."needsReauth"), COUNT(se.id) = 0) AS needs_reauth,
+                 COALESCE(bool_and(se."refreshToken" IS NOT NULL AND se."refreshToken" <> ''), false) AS refresh_token_present,
+                 COALESCE(bool_and(se."refreshTokenExpires" > (NOW() AT TIME ZONE 'UTC')), false) AS refresh_expires_in_future
+          FROM "Shop" s
+          JOIN shop_labels sl ON sl.shop_id = s.id
+          LEFT JOIN "Session" se
+            ON se.shop = s.domain AND se."isOnline" = false
+          WHERE sl.shop_kind = 'main';
+          ROLLBACK;
+          EOSQL
+
+          JRD_EXISTS=$(psql -X -q -v ON_ERROR_STOP=1 -t -A "$DATABASE_URL" <<'EOSQL'
+          SELECT to_regclass('cron.job_run_details') IS NOT NULL;
+          EOSQL
+          )
+          if [ "$JRD_EXISTS" != "t" ]; then
+            echo "cron_reminders=skipped_no_job_run_details"
+          else
+            psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'EOSQL'
+            -- @col last_start_utc, last_success_utc: timestamp
+            BEGIN TRANSACTION READ ONLY;
+            \echo '== 4. pg_cron reminder enqueue + drain jobs, last 24h (status counts, last start; no command or return text)'
+            WITH jobs AS (
+              SELECT j.jobid,
+                     CASE WHEN j.jobname IN ('s18_enqueue_reminders_hourly', 's10_drain_every_minute')
+                          THEN j.jobname END AS cron_job,
+                     j.active AS job_active
+              FROM cron.job j
+              WHERE j.jobname IN ('s18_enqueue_reminders_hourly', 's10_drain_every_minute')
+            )
+            SELECT jb.cron_job,
+                   bool_or(jb.job_active) AS active,
+                   COUNT(d.runid) AS runs_24h,
+                   COUNT(d.runid) FILTER (WHERE d.status = 'succeeded') AS succeeded_24h,
+                   COUNT(d.runid) FILTER (WHERE d.status = 'failed') AS failed_24h,
+                   COUNT(d.runid) FILTER (WHERE d.status NOT IN ('succeeded', 'failed')) AS other_status_24h,
+                   to_char(max(d.start_time) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_start_utc,
+                   to_char(max(d.start_time) FILTER (WHERE d.status = 'succeeded') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_success_utc
+            FROM jobs jb
+            LEFT JOIN cron.job_run_details d
+              ON d.jobid = jb.jobid
+              AND d.start_time > NOW() - INTERVAL '24 hours'
+            GROUP BY jb.cron_job
+            ORDER BY jb.cron_job;
+            ROLLBACK;
+          EOSQL
+          fi
+
+          echo ""
+          echo "::notice::Reminders counts completed"
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -2528,6 +2942,8 @@ jobs:
                   'dlq_' || COALESCE((SELECT lower(l.message->>'topic') FROM linked l ORDER BY l.dead_lettered_at, l.id LIMIT 1), 'unknown')
                 ELSE 'none' END),
             (10, 'e2e_bulk_ops_closed', (SELECT COUNT(*) FROM bulk WHERE closed_at IS NOT NULL)::text),
+            -- Completed per Shopify (completed_at set), whether or not closed. Sorted last.
+            (20, 'e2e_bulk_ops_completed', (SELECT COUNT(*) FROM bulk WHERE completed_at IS NOT NULL)::text),
             (11, 'e2e_bulk_finish_receipts', (SELECT COUNT(*) FROM webhook_receipts WHERE shop = :'shop' AND topic = 'BULK_OPERATIONS_FINISH')::text),
             (12, 'e2e_bulk_ops_listed', (SELECT COUNT(*) FROM bulk WHERE n <= 10)::text),
             (13, 'e2e_dlq_rows_listed', (SELECT COUNT(*) FROM dlq WHERE n <= 10)::text),

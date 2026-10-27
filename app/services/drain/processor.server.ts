@@ -140,6 +140,8 @@ export interface DrainConfig {
   maxRetries: number;
   /** Max read_ct for no-handler messages before DLQ (default: 48, ~2 days) */
   noHandlerMaxReads: number;
+  /** Max drain passes per tick (default: 1 = today's single-pass behavior; max: MAX_DRAIN_PASSES) */
+  maxPasses: number;
 }
 
 export const DEFAULT_DRAIN_CONFIG: DrainConfig = {
@@ -148,7 +150,21 @@ export const DEFAULT_DRAIN_CONFIG: DrainConfig = {
   timeBudgetMs: 15000,
   maxRetries: 5,
   noHandlerMaxReads: 48,
+  maxPasses: 1,
 };
+
+/**
+ * Maximum number of drain passes within a single tick.
+ * Bounds CPU usage on Workers Free tier while allowing chained stages
+ * to complete in one tick.
+ */
+export const MAX_DRAIN_PASSES = 4;
+
+/**
+ * Safety margin (ms) before timeBudgetMs at which no new pass should start.
+ * Ensures we don't start a pass that can't finish within the budget.
+ */
+export const PASS_START_MARGIN_MS = 3000;
 
 /**
  * Handler function type for sync messages.
@@ -1119,6 +1135,8 @@ export interface DrainResult {
   timedOut: boolean;
   /** Total wall time in milliseconds */
   elapsedMs: number;
+  /** Number of passes actually run (useful for monitoring) */
+  passesRun: number;
   /** Errors encountered (for logging) - code only, no raw messages */
   errors: Array<{ msgId: string; topic: string; code: string }>;
 }
@@ -1175,7 +1193,7 @@ async function archiveMessage(sql: Sql, queue: string, msgId: string): Promise<v
  * Extend visibility timeout for a message (e.g., no handler available).
  */
 async function extendVisibility(sql: Sql, queue: string, msgId: string, seconds: number): Promise<void> {
-  await sql`SELECT pgmq.set_vt(${queue}, ${msgId}::bigint, ${seconds})`;
+  await sql`SELECT pgmq.set_vt(${queue}, ${msgId}::bigint, ${seconds}::integer)`;
 }
 
 /**
@@ -1355,6 +1373,7 @@ async function processSyncQueue(
     noHandler: 0,
     timedOut: false,
     elapsedMs: 0,
+    passesRun: 0,
     errors: [],
   };
 
@@ -1636,12 +1655,17 @@ async function processSyncQueue(
 
 /**
  * Process the s6_bulk queue.
+ *
+ * @param handledBulkOpIds - Set of bulk operation IDs already handled this tick.
+ *   Continuation messages for these ops are skipped to prevent re-polling
+ *   the same bulk operation multiple times within one tick.
  */
 async function processBulkQueue(
   sql: Sql,
   config: DrainConfig,
   startTime: number,
-  previousResult: DrainResult
+  previousResult: DrainResult,
+  handledBulkOpIds: Set<string>
 ): Promise<DrainResult> {
   const result = { ...previousResult };
 
@@ -1747,6 +1771,26 @@ async function processBulkQueue(
       continue;
     }
 
+    // Skip bulk operations already handled this tick (prevents re-polling continuations)
+    const bulkOpId = msg.message.bulkOperationId;
+    if (bulkOpId && handledBulkOpIds.has(bulkOpId)) {
+      // Replace message atomically with delay to prevent re-read in same tick.
+      // Only reset read_ct when this is the first read (read_ct === 1) to preserve
+      // retry budget for continuations that failed in prior ticks.
+      if (msg.read_ct === 1) {
+        // First read: delete + resend with delay resets read_ct to 0
+        await sql.begin(async (tx) => {
+          await tx`SELECT pgmq.delete(${S6_QUEUES.BULK}, ${msg.msg_id}::bigint)`;
+          await tx`SELECT pgmq.send(${S6_QUEUES.BULK}, ${tx.json(msg.message)}, ${config.visibilityTimeoutSec}::integer)`;
+        });
+      } else {
+        // Prior failed reads: extend VT to defer without resetting read_ct
+        await extendVisibility(sql, S6_QUEUES.BULK, msg.msg_id, config.visibilityTimeoutSec);
+      }
+      result.skipped++;
+      continue;
+    }
+
     const handler = getBulkHandler(msg.message.topic);
 
     if (!handler) {
@@ -1775,6 +1819,11 @@ async function processBulkQueue(
       const bulkResult = await handler(sql, msg.message);
 
       if (bulkResult.success) {
+        // Mark this bulk operation as handled this tick to prevent re-polling continuations
+        if (bulkOpId) {
+          handledBulkOpIds.add(bulkOpId);
+        }
+
         // Check status for progress vs complete
         if (bulkResult.status === "progress") {
           // Guard: only send continuation if Shop still exists and is not uninstalled (#239).
@@ -1926,14 +1975,36 @@ async function processBulkQueue(
 }
 
 /**
+ * Count messages that did real work in a pass.
+ * Excludes skips so that skipped continuations don't prevent early stop.
+ */
+function countMessagesWorked(result: DrainResult): number {
+  return (
+    result.processed +
+    result.noHandler +
+    result.failed +
+    result.deadLettered +
+    result.deadLetterAlreadyGoneCount
+  );
+}
+
+/**
  * Run the queue drain.
  *
- * Processes messages from both s6_sync and s6_bulk queues,
- * respecting the time budget and batch size limits.
+ * Processes messages from both s6_sync and s6_bulk queues in multiple passes,
+ * allowing chained stages (a message that enqueues a follow-up) to complete
+ * within a single tick.
+ *
+ * Stops when ANY of these conditions is met:
+ * - Both queues return empty in a pass
+ * - A pass processed 0 messages in total
+ * - Elapsed time reaches the safety margin (timeBudgetMs - PASS_START_MARGIN_MS)
+ * - Elapsed time nears the visibility timeout (prevents message re-read in same tick)
+ * - maxPasses is reached (default 1 = today's behavior; max MAX_DRAIN_PASSES)
  *
  * @param sql - postgres.js SQL client
  * @param config - Drain configuration (optional, uses defaults)
- * @returns Drain result with statistics
+ * @returns Drain result with statistics aggregated across all passes
  */
 export async function runDrain(
   sql: Sql,
@@ -1941,14 +2012,67 @@ export async function runDrain(
 ): Promise<DrainResult> {
   const fullConfig = { ...DEFAULT_DRAIN_CONFIG, ...config };
   const startTime = Date.now();
+  const passStartMargin = fullConfig.timeBudgetMs - PASS_START_MARGIN_MS;
+  const vtMarginMs = fullConfig.visibilityTimeoutSec * 1000;
 
-  // Process sync queue first
-  let result = await processSyncQueue(sql, fullConfig, startTime);
+  // Clamp maxPasses to valid range
+  const maxPasses = Math.max(1, Math.min(fullConfig.maxPasses, MAX_DRAIN_PASSES));
 
-  // If we have time, process bulk queue too
-  if (!result.timedOut) {
-    result = await processBulkQueue(sql, fullConfig, startTime, result);
+  // Track bulk operation IDs handled this tick to prevent re-polling continuations
+  const handledBulkOpIds = new Set<string>();
+
+  const aggregatedResult: DrainResult = {
+    processed: 0,
+    failed: 0,
+    deadLettered: 0,
+    deadLetterAlreadyGoneCount: 0,
+    skipped: 0,
+    noHandler: 0,
+    timedOut: false,
+    elapsedMs: 0,
+    passesRun: 0,
+    errors: [],
+  };
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    // Always run pass 1 (pass === 0); check margin only before pass 2+
+    if (pass > 0) {
+      const elapsed = Date.now() - startTime;
+      // Stop if elapsed time nears either the time budget margin or the VT
+      const stopThreshold = Math.min(passStartMargin, vtMarginMs - PASS_START_MARGIN_MS);
+      if (elapsed >= stopThreshold) {
+        aggregatedResult.timedOut = true;
+        break;
+      }
+    }
+
+    const syncResult = await processSyncQueue(sql, fullConfig, startTime);
+
+    let passResult = syncResult;
+    if (!syncResult.timedOut) {
+      passResult = await processBulkQueue(sql, fullConfig, startTime, syncResult, handledBulkOpIds);
+    }
+
+    aggregatedResult.passesRun++;
+    aggregatedResult.processed += passResult.processed;
+    aggregatedResult.failed += passResult.failed;
+    aggregatedResult.deadLettered += passResult.deadLettered;
+    aggregatedResult.deadLetterAlreadyGoneCount += passResult.deadLetterAlreadyGoneCount;
+    aggregatedResult.skipped += passResult.skipped;
+    aggregatedResult.noHandler += passResult.noHandler;
+    aggregatedResult.errors.push(...passResult.errors);
+
+    if (passResult.timedOut) {
+      aggregatedResult.timedOut = true;
+      break;
+    }
+
+    const passMessagesWorked = countMessagesWorked(passResult);
+    if (passMessagesWorked === 0) {
+      break;
+    }
   }
 
-  return result;
+  aggregatedResult.elapsedMs = Date.now() - startTime;
+  return aggregatedResult;
 }

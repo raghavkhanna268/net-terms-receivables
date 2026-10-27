@@ -39,7 +39,7 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
 describeWithDb("shop/redact complete DB deletion", () => {
   let sql: ReturnType<typeof postgres>;
-  const TEST_SUFFIX = Date.now().toString(36) + "-redact-complete";
+  const TEST_SUFFIX = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8) + "-redact-complete";
 
   // Shop A - will be deleted
   const SHOP_A_ID = `shop-a-${TEST_SUFFIX}`;

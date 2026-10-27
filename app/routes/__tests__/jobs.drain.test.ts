@@ -48,7 +48,7 @@ vi.mock("~/services/drain/processor.server", () => ({
     timeBudgetMs: 15000,
     maxRetries: 5,
     noHandlerMaxReads: 48,
-    bulkChunkSize: 500,
+    maxPasses: 1,
   },
 }));
 
@@ -101,13 +101,19 @@ describe("jobs.drain route", () => {
 
   function createActionArgs(
     request: Request,
-    secret?: string
+    options: { secret?: string; drainMaxPasses?: string } = {}
   ): ActionFunctionArgs {
+    const env: { JOBS_DRAIN_SECRET?: string; DRAIN_MAX_PASSES?: string } = {
+      JOBS_DRAIN_SECRET: options.secret ?? VALID_SECRET,
+    };
+    if (options.drainMaxPasses !== undefined) {
+      env.DRAIN_MAX_PASSES = options.drainMaxPasses;
+    }
     return {
       request,
       context: {
         cloudflare: {
-          env: { JOBS_DRAIN_SECRET: secret ?? VALID_SECRET },
+          env,
           ctx: {},
         },
       },
@@ -218,13 +224,13 @@ describe("jobs.drain route", () => {
   });
 
   describe("drain execution", () => {
-    it("calls runDrain with default config", async () => {
+    it("calls runDrain with default config (maxPasses=1)", async () => {
       const { action } = await import("../jobs.drain");
       const request = createRequest();
 
       await action(createActionArgs(request));
 
-      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, {});
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
     });
 
     it("parses batchSize from query params", async () => {
@@ -233,7 +239,7 @@ describe("jobs.drain route", () => {
 
       await action(createActionArgs(request));
 
-      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { batchSize: 10 });
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { batchSize: 10, maxPasses: 1 });
     });
 
     it("parses timeBudgetMs from query params", async () => {
@@ -242,7 +248,7 @@ describe("jobs.drain route", () => {
 
       await action(createActionArgs(request));
 
-      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { timeBudgetMs: 10000 });
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { timeBudgetMs: 10000, maxPasses: 1 });
     });
 
     it("ignores invalid batchSize values", async () => {
@@ -251,19 +257,19 @@ describe("jobs.drain route", () => {
       // Non-numeric
       const request1 = createRequest({ queryParams: { batchSize: "abc" } });
       await action(createActionArgs(request1));
-      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, {});
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
 
       // Too large
       mockRunDrain.mockClear();
       const request2 = createRequest({ queryParams: { batchSize: "500" } });
       await action(createActionArgs(request2));
-      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, {});
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
 
       // Negative
       mockRunDrain.mockClear();
       const request3 = createRequest({ queryParams: { batchSize: "-5" } });
       await action(createActionArgs(request3));
-      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, {});
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
     });
 
     it("returns drain result as JSON with noHandler field", async () => {
@@ -299,6 +305,80 @@ describe("jobs.drain route", () => {
       const result = (await response.json()) as { error: string };
       // Should be generic, not the raw error message
       expect(result.error).toBe("Internal server error");
+    });
+  });
+
+  describe("DRAIN_MAX_PASSES env var parsing", () => {
+    it("default with no env var gives maxPasses=1 (same as today)", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
+    });
+
+    it("'0' becomes maxPasses=1 (clamped)", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request, { drainMaxPasses: "0" }));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
+    });
+
+    it("'9' becomes maxPasses=4 (clamped to MAX_DRAIN_PASSES)", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request, { drainMaxPasses: "9" }));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 4 });
+    });
+
+    it("'abc' (garbage) becomes maxPasses=1", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request, { drainMaxPasses: "abc" }));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
+    });
+
+    it("'3' gives maxPasses=3 (valid value)", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request, { drainMaxPasses: "3" }));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 3 });
+    });
+
+    it("'' (empty string) becomes maxPasses=1", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request, { drainMaxPasses: "" }));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
+    });
+
+    it("'2.5x' (garbage with numbers) becomes maxPasses=1", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request, { drainMaxPasses: "2.5x" }));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
+    });
+
+    it("negative value becomes maxPasses=1", async () => {
+      const { action } = await import("../jobs.drain");
+      const request = createRequest();
+
+      await action(createActionArgs(request, { drainMaxPasses: "-1" }));
+
+      expect(mockRunDrain).toHaveBeenCalledWith(mockSql, { maxPasses: 1 });
     });
   });
 
