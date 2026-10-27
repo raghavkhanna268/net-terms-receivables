@@ -11,7 +11,8 @@ import { describe, it, expect } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const WEBHOOK_ROUTES = [
+// Routes that received loaders in F12 - these include Allow: POST header
+const NEW_LOADER_ROUTES = [
   "webhooks.orders",
   "webhooks.customers",
   "webhooks.compliance",
@@ -19,15 +20,35 @@ const WEBHOOK_ROUTES = [
   "webhooks.company_locations",
   "webhooks.draft_orders",
   "webhooks.app.scopes_update",
-  "webhooks.app.subscriptions_update",
   "webhooks.app.uninstalled",
   "webhooks.bulk_operations.finish",
+] as const;
+
+// Routes that already had loaders before F12 - these return 405 but use
+// statusText instead of Allow header (not modified to keep diff minimal for #536)
+const EXISTING_LOADER_ROUTES = [
+  "webhooks.app.subscriptions_update",
   "webhooks.shop.update",
 ] as const;
 
+const ALL_WEBHOOK_ROUTES = [...NEW_LOADER_ROUTES, ...EXISTING_LOADER_ROUTES];
+
 describe("webhooks.* loader 405 responses", () => {
-  describe.each(WEBHOOK_ROUTES)("%s", (routeName) => {
+  describe.each(NEW_LOADER_ROUTES)("%s (F12 new loader)", (routeName) => {
     it("returns 405 with Allow: POST header on GET", async () => {
+      const module = await import(`../${routeName}`);
+      expect(module.loader).toBeDefined();
+
+      const response = await module.loader();
+
+      expect(response).toBeInstanceOf(Response);
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe("POST");
+    });
+  });
+
+  describe.each(EXISTING_LOADER_ROUTES)("%s (pre-existing loader)", (routeName) => {
+    it("returns 405 on GET", async () => {
       const module = await import(`../${routeName}`);
       expect(module.loader).toBeDefined();
 
@@ -39,7 +60,6 @@ describe("webhooks.* loader 405 responses", () => {
 
       expect(response).toBeInstanceOf(Response);
       expect(response.status).toBe(405);
-      expect(response.headers.get("Allow")).toBe("POST");
     });
   });
 
@@ -74,14 +94,10 @@ describe("webhooks.* loader 405 responses", () => {
     ).toEqual([]);
   });
 
-  it("all webhook loaders return Response with Allow header value POST", async () => {
-    for (const routeName of WEBHOOK_ROUTES) {
+  it("F12 loaders return Allow: POST header", async () => {
+    for (const routeName of NEW_LOADER_ROUTES) {
       const module = await import(`../${routeName}`);
-      const response = await module.loader({
-        request: new Request(`https://example.com/${routeName}`),
-        context: {},
-        params: {},
-      });
+      const response = await module.loader();
 
       const allowHeader = response.headers.get("Allow");
       expect(
