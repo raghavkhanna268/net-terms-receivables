@@ -4,7 +4,8 @@
  * Covers the rails for real deletion: db/ prefix only, keep-newest-7 enforced
  * in code even when age says delete, no deletion when fewer than 7 objects are
  * listed or the listing fails, fail-closed mode/listing handling, counts-only
- * output, and the db-backup.yml mode wiring (delete by default, dry_run kept).
+ * output, and the db-backup.yml mode wiring (schedule deletes; manual dispatch
+ * is a dry run unless dry_run=false).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -255,17 +256,56 @@ describe("main(): guards around real deletion", () => {
 
 describe("db-backup.yml prune wiring", () => {
   const wf = parse(readFileSync(join(__dirname, "../../../.github/workflows/db-backup.yml"), "utf8"));
-  const input = wf.on.workflow_dispatch.inputs.prune_mode;
+  const input = wf.on.workflow_dispatch.inputs.dry_run;
   const step = wf.jobs.prune.steps.find((s: { name?: string }) => s.name === "Prune eligible backups");
+  const expr: string = step.env.PRUNE_MODE;
 
-  it("manual dispatch keeps a dry_run option, defaulting to delete", () => {
-    expect(input.type).toBe("choice");
-    expect(input.options).toEqual(["dry_run", "delete"]);
-    expect(input.default).toBe("delete");
+  /**
+   * Evaluates the PRUNE_MODE `${{ }}` expression for an event. Only the
+   * operators used here are supported (==, &&, ||, parentheses, literals);
+   * anything else in the expression fails the test. `inputs.dry_run` is
+   * null outside workflow_dispatch, as in GitHub's inputs context.
+   */
+  function resolveMode(event: string, dryRun: boolean | null): string {
+    const m = /^\$\{\{ (.*) \}\}$/.exec(expr);
+    expect(m).not.toBeNull();
+    const body = m![1];
+    const allowed = body
+      .replace(/github\.event_name|inputs\.dry_run|'[a-z_]+'|==|&&|\|\||\(|\)|false|true|\s+/g, "");
+    expect(allowed).toBe("");
+    const js = body
+      .replace(/github\.event_name/g, "ctx.event")
+      .replace(/inputs\.dry_run/g, "ctx.dryRun")
+      .replace(/==/g, "===");
+    return new Function("ctx", `return (${js});`)({ event, dryRun }) as string;
+  }
+
+  it("manual dispatch has a boolean dry_run input that defaults to true", () => {
+    expect(input.type).toBe("boolean");
+    expect(input.default).toBe(true);
+    expect(wf.on.workflow_dispatch.inputs.prune_mode).toBeUndefined();
   });
 
-  it("scheduled runs (no inputs) resolve to delete; a chosen dry_run is passed through", () => {
-    expect(step.env.PRUNE_MODE).toBe("${{ inputs.prune_mode || 'delete' }}");
+  it("schedule -> delete (real)", () => {
+    expect(resolveMode("schedule", null)).toBe("delete");
+  });
+
+  it("dispatch with the default (dry_run=true) -> dry_run", () => {
+    expect(resolveMode("workflow_dispatch", input.default)).toBe("dry_run");
+    expect(resolveMode("workflow_dispatch", true)).toBe("dry_run");
+  });
+
+  it("dispatch with explicit dry_run=false -> delete (real)", () => {
+    expect(resolveMode("workflow_dispatch", false)).toBe("delete");
+  });
+
+  it("any other event, or a missing input, falls back to dry_run", () => {
+    expect(resolveMode("push", null)).toBe("dry_run");
+    expect(resolveMode("workflow_dispatch", null)).toBe("dry_run");
+  });
+
+  it("the only triggers are schedule and workflow_dispatch", () => {
+    expect(Object.keys(wf.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
   });
 
   it("prune runs only after a successful backup, on main", () => {

@@ -28,14 +28,11 @@ on:
     - cron: '17 21 * * *'
   workflow_dispatch:
     inputs:
-      prune_mode:
-        description: 'Retention pruning mode (delete removes eligible objects; dry_run prints counts only)'
+      dry_run:
+        description: 'Prune as a dry run (counts only). Untick (dry_run=false) to delete eligible objects.'
         required: false
-        default: 'delete'
-        type: choice
-        options:
-          - dry_run
-          - delete
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -260,10 +257,10 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          # Scheduled runs and default manual dispatches prune for real (Team
-          # Lead OK). Choose prune_mode=dry_run on a manual dispatch for counts
-          # only. Any other value is rejected by the script (exit non-zero).
-          PRUNE_MODE: ${{ inputs.prune_mode || 'delete' }}
+          # Only scheduled runs prune for real (Team Lead OK). A manual
+          # dispatch is a dry run unless dry_run=false is chosen explicitly.
+          # Any other PRUNE_MODE value is rejected by the script (exit 1).
+          PRUNE_MODE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)) && 'delete' || 'dry_run' }}
         run: |
           set -euo pipefail
           # db/ prefix only, keep-newest-7 (re-checked before deleting),

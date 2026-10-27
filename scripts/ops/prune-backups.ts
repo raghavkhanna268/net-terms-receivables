@@ -14,8 +14,8 @@
  * - Sanity floor: refuses to delete if total < 8, if eligible would leave < 7,
  *   or if newest backup > 48h old (signals stalled backup job)
  * - Unknown PRUNE_MODE values exit non-zero; an unset PRUNE_MODE is dry_run.
- *   The workflow passes `delete` for scheduled and default dispatch runs and
- *   `dry_run` when chosen on a manual dispatch.
+ *   The workflow passes `delete` only for scheduled runs and for a manual
+ *   dispatch with an explicit dry_run=false; otherwise `dry_run`.
  * - Output is counts only, never keys or sizes
  * - Stops at the first failed delete and exits non-zero (deleted < eligible)
  *

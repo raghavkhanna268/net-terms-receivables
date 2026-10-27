@@ -200,12 +200,13 @@ you keep 7 backups indefinitely.
 
 ### Prune mode
 
-Pruning is enabled (`delete`), within the rails above:
+Pruning is enabled for scheduled runs, within the rails above:
 
 - **Scheduled runs** (cron): `delete`. Logs print counts only: `total=`,
   `eligible=`, `kept=`, `deleted=`, `newest_age_hours=`.
-- **Manual dispatch**: `prune_mode` defaults to `delete`; choose `dry_run` to
-  print counts only (`total=`, `eligible=`, `kept=`) without deleting anything.
+- **Manual dispatch**: the `dry_run` input defaults to `true` and prints counts
+  only (`total=`, `eligible=`, `kept=`) without deleting anything. A manual run
+  deletes only when you explicitly set `dry_run=false`.
 - A delete failure stops the run at the first failed object and exits
   non-zero (`prune_error=true reason=partial_delete_failure`).
 
