@@ -22,6 +22,7 @@ import type {
 import { useLoaderData, useActionData, useNavigation, Form } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
+import { parsePageParam } from "~/lib/parse-page-param";
 import {
   getUnmatchedPayments,
   getSuggestedMatches,
@@ -164,7 +165,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shopDomain = session.shop;
 
   const url = new URL(request.url);
-  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
+  const page = parsePageParam(url.searchParams.get("page"));
   const view = url.searchParams.get("view") ?? "suggested";
   const selectedPaymentId = url.searchParams.get("payment") ?? null;
 
