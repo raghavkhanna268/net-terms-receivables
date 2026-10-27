@@ -205,6 +205,9 @@ const DB_TEST_PATTERNS = [
 
   // Confirm concurrency lock DB tests
   "tests/integration/confirm-concurrency-lock-db.test.ts",
+
+  // Embedded admin scale and N+1 tests
+  "tests/integration/embedded-admin-scale-db.test.ts",
 ];
 
 export default defineConfig({
