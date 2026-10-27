@@ -179,6 +179,46 @@ describe("AccountPage due date timezone rendering", () => {
 
       expect(html).toContain("27/11/2026");
     });
+
+    it("DST: July instant near New York midnight (EDT -04:00) → 14/7 for NY, 15/7 for IST", () => {
+      const loaderDataNY = buildLoaderData({
+        shopTimezone: "America/New_York",
+        invoiceRows: [
+          {
+            id: "test-inv-dst",
+            name: "INV-DST",
+            orderId: null,
+            dueAt: "2026-07-15T03:59:59.999Z",
+            outstandingPaise: "100000",
+            currency: "INR",
+            daysPastDue: 0,
+          },
+        ],
+      });
+      mockUseLoaderData.mockReturnValue(loaderDataNY);
+
+      const htmlNY = renderToString(createElement(AccountPage));
+      expect(htmlNY).toContain("14/7/2026");
+
+      const loaderDataIST = buildLoaderData({
+        shopTimezone: "Asia/Kolkata",
+        invoiceRows: [
+          {
+            id: "test-inv-dst",
+            name: "INV-DST",
+            orderId: null,
+            dueAt: "2026-07-15T03:59:59.999Z",
+            outstandingPaise: "100000",
+            currency: "INR",
+            daysPastDue: 0,
+          },
+        ],
+      });
+      mockUseLoaderData.mockReturnValue(loaderDataIST);
+
+      const htmlIST = renderToString(createElement(AccountPage));
+      expect(htmlIST).toContain("15/7/2026");
+    });
   });
 
   describe("validateTimezone fallback", () => {

@@ -32,6 +32,7 @@ import { getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
+import { validateTimezone } from "~/lib/aging-dates.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 import { processPlanWelcome } from "~/services/plan-welcome.server";
@@ -431,6 +432,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
   timing.endPhase("shop_lookup");
 
+  const shopTimezone = validateTimezone(shop?.timezone);
+
   const [currencyResult, onboardingCheckResult] = await Promise.all([
     shop
       ? checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
@@ -461,6 +464,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopDomain,
       storeHandle: notSupportedStoreHandle,
       shopCurrency: getEffectiveCurrency(shopCurrency),
+      shopTimezone,
       currencySupported: false as const,
       currencyFlipBlocked,
       gatingEnforced: false,
@@ -532,6 +536,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopDomain,
     storeHandle,
     shopCurrency,
+    shopTimezone,
     currencySupported: true as const,
     currencyFlipBlocked,
     gatingEnforced,
@@ -756,10 +761,12 @@ function BuyerInvoiceList({
   invoices,
   buyerName,
   onClose,
+  shopTimezone,
 }: {
   invoices: BuyerInvoiceRow[];
   buyerName: string;
   onClose: string;
+  shopTimezone: string;
 }) {
   if (invoices.length === 0) {
     return (
@@ -796,7 +803,7 @@ function BuyerInvoiceList({
                   <s-table-cell>
                     {inv.due_at
                       ? new Date(inv.due_at).toLocaleDateString("en-IN", {
-                          timeZone: "Asia/Kolkata",
+                          timeZone: shopTimezone,
                         })
                       : "—"}
                   </s-table-cell>
@@ -936,6 +943,7 @@ function DashboardContent({
   sortBy,
   sortOrder,
   onlyOverLimit,
+  shopTimezone,
 }: {
   dashboardData: DeferredDashboardData;
   gatingEnforced: boolean;
@@ -943,6 +951,7 @@ function DashboardContent({
   sortBy: SortBy;
   sortOrder: SortOrder;
   onlyOverLimit: boolean;
+  shopTimezone: string;
 }) {
   const {
     plan,
@@ -1052,6 +1061,7 @@ function DashboardContent({
               invoices={selectedBuyerInvoices.rows}
               buyerName={selectedBuyerInvoices.buyerName}
               onClose={closeInvoiceListUrl}
+              shopTimezone={shopTimezone}
             />
           )}
 
@@ -1129,6 +1139,7 @@ export default function Index() {
     onlyOverLimit,
     currencySupported,
     currencyFlipBlocked,
+    shopTimezone,
     dashboardData,
   } = loaderData;
 
@@ -1173,6 +1184,7 @@ export default function Index() {
               sortBy={sortBy}
               sortOrder={sortOrder}
               onlyOverLimit={onlyOverLimit}
+              shopTimezone={shopTimezone}
             />
           )}
         </Await>

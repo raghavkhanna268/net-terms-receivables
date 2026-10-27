@@ -40,6 +40,7 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { validateTimezone } from "~/lib/aging-dates.server";
 
 const PAGE_SIZE = 20;
 
@@ -170,13 +171,16 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const selectedPaymentId = url.searchParams.get("payment") ?? null;
 
   // Get shop ID
-  const [shop] = await sql<{ id: string; currency: string | null }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null; timezone: string | null }[]>`
+    SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  const shopTimezone = validateTimezone(shop?.timezone);
 
   if (!shop) {
     return {
       shopCurrency: "INR",
+      shopTimezone,
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -192,6 +196,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   if (!isCurrencyGateOpen(shop.currency)) {
     return {
       shopCurrency: getEffectiveCurrency(shop.currency),
+      shopTimezone,
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -375,6 +380,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     });
     return {
       shopCurrency: getEffectiveCurrency(shop.currency),
+      shopTimezone,
       payments: [],
       matches: [],
       selectedPayment: null,
@@ -396,6 +402,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   return {
     shopCurrency: getEffectiveCurrency(shop.currency),
+    shopTimezone,
     payments,
     matches,
     selectedPayment,
@@ -417,8 +424,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const intent = formData.get("intent") as string;
 
   // Get shop ID and currency
-  const [shop] = await sql<{ id: string; currency: string | null }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null; timezone: string | null }[]>`
+    SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
   if (!shop) {
@@ -561,11 +568,13 @@ function PaymentDetailView({
   matches,
   currency,
   actionsDisabled,
+  shopTimezone,
 }: {
   payment: { id: string; amountPaise: string; narration: string; payerText: string | null; utr: string | null; rail: string | null; valueDate: string; importFileName: string };
   matches: MatchSummary[];
   currency: string;
   actionsDisabled: boolean;
+  shopTimezone: string;
 }) {
 
   return (
@@ -579,7 +588,7 @@ function PaymentDetailView({
           <s-text type="strong">Value Date: </s-text>
           <s-text>
             {new Date(payment.valueDate).toLocaleDateString("en-IN", {
-              timeZone: "Asia/Kolkata",
+              timeZone: shopTimezone,
             })}
           </s-text>
         </s-paragraph>
@@ -1098,6 +1107,7 @@ export default function ReconcilePage() {
   const loaderData = useLoaderData<typeof loader>();
   const {
     shopCurrency,
+    shopTimezone,
     payments,
     matches,
     selectedPayment,
@@ -1193,6 +1203,7 @@ export default function ReconcilePage() {
           matches={selectedPayment.matches}
           currency={shopCurrency}
           actionsDisabled={actionsDisabled}
+          shopTimezone={shopTimezone}
         />
       ) : view === "unmatched" ? (
         <s-section heading="Unmatched Payments">
