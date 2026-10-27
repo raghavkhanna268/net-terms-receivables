@@ -738,37 +738,40 @@ describe("Plan Resolution Service", () => {
         { json: vi.fn((v) => v) }
       );
       
-      // Use a delayed resolution to ensure we can catch the in-flight state
-      // before the promise settles. Immediate resolution can complete before
-      // assertions run due to microtask scheduling.
-      adminGraphQL.mockImplementationOnce(async () => {
-        await new Promise(resolve => setTimeout(resolve, 10));
-        return {
-          success: true,
-          data: {
-            currentAppInstallation: {
-              activeSubscriptions: [],
-            },
-          },
-        };
+      // Use a deferred promise to control when the API call resolves,
+      // ensuring we can assert in-flight state before and after completion.
+      let release!: (v: unknown) => void;
+      const pending = new Promise((r) => {
+        release = r;
       });
-      
+      adminGraphQL.mockImplementationOnce(() => pending);
+
       const store: RequestStore = {
         getSql: () => specialMockSql as unknown as Sql,
         waitUntil: mockWaitUntil,
       };
-      
+
       await requestContext.run(store, async () => {
         await resolvePlan(specialMockSql as unknown as Sql, TEST_SHOP);
-        
-        // Should be in-flight immediately after triggering
+
+        // Should be in-flight while API call is pending
         expect(_isRefreshInFlight(TEST_SHOP)).toBe(true);
       });
-      
+
+      // Release the pending API call
+      release({
+        success: true,
+        data: {
+          currentAppInstallation: {
+            activeSubscriptions: [],
+          },
+        },
+      });
+
       // Wait for background refresh to complete
       const promise = mockWaitUntil.mock.calls[0][0];
       await promise;
-      
+
       // Should no longer be in-flight after completion
       expect(_isRefreshInFlight(TEST_SHOP)).toBe(false);
     });
