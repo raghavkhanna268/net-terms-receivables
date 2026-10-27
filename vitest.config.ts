@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import tsconfigPaths from "vite-tsconfig-paths";
+import { SECRET_ENV_VARS } from "./tests/helpers/env-secrets";
 
 /**
  * DB-backed test files that hit the real Postgres/pgmq and must run sequentially.
@@ -229,16 +230,9 @@ export default defineConfig({
   plugins: [tsconfigPaths()],
   test: {
     env: {
-      SHOPIFY_API_SECRET: "test-fake-shopify-api-secret",
-      SHOPIFY_API_KEY: "test-fake-shopify-api-key",
-      SHOPIFY_ADMIN_TOKEN: "test-fake-shopify-admin-token",
-      JOBS_DRAIN_SECRET: "test-fake-jobs-drain-secret",
-      REMINDER_UNSUBSCRIBE_SECRET: "test-fake-reminder-unsubscribe-secret",
-      REMINDER_UNSUBSCRIBE_SECRET_PREVIOUS: "test-fake-reminder-unsubscribe-secret-previous",
-      SENTRY_DSN: "https://fake.example.com/sentry",
-      RESEND_API_KEY: "test-fake-resend-api-key",
-      ALLOWED_DEV_STORE: "test-fake-allowed-dev-store.myshopify.com",
-    },
+      ...Object.fromEntries(SECRET_ENV_VARS.map((v) => [v.name, v.fakeValue])),
+      SHOPIFY_APP_URL: "https://example.com",
+    } as Record<string, string>,
     projects: [
       {
         test: {

@@ -1,9 +1,13 @@
 /**
  * Secret environment variable definitions for test isolation.
  *
- * This module defines which environment variables are secrets (API keys,
- * tokens, DSNs, etc.) that must be overridden with fake values during tests
- * to ensure tests never accidentally use real credentials.
+ * This module is the SINGLE SOURCE OF TRUTH for which environment variables
+ * are secrets (API keys, tokens, DSNs, etc.) that must be overridden with
+ * fake values during tests to ensure tests never accidentally use real
+ * credentials.
+ *
+ * vitest.config.ts imports this module and builds test.env dynamically:
+ *   env: { ...Object.fromEntries(SECRET_ENV_VARS.map(v => [v.name, v.fakeValue])) }
  *
  * The list is derived from scanning the codebase for process.env.* and env.*
  * references that match secret-like patterns (KEY, SECRET, TOKEN, DSN, etc.)
@@ -14,9 +18,6 @@
  *
  * Database vars (TEST_DATABASE_URL, DATABASE_URL) are excluded because DB
  * tests need the real CI Postgres connection.
- *
- * The fake values are applied via vitest's `test.env` configuration in
- * vitest.config.ts, which sets them before any test code runs.
  */
 
 export interface SecretVarDef {
@@ -30,8 +31,8 @@ export interface SecretVarDef {
  * URL/DSN-shaped vars use https://fake.example.com.
  * API keys/tokens/secrets use test-fake-<lowercase-name>.
  *
- * These values are mirrored in vitest.config.ts `test.env` block.
- * Keep both in sync when adding or removing secrets.
+ * vitest.config.ts dynamically builds test.env from this array.
+ * To add a new secret: add it here, and vitest automatically picks it up.
  */
 export const SECRET_ENV_VARS: readonly SecretVarDef[] = [
   { name: "SHOPIFY_API_SECRET", fakeValue: "test-fake-shopify-api-secret" },
