@@ -1864,4 +1864,74 @@ mod tests {
         let result = run_test(&input).unwrap();
         assert_eq!(result.operations.len(), 2, "pinned behaviour: manualPaymentMethodName as number");
     }
+
+    // =========================================================================
+    // Defaults-coverage check
+    //
+    // The app never writes a `$app:hide-terms-config` metafield (asserted on the
+    // TS side), so this Function always falls back to DEFAULT_DEFERRED_PATTERNS.
+    // This test pins that those shipped defaults both MATCH (via the real
+    // `matches_deferred_patterns`) and HIDE (via the full function run for a
+    // held B2B buyer) the deferred / net-terms payment-method labels a held
+    // buyer would see. It deliberately does not change the patterns.
+    //
+    // Sourcing of the asserted labels (see PR notes for the full write-up):
+    //   - Setup / UX copy: the merchant is NOT told to create any specifically
+    //     named payment or manual-payment method. `onboarding-steps.server.ts`
+    //     ("Configure payment options" / "Hide or show payment methods based on
+    //     buyer account status") and `app.onboarding.tsx` (the customization is
+    //     named "Hide net terms at checkout") name the app's own customization,
+    //     not a method the merchant creates. So setup copy contributes no
+    //     create-a-method name here.
+    //   - `/workspace/listing/reviewer-instructions.md` is not present in the
+    //     repo, so no name is sourced from it.
+    //   - Official Shopify docs model B2B deferral as "payment terms"
+    //     (Net 7/15/30/45/60/90, "Due on fulfillment", admin option
+    //     "Payment due later"), not as a named checkout payment method. No
+    //     official source gives an exact checkout PaymentMethod.name, so no such
+    //     string is asserted here (none is invented).
+    //
+    // The labels below are the deferred / net-terms option names the repo's own
+    // copy and fixtures say a held buyer sees (docs/privacy.md and docs/qa/S13
+    // "the net-terms payment option"; the Function's canonical fixtures use
+    // "Net Terms" and "Deferred Payment"). All match the defaults, so this test
+    // is NOT #[ignore]d. If a required name ever fails to match, it would be
+    // marked #[ignore] with a generic note instead of changing the patterns.
+    // =========================================================================
+    #[test]
+    fn test_default_patterns_match_and_hide_deferred_method_names() {
+        let deferred_names = ["Net Terms", "Deferred Payment"];
+        let visible = ("gid://shopify/PaymentCustomizationPaymentMethod/1", "Credit Card");
+        let deferred_id = "gid://shopify/PaymentCustomizationPaymentMethod/2";
+
+        for name in deferred_names {
+            // (1) The shipped defaults match the name directly.
+            assert!(
+                matches_deferred_patterns(name, DEFAULT_DEFERRED_PATTERNS),
+                "DEFAULT_DEFERRED_PATTERNS should match deferred method name: {name}",
+            );
+
+            // (2) The full function run hides exactly that method for a held
+            //     B2B buyer, leaving the non-deferred method visible.
+            let payment_methods = [visible, (deferred_id, name)];
+            let input = make_b2b_input(Some(held_metafield()), &payment_methods);
+            let result = run_test(&input).unwrap();
+
+            assert_eq!(
+                result.operations.len(),
+                1,
+                "held B2B buyer: only the deferred method ({name}) should be hidden",
+            );
+            for op in &result.operations {
+                match op {
+                    schema::Operation::PaymentMethodHide(hide_op) => {
+                        assert_eq!(
+                            hide_op.payment_method_id, deferred_id,
+                            "the hidden method should be the deferred one ({name})",
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

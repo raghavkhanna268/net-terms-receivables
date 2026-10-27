@@ -305,6 +305,7 @@ describeWithDb("Reviewer gap B: checkout protection turned on at install (DB)", 
   const DOMAIN_POSITIVE = `test-protect-create-${RUN_ID}.myshopify.com`;
   const DOMAIN_IDEMPOTENT = `test-protect-idem-${RUN_ID}.myshopify.com`;
   const DOMAIN_ERROR = `test-protect-err-${RUN_ID}.myshopify.com`;
+  const DOMAIN_HIDECONFIG = `test-protect-hideconfig-${RUN_ID}.myshopify.com`;
 
   // Opaque id used where the source expects a shop GID. Deliberately NOT a gid:// string.
   const SHOP_OWNER_ID = `test-shop-owner-${RUN_ID}`;
@@ -331,7 +332,7 @@ describeWithDb("Reviewer gap B: checkout protection turned on at install (DB)", 
   async function cleanShops() {
     await sql`
       DELETE FROM "Shop"
-      WHERE domain IN (${DOMAIN_POSITIVE}, ${DOMAIN_IDEMPOTENT}, ${DOMAIN_ERROR})
+      WHERE domain IN (${DOMAIN_POSITIVE}, ${DOMAIN_IDEMPOTENT}, ${DOMAIN_ERROR}, ${DOMAIN_HIDECONFIG})
     `;
   }
 
@@ -600,10 +601,59 @@ describeWithDb("Reviewer gap B: checkout protection turned on at install (DB)", 
     expect(_isShopSetupComplete(DOMAIN_ERROR)).toBe(false);
   });
 
-  // Coverage gap (intentionally skipped — see PR review notes, not the public PR body).
-  it.skip("install writes the hide-terms configuration metafield", () => {
-    // Skipped: the expected install-time behaviour this test would assert is not present in
-    // the current code path. Driving the real install/setup flow performs no corresponding
-    // metafield write. Marked skip per the no-source-change rule.
+  // The Function reads an optional `$app:hide-terms-config` metafield but the install flow is
+  // designed NOT to write one, so the Function's built-in DEFAULT_DEFERRED_PATTERNS apply. This
+  // drives the same real install/setup flow and asserts no captured mutation writes a metafield
+  // with key "hide-terms-config" (neither a metafieldsSet input nor a definition create, nor any
+  // metafield on the payment-customization mutations). It fails if such a write is ever added.
+  it("install never writes a $app:hide-terms-config metafield (Function defaults apply by design)", async () => {
+    const { runAfterAuth, _resetSetupCacheForTesting, _isShopSetupComplete } =
+      await importAfterAuth();
+    _resetSetupCacheForTesting();
+
+    const { admin, calls } = makeCapturingAdmin();
+    const waitUntilPromises: Promise<unknown>[] = [];
+    await runAfterAuth(DOMAIN_HIDECONFIG, admin as never, (p) => {
+      waitUntilPromises.push(p);
+    });
+    await Promise.all(waitUntilPromises);
+    await vi.waitFor(() => expect(_isShopSetupComplete(DOMAIN_HIDECONFIG)).toBe(true));
+
+    // The real install flow actually ran (so the absence assertions below have teeth, not a
+    // vacuous pass): it registered the payment customization, created metafield definitions and
+    // wrote shop_config. Any of those is where a hide-terms-config write would plausibly appear.
+    expect(calls.find((c) => c.query.includes("PaymentCustomizationCreate"))).toBeDefined();
+    expect(calls.find((c) => c.query.includes("MetafieldDefinitionCreate"))).toBeDefined();
+    expect(calls.find((c) => c.query.includes("WriteShopConfig"))).toBeDefined();
+
+    const HIDE_TERMS_KEY = "hide-terms-config";
+
+    // Any metafieldsSet-style write (e.g. WriteShopConfig, or a payment-customization mutation
+    // carrying a `metafields` input) must not target the hide-terms-config key.
+    const metafieldWriteKeys: unknown[] = [];
+    for (const call of calls) {
+      const mfs = call.variables?.metafields;
+      if (Array.isArray(mfs)) {
+        for (const mf of mfs) {
+          if (mf && typeof mf === "object" && "key" in mf) {
+            metafieldWriteKeys.push((mf as { key: unknown }).key);
+          }
+        }
+      }
+    }
+    expect(metafieldWriteKeys).not.toContain(HIDE_TERMS_KEY);
+
+    // No metafield-definition create targets the hide-terms-config key either.
+    const definitionKeys = calls
+      .filter((c) => c.query.includes("MetafieldDefinitionCreate"))
+      .map((c) => c.variables?.key);
+    expect(definitionKeys).not.toContain(HIDE_TERMS_KEY);
+
+    // Belt-and-braces: the literal key never appears as a metafield `key` anywhere in any
+    // captured mutation's variables (covers any current or future write path).
+    const keyAppearsAnywhere = calls.some((c) =>
+      JSON.stringify(c.variables ?? {}).includes(`"key":"${HIDE_TERMS_KEY}"`),
+    );
+    expect(keyAppearsAnywhere).toBe(false);
   });
 });
