@@ -211,7 +211,8 @@ describe("reminder unsubscribe token module", () => {
       expect(isUnsubscribeSecretConfigured({ REMINDER_UNSUBSCRIBE_SECRET: FAKE_SECRET })).toBe(true);
     });
 
-    it("returns false when secret is undefined in env object", () => {
+    it("returns false when secret is undefined in env object (process.env also cleared)", () => {
+      vi.stubEnv("REMINDER_UNSUBSCRIBE_SECRET", "");
       expect(isUnsubscribeSecretConfigured({ REMINDER_UNSUBSCRIBE_SECRET: undefined })).toBe(false);
     });
 
@@ -219,7 +220,8 @@ describe("reminder unsubscribe token module", () => {
       expect(isUnsubscribeSecretConfigured({ REMINDER_UNSUBSCRIBE_SECRET: "" })).toBe(false);
     });
 
-    it("returns false when env object is empty", () => {
+    it("returns false when env object is empty (process.env also cleared)", () => {
+      vi.stubEnv("REMINDER_UNSUBSCRIBE_SECRET", "");
       expect(isUnsubscribeSecretConfigured({})).toBe(false);
     });
   });

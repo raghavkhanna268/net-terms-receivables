@@ -233,6 +233,7 @@ describe("Critical Path: Reminder Sending Gates", () => {
     });
 
     it("returns disabled when RESEND_API_KEY is missing", async () => {
+      vi.stubEnv("RESEND_API_KEY", "");
       const { sendPaymentReminder } = await import("../reminders.server");
 
       const result = await sendPaymentReminder(

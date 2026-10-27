@@ -144,7 +144,6 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.unstubAllEnvs();
   });
 
   describe("sendPaymentReminder - opt-out between enqueue and send", () => {
@@ -457,6 +456,9 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
 
   describe("missing REMINDER_UNSUBSCRIBE_SECRET", () => {
     it("sendPaymentReminder skips when secret is missing", async () => {
+      vi.stubEnv("REMINDER_UNSUBSCRIBE_SECRET", "");
+      vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", "false");
+
       const { sendPaymentReminder } = await import("../reminders.server");
       const envWithoutSecret = {
         RESEND_API_KEY: "re_test_1234",
@@ -510,6 +512,9 @@ describeWithDb("S18 reminder opt-out send paths (DB)", () => {
     });
 
     it("sendCatchupReminder skips when secret is missing (delayed row preserved)", async () => {
+      vi.stubEnv("REMINDER_UNSUBSCRIBE_SECRET", "");
+      vi.stubEnv("RESEND_RECIPIENT_ALLOWLIST_ENFORCED", "false");
+
       const { sendCatchupReminder } = await import("../reminders.server");
       const envWithoutSecret = {
         RESEND_API_KEY: "re_test_1234",
