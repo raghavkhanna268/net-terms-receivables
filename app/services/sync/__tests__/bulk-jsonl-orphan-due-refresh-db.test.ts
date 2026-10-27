@@ -120,8 +120,8 @@ describeWithDb("orphan payment schedule due date refresh (DB-backed)", () => {
 
       const orderId = `gid://shopify/Order/orphan-match-${TEST_SUFFIX}`;
       const invoiceId = `inv-orphan-match-${TEST_SUFFIX}`;
-      const originalDueAt = new Date("2026-11-01T00:00:00Z");
-      const newDueAt = "2026-11-15T00:00:00Z";
+      const originalDueAt = new Date("2026-11-01T10:00:00.000Z");
+      const newDueAt = "2026-11-15T10:00:00.000Z";
 
       await sql`
         INSERT INTO "Invoice" (
@@ -160,7 +160,7 @@ describeWithDb("orphan payment schedule due date refresh (DB-backed)", () => {
       const { processOrderLines } = await import("../bulk-jsonl-processor.server");
 
       const nonExistentOrderId = `gid://shopify/Order/no-invoice-${TEST_SUFFIX}`;
-      const newDueAt = "2026-11-15T00:00:00Z";
+      const newDueAt = "2026-11-15T10:00:00.000Z";
 
       const orphanScheduleLine = JSON.stringify({
         id: `gid://shopify/PaymentSchedule/ps-no-match-${TEST_SUFFIX}`,
@@ -189,10 +189,10 @@ describeWithDb("orphan payment schedule due date refresh (DB-backed)", () => {
       const invoice2Id = `inv-multi-2-${TEST_SUFFIX}`;
       const invoice3Id = `inv-multi-3-${TEST_SUFFIX}`;
 
-      const sameDueAt = new Date("2026-11-20T00:00:00Z");
-      const differentDueAt1 = new Date("2026-11-01T00:00:00Z");
-      const differentDueAt2 = new Date("2026-11-05T00:00:00Z");
-      const newDueAt = "2026-11-20T00:00:00Z";
+      const sameDueAt = new Date("2026-11-20T10:00:00.000Z");
+      const differentDueAt1 = new Date("2026-11-01T10:00:00.000Z");
+      const differentDueAt2 = new Date("2026-11-05T10:00:00.000Z");
+      const newDueAt = "2026-11-20T10:00:00.000Z";
 
       await sql`
         INSERT INTO "Invoice" (
@@ -252,8 +252,8 @@ describeWithDb("orphan payment schedule due date refresh (DB-backed)", () => {
 
       const orderId = `gid://shopify/Order/same-due-${TEST_SUFFIX}`;
       const invoiceId = `inv-same-due-${TEST_SUFFIX}`;
-      const matchingDueAt = new Date("2026-11-15T00:00:00Z");
-      const scheduleDueAt = "2026-11-15T00:00:00Z";
+      const matchingDueAt = new Date("2026-11-15T10:00:00.000Z");
+      const scheduleDueAt = "2026-11-15T10:00:00.000Z";
 
       await sql`
         INSERT INTO "Invoice" (
