@@ -499,11 +499,11 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   }
 
   beforeEach(async () => {
-    vi.resetModules();
     vi.clearAllMocks();
 
     await sql`UPDATE "Match" SET state = 'suggested' WHERE id IN (${MATCH_A_ID}, ${MATCH_B_ID})`;
     await sql`UPDATE "BuyerAccount" SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = NULL WHERE id = ${BUYER_B_OPTOUT_ID}`;
+    await sql`UPDATE s22_data_requests SET status = 'completed' WHERE id IN (${DATA_REQUEST_A_ID}, ${DATA_REQUEST_B_ID})`;
   });
 
   afterEach(() => {
