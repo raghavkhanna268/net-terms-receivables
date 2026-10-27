@@ -20,6 +20,12 @@
  * @module
  */
 
+import {
+  MAX_METRICS,
+  isWithinBounds,
+  type BoundedMetricName,
+} from "./web-vitals-bounds";
+
 /**
  * Metric names from App Bridge Web Vitals API.
  * We only forward the Core Web Vitals: LCP, CLS, INP.
@@ -165,25 +171,41 @@ function sendMetrics(payload: WebVitalsPayload): void {
  * Only includes LCP, CLS, INP. Strips id, version, and all other data.
  * Also logs metrics to console.debug if debug mode is enabled.
  *
+ * Drops any metric whose rounded value is non-finite (NaN or ±Infinity) or
+ * falls outside the server's accepted bounds for its name, and never emits more
+ * than MAX_METRICS entries. These mirror the server's validation so a report
+ * built from noisy client values is accepted (204) rather than rejected as a
+ * whole batch (400).
+ *
  * @param metrics - Raw metrics from App Bridge
  * @param route - Clean route (pathname only)
- * @returns Filtered payload or null if no allowed metrics
+ * @returns Filtered payload or null if no metric survives filtering
  */
 export function filterMetrics(
   metrics: WebVitalsMetric[],
   route: string
 ): WebVitalsPayload | null {
-  const filtered = metrics
-    .filter((m) => ALLOWED_METRICS.has(m.name))
-    .map((m) => {
-      const roundedValue = roundValue(m.name, m.value);
-      debugLogMetric(m.name, roundedValue);
-      return {
-        name: m.name,
-        value: roundedValue,
-        route,
-      };
-    });
+  const filtered: WebVitalsPayload["metrics"] = [];
+
+  for (const m of metrics) {
+    if (!ALLOWED_METRICS.has(m.name)) {
+      continue;
+    }
+
+    const name = m.name as BoundedMetricName;
+    const roundedValue = roundValue(m.name, m.value);
+
+    if (!isWithinBounds(name, roundedValue)) {
+      continue;
+    }
+
+    debugLogMetric(m.name, roundedValue);
+    filtered.push({ name: m.name, value: roundedValue, route });
+
+    if (filtered.length >= MAX_METRICS) {
+      break;
+    }
+  }
 
   if (filtered.length === 0) {
     return null;
