@@ -63,6 +63,7 @@ vi.mock("~/services/credit-status.server", () => ({
   getCreditStatusDisplay: vi.fn().mockResolvedValue(null),
   getCompanyTotals: vi.fn().mockResolvedValue(null),
   updateCreditStatus: vi.fn(),
+  parseCreditLimitString: vi.fn().mockReturnValue({ valid: true, value: 0 }),
 }));
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({

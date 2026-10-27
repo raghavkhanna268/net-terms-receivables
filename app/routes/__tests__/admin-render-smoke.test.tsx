@@ -245,13 +245,13 @@ const APP_ROUTES: RouteTestConfig[] = [
     name: "app.settings.reminders",
     importPath: "../app.settings.reminders",
     urlPath: "/app/settings/reminders",
-    currencyGate: { exempt: "Reminder settings are configuration-only and do not display monetary amounts" },
+    currencyGate: "gated",
   },
   {
     name: "app.tag-rules",
     importPath: "../app.tag-rules",
     urlPath: "/app/tag-rules",
-    currencyGate: { exempt: "Tag rules are configuration-only and do not display monetary amounts" },
+    currencyGate: "gated",
   },
   {
     name: "app.data-requests",

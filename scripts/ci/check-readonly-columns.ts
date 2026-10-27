@@ -71,6 +71,12 @@
  *      raw error/reason, money (amount/price/balance/outstanding/limit) or a
  *      token/secret. An annotation cannot override this; map the value to an
  *      enum/boolean/count in SQL instead.
+ *   4b. Session credential columns (SESSION_CREDENTIAL_COLUMNS: the OAuth
+ *      tokens, their expiry times and the OAuth state) may only feed a
+ *      DERIVED boolean or count, e.g. `bool_or(se."refreshToken" IS NOT NULL)`
+ *      or `se."refreshTokenExpires" > NOW()`. Any other use (passthrough,
+ *      annotation, convention, CASE result, to_char, ...) is rejected as
+ *      `sensitive`, so a token value or an expiry time can never be printed.
  *      Also rejected: SELECT * (`star`), SUM/AVG and other unclassifiable
  *      expressions (`unclassified`), statements that are not SELECT/WITH/
  *      SHOW/BEGIN/COMMIT/ROLLBACK, e.g. SET (`unsupported_statement`), unparseable
@@ -112,6 +118,22 @@ export type Kind = (typeof KINDS)[number];
  * Adding a name here needs Team Lead / QA sign-off.
  */
 export const CONFIG_INT_COLUMNS: readonly string[] = ["defaultTermsDays"];
+
+/**
+ * Session (prisma/schema.prisma model Session) columns that hold a credential
+ * or its expiry time. Matched case-insensitively against every column the
+ * output expression reads; allowed only inside a derived boolean/count.
+ */
+export const SESSION_CREDENTIAL_COLUMNS: readonly string[] = [
+  "accessToken",
+  "refreshToken",
+  "refreshTokenExpires",
+  "expires",
+  "state",
+];
+const SESSION_CREDENTIAL_SET = new Set(
+  SESSION_CREDENTIAL_COLUMNS.map((c) => c.toLowerCase()),
+);
 
 export type Issue =
   | "sensitive"
@@ -1443,6 +1465,25 @@ function classifyColumn(
   // sensitive check: skip only for derived count/boolean (they cannot carry the value)
   const derivedSafe =
     via === "derived" && (kind === "count" || kind === "boolean");
+  // 4b: Session credential / expiry columns only inside a derived boolean/count
+  if (!derivedSafe) {
+    const all: Ctx = { sources: [], bare: [] };
+    collectSources(expr, all);
+    const cred = [...all.sources, ...ctx.sources].find((src) =>
+      SESSION_CREDENTIAL_SET.has(src.toLowerCase()),
+    );
+    if (cred) {
+      return {
+        kind,
+        via,
+        used,
+        violation: {
+          issue: "sensitive",
+          detail: `reads Session credential column ${cred} outside a derived boolean/count`,
+        },
+      };
+    }
+  }
   if (!derivedSafe) {
     const hits = [nm, ...ctx.sources]
       .map((s) => [s, sensitiveWord(s)] as const)

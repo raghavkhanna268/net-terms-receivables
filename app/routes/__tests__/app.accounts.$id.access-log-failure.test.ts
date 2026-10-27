@@ -50,6 +50,7 @@ vi.mock("~/services/credit-status.server", () => ({
   }),
   getCompanyTotals: vi.fn().mockResolvedValue(null),
   updateCreditStatus: vi.fn(),
+  parseCreditLimitString: vi.fn().mockReturnValue({ valid: true, value: 0 }),
 }));
 
 vi.mock("~/services/reminder-optout.server", () => ({
