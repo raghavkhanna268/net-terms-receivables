@@ -750,7 +750,7 @@ export function BuyerLedgerTable({
   );
 }
 
-function BuyerInvoiceList({
+export function BuyerInvoiceList({
   invoices,
   buyerName,
   buyerAccountId,

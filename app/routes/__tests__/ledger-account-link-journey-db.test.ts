@@ -380,17 +380,4 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
     });
   });
 
-  describe("5. Open Invoices panel has View account button", () => {
-    it("Panel header contains View account button (tested via loader integration)", async () => {
-      const { loader } = await import("../app.accounts.$id");
-
-      const result = await loader(createLoaderArgs(`/app/accounts/${BUYER_ID}`, { id: BUYER_ID }) as never);
-      const data = extractLoaderResult<{
-        account: { id: string; name: string } | null;
-      }>(result);
-
-      expect(data.account).not.toBeNull();
-      expect(data.account?.id).toBe(BUYER_ID);
-    });
-  });
 });
