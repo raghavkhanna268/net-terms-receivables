@@ -209,6 +209,9 @@ const DB_TEST_PATTERNS = [
 
   // Embedded admin scale and N+1 tests
   "tests/integration/embedded-admin-scale-db.test.ts",
+
+  // Cross-shop (tenant) isolation DB tests
+  "tests/integration/tenant-isolation-db.test.ts",
 ];
 
 export default defineConfig({
