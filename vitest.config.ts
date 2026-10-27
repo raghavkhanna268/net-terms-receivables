@@ -206,6 +206,9 @@ const DB_TEST_PATTERNS = [
 
   // Reviewer journey DB tests
   "tests/integration/reviewer-journey-db.test.ts",
+
+  // Confirm concurrency lock DB tests
+  "tests/integration/confirm-concurrency-lock-db.test.ts",
 ];
 
 export default defineConfig({

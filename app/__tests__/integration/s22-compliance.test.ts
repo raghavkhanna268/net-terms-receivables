@@ -157,7 +157,7 @@ describe("S22 Migration Verification", () => {
     });
 
     it.skipIf(!DATABASE_URL)("deleting Shop cascades to PayerAlias via BuyerAccount", async () => {
-      const testId = Date.now();
+      const testId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const testShopId = `shop-alias-cascade-${testId}`;
       const testAccountId = `account-alias-cascade-${testId}`;
       const testAliasId = `alias-cascade-${testId}`;
@@ -206,7 +206,7 @@ describe("S22 Migration Verification", () => {
     });
 
     it.skipIf(!DATABASE_URL)("deleting Shop A cascades Payment, Match, RejectedMatch, Invoice while leaving Shop B intact", async () => {
-      const testId = Date.now();
+      const testId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const now = new Date();
 
       // Shop A - will be deleted
@@ -426,12 +426,13 @@ describe("S22 Migration Verification", () => {
 
   describe("Retention Purge Function", () => {
     it.skipIf(!DATABASE_URL)("s22_purge_unmatched_narration() purges old unmatched, preserves matched and amounts/UTR", async () => {
-      const testId = Date.now();
+      const testId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const testShopId = `shop-retention-${testId}`;
       const testImportId = `import-retention-${testId}`;
       const testShopDomain = `test-retention-${testId}.myshopify.com`;
 
-      const now = new Date();
+      const [{ dbNow }] = await sql!<{ dbNow: Date }[]>`SELECT NOW() AS "dbNow"`;
+      const now = dbNow;
       const oldDate = new Date(now.getTime() - 200 * 24 * 60 * 60 * 1000); // 200 days ago
       const recentDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // 30 days ago
 
