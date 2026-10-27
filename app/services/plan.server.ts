@@ -156,6 +156,22 @@ export interface ResolvedPlan {
 }
 
 /**
+ * Status of plan resolution for redirect decisions.
+ * - "active": Confirmed active subscription exists
+ * - "none": Confirmed no active subscription (API succeeded, no subscription)
+ * - "error": Lookup failed (API error, no shop, etc.)
+ */
+export type PlanResolutionStatus = "active" | "none" | "error";
+
+/**
+ * Result of plan resolution with status for redirect decisions.
+ */
+export interface ResolvedPlanWithStatus {
+  plan: ResolvedPlan;
+  status: PlanResolutionStatus;
+}
+
+/**
  * Get the cached plan for a shop.
  * Returns the cached plan with staleness flag. Returns null only if no cache exists.
  * Staleness never lowers the tier - we always return the last known plan.
@@ -399,22 +415,72 @@ export async function resolvePlan(
 }
 
 /**
- * Internal plan resolution logic for AdminInstallationPlanSource.
- * This contains the actual implementation that was previously in resolvePlan().
+ * Resolve the current plan for a shop with status for redirect decisions.
  *
- * @internal - Use resolvePlan() or getPlanSource().resolveActivePlan() instead
+ * Status values:
+ * - "active": Confirmed active subscription exists
+ * - "none": Confirmed no active subscription (API succeeded, no subscription)
+ * - "error": Lookup failed (API error, no shop, exception thrown)
+ *
+ * Status determination:
+ * - Fresh cache hit with subscriptionId → active
+ * - Fresh cache hit without subscriptionId → none (written from successful lookup)
+ * - Stale cache hit (no forceRefresh) → active or none based on cached subscriptionId
+ * - Fresh API call succeeded with subscriptionId → active
+ * - Fresh API call succeeded without subscriptionId → none
+ * - API call failed (forceRefresh or no cache), using cached plan → error
+ * - API call failed, no cache → error
+ * - Shop not found → error
+ * - Any exception → error
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopDomain - Shop domain (e.g., "example.myshopify.com")
+ * @param forceRefresh - Skip cache and fetch fresh from Shopify
+ * @returns Resolved plan with status
  */
-async function _resolveFromAdminInstallation(
+export async function resolvePlanWithStatus(
+  sql: Sql,
+  shopDomain: string,
+  forceRefresh = false
+): Promise<ResolvedPlanWithStatus> {
+  const result = await _resolveFromAdminInstallationWithStatus(
+    sql,
+    shopDomain,
+    forceRefresh
+  );
+  return result;
+}
+
+/**
+ * Internal plan resolution logic with status tracking for redirect decisions.
+ *
+ * Status determination:
+ * - Fresh cache hit with subscriptionId → active
+ * - Fresh cache hit without subscriptionId → none (written from successful lookup)
+ * - Stale cache hit (no forceRefresh) → active or none based on cached subscriptionId
+ * - Fresh API call succeeded with subscriptionId → active
+ * - Fresh API call succeeded without subscriptionId → none
+ * - API call failed (forceRefresh or no cache), using cached plan → error
+ * - API call failed, no cache → error
+ * - Shop not found → error
+ * - Any exception → error
+ *
+ * @internal - Use resolvePlanWithStatus() instead
+ */
+async function _resolveFromAdminInstallationWithStatus(
   sql: Sql,
   shopDomain: string,
   forceRefresh: boolean
-): Promise<ResolvedPlan> {
-  const defaultResult: ResolvedPlan = {
-    plan: getDefaultPlan(),
-    subscriptionId: null,
-    subscriptionName: null,
-    isTest: false,
-    fromCache: false,
+): Promise<ResolvedPlanWithStatus> {
+  const defaultResult: ResolvedPlanWithStatus = {
+    plan: {
+      plan: getDefaultPlan(),
+      subscriptionId: null,
+      subscriptionName: null,
+      isTest: false,
+      fromCache: false,
+    },
+    status: "error",
   };
 
   let shopId: string | null = null;
@@ -428,53 +494,56 @@ async function _resolveFromAdminInstallation(
       return defaultResult;
     }
 
-    // Always get cached plan first (for fail-to-cached behavior)
     cachedPlan = await getCachedPlan(sql, shopId);
 
-    // If we have a fresh cache and not forcing refresh, return it
     if (cachedPlan && !cachedPlan.isStale && !forceRefresh) {
+      const status: PlanResolutionStatus = cachedPlan.subscriptionId ? "active" : "none";
       return {
-        plan: getPlanConfig(cachedPlan.planKey),
-        subscriptionId: cachedPlan.subscriptionId,
-        subscriptionName: cachedPlan.subscriptionName,
-        isTest: cachedPlan.isTest,
-        fromCache: true,
+        plan: {
+          plan: getPlanConfig(cachedPlan.planKey),
+          subscriptionId: cachedPlan.subscriptionId,
+          subscriptionName: cachedPlan.subscriptionName,
+          isTest: cachedPlan.isTest,
+          fromCache: true,
+        },
+        status,
       };
     }
 
-    // If cache is stale (but exists) and not forcing refresh,
-    // return cached value and trigger background refresh
     if (cachedPlan && cachedPlan.isStale && !forceRefresh) {
       triggerBackgroundRefresh(sql, shopId, shopDomain);
-
-      // Return stale cache immediately (staleness never lowers tier)
+      const status: PlanResolutionStatus = cachedPlan.subscriptionId ? "active" : "none";
       return {
-        plan: getPlanConfig(cachedPlan.planKey),
-        subscriptionId: cachedPlan.subscriptionId,
-        subscriptionName: cachedPlan.subscriptionName,
-        isTest: cachedPlan.isTest,
-        fromCache: true,
+        plan: {
+          plan: getPlanConfig(cachedPlan.planKey),
+          subscriptionId: cachedPlan.subscriptionId,
+          subscriptionName: cachedPlan.subscriptionName,
+          isTest: cachedPlan.isTest,
+          fromCache: true,
+        },
+        status,
       };
     }
 
-    // Fetch from Shopify (no cache or force refresh)
     const fetched = await fetchPlanFromShopify(shopDomain);
 
     if (!fetched) {
       if (cachedPlan) {
         safeLog("warn", "plan_fetch_failed_using_cache", { shopId });
         return {
-          plan: getPlanConfig(cachedPlan.planKey),
-          subscriptionId: cachedPlan.subscriptionId,
-          subscriptionName: cachedPlan.subscriptionName,
-          isTest: cachedPlan.isTest,
-          fromCache: true,
+          plan: {
+            plan: getPlanConfig(cachedPlan.planKey),
+            subscriptionId: cachedPlan.subscriptionId,
+            subscriptionName: cachedPlan.subscriptionName,
+            isTest: cachedPlan.isTest,
+            fromCache: true,
+          },
+          status: "error",
         };
       }
       return defaultResult;
     }
 
-    // Update cache
     await setCachedPlan(
       sql,
       shopId,
@@ -484,30 +553,52 @@ async function _resolveFromAdminInstallation(
       fetched.isTest
     );
 
+    const status: PlanResolutionStatus = fetched.subscriptionId ? "active" : "none";
     return {
-      plan: getPlanConfig(fetched.planKey),
-      subscriptionId: fetched.subscriptionId,
-      subscriptionName: fetched.subscriptionName,
-      isTest: fetched.isTest,
-      fromCache: false,
+      plan: {
+        plan: getPlanConfig(fetched.planKey),
+        subscriptionId: fetched.subscriptionId,
+        subscriptionName: fetched.subscriptionName,
+        isTest: fetched.isTest,
+        fromCache: false,
+      },
+      status,
     };
   } catch (error) {
     safeLog("error", "plan_resolve_error", { shopId, err: toErrorCode(error) });
     captureExceptionWithTags(error, { shopId: shopId ?? undefined });
-    
+
     if (cachedPlan) {
       safeLog("warn", "plan_exception_using_cache", { shopId });
       return {
-        plan: getPlanConfig(cachedPlan.planKey),
-        subscriptionId: cachedPlan.subscriptionId,
-        subscriptionName: cachedPlan.subscriptionName,
-        isTest: cachedPlan.isTest,
-        fromCache: true,
+        plan: {
+          plan: getPlanConfig(cachedPlan.planKey),
+          subscriptionId: cachedPlan.subscriptionId,
+          subscriptionName: cachedPlan.subscriptionName,
+          isTest: cachedPlan.isTest,
+          fromCache: true,
+        },
+        status: "error",
       };
     }
-    
+
     return defaultResult;
   }
+}
+
+/**
+ * Internal plan resolution logic for AdminInstallationPlanSource.
+ * Delegates to _resolveFromAdminInstallationWithStatus and returns only the plan.
+ *
+ * @internal - Use resolvePlan() or getPlanSource().resolveActivePlan() instead
+ */
+async function _resolveFromAdminInstallation(
+  sql: Sql,
+  shopDomain: string,
+  forceRefresh: boolean
+): Promise<ResolvedPlan> {
+  const result = await _resolveFromAdminInstallationWithStatus(sql, shopDomain, forceRefresh);
+  return result.plan;
 }
 
 /**
