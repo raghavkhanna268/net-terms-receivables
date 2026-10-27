@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (38 total):
+ * Files included (39 total):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -70,6 +70,9 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - scripts/__tests__/refresh-offline-token.test.ts
  * - scripts/ci/__tests__/backfill-dry-run-preflight.test.ts
  * - scripts/__tests__/e2e-bank-import.test.ts
+ *
+ * Reviewer coverage-gap tests:
+ * - tests/integration/reviewer-gaps-tagrules-protection-db.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
@@ -162,6 +165,9 @@ const DB_TEST_PATTERNS = [
 
   // Ingestion paths DB tests
   "tests/integration/ingestion-paths-db.test.ts",
+
+  // Reviewer coverage-gap DB tests (tag-rule enqueue/#498 dedupe + checkout protection install)
+  "tests/integration/reviewer-gaps-tagrules-protection-db.test.ts",
 ];
 
 export default defineConfig({
