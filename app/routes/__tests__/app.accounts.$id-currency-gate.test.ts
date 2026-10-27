@@ -39,10 +39,19 @@ const mockGetCreditStatusDisplay = vi.fn();
 const mockGetCompanyTotals = vi.fn();
 const mockUpdateCreditStatus = vi.fn();
 
-vi.mock("~/services/credit-status.server", () => ({
-  getCreditStatusDisplay: mockGetCreditStatusDisplay,
-  getCompanyTotals: mockGetCompanyTotals,
-  updateCreditStatus: mockUpdateCreditStatus,
+vi.mock("~/services/credit-status.server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/services/credit-status.server")>();
+  return {
+    ...actual,
+    getCreditStatusDisplay: mockGetCreditStatusDisplay,
+    getCompanyTotals: mockGetCompanyTotals,
+    updateCreditStatus: mockUpdateCreditStatus,
+  };
+});
+
+vi.mock("@shopify/shopify-app-react-router/server", () => ({
+  boundary: { headers: vi.fn(() => ({})) },
+  ApiVersion: { October26: "2026-10" },
 }));
 
 vi.mock("~/lib/aging-queries.server", () => ({
