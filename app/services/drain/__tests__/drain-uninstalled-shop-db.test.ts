@@ -194,14 +194,18 @@ describeWithDb("Drain: skip work for uninstalled shops", () => {
       `;
       expect(parseInt(dlqCount.count, 10), "no DLQ entry").toBe(0);
 
-      const logEntry = findLogEntry("drain_skip_uninstalled_shop");
-      expect(logEntry, "log entry exists").not.toBeNull();
+      // Reuses existing drain_skip_non_inr_shop event code with reason 'shop_uninstalled'
+      const logEntry = findLogEntry("drain_skip_non_inr_shop");
+      expect(logEntry, "log entry exists with drain_skip_non_inr_shop event").not.toBeNull();
       expect(logEntry!.reason).toBe("shop_uninstalled");
       expect(logEntry!.queue).toBe("s6_sync");
+      expect(typeof logEntry!.count).toBe("number");
+      expect(typeof logEntry!.shopHash).toBe("string");
 
+      // Verify no domain or webhookId in any log line
       const allLogs = getAllLogOutput().join("\n");
-      expect(allLogs).not.toContain(uninstalledDomain);
-      expect(allLogs).not.toContain(webhookId);
+      expect(allLogs, "no domain in logs").not.toContain(uninstalledDomain);
+      expect(allLogs, "no webhookId in logs").not.toContain(webhookId);
     } finally {
       await cleanupTestData([uninstalledDomain], suffix);
     }
@@ -334,8 +338,9 @@ describeWithDb("Drain: skip work for uninstalled shops", () => {
       `;
       expect(parseInt(dlqCount.count, 10), "no DLQ entry").toBe(0);
 
-      const logEntry = findLogEntry("drain_skip_uninstalled_shop");
-      expect(logEntry, "log entry exists").not.toBeNull();
+      // Reuses existing drain_skip_non_inr_shop event code with reason 'shop_uninstalled'
+      const logEntry = findLogEntry("drain_skip_non_inr_shop");
+      expect(logEntry, "log entry exists with drain_skip_non_inr_shop event").not.toBeNull();
       expect(logEntry!.reason).toBe("shop_uninstalled");
     } finally {
       await cleanupTestData([raceDomain], suffix);

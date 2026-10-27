@@ -1630,9 +1630,9 @@ async function processSyncQueue(
     });
   }
 
-  // Log aggregated uninstalled shop skip counts
+  // Log aggregated uninstalled shop skip counts (reuse existing drain_skip_non_inr_shop event)
   for (const [domain, count] of skippedUninstalledCounts) {
-    safeLog("info", "drain_skip_uninstalled_shop", {
+    safeLog("info", "drain_skip_non_inr_shop", {
       queue: S6_QUEUES.SYNC,
       shopHash: await shopHash(domain),
       count,
