@@ -888,34 +888,36 @@ function OnboardingChecklist({
         </s-text>
       </s-paragraph>
 
-      <s-table>
-        <s-table-header-row>
-          <s-table-header listSlot="inline">Status</s-table-header>
-          <s-table-header listSlot="primary">Step</s-table-header>
-          <s-table-header listSlot="secondary">Details</s-table-header>
-          <s-table-header listSlot="labeled">Action</s-table-header>
-        </s-table-header-row>
-        <s-table-body>
-          {steps.map((step) => (
-            <s-table-row key={step.id}>
-              <s-table-cell>
-                <StepStatusBadge status={step.status} />
-              </s-table-cell>
-              <s-table-cell>
-                <s-text type="strong">{step.title}</s-text>
-              </s-table-cell>
-              <s-table-cell>
-                <s-text>{step.helpText ?? step.description}</s-text>
-              </s-table-cell>
-              <s-table-cell>
-                {step.actionUrl && step.status !== "coming_soon" && (
-                  <s-link href={step.actionUrl}>{step.actionLabel}</s-link>
-                )}
-              </s-table-cell>
-            </s-table-row>
-          ))}
-        </s-table-body>
-      </s-table>
+      <div style={{ overflowX: "auto" }}>
+        <s-table>
+          <s-table-header-row>
+            <s-table-header listSlot="inline">Status</s-table-header>
+            <s-table-header listSlot="primary">Step</s-table-header>
+            <s-table-header listSlot="secondary">Details</s-table-header>
+            <s-table-header listSlot="labeled">Action</s-table-header>
+          </s-table-header-row>
+          <s-table-body>
+            {steps.map((step) => (
+              <s-table-row key={step.id}>
+                <s-table-cell>
+                  <StepStatusBadge status={step.status} />
+                </s-table-cell>
+                <s-table-cell>
+                  <s-text type="strong">{step.title}</s-text>
+                </s-table-cell>
+                <s-table-cell>
+                  <s-text>{step.helpText ?? step.description}</s-text>
+                </s-table-cell>
+                <s-table-cell>
+                  {step.actionUrl && step.status !== "coming_soon" && (
+                    <s-link href={step.actionUrl}>{step.actionLabel}</s-link>
+                  )}
+                </s-table-cell>
+              </s-table-row>
+            ))}
+          </s-table-body>
+        </s-table>
+      </div>
     </s-stack>
   );
 }
@@ -971,6 +973,9 @@ export default function OnboardingPage() {
   if (error || !state) {
     return (
       <s-page heading="Setup Guide">
+        <s-link href="/" slot="breadcrumb-actions">
+          Back to Dashboard
+        </s-link>
         <s-section>
           <s-banner tone="critical" heading="Error">
             {error ?? "Failed to load onboarding state"}
@@ -984,6 +989,9 @@ export default function OnboardingPage() {
 
   return (
     <s-page heading="Setup Guide">
+      <s-link href="/" slot="breadcrumb-actions">
+        Back to Dashboard
+      </s-link>
       {/* #292: Currency Flip Blocked Banner (non-INR→INR with existing data) */}
       {currencyFlipBlocked && (
         <s-section>
