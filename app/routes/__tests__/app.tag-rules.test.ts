@@ -144,7 +144,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -170,7 +170,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - found one
       mockSql.mockResolvedValueOnce([{ id: "acc-company" }]);
       // Tag rules fetch
@@ -195,7 +195,7 @@ describe("Tag Rules Route", () => {
 
       const now = new Date();
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -254,7 +254,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -283,7 +283,7 @@ describe("Tag Rules Route", () => {
       (getUsageStats as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -314,7 +314,7 @@ describe("Tag Rules Route", () => {
       (getUsageStats as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Database error"));
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -349,7 +349,7 @@ describe("Tag Rules Route", () => {
       });
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // COMPANY check - none found
       mockSql.mockResolvedValueOnce([]);
       // Tag rules fetch
@@ -378,7 +378,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -413,7 +413,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -449,7 +449,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -484,7 +484,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -519,7 +519,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds existing rule with different case
@@ -570,7 +570,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds no case-variant duplicate
@@ -617,7 +617,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -650,7 +650,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -685,7 +685,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -720,7 +720,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -755,7 +755,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -792,7 +792,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check for case-insensitive duplicate - none found
@@ -844,7 +844,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", domain: "test-s8-tagrules.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
@@ -887,7 +887,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "test-s8-first.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-first", domain: "test-s8-first.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
@@ -938,7 +938,7 @@ describe("Tag Rules Route", () => {
       (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "test-s8-second.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-second", domain: "test-s8-second.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
@@ -989,7 +989,7 @@ describe("Tag Rules Route", () => {
       (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-dup", domain: "test-s8-dup.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-dup", domain: "test-s8-dup.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds no case-variant duplicate
@@ -1035,7 +1035,7 @@ describe("Tag Rules Route", () => {
       (enqueueReconcileStage as ReturnType<typeof vi.fn>).mockClear();
 
       // Shop lookup (action uses SELECT id, domain FROM "Shop")
-      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "test-s8-idem.myshopify.com" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-idem", domain: "test-s8-idem.myshopify.com", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check - none found
@@ -1121,7 +1121,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
 
@@ -1156,7 +1156,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check - has COMPANY account (B2B)
       mockSql.mockResolvedValueOnce([{ id: "company-acc" }]);
 
@@ -1199,7 +1199,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds no duplicate
@@ -1240,7 +1240,7 @@ describe("Tag Rules Route", () => {
       (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
 
       // Shop lookup
-      mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+      mockSql.mockResolvedValueOnce([{ id: "shop-123", currency: "INR" }]);
       // Store mode check (tag_based)
       mockSql.mockResolvedValueOnce([]);
       // Pre-check finds no duplicate
@@ -1385,7 +1385,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
     const sensitiveTag = "wholesale-gold-tier";
 
     // Shop lookup
-    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com" }]);
+    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com", currency: "INR" }]);
     // Store mode check (tag_based)
     mockSql.mockResolvedValueOnce([]);
     // Pre-check for case-insensitive duplicate
@@ -1453,7 +1453,7 @@ describe("Tag rules safeLog (R2 PII prevention)", () => {
     const sensitiveTag = "secret-tier-99";
 
     // Shop lookup
-    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com" }]);
+    mockSql.mockResolvedValueOnce([{ id: "shop-xyz", domain: "test-sensitive-store.myshopify.com", currency: "INR" }]);
     // Store mode check (tag_based)
     mockSql.mockResolvedValueOnce([]);
     // Pre-check for case-insensitive duplicate
@@ -1611,8 +1611,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
 
     const html = renderToString(createElement(TagRulesPage));
 
-    expect(html).toContain("s-button");
-    expect(html).toContain("Refresh");
+    expect(html).toContain("Setting up your store");
     expect(revalidatorCalled).toBe(true);
   });
 
@@ -1643,12 +1642,9 @@ describe("S24: Finishing setup empty state (real render)", () => {
     const html = renderToString(createElement(TagRulesPage));
 
     expect(html).toContain("s-banner");
-    expect(html).toContain("Finishing setup");
-    expect(html).toContain("finishing setting up your store");
-    expect(html).toContain("s-empty-state");
     expect(html).toContain("Setting up your store");
-    expect(html).toContain("s-button");
-    expect(html).toContain("Refresh");
+    expect(html).toContain("finishing setting up your store");
+    expect(html).not.toContain("s-empty-state");
   });
 
   it("does not render create form when finishingSetup is true", async () => {
@@ -1716,7 +1712,7 @@ describe("S24: Finishing setup empty state (real render)", () => {
 
     const html = renderToString(createElement(TagRulesPage));
 
-    expect(html).not.toContain("Finishing setup");
+    expect(html).not.toContain("Setting up your store");
     expect(html).toContain("Create Tag Rule");
     expect(html).toContain('name="tag"');
     expect(html).toContain('name="defaultTermsDays"');

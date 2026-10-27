@@ -17,6 +17,9 @@ import type {
 import { useLoaderData, useNavigation, Form } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
+import { getStoreSetupStatus, type StoreSetupStatus } from "~/lib/store-setup-state";
+import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import {
   getShopReminderSettings,
   getShopReminderRules,
@@ -64,13 +67,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string; timezone: string }[]>`
-    SELECT id, timezone FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; timezone: string; currency: string | null }[]>`
+    SELECT id, timezone, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
+  const storeSetupStatus = getStoreSetupStatus(shop);
+
+  if (storeSetupStatus !== "supported") {
     return {
-      error: "Shop not found",
+      error: null,
       settings: null,
       rules: [],
       logs: [],
@@ -79,6 +84,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       statusCounts: { sent: 0, delayed: 0, skippedDailyLimit: 0, skippedOptedOut: 0 } as ReminderStatusCounts,
       delayedReminders: [] as DelayedReminder[],
       shopSentToday: 0,
+      settingUp: storeSetupStatus === "setting_up",
+      notSupported: storeSetupStatus === "not_supported",
+      storeSetupStatus,
     };
   }
 
@@ -109,6 +117,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     statusCounts,
     delayedReminders,
     shopSentToday,
+    settingUp: false,
+    notSupported: false,
+    storeSetupStatus: "supported" as const,
   };
 };
 
@@ -118,16 +129,27 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const sql = getRequestSql();
   const shopDomain = session.shop;
 
-  const [shop] = await sql<{ id: string }[]>`
-    SELECT id FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null }[]>`
+    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
   `;
 
-  if (!shop) {
-    return { success: false, error: "Shop not found" };
-  }
+  const storeSetupStatus = getStoreSetupStatus(shop);
 
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
+
+  if (intent === "toggle_enabled") {
+    if (storeSetupStatus === "setting_up") {
+      return { success: false, error: "Your store is still being set up. Please wait a moment and try again." };
+    }
+    if (storeSetupStatus === "not_supported") {
+      return { success: false, error: "Only INR currency is supported" };
+    }
+  }
+
+  if (storeSetupStatus !== "supported") {
+    return { success: false, error: "Shop not found" };
+  }
 
   const env = (context as { cloudflare?: { env?: { RESEND_API_KEY?: string; RESEND_FROM?: string } } })
     .cloudflare?.env;
@@ -383,11 +405,35 @@ export default function RemindersSettingsPage() {
     statusCounts,
     delayedReminders,
     shopSentToday,
+    settingUp,
+    notSupported,
   } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
   const remindersEnabled = settings?.enabled ?? false;
+
+  if (settingUp) {
+    return (
+      <s-page heading="Payment Reminders">
+        <s-section>
+          <StoreSettingUpBanner />
+        </s-section>
+      </s-page>
+    );
+  }
+
+  if (notSupported) {
+    return (
+      <s-page heading="Payment Reminders">
+        <s-section>
+          <s-banner tone="critical" heading="Currency Not Supported">
+            {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
+          </s-banner>
+        </s-section>
+      </s-page>
+    );
+  }
 
   return (
     <s-page heading="Payment Reminders">
