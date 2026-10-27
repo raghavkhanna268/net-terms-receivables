@@ -347,4 +347,4 @@ Migration: `prisma/migrations/20261025000000_s21_plan_cache/migration.sql`
 
 ## Scopes
 
-App Pricing requires no additional OAuth scopes. The 11 production scopes remain unchanged.
+App Pricing requires no additional OAuth scopes. The 9 production scopes remain unchanged.
