@@ -1,0 +1,486 @@
+#!/usr/bin/env npx vitest run
+/**
+ * Generate Shopify Function input fixtures from real TypeScript metafield writers.
+ *
+ * Usage:
+ *   npx vitest run scripts/gen-function-fixtures.ts
+ *
+ * This script runs the REAL updateCreditStatus writer and captures the serialized
+ * metafield values to generate fixtures for Rust Function tests. It must be run
+ * via vitest to properly mock the Shopify client.
+ *
+ * The test file app/lib/__tests__/metafield-function-fixtures.test.ts has guard
+ * tests that verify the committed fixtures match the writer output. Run this
+ * script to regenerate fixtures when the writer schema changes.
+ */
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const FIXED_TIMESTAMP = "2026-10-15T00:00:00.000Z";
+
+function companyLocationGid(id: number): string {
+  return `gid://shopify/CompanyLocation/${id}`;
+}
+
+const MOCK_SHOP_DOMAIN = "test-fixtures.example.com";
+
+interface MockBuyerAccount {
+  id: string;
+  shopId: string;
+  kind: "COMPANY" | "TAGGED_CUSTOMER";
+  companyLocationId: string | null;
+  customerId: string | null;
+  creditLimit: string | null;
+  holdState: "OK" | "NEAR_LIMIT" | "HELD" | "BYPASS";
+  bypass: boolean;
+  manualHold: boolean;
+  holdReasonCode: string | null;
+  holdNote: string | null;
+  syncPending: boolean;
+  gatedAt: Date | null;
+  metafieldSyncedAt: Date | null;
+  metafieldSyncErrorAt: Date | null;
+  metafieldSyncErrorCode: string | null;
+}
+
+interface MockConfig {
+  account: MockBuyerAccount;
+  shop: { id: string; domain: string; currency: string };
+  invoiceExposure: string;
+  draftExposure: string;
+  hasOverdue: boolean;
+}
+
+interface FixtureCase {
+  name: string;
+  description: string;
+  account: MockBuyerAccount;
+  shop: { id: string; domain: string; currency: string };
+  invoiceExposure: string;
+  draftExposure: string;
+  hasOverdue: boolean;
+  cartAmount: string;
+}
+
+const FIXTURE_CASES: FixtureCase[] = [
+  {
+    name: "unheld_under_limit",
+    description: "Unheld buyer under the credit limit",
+    account: {
+      id: "acc-unheld-under",
+      shopId: "shop-test",
+      kind: "COMPANY",
+      companyLocationId: companyLocationGid(1),
+      customerId: null,
+      creditLimit: "100000.00",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+      metafieldSyncedAt: new Date("2026-10-01"),
+      metafieldSyncErrorAt: null,
+      metafieldSyncErrorCode: null,
+    },
+    shop: { id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" },
+    invoiceExposure: "2500000",
+    draftExposure: "0",
+    hasOverdue: false,
+    cartAmount: "1000.00",
+  },
+  {
+    name: "unheld_over_limit",
+    description: "Unheld buyer over the credit limit",
+    account: {
+      id: "acc-unheld-over",
+      shopId: "shop-test",
+      kind: "COMPANY",
+      companyLocationId: companyLocationGid(2),
+      customerId: null,
+      creditLimit: "100000.00",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+      metafieldSyncedAt: new Date("2026-10-01"),
+      metafieldSyncErrorAt: null,
+      metafieldSyncErrorCode: null,
+    },
+    shop: { id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" },
+    invoiceExposure: "9500000",
+    draftExposure: "0",
+    hasOverdue: false,
+    cartAmount: "10000.00",
+  },
+  {
+    name: "held",
+    description: "Buyer on manual hold",
+    account: {
+      id: "acc-held",
+      shopId: "shop-test",
+      kind: "COMPANY",
+      companyLocationId: companyLocationGid(3),
+      customerId: null,
+      creditLimit: "100000.00",
+      holdState: "HELD",
+      bypass: false,
+      manualHold: true,
+      holdReasonCode: "MANUAL_HOLD",
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+      metafieldSyncedAt: new Date("2026-10-01"),
+      metafieldSyncErrorAt: null,
+      metafieldSyncErrorCode: null,
+    },
+    shop: { id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" },
+    invoiceExposure: "0",
+    draftExposure: "0",
+    hasOverdue: false,
+    cartAmount: "100.00",
+  },
+  {
+    name: "zero_limit",
+    description: "Buyer with zero credit limit",
+    account: {
+      id: "acc-zero-limit",
+      shopId: "shop-test",
+      kind: "COMPANY",
+      companyLocationId: companyLocationGid(4),
+      customerId: null,
+      creditLimit: "0.00",
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+      metafieldSyncedAt: new Date("2026-10-01"),
+      metafieldSyncErrorAt: null,
+      metafieldSyncErrorCode: null,
+    },
+    shop: { id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" },
+    invoiceExposure: "0",
+    draftExposure: "0",
+    hasOverdue: false,
+    cartAmount: "100.00",
+  },
+  {
+    name: "no_limit",
+    description: "Buyer with no limit set (unlimited credit)",
+    account: {
+      id: "acc-no-limit",
+      shopId: "shop-test",
+      kind: "COMPANY",
+      companyLocationId: companyLocationGid(5),
+      customerId: null,
+      creditLimit: null,
+      holdState: "OK",
+      bypass: false,
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      syncPending: true,
+      gatedAt: null,
+      metafieldSyncedAt: new Date("2026-10-01"),
+      metafieldSyncErrorAt: null,
+      metafieldSyncErrorCode: null,
+    },
+    shop: { id: "shop-test", domain: MOCK_SHOP_DOMAIN, currency: "INR" },
+    invoiceExposure: "50000000",
+    draftExposure: "0",
+    hasOverdue: false,
+    cartAmount: "100000.00",
+  },
+];
+
+const CREDIT_CHECK_FIXTURES_DIR = path.resolve(
+  __dirname,
+  "../extensions/credit-check-validation/tests/fixtures"
+);
+const HIDE_TERMS_FIXTURES_DIR = path.resolve(
+  __dirname,
+  "../extensions/hide-terms-payment/tests/fixtures"
+);
+
+let creditStatusMetafieldCaptures: Array<{
+  ownerId: string;
+  namespace: string;
+  key: string;
+  value: string;
+  type?: string;
+}> = [];
+
+vi.mock("~/services/shopify-client.server", () => ({
+  shopifyGraphQLRequest: vi.fn().mockImplementation(async (_domain, _query, variables) => {
+    const metafields = variables?.metafields as Array<{
+      ownerId: string;
+      namespace: string;
+      key: string;
+      value: string;
+      type?: string;
+    }>;
+    if (metafields) {
+      creditStatusMetafieldCaptures.push(...metafields);
+    }
+    return {
+      success: true,
+      data: {
+        metafieldsSet: {
+          metafields:
+            metafields?.map((m, i) => ({ id: `mf-${i}`, namespace: m.namespace, key: m.key })) ?? [],
+          userErrors: [],
+        },
+      },
+    };
+  }),
+}));
+
+function createMockSql(config: MockConfig) {
+  let syncVersionCounter = 1;
+
+  const queryHandler = async (
+    strings: TemplateStringsArray,
+    ..._values: unknown[]
+  ): Promise<unknown[]> => {
+    const query = strings.join("?");
+
+    if (
+      query.includes('FROM "BuyerAccount"') &&
+      query.includes("SELECT") &&
+      !query.includes('UPDATE "BuyerAccount"')
+    ) {
+      return [config.account];
+    }
+
+    if (query.includes('UPDATE "BuyerAccount"') && query.includes("RETURNING")) {
+      syncVersionCounter++;
+      return [{ syncVersion: syncVersionCounter, id: config.account.id }];
+    }
+
+    if (query.includes('UPDATE "BuyerAccount"')) {
+      return [{ count: 1 }];
+    }
+
+    if (query.includes('FROM "Shop"')) {
+      return [config.shop];
+    }
+
+    if (query.includes('FROM "Invoice"') && query.includes("SUM")) {
+      return [{ total_paise: config.invoiceExposure }];
+    }
+
+    if (query.includes("s8_draft_orders") && query.includes("SUM")) {
+      return [{ total_paise: config.draftExposure }];
+    }
+
+    if (query.includes("EXISTS") && query.includes('"Invoice"')) {
+      return [{ has_overdue: config.hasOverdue }];
+    }
+
+    if (query.includes("INSERT INTO")) {
+      return [];
+    }
+
+    if (query.includes("UPDATE") && query.includes('"Shop"')) {
+      return [];
+    }
+
+    return [];
+  };
+
+  const createTxMock = () => {
+    const tx = Object.assign(
+      async (strings: TemplateStringsArray, ...values: unknown[]) => queryHandler(strings, ...values),
+      {
+        json: (v: unknown) => v,
+        array: (arr: unknown[]) => arr,
+      }
+    );
+    return tx;
+  };
+
+  return Object.assign(
+    async (strings: TemplateStringsArray, ...values: unknown[]) => queryHandler(strings, ...values),
+    {
+      json: (v: unknown) => v,
+      array: (arr: unknown[]) => arr,
+      begin: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+        const tx = createTxMock();
+        return fn(tx);
+      },
+    }
+  );
+}
+
+function buildCreditCheckFixture(
+  creditStatusValue: Record<string, unknown>,
+  shopConfigValue: Record<string, unknown>,
+  cartAmount: string,
+  cartCurrency: string,
+  isB2B: boolean
+): Record<string, unknown> {
+  const creditStatusMetafield = { jsonValue: creditStatusValue };
+  const shopConfigMetafield = { jsonValue: shopConfigValue };
+
+  return {
+    cart: {
+      cost: {
+        totalAmount: {
+          amount: cartAmount,
+          currencyCode: cartCurrency,
+        },
+      },
+      buyerIdentity: isB2B
+        ? {
+            customer: null,
+            purchasingCompany: {
+              location: {
+                metafield: creditStatusMetafield,
+              },
+            },
+          }
+        : {
+            customer: {
+              metafield: creditStatusMetafield,
+            },
+            purchasingCompany: null,
+          },
+    },
+    buyerJourney: {
+      step: "CHECKOUT_COMPLETION",
+    },
+    shop: {
+      metafield: shopConfigMetafield,
+    },
+  };
+}
+
+function buildHideTermsFixture(
+  creditStatusValue: Record<string, unknown>,
+  shopConfigValue: Record<string, unknown>,
+  cartCurrency: string,
+  isB2B: boolean
+): Record<string, unknown> {
+  const creditStatusMetafield = { jsonValue: creditStatusValue };
+  const shopConfigMetafield = { jsonValue: shopConfigValue };
+
+  return {
+    cart: {
+      cost: {
+        totalAmount: {
+          currencyCode: cartCurrency,
+        },
+      },
+      buyerIdentity: isB2B
+        ? {
+            customer: null,
+            purchasingCompany: {
+              location: {
+                metafield: creditStatusMetafield,
+              },
+            },
+          }
+        : {
+            customer: {
+              metafield: creditStatusMetafield,
+            },
+            purchasingCompany: null,
+          },
+    },
+    paymentMethods: [
+      { id: "gid://shopify/PaymentCustomizationPaymentMethod/1", name: "Credit Card" },
+      { id: "gid://shopify/PaymentCustomizationPaymentMethod/2", name: "Deferred Payment" },
+      { id: "gid://shopify/PaymentCustomizationPaymentMethod/3", name: "Net Terms" },
+    ],
+    paymentCustomization: {
+      metafield: null,
+    },
+    shop: {
+      metafield: shopConfigMetafield,
+    },
+  };
+}
+
+describe("Generate Function Fixtures", () => {
+  beforeAll(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(FIXED_TIMESTAMP));
+  });
+
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  it("generates all fixtures to disk", async () => {
+    fs.mkdirSync(CREDIT_CHECK_FIXTURES_DIR, { recursive: true });
+    fs.mkdirSync(HIDE_TERMS_FIXTURES_DIR, { recursive: true });
+
+    for (const fixtureCase of FIXTURE_CASES) {
+      creditStatusMetafieldCaptures = [];
+
+      const sql = createMockSql({
+        account: fixtureCase.account,
+        shop: fixtureCase.shop,
+        invoiceExposure: fixtureCase.invoiceExposure,
+        draftExposure: fixtureCase.draftExposure,
+        hasOverdue: fixtureCase.hasOverdue,
+      });
+
+      const { recomputeCreditStatus } = await import("~/services/credit-status-recompute.server");
+      const result = await recomputeCreditStatus(sql as never, fixtureCase.account.id, "invoice_change");
+
+      expect(result.success, `recomputeCreditStatus failed for ${fixtureCase.name}`).toBe(true);
+
+      const captured = creditStatusMetafieldCaptures.find((m) => m.key === "credit_status");
+      expect(captured, `No credit_status metafield captured for ${fixtureCase.name}`).toBeDefined();
+
+      const creditStatusValue = JSON.parse(captured!.value);
+      const shopConfigValue = { schemaVersion: 1, currencyCode: fixtureCase.shop.currency };
+
+      const isB2B = fixtureCase.account.kind === "COMPANY";
+
+      const creditCheckFixture = buildCreditCheckFixture(
+        creditStatusValue,
+        shopConfigValue,
+        fixtureCase.cartAmount,
+        fixtureCase.shop.currency,
+        isB2B
+      );
+
+      const hideTermsFixture = buildHideTermsFixture(
+        creditStatusValue,
+        shopConfigValue,
+        fixtureCase.shop.currency,
+        isB2B
+      );
+
+      fs.writeFileSync(
+        path.join(CREDIT_CHECK_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`),
+        JSON.stringify(creditCheckFixture, null, 2) + "\n"
+      );
+
+      fs.writeFileSync(
+        path.join(HIDE_TERMS_FIXTURES_DIR, `fixture_${fixtureCase.name}.json`),
+        JSON.stringify(hideTermsFixture, null, 2) + "\n"
+      );
+
+      console.log(`Generated: ${fixtureCase.name} (updatedAt: ${creditStatusValue.updatedAt})`);
+    }
+
+    console.log("\nFixtures written to:");
+    console.log(`  ${CREDIT_CHECK_FIXTURES_DIR}`);
+    console.log(`  ${HIDE_TERMS_FIXTURES_DIR}`);
+  });
+});
