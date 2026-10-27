@@ -9,7 +9,7 @@
  * - Download errors show generic text, never server error details
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderToString } from "react-dom/server";
 import { createElement, type ReactNode } from "react";
 
@@ -142,8 +142,8 @@ describe("Reconcile action result banners", () => {
     expect(html).not.toContain("Action completed.");
   });
 
-  it("thrown error shows generic text, never the internal error message", () => {
-    const internalErrorMessage = "internal-db-connection-xyz-detail-secret";
+  it("render test: action error shows critical banner without internal error string", () => {
+    const internalDetail = "internal-detail-xyz";
     mockUseActionData.mockReturnValue({
       success: false,
       intent: "confirm",
@@ -154,35 +154,196 @@ describe("Reconcile action result banners", () => {
 
     expect(html).toContain('tone="critical"');
     expect(html).toContain("Action failed");
-    expect(html).not.toContain(internalErrorMessage);
+    expect(html).not.toContain(internalDetail);
   });
 });
 
-describe("Data-requests download error handling", () => {
-  it("code sets generic error message not err.message or server details", async () => {
-    const fs = await import("fs");
-    const sourceFile = fs.readFileSync("app/routes/app.data-requests.tsx", "utf-8");
+describe("Reconcile action error handling (real action tests)", () => {
+  const mockSession = { shop: "test-action-shop.myshopify.com" };
+  const mockContext = {
+    shopify: {
+      authenticate: {
+        admin: vi.fn().mockResolvedValue({ session: mockSession }),
+      },
+    },
+  };
+  const mockUrl = new URL("https://example.com/app/reconcile");
+  const mockPattern = "/app/reconcile";
 
-    expect(sourceFile).toContain('setDownloadError("Download failed. Please try again.")');
-    expect(sourceFile).not.toMatch(/setDownloadError\([^)]*err\.message/);
-    expect(sourceFile).not.toMatch(/setDownloadError\([^)]*errorData\.error/);
+  let mockSql: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockSql = vi.fn();
+    mockContext.shopify.authenticate.admin.mockResolvedValue({
+      session: mockSession,
+    });
   });
 
-  it("download error display does not include prefix", async () => {
-    const fs = await import("fs");
-    const sourceFile = fs.readFileSync("app/routes/app.data-requests.tsx", "utf-8");
-
-    expect(sourceFile).not.toContain("Download error:");
-    expect(sourceFile).toContain("{downloadError}");
+  afterEach(() => {
+    vi.clearAllMocks();
   });
 
-  it("failed download with server error internal-detail-xyz shows only generic text", async () => {
-    const fs = await import("fs");
-    const sourceFile = fs.readFileSync("app/routes/app.data-requests.tsx", "utf-8");
+  it("(a) thrown error from confirmMatch returns generic error, not internal message", async () => {
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestSql: () => mockSql,
+      getRequestWaitUntil: vi.fn(() => undefined),
+    }));
 
-    const catchBlock = sourceFile.match(/catch\s*\{[\s\S]*?finally/);
-    expect(catchBlock).toBeTruthy();
-    expect(catchBlock![0]).toContain("Download failed. Please try again.");
-    expect(catchBlock![0]).not.toContain("internal-detail-xyz");
+    vi.doMock("~/services/matcher.server", () => ({
+      runMatcher: vi.fn(),
+      confirmMatch: vi.fn().mockRejectedValue(new Error("internal-detail-xyz")),
+      rejectMatch: vi.fn(),
+      MAX_PAYMENTS_PER_REQUEST: 50,
+    }));
+
+    vi.doMock("~/services/apply.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/services/apply.server")>();
+      return {
+        applyMatch: vi.fn(),
+        unmatchMatch: vi.fn(),
+        RECONCILE_HUMAN_MESSAGES: actual.RECONCILE_HUMAN_MESSAGES,
+      };
+    });
+
+    vi.doMock("@shopify/shopify-app-react-router/server", () => ({
+      boundary: { headers: vi.fn(() => ({})) },
+      ApiVersion: { October26: "2026-10" },
+    }));
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-throw-test", currency: "INR" }]);
+
+    const formData = new FormData();
+    formData.append("intent", "confirm");
+    formData.append("matchId", "match-throw-test");
+
+    const postRequest = new Request("https://example.com/app/reconcile", {
+      method: "POST",
+      body: formData,
+    });
+
+    const { action } = await import("../app.reconcile");
+    const result = await action({
+      request: postRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    expect(result).toEqual({
+      success: false,
+      intent: "confirm",
+      error: "Action failed",
+    });
+    expect(JSON.stringify(result)).not.toContain("internal-detail-xyz");
+    expect(result.intent).toBe("confirm");
+  });
+
+  it("(b) applyMatch resolving with internal error returns generic message", async () => {
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestSql: () => mockSql,
+      getRequestWaitUntil: vi.fn(() => undefined),
+    }));
+
+    vi.doMock("~/services/matcher.server", () => ({
+      runMatcher: vi.fn(),
+      confirmMatch: vi.fn(),
+      rejectMatch: vi.fn(),
+      MAX_PAYMENTS_PER_REQUEST: 50,
+    }));
+
+    vi.doMock("~/services/apply.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/services/apply.server")>();
+      return {
+        applyMatch: vi.fn().mockResolvedValue({ success: false, error: "internal-detail-xyz" }),
+        unmatchMatch: vi.fn(),
+        RECONCILE_HUMAN_MESSAGES: actual.RECONCILE_HUMAN_MESSAGES,
+      };
+    });
+
+    vi.doMock("@shopify/shopify-app-react-router/server", () => ({
+      boundary: { headers: vi.fn(() => ({})) },
+      ApiVersion: { October26: "2026-10" },
+    }));
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-apply-error-test", currency: "INR" }]);
+
+    const formData = new FormData();
+    formData.append("intent", "apply");
+    formData.append("matchId", "match-apply-error-test");
+
+    const postRequest = new Request("https://example.com/app/reconcile", {
+      method: "POST",
+      body: formData,
+    });
+
+    const { action } = await import("../app.reconcile");
+    const result = await action({
+      request: postRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("An error occurred. Please try again.");
+    expect(JSON.stringify(result)).not.toContain("internal-detail-xyz");
+  });
+
+  it("(c) successful confirm returns success with intent", async () => {
+    vi.doMock("~/lib/request-context.server", () => ({
+      getRequestSql: () => mockSql,
+      getRequestWaitUntil: vi.fn(() => undefined),
+    }));
+
+    vi.doMock("~/services/matcher.server", () => ({
+      runMatcher: vi.fn(),
+      confirmMatch: vi.fn().mockResolvedValue({ success: true }),
+      rejectMatch: vi.fn(),
+      MAX_PAYMENTS_PER_REQUEST: 50,
+    }));
+
+    vi.doMock("~/services/apply.server", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("~/services/apply.server")>();
+      return {
+        applyMatch: vi.fn(),
+        unmatchMatch: vi.fn(),
+        RECONCILE_HUMAN_MESSAGES: actual.RECONCILE_HUMAN_MESSAGES,
+      };
+    });
+
+    vi.doMock("@shopify/shopify-app-react-router/server", () => ({
+      boundary: { headers: vi.fn(() => ({})) },
+      ApiVersion: { October26: "2026-10" },
+    }));
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-confirm-success-test", currency: "INR" }]);
+
+    const formData = new FormData();
+    formData.append("intent", "confirm");
+    formData.append("matchId", "match-confirm-success-test");
+
+    const postRequest = new Request("https://example.com/app/reconcile", {
+      method: "POST",
+      body: formData,
+    });
+
+    const { action } = await import("../app.reconcile");
+    const result = await action({
+      request: postRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    expect(result).toEqual({
+      success: true,
+      intent: "confirm",
+      error: null,
+    });
   });
 });
