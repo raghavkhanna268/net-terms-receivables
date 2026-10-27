@@ -26,8 +26,10 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { buildOverLimitBannerState, buildNewAccountsPausedBannerState } from "~/lib/over-limit-banner";
 import { NO_CURRENCY_SENTINEL } from "~/lib/shop-currency.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY, CURRENCY_FLIP_BLOCKED_BANNER_TEXT, SUPPORT_EMAIL_MAILTO } from "~/lib/shop-currency-copy";
+import { StoreSettingUpBanner } from "~/components/StoreSetupState";
 import { pluralizeWithCount } from "~/lib/copy-helpers";
-import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { getEffectiveCurrency } from "~/lib/currency-gate.server";
+import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
@@ -186,27 +188,15 @@ async function checkOnboardingRedirect(
   shopId: string
 ): Promise<boolean> {
   try {
-    const [shop] = await sql<{ onboarding_dismissed_at: Date | null }[]>`
-      SELECT onboarding_dismissed_at FROM "Shop" WHERE id = ${shopId}
+    const [result] = await sql<{ should_redirect: boolean }[]>`
+      SELECT 
+        s.onboarding_dismissed_at IS NULL 
+        AND NOT EXISTS (SELECT 1 FROM "BuyerAccount" WHERE "shopId" = ${shopId})
+        AND NOT EXISTS (SELECT 1 FROM "AccountSource" WHERE "shopId" = ${shopId}) AS should_redirect
+      FROM "Shop" s
+      WHERE s.id = ${shopId}
     `;
-
-    if (shop?.onboarding_dismissed_at !== null) {
-      return false;
-    }
-
-    const buyerCountResult = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count FROM "BuyerAccount" WHERE "shopId" = ${shopId}
-    `;
-    const buyerCount = parseInt(buyerCountResult[0]?.count ?? "0", 10);
-    if (buyerCount > 0) return false;
-
-    const tagRuleCountResult = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count FROM "AccountSource" WHERE "shopId" = ${shopId}
-    `;
-    const tagRuleCount = parseInt(tagRuleCountResult[0]?.count ?? "0", 10);
-    if (tagRuleCount > 0) return false;
-
-    return true;
+    return result?.should_redirect ?? false;
   } catch {
     return false;
   }
@@ -441,13 +431,20 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
   timing.endPhase("shop_lookup");
 
-  const currencyResult = shop
-    ? await checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
-    : null;
+  const [currencyResult, onboardingCheckResult] = await Promise.all([
+    shop
+      ? checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
+      : Promise.resolve(null),
+    shop && !skipOnboarding
+      ? checkOnboardingRedirect(sql, shop.id)
+      : Promise.resolve(false),
+  ]);
+
   const shopCurrency = currencyResult?.currency ?? NO_CURRENCY_SENTINEL;
   const currencyFlipBlocked = currencyResult?.flipBlocked ?? false;
 
-  const currencySupported = isCurrencyGateOpen(shopCurrency);
+  const storeSetupStatus = getStoreSetupStatus(shop ? { currency: shopCurrency } : null);
+  const currencySupported = storeSetupStatus === "supported";
   if (!currencySupported) {
     timing.endPhase("loader_total");
     timing.logAllPhases();
@@ -459,6 +456,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     const notSupportedStoreHandle = shopDomain.replace(".myshopify.com", "");
     return data({
       notSupported: true,
+      storeSetupStatus,
       shopName: notSupportedStoreHandle,
       shopDomain,
       storeHandle: notSupportedStoreHandle,
@@ -478,12 +476,24 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     }, { headers });
   }
 
-  if (shop && !skipOnboarding) {
-    timing.startPhase("onboarding_checks");
-    const shouldRedirect = await checkOnboardingRedirect(sql, shop.id);
-    timing.endPhase("onboarding_checks");
-    if (shouldRedirect) {
+  if (onboardingCheckResult) {
+    timing.endPhase("loader_total");
+    const serverTiming = timing.toHeaderValue();
+    try {
       throw shopifyRedirect("/app/onboarding");
+    } catch (e) {
+      if (e instanceof Response) {
+        const headers = new Headers(e.headers);
+        if (serverTiming) {
+          headers.set("Server-Timing", serverTiming);
+        }
+        throw new Response(e.body, {
+          status: e.status,
+          statusText: e.statusText,
+          headers,
+        });
+      }
+      throw e;
     }
   }
 
@@ -1110,6 +1120,7 @@ function DashboardContent({
 }
 
 export default function Index() {
+  const loaderData = useLoaderData<typeof loader>();
   const {
     upgradeUrl,
     gatingEnforced,
@@ -1119,9 +1130,19 @@ export default function Index() {
     currencySupported,
     currencyFlipBlocked,
     dashboardData,
-  } = useLoaderData<typeof loader>();
+  } = loaderData;
 
   if (!currencySupported) {
+    const storeSetupStatus = "storeSetupStatus" in loaderData ? loaderData.storeSetupStatus : "not_supported";
+    if (storeSetupStatus === "setting_up") {
+      return (
+        <s-page heading="Termwise: Net Terms & Credit">
+          <s-section>
+            <StoreSettingUpBanner />
+          </s-section>
+        </s-page>
+      );
+    }
     return (
       <s-page heading="Termwise: Net Terms & Credit">
         <s-section>

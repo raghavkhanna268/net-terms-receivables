@@ -4,9 +4,10 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 /**
  * #292: Currency gate tests for app.imports loader and action.
  *
- * Tests verify that when a shop's currency is not supported (non-INR, NULL, XXX):
- * - The loader returns notSupported: true (no preview shown)
- * - The action rejects imports with "Only INR currency is supported"
+ * Tests verify that:
+ * - USD shop: loader returns notSupported: true, action rejects
+ * - XXX/NULL shop (setting up): loader returns settingUp: true, action rejects
+ * - INR shop: loader returns notSupported: false, settingUp: false
  */
 
 const createMockSqlFn = () =>
@@ -146,13 +147,14 @@ describe("#292 currency gate on /app/imports", () => {
       assertNoMoneyKeysInPayload(serialized);
     });
 
-    it("XXX (unknown) shop: notSupported=true, fail-closed", async () => {
+    it("XXX (unknown) shop: settingUp=true, fail-closed", async () => {
       setupSqlMock("XXX");
 
       const { loader } = await import("../app.imports");
       const result = await loader(createLoaderArgs());
 
-      expect(result.notSupported).toBe(true);
+      expect(result.settingUp).toBe(true);
+      expect(result.notSupported).toBe(false);
       expect(result.shopCurrency).toBe("XXX");
 
       // Verify serialized payload has no money keys with values
@@ -160,13 +162,14 @@ describe("#292 currency gate on /app/imports", () => {
       assertNoMoneyKeysInPayload(serialized);
     });
 
-    it("NULL currency: notSupported=true, fail-closed", async () => {
+    it("NULL currency: settingUp=true, fail-closed", async () => {
       setupSqlMock(null);
 
       const { loader } = await import("../app.imports");
       const result = await loader(createLoaderArgs());
 
-      expect(result.notSupported).toBe(true);
+      expect(result.settingUp).toBe(true);
+      expect(result.notSupported).toBe(false);
       expect(result.shopCurrency).toBe("XXX");
 
       // Verify serialized payload has no money keys with values
@@ -174,13 +177,14 @@ describe("#292 currency gate on /app/imports", () => {
       assertNoMoneyKeysInPayload(serialized);
     });
 
-    it("INR shop: notSupported=false, preview enabled", async () => {
+    it("INR shop: notSupported=false, settingUp=false, preview enabled", async () => {
       setupSqlMock("INR");
 
       const { loader } = await import("../app.imports");
       const result = await loader(createLoaderArgs());
 
       expect(result.notSupported).toBe(false);
+      expect(result.settingUp).toBe(false);
       expect(result.shopCurrency).toBe("INR");
     });
   });
@@ -210,7 +214,7 @@ describe("#292 currency gate on /app/imports", () => {
       expect(result.error).toBe("Only INR currency is supported for bank imports");
     });
 
-    it("XXX shop: rejects import, fail-closed", async () => {
+    it("XXX shop: rejects import with setting up message", async () => {
       setupSqlMock("XXX");
 
       const { action } = await import("../app.imports");
@@ -218,10 +222,10 @@ describe("#292 currency gate on /app/imports", () => {
       const result = await response.json() as { success: boolean; error?: string };
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Only INR currency is supported for bank imports");
+      expect(result.error).toBe("Your store is still being set up. Please wait a moment and try again.");
     });
 
-    it("NULL currency: rejects import, fail-closed", async () => {
+    it("NULL currency: rejects import with setting up message", async () => {
       setupSqlMock(null);
 
       const { action } = await import("../app.imports");
@@ -229,7 +233,7 @@ describe("#292 currency gate on /app/imports", () => {
       const result = await response.json() as { success: boolean; error?: string };
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Only INR currency is supported for bank imports");
+      expect(result.error).toBe("Your store is still being set up. Please wait a moment and try again.");
     });
   });
 });

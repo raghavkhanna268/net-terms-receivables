@@ -330,10 +330,11 @@ describeWithDb("scripts/backstop-backfill", () => {
 
   describe("hasOfflineSession", () => {
     const SESSION_ID = `offline_${TEST_SHOP_DOMAIN}`;
+    let dbNow: Date;
 
     beforeEach(async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
-      await syncClockToDb(sql);
+      dbNow = await syncClockToDb(sql);
       await sql`DELETE FROM "Session" WHERE shop = ${TEST_SHOP_DOMAIN}`;
     });
 
@@ -351,10 +352,14 @@ describeWithDb("scripts/backstop-backfill", () => {
     });
 
     it("returns false for online-only session", async () => {
+      const sessionId = SESSION_ID + "-online";
+      await sql`DELETE FROM "Session" WHERE id = ${sessionId}`;
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken")
-        VALUES (${SESSION_ID + "-online"}, ${TEST_SHOP_DOMAIN}, 'state', true, 'read_products', 'shpua_online_token')
+        VALUES (${sessionId}, ${TEST_SHOP_DOMAIN}, 'state', true, 'read_products', 'shpua_online_token')
       `;
+      const [inserted] = await sql<{ id: string }[]>`SELECT id FROM "Session" WHERE id = ${sessionId}`;
+      expect(inserted, "Session row must exist after insert").toBeDefined();
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
       expect(has).toBe(false);
@@ -362,20 +367,27 @@ describeWithDb("scripts/backstop-backfill", () => {
 
     it("returns true when non-expired offline session exists", async () => {
       // Use synced JS clock - expires is 1 hour in the future
+      await sql`DELETE FROM "Session" WHERE id = ${SESSION_ID}`;
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
-        VALUES (${SESSION_ID}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', ${new Date(Date.now() + 3600000).toISOString()})
+        VALUES (${SESSION_ID}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', ${new Date(dbNow.getTime() + 3600000).toISOString()})
       `;
+      const [inserted] = await sql<{ id: string }[]>`SELECT id FROM "Session" WHERE id = ${SESSION_ID}`;
+      expect(inserted, "Session row must exist after insert").toBeDefined();
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
       expect(has).toBe(true);
     });
 
     it("returns true when offline session has null expires (never expires)", async () => {
+      const sessionId = SESSION_ID + "-null";
+      await sql`DELETE FROM "Session" WHERE id = ${sessionId}`;
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
-        VALUES (${SESSION_ID + "-null"}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', NULL)
+        VALUES (${sessionId}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_offline_token', NULL)
       `;
+      const [inserted] = await sql<{ id: string }[]>`SELECT id FROM "Session" WHERE id = ${sessionId}`;
+      expect(inserted, "Session row must exist after insert").toBeDefined();
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
       expect(has).toBe(true);
@@ -383,10 +395,14 @@ describeWithDb("scripts/backstop-backfill", () => {
 
     it("returns false when offline session is expired", async () => {
       // Use synced JS clock - expires is 1 hour in the past
+      const sessionId = SESSION_ID + "-expired";
+      await sql`DELETE FROM "Session" WHERE id = ${sessionId}`;
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
-        VALUES (${SESSION_ID + "-expired"}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_expired_token', ${new Date(Date.now() - 3600000).toISOString()})
+        VALUES (${sessionId}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_expired_token', ${new Date(dbNow.getTime() - 3600000).toISOString()})
       `;
+      const [inserted] = await sql<{ id: string }[]>`SELECT id FROM "Session" WHERE id = ${sessionId}`;
+      expect(inserted, "Session row must exist after insert").toBeDefined();
 
       const has = await hasOfflineSession(sql, TEST_SHOP_DOMAIN);
       expect(has).toBe(false);
@@ -425,9 +441,11 @@ describeWithDb("scripts/backstop-backfill", () => {
       `;
 
       // Use SQL NOW() + 1 hour for expires to avoid JS/DB clock skew
+      const sessionId = "offline_" + TEST_SHOP_DOMAIN;
+      await sql`DELETE FROM "Session" WHERE id = ${sessionId}`;
       await sql`
         INSERT INTO "Session" (id, shop, state, "isOnline", scope, "accessToken", expires)
-        VALUES (${"offline_" + TEST_SHOP_DOMAIN}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_dryrun_token', (NOW() AT TIME ZONE 'UTC') + INTERVAL '1 hour')
+        VALUES (${sessionId}, ${TEST_SHOP_DOMAIN}, 'state', false, 'read_products', 'shpat_dryrun_token', (NOW() AT TIME ZONE 'UTC') + INTERVAL '1 hour')
       `;
     });
 

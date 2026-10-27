@@ -38,6 +38,7 @@ import {
   getCreditStatusDisplay,
   getCompanyTotals,
   updateCreditStatus,
+  parseCreditLimitString,
   type CreditStatusUpdate,
 } from "~/services/credit-status.server";
 import { getBuyerInvoices, type BuyerInvoiceRow } from "~/lib/aging-queries.server";
@@ -512,27 +513,15 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
       }
     } else if (noLimit) {
       creditLimitAmount = null;
-    } else if (creditLimitStr && creditLimitStr.trim() !== "") {
-      const trimmed = creditLimitStr.trim();
-      if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) {
-        return {
-          success: false,
-          error: "Invalid credit limit format. Use a number with up to 2 decimal places (e.g., 100000 or 100000.50).",
-        } satisfies ActionData;
-      }
-      const parsed = Number(trimmed);
-      if (parsed < 0) {
-        return {
-          success: false,
-          error: "Credit limit must be non-negative.",
-        } satisfies ActionData;
-      }
-      creditLimitAmount = parsed;
     } else {
-      return {
-        success: false,
-        error: "Credit limit cannot be empty. Check 'No credit limit' to allow unlimited credit.",
-      } satisfies ActionData;
+      const parseResult = parseCreditLimitString(creditLimitStr);
+      if (!parseResult.valid) {
+        return {
+          success: false,
+          error: parseResult.error,
+        } satisfies ActionData;
+      }
+      creditLimitAmount = parseResult.value;
     }
 
     const update: CreditStatusUpdate = {
@@ -922,14 +911,13 @@ export default function AccountPage() {
             <input type="hidden" name="_action" value="updateCredit" />
             <s-stack gap="base">
               <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
-                <s-money-field
+                <s-text-field
                   label="Credit Limit"
                   name="creditLimit"
-                  min={0}
-                  placeholder="e.g., 100000"
+                  placeholder="e.g., 1,00,000 or ₹1,00,000.50"
                   value={noLimitChecked ? "" : (creditStatus?.creditLimitAmount?.toString() ?? "")}
                   disabled={noLimitChecked}
-                ></s-money-field>
+                ></s-text-field>
                 <s-text>{currency}</s-text>
               </s-grid>
 

@@ -33,6 +33,54 @@ function extractLoaderData<T>(result: unknown): T {
   return result as T;
 }
 
+/**
+ * Step type for loader result (minimal interface for test assertions).
+ */
+interface LoaderStep {
+  id: string;
+  status: string;
+  helpText?: string;
+}
+
+/**
+ * Loader result type for type-safe extraction.
+ */
+interface LoaderResult {
+  error: string | null;
+  state: {
+    steps: LoaderStep[];
+    isComplete: boolean;
+    completedCount: number;
+    totalCount: number;
+    dismissedAt: string | null;
+  } | null;
+  shopId?: string;
+  registrationStatus: {
+    validation: { status: string; errorCode?: string };
+    paymentCustomization: { status: string; errorCode?: string };
+    metafieldDefinitions: { status: string; errorCode?: string };
+  } | null;
+  initialSyncState: { status: string } | null;
+  newAccountsPausedBanner: {
+    show: boolean;
+    heading: string;
+    bodyText: string;
+    upgradeUrl: string | null;
+  };
+  currencySupported: boolean;
+  currencyFlipBlocked: boolean;
+}
+
+/**
+ * Helper to call loader and extract data in one step.
+ * Uses 'any' for flexible typing in tests.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function callLoader(loader: (args: any) => Promise<any>, args: any): Promise<LoaderResult> {
+  const result = await loader(args);
+  return extractLoaderData<LoaderResult>(result);
+}
+
 const mockSql = Object.assign(vi.fn(), {
   unsafe: vi.fn((s) => s),
   json: vi.fn((obj) => JSON.stringify(obj)),
@@ -286,7 +334,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -401,7 +449,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -448,7 +496,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -465,6 +513,364 @@ describe("app.onboarding", () => {
 
       expect(result.error).toBeNull();
       expect(result.state?.dismissedAt).toBe(dismissedDate.toISOString());
+    });
+
+    describe("reminders step via loader (step 3)", () => {
+      beforeEach(() => {
+        vi.stubEnv("RESEND_API_KEY", "re_test_key_for_loader_test");
+        vi.stubEnv("RESEND_FROM", "test@example.com");
+      });
+
+      afterEach(() => {
+        vi.unstubAllEnvs();
+      });
+
+      it("returns step 3 as 'pending' when email sending is configured but reminders disabled (fails on revert)", async () => {
+        mockSql.mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+            return Promise.resolve([{
+              id: TEST_SHOP_ID,
+              defaultTermsDays: 30,
+              onboardingDismissedAt: null,
+            }]);
+          }
+          if (query.includes("SELECT currency") && query.includes("Shop")) {
+            return Promise.resolve([{ currency: "INR" }]);
+          }
+          if (query.includes("COUNT(*)")) {
+            return Promise.resolve([{ count: "1" }]);
+          }
+          if (query.includes("s18_shop_reminder_settings")) {
+            return Promise.resolve([{ enabled: false }]);
+          }
+          return Promise.resolve([]);
+        });
+
+        const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ShopCurrencyAndId")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: "gid://shopify/Shop/12345",
+                    currencyCode: "INR",
+                    metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("validations")) {
+            return {
+              json: async () => ({
+                data: {
+                  validations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/Validation/123",
+                        shopifyFunction: { handle: "credit-check-validation" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("paymentCustomizations")) {
+            return {
+              json: async () => ({
+                data: {
+                  paymentCustomizations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/PaymentCustomization/456",
+                        shopifyFunction: { handle: "hide-terms-payment" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("metafieldDefinitions")) {
+            return {
+              json: async () => ({
+                data: {
+                  metafieldDefinitions: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/MetafieldDefinition/789",
+                        namespace: "$app",
+                        key: "credit_status",
+                        ownerType: "COMPANY_LOCATION",
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          return { json: async () => ({ data: {} }) };
+        });
+
+        const { loader } = await import("../app.onboarding");
+
+        const rawResult = await loader({
+          request: new Request("https://example.com/app/onboarding"),
+          context: {
+            shopify: {
+              authenticate: {
+                admin: vi.fn().mockResolvedValue({
+                  session: { shop: TEST_SHOP },
+                  admin: { graphql: mockGraphql },
+                }),
+              },
+            },
+          },
+          params: {},
+        } as unknown as LoaderFunctionArgs);
+        const result = extractLoaderData<LoaderResult>(rawResult);
+
+        const remindersStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
+        expect(remindersStep?.status).toBe("pending");
+        expect(remindersStep?.helpText).toContain("Email sending is ready");
+      });
+
+      it("returns step 3 as 'complete' when both email sending and reminders are enabled (fails on revert)", async () => {
+        mockSql.mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+            return Promise.resolve([{
+              id: TEST_SHOP_ID,
+              defaultTermsDays: 30,
+              onboardingDismissedAt: null,
+            }]);
+          }
+          if (query.includes("SELECT currency") && query.includes("Shop")) {
+            return Promise.resolve([{ currency: "INR" }]);
+          }
+          if (query.includes("COUNT(*)")) {
+            return Promise.resolve([{ count: "1" }]);
+          }
+          if (query.includes("s18_shop_reminder_settings")) {
+            return Promise.resolve([{ enabled: true }]);
+          }
+          return Promise.resolve([]);
+        });
+
+        const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ShopCurrencyAndId")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: "gid://shopify/Shop/12345",
+                    currencyCode: "INR",
+                    metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("validations")) {
+            return {
+              json: async () => ({
+                data: {
+                  validations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/Validation/123",
+                        shopifyFunction: { handle: "credit-check-validation" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("paymentCustomizations")) {
+            return {
+              json: async () => ({
+                data: {
+                  paymentCustomizations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/PaymentCustomization/456",
+                        shopifyFunction: { handle: "hide-terms-payment" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("metafieldDefinitions")) {
+            return {
+              json: async () => ({
+                data: {
+                  metafieldDefinitions: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/MetafieldDefinition/789",
+                        namespace: "$app",
+                        key: "credit_status",
+                        ownerType: "COMPANY_LOCATION",
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          return { json: async () => ({ data: {} }) };
+        });
+
+        const { loader } = await import("../app.onboarding");
+
+        const rawResult = await loader({
+          request: new Request("https://example.com/app/onboarding"),
+          context: {
+            shopify: {
+              authenticate: {
+                admin: vi.fn().mockResolvedValue({
+                  session: { shop: TEST_SHOP },
+                  admin: { graphql: mockGraphql },
+                }),
+              },
+            },
+          },
+          params: {},
+        } as unknown as LoaderFunctionArgs);
+        const result = extractLoaderData<LoaderResult>(rawResult);
+
+        const remindersStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
+        expect(remindersStep?.status).toBe("complete");
+      });
+
+      it("returns step 3 as 'pending' when no reminder settings row exists (fails on revert)", async () => {
+        mockSql.mockImplementation((strings: TemplateStringsArray) => {
+          const query = strings.join("?");
+          if (query.includes("SELECT id") && query.includes("defaultTermsDays")) {
+            return Promise.resolve([{
+              id: TEST_SHOP_ID,
+              defaultTermsDays: 30,
+              onboardingDismissedAt: null,
+            }]);
+          }
+          if (query.includes("SELECT currency") && query.includes("Shop")) {
+            return Promise.resolve([{ currency: "INR" }]);
+          }
+          if (query.includes("COUNT(*)")) {
+            return Promise.resolve([{ count: "1" }]);
+          }
+          if (query.includes("s18_shop_reminder_settings")) {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve([]);
+        });
+
+        const mockGraphql = vi.fn().mockImplementation(async (query: string) => {
+          if (query.includes("ShopCurrencyAndId")) {
+            return {
+              json: async () => ({
+                data: {
+                  shop: {
+                    id: "gid://shopify/Shop/12345",
+                    currencyCode: "INR",
+                    metafield: { value: JSON.stringify({ schemaVersion: 1, currencyCode: "INR" }) },
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("validations")) {
+            return {
+              json: async () => ({
+                data: {
+                  validations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/Validation/123",
+                        shopifyFunction: { handle: "credit-check-validation" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("paymentCustomizations")) {
+            return {
+              json: async () => ({
+                data: {
+                  paymentCustomizations: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/PaymentCustomization/456",
+                        shopifyFunction: { handle: "hide-terms-payment" },
+                        title: "Test",
+                        enabled: true,
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          if (query.includes("metafieldDefinitions")) {
+            return {
+              json: async () => ({
+                data: {
+                  metafieldDefinitions: {
+                    edges: [{
+                      node: {
+                        id: "gid://shopify/MetafieldDefinition/789",
+                        namespace: "$app",
+                        key: "credit_status",
+                        ownerType: "COMPANY_LOCATION",
+                      },
+                    }],
+                  },
+                },
+              }),
+            };
+          }
+          return { json: async () => ({ data: {} }) };
+        });
+
+        const { loader } = await import("../app.onboarding");
+
+        const rawResult = await loader({
+          request: new Request("https://example.com/app/onboarding"),
+          context: {
+            shopify: {
+              authenticate: {
+                admin: vi.fn().mockResolvedValue({
+                  session: { shop: TEST_SHOP },
+                  admin: { graphql: mockGraphql },
+                }),
+              },
+            },
+          },
+          params: {},
+        } as unknown as LoaderFunctionArgs);
+        const result = extractLoaderData<LoaderResult>(rawResult);
+
+        const remindersStep = result.state?.steps.find((s: { id: string }) => s.id === "reminders");
+        expect(remindersStep?.status).toBe("pending");
+        expect(remindersStep?.helpText).toContain("Email sending is ready");
+      });
     });
   });
 
@@ -561,7 +967,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -644,7 +1050,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -684,7 +1090,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -752,7 +1158,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -817,7 +1223,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -857,7 +1263,7 @@ describe("app.onboarding", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1176,7 +1582,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1220,7 +1626,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1264,7 +1670,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1307,7 +1713,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -1356,7 +1762,7 @@ describe("S23-04: initial sync", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -2155,13 +2561,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
@@ -2198,14 +2601,8 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: null }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
-        return Promise.resolve([{ count: "0" }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: true }]);
       }
       return Promise.resolve([]);
     });
@@ -2244,13 +2641,10 @@ describe("app._index redirect", () => {
           { id: TEST_SHOP_ID, currency: "INR", timezone: "Asia/Kolkata" },
         ]);
       }
-      if (query.includes("onboarding_dismissed_at")) {
-        return Promise.resolve([{ onboarding_dismissed_at: new Date() }]);
+      if (query.includes("should_redirect")) {
+        return Promise.resolve([{ should_redirect: false }]);
       }
-      if (query.includes("COUNT(*)") && query.includes("BuyerAccount")) {
-        return Promise.resolve([{ count: "0" }]);
-      }
-      if (query.includes("COUNT(*)") && query.includes("AccountSource")) {
+      if (query.includes("COUNT(DISTINCT") && query.includes("gated_at IS NOT NULL") && query.includes("Invoice")) {
         return Promise.resolve([{ count: "0" }]);
       }
       return Promise.resolve([]);
@@ -2615,7 +3009,7 @@ describe("T4: newAccountsPausedBanner", () => {
 
     const { loader } = await import("../app.onboarding");
 
-    const result = await loader({
+    const result = await callLoader(loader, {
       request: new Request("https://example.com/app/onboarding"),
       context: {
         shopify: {
@@ -2659,7 +3053,7 @@ describe("T4: newAccountsPausedBanner", () => {
 
     const { loader } = await import("../app.onboarding");
 
-    const result = await loader({
+    const result = await callLoader(loader, {
       request: new Request("https://example.com/app/onboarding"),
       context: {
         shopify: {
@@ -2705,7 +3099,7 @@ describe("T4: newAccountsPausedBanner", () => {
 
     const { loader } = await import("../app.onboarding");
 
-    const result = await loader({
+    const result = await callLoader(loader, {
       request: new Request("https://example.com/app/onboarding"),
       context: {
         shopify: {
@@ -2860,7 +3254,7 @@ describe("Sequential DB: Initial Sync currency UI", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -2969,7 +3363,7 @@ describe("Sequential DB: Initial Sync currency UI", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -3079,7 +3473,7 @@ describe("Sequential DB: Initial Sync currency UI", () => {
 
       const { loader } = await import("../app.onboarding");
 
-      const result = await loader({
+      const result = await callLoader(loader, {
         request: new Request("https://example.com/app/onboarding"),
         context: {
           shopify: {
@@ -3264,6 +3658,107 @@ describe("Button loading state isolation", () => {
     const html = renderToString(createElement(OnboardingPage));
 
     expect(html).toContain("Dismissing...");
+    expect(html).toContain("Retry");
+    expect(html).not.toContain("Retrying...");
+  });
+
+  it("Start sync submit does not put Dismiss into loading state (fails on revert)", async () => {
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "start_sync");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 0,
+            totalCount: 5,
+            dismissedAt: null,
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "ok" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
+          },
+          initialSyncState: { status: "not_started" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    expect(html).toContain("Starting...");
+    expect(html).toContain("Dismiss for now");
+    expect(html).not.toContain("Dismissing...");
+  });
+
+  it("Reopen submit shows Reopening... and does not affect Retry button (fails on revert)", async () => {
+    // When dismissed, only Reopen (not Dismiss) is rendered. To test isolation,
+    // we need a registration status with missing items so Retry button appears.
+    // The Dismiss button never coexists with Reopen by design (mutually exclusive).
+    const mockFormData = new FormData();
+    mockFormData.set("_action", "reopen");
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 5,
+            dismissedAt: "2026-10-26T10:00:00Z",
+          },
+          registrationStatus: {
+            validation: { name: "Checkout credit check", status: "missing" },
+            paymentCustomization: { name: "Hide net terms at checkout", status: "ok" },
+            metafieldDefinitions: { name: "Store data fields", status: "ok" },
+          },
+          initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({
+          state: "submitting",
+          formData: mockFormData,
+        }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    // Reopen button shows loading state
+    expect(html).toContain("Reopening...");
+    // Retry button exists (because validation is missing) but is NOT loading
     expect(html).toContain("Retry");
     expect(html).not.toContain("Retrying...");
   });
@@ -3483,5 +3978,130 @@ describe("copy polish: headings and messages", () => {
     expect(html).not.toContain("Validation Function");
     expect(html).not.toContain("Payment Customization");
     expect(html).not.toContain("Metafield Definitions");
+  });
+});
+
+describe("Initial sync card shows loader status, not stale actionData", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("shows Complete badge when loader returns done, even with successful start_sync actionData", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: true,
+            completedCount: 4,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => ({ success: true, action: "start_sync" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    // The sync status badge should show "Complete" (from SyncStatusBadge for status=done)
+    expect(html).toContain('tone="success">Complete</s-badge>');
+    // Should NOT show "In progress" badge
+    expect(html).not.toContain('tone="info">In progress</s-badge>');
+  });
+
+  it("shows Failed badge when loader returns failed, even with successful start_sync actionData", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "failed" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => ({ success: true, action: "start_sync" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    // The sync status badge should show "Failed" (from SyncStatusBadge for status=failed)
+    expect(html).toContain('tone="critical">Failed</s-badge>');
+    // Should NOT show "In progress" badge
+    expect(html).not.toContain('tone="info">In progress</s-badge>');
+  });
+
+  it("shows In progress badge when loader returns in_progress with successful start_sync actionData", async () => {
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "in_progress" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => ({ success: true, action: "start_sync" }),
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: vi.fn() }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const html = renderToString(createElement(OnboardingPage));
+
+    // The sync status badge should show "In progress" (from SyncStatusBadge for status=in_progress)
+    expect(html).toContain('tone="info">In progress</s-badge>');
+    // Should NOT show "Complete" or "Failed" badge
+    expect(html).not.toContain('tone="success">Complete</s-badge>');
+    expect(html).not.toContain('tone="critical">Failed</s-badge>');
   });
 });

@@ -885,6 +885,17 @@ describe("compliance.server", () => {
 
       expect(result).toBe(false);
     });
+
+    it("sets plan_cached_at to NULL to invalidate plan cache on uninstall", async () => {
+      mockSql.mockResolvedValueOnce(Object.assign([], { count: 1 }));
+
+      await markShopUninstalled(mockSql, "test-plan-cache.myshopify.com");
+
+      expect(mockSql).toHaveBeenCalled();
+      const sqlCall = mockSql.mock.calls[0];
+      const sqlTemplate = Array.isArray(sqlCall[0]) ? sqlCall[0].join("") : String(sqlCall[0]);
+      expect(sqlTemplate).toContain("plan_cached_at = NULL");
+    });
   });
 
   describe("sendDataRequestNotification", () => {

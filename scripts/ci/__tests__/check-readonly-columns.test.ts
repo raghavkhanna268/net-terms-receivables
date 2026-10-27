@@ -11,6 +11,7 @@ import {
   validateAllowlist,
   isSafeGuardRegex,
   sensitiveWord,
+  SESSION_CREDENTIAL_COLUMNS,
   type AllowlistEntry,
 } from "../check-readonly-columns";
 
@@ -36,7 +37,8 @@ SELECT i.id AS invoice_id, i.status, (i.outstanding > 0) AS outstanding_gt_0,
        CASE WHEN ba."holdReasonCode" ~ '^[A-Z0-9_]{1,40}$' THEN ba."holdReasonCode" ELSE '<other>' END AS hold_reason_code,
        CASE WHEN ev.actor IN ('system','webhook') THEN ev.actor ELSE '<user>' END AS actor_kind,
        ba."manualHold", m.read_ct, m.message->>'topic' AS topic,
-       DENSE_RANK() OVER (ORDER BY i."shopId") AS shop_idx,
+       CASE WHEN i."shopId" IS NULL THEN 'unknown'
+            ELSE 'other_' || (ROW_NUMBER() OVER (ORDER BY i."shopId"))::text END AS shop_kind,
        NOW() - i."dueAt" AS past_due_by
 FROM "Invoice" i GROUP BY 1;
 WITH x AS (SELECT a, b FROM t)
@@ -202,6 +204,93 @@ SELECT CASE WHEN a."defaultTermsDays" BETWEEN 0 AND 365 THEN a."defaultTermsDays
     expect(sensitiveWord("shop_idx")).toBeNull();
     expect(sensitiveWord("shopDomain")).toBe("shop");
     expect(sensitiveWord("holdNote")).toBe("note");
+  });
+});
+
+describe("check-readonly-columns: Session credential columns (rule 4b)", () => {
+  const sel = (cols: string, ann = "") =>
+    issues(`${ann}BEGIN TRANSACTION READ ONLY;\nSELECT ${cols} FROM "Session" se;\nROLLBACK;`);
+
+  it("lists the Session token, expiry and OAuth state columns", () => {
+    expect([...SESSION_CREDENTIAL_COLUMNS].sort()).toEqual(
+      ["accessToken", "expires", "refreshToken", "refreshTokenExpires", "state"].sort(),
+    );
+  });
+
+  it("rejects passing a token or expiry time through, even when annotated", () => {
+    expect(sel(`se."refreshToken" AS rt_present`)).toEqual(["rt_present:sensitive"]);
+    expect(sel(`se.expires AS expires_at`)).toEqual(["expires_at:sensitive"]);
+    expect(sel(`se.expires AS x_at`, "-- @col x_at: timestamp\n")).toEqual(["x_at:sensitive"]);
+    expect(
+      sel(`to_char(max(se."refreshTokenExpires"), 'YYYY') AS y`, "-- @col y: timestamp\n"),
+    ).toEqual(["y:sensitive"]);
+    expect(sel(`max(se.state) AS oauth_kind`, "-- @col oauth_kind: enum\n")).toEqual([
+      "oauth_kind:sensitive",
+    ]);
+    expect(
+      sel(`CASE WHEN se."accessToken" ~ '^[a-z]{1,8}$' THEN se."accessToken" END AS k`),
+    ).toEqual(["k:sensitive"]);
+  });
+
+  it("allows them only inside a derived boolean or count", () => {
+    expect(
+      sel(
+        `COALESCE(bool_and(se."refreshToken" IS NOT NULL AND se."refreshToken" <> ''), false) AS refresh_token_present, ` +
+          `COALESCE(bool_and(se."refreshTokenExpires" > (NOW() AT TIME ZONE 'UTC')), false) AS refresh_expires_in_future, ` +
+          `COUNT(*) FILTER (WHERE se.expires < NOW()) AS expired_ct, ` +
+          `bool_or(se."needsReauth") AS needs_reauth`,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("check-readonly-columns: 'prefix' || rank label (shop_kind)", () => {
+  const kinds = (sql: string) =>
+    checkSql("scripts/readonly/t.sql", sql).columns.map((c) => `${c.column}:${c.kind}`);
+
+  it("classifies 'prefix' || ROW_NUMBER/RANK/DENSE_RANK() OVER (...) as enum, even over a domain", () => {
+    for (const expr of [
+      `'other_' || ROW_NUMBER() OVER (ORDER BY s.id)`,
+      `'other_' || (ROW_NUMBER() OVER (PARTITION BY s.domain IN ('a', 'b') ORDER BY s.id))::text`,
+      `'x' || RANK() OVER (ORDER BY s.domain)`,
+      `'x' || (DENSE_RANK() OVER (ORDER BY s.id))::varchar`,
+    ]) {
+      expect(issues(`SELECT ${expr} AS shop_kind FROM "Shop" s;`)).toEqual([]);
+      expect(kinds(`SELECT ${expr} AS shop_kind FROM "Shop" s;`)).toEqual(["shop_kind:enum"]);
+    }
+  });
+
+  it("keeps CASE labels derived from a domain comparison enum through a CTE", () => {
+    const sql = `WITH sl AS (SELECT s.id AS shop_id,
+      CASE WHEN s.domain = :'allowed' THEN 'main'
+           ELSE 'other_' || (ROW_NUMBER() OVER (PARTITION BY s.domain = :'allowed' ORDER BY s.id))::text
+      END AS shop_kind FROM "Shop" s)
+      SELECT sl.shop_kind FROM sl;`;
+    expect(issues(sql)).toEqual([]);
+    expect(kinds(sql)).toEqual(["shop_kind:enum"]);
+  });
+
+  it("still fails anything that could print the domain or free text", () => {
+    expect(issues(`SELECT 'x' || s.domain AS shop_kind FROM "Shop" s;`)).toEqual([
+      "shop_kind:sensitive",
+    ]);
+    expect(
+      issues(`SELECT 'x' || ROW_NUMBER() OVER (ORDER BY s.id) || s.domain AS shop_kind FROM "Shop" s;`),
+    ).toEqual(["shop_kind:sensitive"]);
+    // non-label prefixes, other functions, other casts, a passthrough ELSE
+    for (const expr of [
+      `'X y' || ROW_NUMBER() OVER (ORDER BY s.id)`,
+      `'x' || ntile(4) OVER (ORDER BY s.id)`,
+      `'x' || lag(s.id) OVER (ORDER BY s.id)`,
+      `'x' || s.id || ROW_NUMBER() OVER (ORDER BY s.id)`,
+      `'x' || ROW_NUMBER() OVER (ORDER BY s.id) || 'y'`,
+      `'x' || s.currency`,
+    ]) {
+      expect(issues(`SELECT ${expr} AS shop_kind FROM "Shop" s;`)).not.toEqual([]);
+    }
+    expect(
+      issues(`SELECT CASE WHEN s.id = 'a' THEN 'main' ELSE s.domain END AS shop_kind FROM "Shop" s;`),
+    ).toEqual(["shop_kind:sensitive"]);
   });
 });
 

@@ -41,6 +41,9 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
   let globalSendsSnapshotExists: boolean = false;
   const todayStr = new Date().toISOString().split("T")[0];
 
+  const FIXED_TODAY = "2026-10-15";
+  const FIXED_TODAY_IST = { year: 2026, month: 10, day: 15, hour: 12, minute: 0 };
+
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
@@ -225,7 +228,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
           '#GATED-SEND-1', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
@@ -235,7 +238,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
       // Mock send window to be within hours
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       try {
@@ -287,7 +290,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_NONGATED_ACCOUNT_ID}, ${orderId},
           '#NONGATED-SEND', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
@@ -296,7 +299,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
       // Mock send window
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       // Mock successful Resend response
@@ -353,7 +356,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
         VALUES (
           ${invoiceId}, ${TEST_SHOP_ID}, ${TEST_GATED_ACCOUNT_ID}, ${orderId},
           '#GATED-SEND-OFF', 10000.00, 10000.00, 'open',
-          NOW() - INTERVAL '5 days', NOW(), NOW(), NOW()
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
         )
       `;
 
@@ -368,7 +371,7 @@ describeWithDb("Plan gating value-add actions (DB)", () => {
 
       // Mock send window
       const luxon = await import("luxon");
-      const mockNow = luxon.DateTime.fromObject({ hour: 12, minute: 0 }, { zone: "Asia/Kolkata" });
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
       const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
 
       // Mock successful Resend response
