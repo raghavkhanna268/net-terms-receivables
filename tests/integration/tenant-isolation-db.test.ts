@@ -103,10 +103,10 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   const TEST_SUFFIX = Date.now().toString(36) + "-iso";
 
   const SHOP_A_ID = `shop-a-${TEST_SUFFIX}`;
-  const SHOP_A_DOMAIN = `test-iso-a.myshopify.com`;
+  const SHOP_A_DOMAIN = `test-iso-a-${TEST_SUFFIX}.myshopify.com`;
 
   const SHOP_B_ID = `shop-b-${TEST_SUFFIX}`;
-  const SHOP_B_DOMAIN = `test-iso-b.myshopify.com`;
+  const SHOP_B_DOMAIN = `test-iso-b-${TEST_SUFFIX}.myshopify.com`;
 
   const ISO_B_MARKER = `ISO_B_MARKER_${TEST_SUFFIX}`;
 
@@ -497,7 +497,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
-    vi.doMock("../../app/lib/request-context.server", () => ({
+    vi.doMock("~/lib/request-context.server", () => ({
       getRequestSql: () => sql,
       getRequestWaitUntil: () => undefined,
     }));
@@ -937,9 +937,17 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
     it("shop A data requests list contains A's requests (positive control)", async () => {
       expect.hasAssertions();
+
+      // Verify the shop the loader will resolve has the expected domain
+      const [shopByDomain] = await sql`SELECT id, domain FROM "Shop" WHERE domain = ${SHOP_A_DOMAIN}`;
+      expect(shopByDomain, `Shop with domain ${SHOP_A_DOMAIN} not found`).toBeDefined();
+      expect(shopByDomain.id).toBe(SHOP_A_ID);
+
       const args = createLoaderArgs("/app/data-requests");
       const { loader } = await import("../../app/routes/app.data-requests.js");
-      const result = (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }> };
+      const result = (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }>; error: string | null };
+
+      expect(result.error, `Loader returned error: ${result.error}`).toBeNull();
 
       const aRequests = result.dataRequests.filter(dr => dr.id === DATA_REQUEST_A_ID || dr.requestId === "req-a-id");
       expect(aRequests.length).toBeGreaterThan(0);
@@ -1014,7 +1022,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const crossShopToken = generateUnsubscribeToken(SHOP_A_ID, BUYER_B_OPTOUT_ID, UNSUBSCRIBE_SECRET);
       expect(crossShopToken).not.toBeNull();
 
-      vi.doMock("../../app/lib/request-context.server", () => ({
+      vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
         getRequestWaitUntil: () => undefined,
       }));
@@ -1043,7 +1051,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const tokenForBuyerB = generateUnsubscribeToken(SHOP_B_ID, BUYER_B_ID, UNSUBSCRIBE_SECRET);
       expect(tokenForBuyerB).not.toBeNull();
 
-      vi.doMock("../../app/lib/request-context.server", () => ({
+      vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,
         getRequestWaitUntil: () => undefined,
       }));
