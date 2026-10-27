@@ -1,5 +1,8 @@
 use shopify_function::prelude::*;
 
+#[path = "../../../functions-shared/credit_rules.rs"]
+pub mod credit_rules;
+
 pub mod cart_payment_methods_transform_run;
 
 pub use cart_payment_methods_transform_run::CreditStatus;

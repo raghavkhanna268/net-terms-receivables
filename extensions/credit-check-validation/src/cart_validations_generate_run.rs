@@ -1,3 +1,4 @@
+use crate::credit_rules::{self, Decision, DecisionInput, StatusResult};
 use crate::schema;
 use shopify_function::prelude::*;
 use shopify_function::scalars::JsonValue;
@@ -240,6 +241,47 @@ fn evaluate_credit_status(
     pass()
 }
 
+/// Evaluate using the shared credit rules with stricter parsing.
+fn evaluate_with_shared_rules(
+    json_value: Option<&JsonValue>,
+    customer_json_value: Option<&JsonValue>,
+    cart_currency: &str,
+    cart_total_paise: Option<u64>,
+    shop_config_json: Option<&JsonValue>,
+) -> schema::CartValidationsGenerateRunResult {
+    let shop_config = credit_rules::read_shop_config(shop_config_json);
+    
+    // Read the primary status (location for B2B, customer for DTC)
+    let status = credit_rules::read_status(json_value);
+    
+    // For B2B with absent location metafield, fall back to customer for hold check only
+    let effective_status = match (&status, customer_json_value) {
+        (StatusResult::Absent, Some(customer_json)) => {
+            let customer_status = credit_rules::read_status(Some(customer_json));
+            // Only use customer status for hold decision
+            if credit_rules::is_held(&customer_status) {
+                customer_status
+            } else {
+                status
+            }
+        }
+        _ => status,
+    };
+    
+    let input = DecisionInput {
+        status: &effective_status,
+        shop_config,
+        cart_currency,
+        cart_total_paise,
+    };
+    
+    match credit_rules::decide(&input) {
+        Decision::BlockHold => create_validation_error(ERROR_MSG_ON_HOLD),
+        Decision::Block => create_validation_error(ERROR_MSG_OVER_LIMIT),
+        Decision::Allow => pass(),
+    }
+}
+
 #[shopify_function]
 fn cart_validations_generate_run(input: schema::cart_validations_generate_run::Input) -> Result<schema::CartValidationsGenerateRunResult> {
     let step = input.buyer_journey().step();
@@ -255,46 +297,44 @@ fn cart_validations_generate_run(input: schema::cart_validations_generate_run::I
     let cart_currency = cart.cost().total_amount().currency_code().to_string();
     let cart_total_amount_str = cart.cost().total_amount().amount().to_string();
 
-    let cart_total_paise = match parse_decimal_to_paise(&cart_total_amount_str) {
-        Some(v) => v,
-        None => return Ok(pass()),
-    };
-
-    // #292: Read shop_config for INR-only logic
-    let shop_config = match input.shop().metafield() {
-        Some(m) => ShopConfig::from_json_value(m.json_value()),
-        None => ShopConfig::default(),
-    };
-
+    // Read status BEFORE parsing the total
+    let shop_config_json = input.shop().metafield().map(|m| m.json_value());
+    
     let buyer_identity = match cart.buyer_identity() {
         Some(bi) => bi,
         None => return Ok(pass()),
     };
 
+    // Get customer metafield for potential fallback
+    let customer_json_value = buyer_identity
+        .customer()
+        .and_then(|c| c.metafield())
+        .map(|m| m.json_value());
+
+    // Parse cart total (may be None if unparseable)
+    let cart_total_paise = parse_decimal_to_paise(&cart_total_amount_str);
+
     if let Some(purchasing_company) = buyer_identity.purchasing_company() {
         let location = purchasing_company.location();
-        if let Some(metafield) = location.metafield() {
-            let json_value = metafield.json_value();
-            let credit_status = CreditStatus::from_json_value(json_value);
-            return Ok(evaluate_credit_status(
-                &credit_status,
-                &cart_currency,
-                cart_total_paise,
-                &shop_config,
-            ));
-        }
-        return Ok(pass());
+        let location_json = location.metafield().map(|m| m.json_value());
+        
+        return Ok(evaluate_with_shared_rules(
+            location_json,
+            customer_json_value,
+            &cart_currency,
+            cart_total_paise,
+            shop_config_json,
+        ));
     }
 
     if let Some(customer) = buyer_identity.customer() {
         if let Some(metafield) = customer.metafield() {
-            let json_value = metafield.json_value();
-            let credit_status = CreditStatus::from_json_value(json_value);
-            return Ok(evaluate_credit_status(
-                &credit_status,
+            return Ok(evaluate_with_shared_rules(
+                Some(metafield.json_value()),
+                None,
                 &cart_currency,
                 cart_total_paise,
-                &shop_config,
+                shop_config_json,
             ));
         }
     }

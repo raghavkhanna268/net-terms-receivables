@@ -1,3 +1,4 @@
+use crate::credit_rules::{self, PaymentDecisionInput, StatusResult};
 use crate::schema;
 use shopify_function::prelude::*;
 use shopify_function::scalars::JsonValue;
@@ -64,7 +65,7 @@ impl ShopConfig {
 #[derive(Default, PartialEq, Clone, Debug)]
 pub struct Configuration {
     /// Patterns to match deferred payment method names (case-insensitive substring match).
-    /// Defaults to ["deferred", "net terms", "net-terms", "pay later", "payment terms"].
+    /// Custom patterns ADD to the defaults rather than replacing them.
     pub deferred_payment_patterns: Option<Vec<String>>,
     /// Exact name of manual payment method to hide for tagged customers (case-insensitive).
     pub manual_payment_method_name: Option<String>,
@@ -107,12 +108,24 @@ impl Configuration {
         }
     }
     
-    /// Get the deferred payment patterns to use (configured or defaults).
-    fn get_deferred_patterns(&self) -> Vec<&str> {
-        match &self.deferred_payment_patterns {
-            Some(patterns) => patterns.iter().map(|s| s.as_str()).collect(),
-            None => DEFAULT_DEFERRED_PATTERNS.to_vec(),
+    /// Get the deferred payment patterns to use.
+    /// Custom patterns ADD to the defaults rather than replacing them.
+    fn get_deferred_patterns(&self) -> Vec<String> {
+        let mut patterns: Vec<String> = DEFAULT_DEFERRED_PATTERNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        
+        if let Some(custom) = &self.deferred_payment_patterns {
+            for p in custom {
+                let lower = p.to_lowercase();
+                if !patterns.iter().any(|existing| existing.to_lowercase() == lower) {
+                    patterns.push(p.clone());
+                }
+            }
         }
+        
+        patterns
     }
 }
 
@@ -209,7 +222,7 @@ const DEFAULT_DEFERRED_PATTERNS: &[&str] = &[
 ];
 
 /// Check if a payment method name matches any of the given patterns (case-insensitive).
-fn matches_deferred_patterns(name: &str, patterns: &[&str]) -> bool {
+fn matches_deferred_patterns(name: &str, patterns: &[String]) -> bool {
     let lower = name.to_lowercase();
     patterns.iter().any(|pattern| lower.contains(&pattern.to_lowercase()))
 }
@@ -231,7 +244,11 @@ fn cart_payment_methods_transform_run(
 ) -> Result<schema::CartPaymentMethodsTransformRunResult> {
     let cart = input.cart();
 
-    // #292: Read shop_config for INR-only logic
+    // #292: Read shop_config for INR-only logic using shared parser
+    let shop_config_json = input.shop().metafield().map(|m| m.json_value());
+    let shop_config_result = credit_rules::read_shop_config(shop_config_json);
+    
+    // Also keep the old ShopConfig for backward compatibility with existing tests
     let shop_config = match input.shop().metafield() {
         Some(m) => ShopConfig::from_json_value(m.json_value()),
         None => ShopConfig::default(),
@@ -291,19 +308,45 @@ fn cart_payment_methods_transform_run(
         None => return Ok(pass()),
     };
 
+    // Get customer metafield for potential B2B fallback
+    let customer_json_value = buyer_identity
+        .customer()
+        .and_then(|c| c.metafield())
+        .map(|m| m.json_value());
+
     // Check B2B company location first (takes precedence)
     if let Some(purchasing_company) = buyer_identity.purchasing_company() {
         let location = purchasing_company.location();
-        if let Some(metafield) = location.metafield() {
-            let json_value = metafield.json_value();
-            let credit_status = CreditStatus::from_json_value(json_value);
-            
-            if credit_status.is_held() {
-                // For B2B, hide deferred payment methods using configured patterns
-                return Ok(schema::CartPaymentMethodsTransformRunResult { operations: hide_deferred() });
+        let location_json = location.metafield().map(|m| m.json_value());
+        
+        // Read status using shared parser
+        let location_status = credit_rules::read_status(location_json);
+        
+        // For B2B with absent location metafield, fall back to customer for hold check only
+        let effective_status = match (&location_status, customer_json_value) {
+            (StatusResult::Absent, Some(customer_json)) => {
+                let customer_status = credit_rules::read_status(Some(customer_json));
+                // Only use customer status for hold decision
+                if credit_rules::is_held(&customer_status) {
+                    customer_status
+                } else {
+                    location_status
+                }
             }
+            _ => location_status,
+        };
+        
+        // Use shared rules to determine if we should hide
+        let payment_input = PaymentDecisionInput {
+            status: &effective_status,
+            shop_config: shop_config_result,
+            cart_currency: &cart_currency,
+        };
+        
+        if credit_rules::should_hide_deferred(&payment_input) {
+            return Ok(schema::CartPaymentMethodsTransformRunResult { operations: hide_deferred() });
         }
-        // No metafield or not held - pass (fail-open)
+        
         return Ok(pass());
     }
 
@@ -313,7 +356,16 @@ fn cart_payment_methods_transform_run(
             let json_value = metafield.json_value();
             let credit_status = CreditStatus::from_json_value(json_value);
             
-            if credit_status.is_held() {
+            // Also read using shared parser for over-limit check
+            let customer_status = credit_rules::read_status(Some(json_value));
+            let payment_input = PaymentDecisionInput {
+                status: &customer_status,
+                shop_config: shop_config_result,
+                cart_currency: &cart_currency,
+            };
+            
+            // Check if should hide using shared rules (held, indeterminate, or over limit)
+            if credit_rules::should_hide_deferred(&payment_input) {
                 let operations: Vec<schema::Operation> = if let Some(ref target_name) = config.manual_payment_method_name {
                     // Hide the specifically configured payment method (exact match)
                     input
@@ -324,6 +376,22 @@ fn cart_payment_methods_transform_run(
                         .collect()
                 } else {
                     // No specific method configured - hide by deferred payment patterns
+                    hide_deferred()
+                };
+                
+                return Ok(schema::CartPaymentMethodsTransformRunResult { operations });
+            }
+            
+            // Legacy path: check old is_held for backward compatibility
+            if credit_status.is_held() {
+                let operations: Vec<schema::Operation> = if let Some(ref target_name) = config.manual_payment_method_name {
+                    input
+                        .payment_methods()
+                        .iter()
+                        .filter(|pm| pm.name().to_lowercase() == target_name.to_lowercase())
+                        .map(|pm| hide_payment_method(pm.id().to_string()))
+                        .collect()
+                } else {
                     hide_deferred()
                 };
                 
