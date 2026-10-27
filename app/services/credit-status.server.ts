@@ -666,7 +666,7 @@ export function parseCreditLimitString(
   if (parsed > MAX_CREDIT_LIMIT_AMOUNT) {
     return {
       valid: false,
-      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString()}`,
+      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString("en-IN")}`,
     };
   }
 
@@ -711,7 +711,7 @@ function validateCreditLimit(amount: number | null | undefined, noLimit: boolean
   if (amount > MAX_CREDIT_LIMIT_AMOUNT) {
     return { 
       valid: false, 
-      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString()}` 
+      error: `Credit limit cannot exceed ${MAX_CREDIT_LIMIT_AMOUNT.toLocaleString("en-IN")}` 
     };
   }
 

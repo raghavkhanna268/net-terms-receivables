@@ -1806,6 +1806,15 @@ describe("parseCreditLimitString (Indian number formatting)", () => {
         expect(result.value).toBe(100000);
       }
     });
+
+    it("accepts '₹5,00,000' as 500000 (5 lakh with rupee prefix)", async () => {
+      const { parseCreditLimitString } = await import("../credit-status.server");
+      const result = parseCreditLimitString("₹5,00,000");
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.value).toBe(500000);
+      }
+    });
   });
 
   describe("rejects invalid formats", () => {
@@ -1926,6 +1935,17 @@ describe("parseCreditLimitString (Indian number formatting)", () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error).toContain("cannot exceed");
+      }
+    });
+
+    it("returns en-IN formatted max in error message", async () => {
+      const { parseCreditLimitString, MAX_CREDIT_LIMIT_AMOUNT } = await import("../credit-status.server");
+      const tooLarge = (MAX_CREDIT_LIMIT_AMOUNT + 1).toString();
+      const result = parseCreditLimitString(tooLarge);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        const expectedMax = MAX_CREDIT_LIMIT_AMOUNT.toLocaleString("en-IN");
+        expect(result.error).toBe(`Credit limit cannot exceed ${expectedMax}`);
       }
     });
   });

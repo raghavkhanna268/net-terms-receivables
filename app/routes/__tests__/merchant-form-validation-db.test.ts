@@ -686,6 +686,34 @@ describeWithDb("Merchant form validation (DB)", () => {
       );
     });
 
+    it("'₹5,00,000' (5 lakh with rupee prefix) is accepted and normalized to 500000", async () => {
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      vi.resetModules();
+      const creditStatusModule = await import("~/services/credit-status.server");
+      const mockUpdate = vi.mocked(creditStatusModule.updateCreditStatus);
+      mockUpdate.mockClear();
+      mockUpdate.mockResolvedValue({ success: true });
+
+      const formData = new FormData();
+      formData.set("_action", "updateCredit");
+      formData.set("creditLimit", "₹5,00,000");
+
+      const { action } = await import("../app.accounts.$id");
+      const result = await action(createAccountActionArgs(SHOP_A_DOMAIN, ACCOUNT_A_ID, formData) as never);
+
+      const data = extractActionData(result);
+      expect(data.success).toBe(true);
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        ACCOUNT_A_ID,
+        expect.objectContaining({ creditLimitAmount: 500000 })
+      );
+    });
+
     it("single decimal '1,00,000.5' is accepted and normalized to 100000.5", async () => {
       vi.doMock("~/lib/request-context.server", () => ({
         getRequestSql: () => sql,

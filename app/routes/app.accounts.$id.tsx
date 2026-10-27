@@ -911,14 +911,13 @@ export default function AccountPage() {
             <input type="hidden" name="_action" value="updateCredit" />
             <s-stack gap="base">
               <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
-                <s-money-field
+                <s-text-field
                   label="Credit Limit"
                   name="creditLimit"
-                  min={0}
                   placeholder="e.g., 1,00,000 or ₹1,00,000.50"
                   value={noLimitChecked ? "" : (creditStatus?.creditLimitAmount?.toString() ?? "")}
                   disabled={noLimitChecked}
-                ></s-money-field>
+                ></s-text-field>
                 <s-text>{currency}</s-text>
               </s-grid>
 
