@@ -39,6 +39,10 @@ vi.mock("~/services/plan.server", () => ({
     subscriptionName: "Free",
     isTest: false,
   }),
+  resolvePlanWithStatus: vi.fn().mockResolvedValue({
+    plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+    status: "none",
+  }),
 }));
 
 vi.mock("~/services/gating.server", () => ({
@@ -601,7 +605,7 @@ describe("Query count reduction", () => {
 
     expect(result.error).toBeNull();
     expect(result.state).not.toBeNull();
-    expect(result.state?.steps).toHaveLength(4);
+    expect(result.state?.steps).toHaveLength(5);
     expect(result.registrationStatus).not.toBeNull();
     expect(result.initialSyncState).not.toBeNull();
     expect(result.currencySupported).toBe(true);
