@@ -145,7 +145,7 @@ describe("Plan Welcome Service", () => {
       const result = await processPlanWelcome(
         mockSql as never,
         TEST_SHOP,
-        "other-store.myshopify.com",
+        "test-other.myshopify.com",
         "growth",
         "charge123"
       );
@@ -453,7 +453,7 @@ describe("/app (index) Route with plan_handle", () => {
     const result = await processPlanWelcome(
       mockSql as never,
       TEST_SHOP,
-      "other-store.myshopify.com",
+      "test-other.myshopify.com",
       "growth",
       null
     );

@@ -35,7 +35,6 @@ const VALID_PLAN_HANDLES: ReadonlySet<string> = new Set([
  */
 export const PLAN_WELCOME_REASONS = [
   "foreign_shop",
-  "no_trigger",
   "refresh_failed",
   "refreshed",
 ] as const;
