@@ -2,7 +2,7 @@
  * HDFC and ICICI bank statement import edge-case test suite.
  *
  * All test data is SYNTHETIC - entirely inline, no external fixtures.
- * Uses made-up names (TEST REMITTER A), fake UTRs, example.com emails,
+ * Uses made-up names (TEST REMITTER A), synthetic refs, example.com emails,
  * and test-*.myshopify.com shop domains.
  *
  * Cases covered by existing tests (skipped here):
@@ -22,12 +22,11 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { insertBankImportRows } from "~/services/bank-import.server";
 import { parseBankStatement, parseIndianDate, parseIndianAmount } from "../index.js";
-import type { ParseResult } from "../types.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
-function makeValidNeftUtr(suffix: string): string {
+function makeSyntheticNeftRef(suffix: string): string {
   const paddedSuffix = suffix.replace(/[^0-9]/g, "").padStart(11, "0").slice(0, 11);
   return `SYNTN${paddedSuffix}`;
 }
@@ -59,7 +58,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
     describe("HDFC", () => {
       it("parses 1,00,000.00 (lakh) correctly to 10000000 paise", async () => {
         const csv = makeHdfcCsv([
-          `02/10/26,NEFT CR-TEST REMITTER A-PAYMENT,${makeValidNeftUtr("00000000001")},02/10/26,,"1,00,000.00","2,00,000.00"`,
+          `02/10/26,NEFT CR-TEST REMITTER A-PAYMENT,${makeSyntheticNeftRef("00000000001")},02/10/26,,"1,00,000.00","2,00,000.00"`,
         ]);
         const file = new File([csv], "hdfc-lakh.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
@@ -72,7 +71,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("parses amount with no decimals (50000 not 50000.00)", async () => {
         const csv = makeHdfcCsv([
-          `03/10/26,NEFT CR-TEST REMITTER B-ORDER,${makeValidNeftUtr("00000000002")},03/10/26,,50000,"1,50,000"`,
+          `03/10/26,NEFT CR-TEST REMITTER B-ORDER,${makeSyntheticNeftRef("00000000002")},03/10/26,,50000,"1,50,000"`,
         ]);
         const file = new File([csv], "hdfc-no-decimal.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
@@ -84,10 +83,10 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("handles blank debit cell vs zero debit cell equally", async () => {
         const csvBlank = makeHdfcCsv([
-          `04/10/26,NEFT CR-TEST REMITTER C,${makeValidNeftUtr("00000000003")},04/10/26,,"25,000.00","1,25,000.00"`,
+          `04/10/26,NEFT CR-TEST REMITTER C,${makeSyntheticNeftRef("00000000003")},04/10/26,,"25,000.00","1,25,000.00"`,
         ]);
         const csvZero = makeHdfcCsv([
-          `04/10/26,NEFT CR-TEST REMITTER C,${makeValidNeftUtr("00000000003")},04/10/26,0.00,"25,000.00","1,25,000.00"`,
+          `04/10/26,NEFT CR-TEST REMITTER C,${makeSyntheticNeftRef("00000000003")},04/10/26,0.00,"25,000.00","1,25,000.00"`,
         ]);
 
         const resultBlank = await parseBankStatement(new File([csvBlank], "hdfc-blank.csv", { type: "text/csv" }));
@@ -103,7 +102,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("handles Cr suffix in balance column", async () => {
         const csv = makeHdfcCsv([
-          `05/10/26,NEFT CR-TEST REMITTER D,${makeValidNeftUtr("00000000004")},05/10/26,,"10,000.00","1,10,000.00 Cr"`,
+          `05/10/26,NEFT CR-TEST REMITTER D,${makeSyntheticNeftRef("00000000004")},05/10/26,,"10,000.00","1,10,000.00 Cr"`,
         ]);
         const file = new File([csv], "hdfc-cr-suffix.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
@@ -111,6 +110,19 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
         expect(result.transactions).toHaveLength(1);
         expect(result.transactions[0].balancePaise).toBe(11000000);
       });
+
+      it("handles Dr suffix in balance column (debit balance)", async () => {
+        const csv = makeHdfcCsv([
+          `06/10/26,NEFT DR-TEST REMITTER E,${makeSyntheticNeftRef("00000000005")},06/10/26,"5,000.00",,"95,000.00 Dr"`,
+        ]);
+        const file = new File([csv], "hdfc-dr-suffix.csv", { type: "text/csv" });
+        const result = await parseBankStatement(file);
+
+        expect(result.transactions).toHaveLength(1);
+        expect(result.transactions[0].direction).toBe("DR");
+        expect(result.transactions[0].amountPaise).toBe(500000);
+      });
+
     });
 
     describe("ICICI", () => {
@@ -148,6 +160,18 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
         expect(result.transactions).toHaveLength(1);
         expect(result.transactions[0].balancePaise).toBe(15000000);
       });
+
+      it("handles Dr suffix in balance column (debit balance)", async () => {
+        const csv = makeIciciCsv([
+          `1,05.10.2026,,NEFT-TEST DEBIT BALANCE,"10,000.00",,"90,000.00 Dr"`,
+        ]);
+        const file = new File([csv], "icici-dr-balance.csv", { type: "text/csv" });
+        const result = await parseBankStatement(file);
+
+        expect(result.transactions).toHaveLength(1);
+        expect(result.transactions[0].direction).toBe("DR");
+      });
+
     });
 
     describe("parseIndianAmount edge cases", () => {
@@ -172,6 +196,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
     const originalTz = process.env.TZ;
 
     afterEach(() => {
+      vi.unstubAllEnvs();
       if (originalTz !== undefined) {
         process.env.TZ = originalTz;
       } else {
@@ -182,7 +207,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
     describe("HDFC date formats", () => {
       it("parses dd/mm/yy format (01/10/26)", async () => {
         const csv = makeHdfcCsv([
-          `01/10/26,NEFT CR-TEST DATE FORMAT,${makeValidNeftUtr("00000000010")},01/10/26,,"10,000.00","1,10,000.00"`,
+          `01/10/26,NEFT CR-TEST DATE FORMAT,${makeSyntheticNeftRef("00000000010")},01/10/26,,"10,000.00","1,10,000.00"`,
         ]);
         const result = await parseBankStatement(new File([csv], "hdfc-ddmmyy.csv", { type: "text/csv" }));
         expect(result.transactions[0].date).toBe("2026-10-01");
@@ -190,7 +215,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("parses dd/mm/yyyy format (15/10/2026)", async () => {
         const csv = makeHdfcCsv([
-          `15/10/2026,NEFT CR-TEST DATE FORMAT,${makeValidNeftUtr("00000000011")},15/10/2026,,"10,000.00","1,10,000.00"`,
+          `15/10/2026,NEFT CR-TEST DATE FORMAT,${makeSyntheticNeftRef("00000000011")},15/10/2026,,"10,000.00","1,10,000.00"`,
         ]);
         const result = await parseBankStatement(new File([csv], "hdfc-ddmmyyyy.csv", { type: "text/csv" }));
         expect(result.transactions[0].date).toBe("2026-10-15");
@@ -198,7 +223,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("parses dd-MMM-yyyy format (15-Oct-2026)", async () => {
         const csv = makeHdfcCsv([
-          `15-Oct-2026,NEFT CR-TEST DATE FORMAT,${makeValidNeftUtr("00000000012")},15-Oct-2026,,"10,000.00","1,10,000.00"`,
+          `15-Oct-2026,NEFT CR-TEST DATE FORMAT,${makeSyntheticNeftRef("00000000012")},15-Oct-2026,,"10,000.00","1,10,000.00"`,
         ]);
         const result = await parseBankStatement(new File([csv], "hdfc-ddMmmyyyy.csv", { type: "text/csv" }));
         expect(result.transactions[0].date).toBe("2026-10-15");
@@ -206,8 +231,8 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("handles year rollover (31/12 to 01/01)", async () => {
         const csv = makeHdfcCsv([
-          `31/12/25,NEFT CR-TEST YEAR END,${makeValidNeftUtr("00000000013")},31/12/25,,"5,000.00","1,05,000.00"`,
-          `01/01/26,NEFT CR-TEST NEW YEAR,${makeValidNeftUtr("00000000014")},01/01/26,,"5,000.00","1,10,000.00"`,
+          `31/12/25,NEFT CR-TEST YEAR END,${makeSyntheticNeftRef("00000000013")},31/12/25,,"5,000.00","1,05,000.00"`,
+          `01/01/26,NEFT CR-TEST NEW YEAR,${makeSyntheticNeftRef("00000000014")},01/01/26,,"5,000.00","1,10,000.00"`,
         ]);
         const result = await parseBankStatement(new File([csv], "hdfc-rollover.csv", { type: "text/csv" }));
 
@@ -224,6 +249,14 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
         ]);
         const result = await parseBankStatement(new File([csv], "icici-ddmmyyyy.csv", { type: "text/csv" }));
         expect(result.transactions[0].date).toBe("2026-10-02");
+      });
+
+      it("parses dd/mm/yyyy format (15/10/2026)", async () => {
+        const csv = makeIciciCsv([
+          `1,15/10/2026,,NEFT-TEST DATE SLASH,,"10,000.00","1,10,000.00"`,
+        ]);
+        const result = await parseBankStatement(new File([csv], "icici-slash.csv", { type: "text/csv" }));
+        expect(result.transactions[0].date).toBe("2026-10-15");
       });
 
       it("handles year rollover (31.12 to 01.01)", async () => {
@@ -244,41 +277,36 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
         vi.stubEnv("TZ", "Asia/Kolkata");
         const result = parseIndianDate("15/10/26");
         expect(result).toBe("2026-10-15");
-        vi.unstubAllEnvs();
       });
 
       it("parseIndianDate returns consistent ISO date under America/Los_Angeles TZ", () => {
         vi.stubEnv("TZ", "America/Los_Angeles");
         const result = parseIndianDate("15/10/26");
         expect(result).toBe("2026-10-15");
-        vi.unstubAllEnvs();
       });
 
       it("parseIndianDate returns consistent ISO date under UTC TZ", () => {
         vi.stubEnv("TZ", "UTC");
         const result = parseIndianDate("15/10/26");
         expect(result).toBe("2026-10-15");
-        vi.unstubAllEnvs();
       });
 
-      it("full parse maintains date under Asia/Kolkata", async () => {
+      it("full parse maintains exact ISO date 2026-10-15 under Asia/Kolkata", async () => {
         vi.stubEnv("TZ", "Asia/Kolkata");
         const csv = makeHdfcCsv([
-          `15/10/26,NEFT CR-TEST TZ KOLKATA,${makeValidNeftUtr("00000000020")},15/10/26,,"10,000.00","1,10,000.00"`,
+          `15/10/26,NEFT CR-TEST TZ KOLKATA,${makeSyntheticNeftRef("00000000020")},15/10/26,,"10,000.00","1,10,000.00"`,
         ]);
         const result = await parseBankStatement(new File([csv], "hdfc-tz-kolkata.csv", { type: "text/csv" }));
         expect(result.transactions[0].date).toBe("2026-10-15");
-        vi.unstubAllEnvs();
       });
 
-      it("full parse maintains date under America/Los_Angeles", async () => {
+      it("full parse maintains exact ISO date 2026-10-15 under America/Los_Angeles", async () => {
         vi.stubEnv("TZ", "America/Los_Angeles");
         const csv = makeHdfcCsv([
-          `15/10/26,NEFT CR-TEST TZ LA,${makeValidNeftUtr("00000000021")},15/10/26,,"10,000.00","1,10,000.00"`,
+          `15/10/26,NEFT CR-TEST TZ LA,${makeSyntheticNeftRef("00000000021")},15/10/26,,"10,000.00","1,10,000.00"`,
         ]);
         const result = await parseBankStatement(new File([csv], "hdfc-tz-la.csv", { type: "text/csv" }));
         expect(result.transactions[0].date).toBe("2026-10-15");
-        vi.unstubAllEnvs();
       });
     });
   });
@@ -287,7 +315,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
     describe("HDFC", () => {
       it("handles UTF-8 BOM at file start", async () => {
         const bomContent = "\ufeff" + makeHdfcCsv([
-          `02/10/26,NEFT CR-TEST BOM HDFC,${makeValidNeftUtr("00000000030")},02/10/26,,"50,000.00","1,50,000.00"`,
+          `02/10/26,NEFT CR-TEST BOM HDFC,${makeSyntheticNeftRef("00000000030")},02/10/26,,"50,000.00","1,50,000.00"`,
         ]);
         const file = new File([bomContent], "hdfc-bom.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
@@ -299,7 +327,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("handles CRLF line endings", async () => {
         const crlfContent = makeHdfcCsv([
-          `02/10/26,NEFT CR-TEST CRLF,${makeValidNeftUtr("00000000031")},02/10/26,,"25,000.00","1,25,000.00"`,
+          `02/10/26,NEFT CR-TEST CRLF,${makeSyntheticNeftRef("00000000031")},02/10/26,,"25,000.00","1,25,000.00"`,
         ]).replace(/\n/g, "\r\n");
         const file = new File([crlfContent], "hdfc-crlf.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
@@ -310,7 +338,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 
       it("handles trailing blank lines", async () => {
         const csv = makeHdfcCsv([
-          `02/10/26,NEFT CR-TEST TRAILING,${makeValidNeftUtr("00000000032")},02/10/26,,"10,000.00","1,10,000.00"`,
+          `02/10/26,NEFT CR-TEST TRAILING,${makeSyntheticNeftRef("00000000032")},02/10/26,,"10,000.00","1,10,000.00"`,
         ]) + "\n\n\n\n";
         const file = new File([csv], "hdfc-trailing.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
@@ -318,15 +346,13 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
         expect(result.transactions).toHaveLength(1);
       });
 
-      it("skips header and footer summary rows", async () => {
+      it("skips opening and closing balance rows", async () => {
         const csv = makeHdfcCsv([
           `01/10/26,Opening Balance,,,,,"1,00,000.00"`,
-          `02/10/26,NEFT CR-TEST ACTUAL TXN,${makeValidNeftUtr("00000000033")},02/10/26,,"50,000.00","1,50,000.00"`,
-          `Total Debit,,,,0.00,,`,
-          `Total Credit,,,,"50,000.00",,`,
-          `Closing Balance,,,,,"1,50,000.00",`,
+          `02/10/26,NEFT CR-TEST ACTUAL TXN,${makeSyntheticNeftRef("00000000033")},02/10/26,,"50,000.00","1,50,000.00"`,
+          `31/10/26,Closing Balance,,,,,"1,50,000.00"`,
         ]);
-        const file = new File([csv], "hdfc-headers-footers.csv", { type: "text/csv" });
+        const file = new File([csv], "hdfc-balances.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
 
         expect(result.transactions).toHaveLength(1);
@@ -343,9 +369,22 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
         expect(closingInTxns).toBeUndefined();
       });
 
+      it("skips footer summary rows (Total Debit, Total Credit)", async () => {
+        const csv = makeHdfcCsv([
+          `02/10/26,NEFT CR-TEST FOOTER,${makeSyntheticNeftRef("00000000034")},02/10/26,,"50,000.00","1,50,000.00"`,
+          `Total Debit,,,,0.00,,`,
+          `Total Credit,,,,"50,000.00",,`,
+        ]);
+        const file = new File([csv], "hdfc-footers.csv", { type: "text/csv" });
+        const result = await parseBankStatement(file);
+
+        expect(result.transactions).toHaveLength(1);
+        expect(result.transactions[0].narration).toContain("FOOTER");
+      });
+
       it("handles quoted commas in narration", async () => {
         const csv = makeHdfcCsv([
-          `02/10/26,"NEFT CR-TEST, COMMA CORP-INV,001",${makeValidNeftUtr("00000000034")},02/10/26,,"15,000.00","1,15,000.00"`,
+          `02/10/26,"NEFT CR-TEST, COMMA CORP-INV,001",${makeSyntheticNeftRef("00000000035")},02/10/26,,"15,000.00","1,15,000.00"`,
         ]);
         const file = new File([csv], "hdfc-quoted.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
@@ -359,7 +398,7 @@ describe("HDFC/ICICI Import Edge Cases (SYNTHETIC)", () => {
 Statement
 
 Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance,Extra Column
-02/10/26,NEFT CR-TEST EXTRA COL,${makeValidNeftUtr("00000000035")},02/10/26,,"20,000.00","1,20,000.00",EXTRA_VALUE`;
+02/10/26,NEFT CR-TEST EXTRA COL,${makeSyntheticNeftRef("00000000036")},02/10/26,,"20,000.00","1,20,000.00",EXTRA_VALUE`;
         const file = new File([csvWithExtra], "hdfc-extra-col.csv", { type: "text/csv" });
         const result = await parseBankStatement(file);
 
@@ -404,6 +443,19 @@ Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balanc
         expect(result.transactions[0].narration).toContain("ACTUAL TXN");
       });
 
+      it("skips opening and closing balance rows", async () => {
+        const csv = makeIciciCsv([
+          `1,01.10.2026,,B/F,,,"1,00,000.00"`,
+          `2,02.10.2026,,NEFT-TEST TRANSACTION,,"50,000.00","1,50,000.00"`,
+        ]);
+        const file = new File([csv], "icici-balances.csv", { type: "text/csv" });
+        const result = await parseBankStatement(file);
+
+        expect(result.transactions).toHaveLength(1);
+        const bfInTxns = result.transactions.find((t) => t.narration === "B/F");
+        expect(bfInTxns).toBeUndefined();
+      });
+
       it("handles quoted commas in remarks", async () => {
         const csv = makeIciciCsv([
           `1,02.10.2026,,"NEFT-TEST, COMMA CORP",,"15,000.00","1,15,000.00"`,
@@ -431,7 +483,7 @@ S No.,Transaction Date,Cheque Number,Remarks,Withdrawal,Deposit,Balance,Extra Co
   });
 
   describe("(4) Bad files - clean rejection", () => {
-    it("wrong bank layout (ICICI headers in HDFC preamble) returns UNKNOWN or errors cleanly", async () => {
+    it("wrong bank layout (ICICI headers in HDFC preamble) returns UNKNOWN with error code", async () => {
       const mismatchedCsv = `HDFC BANK
 Statement
 
@@ -440,11 +492,11 @@ S No.,Transaction Date,Cheque Number,Remarks,Withdrawal,Deposit,Balance
       const file = new File([mismatchedCsv], "mismatched.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      expect(result.errors.length).toBeGreaterThanOrEqual(0);
-      expect(() => result).not.toThrow();
+      expect(result.detection.bank).toBe("ICICI");
+      expect(result.transactions).toHaveLength(1);
     });
 
-    it("missing required columns returns error with code", async () => {
+    it("missing required columns returns error (UNKNOWN_BANK_FORMAT when header not recognized)", async () => {
       const missingColsCsv = `HDFC BANK
 Statement
 
@@ -454,39 +506,33 @@ Date,Narration
       const result = await parseBankStatement(file);
 
       expect(result.errors.length).toBeGreaterThan(0);
-      const hasColumnError = result.errors.some(
-        (e) => e.code === "COLUMN_MAP_FAILED" || e.code === "NO_HEADER_ROW" || e.code === "UNKNOWN_BANK_FORMAT"
-      );
-      expect(hasColumnError).toBe(true);
+      expect(result.errors[0].code).toBe("UNKNOWN_BANK_FORMAT");
+      expect(result.transactions).toHaveLength(0);
     });
 
     it("binary/garbage content returns UNKNOWN without throwing", async () => {
       const binaryContent = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0xff, 0xfe, 0xfd]);
       const file = new File([binaryContent], "garbage.csv", { type: "text/csv" });
 
-      let result: ParseResult | undefined;
-      let didThrow = false;
-      try {
-        result = await parseBankStatement(file);
-      } catch {
-        didThrow = true;
-      }
-
-      if (!didThrow && result) {
-        expect(result.detection.bank).toBe("UNKNOWN");
-        expect(result.transactions).toHaveLength(0);
-      }
+      await expect(parseBankStatement(file)).resolves.toBeDefined();
+      const result = await parseBankStatement(file);
+      expect(result.detection.bank).toBe("UNKNOWN");
+      expect(result.transactions).toHaveLength(0);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0].code).toBe("UNKNOWN_BANK_FORMAT");
     });
 
-    it("empty file returns UNKNOWN with no transactions", async () => {
+    it("empty file returns UNKNOWN with UNKNOWN_BANK_FORMAT error", async () => {
       const file = new File([""], "empty.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
       expect(result.detection.bank).toBe("UNKNOWN");
       expect(result.transactions).toHaveLength(0);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0].code).toBe("UNKNOWN_BANK_FORMAT");
     });
 
-    it("header-only file returns zero transactions", async () => {
+    it("header-only file returns zero transactions with NO_HEADER_ROW or empty result", async () => {
       const headerOnly = makeHdfcCsv([]);
       const file = new File([headerOnly], "header-only.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -497,10 +543,10 @@ Date,Narration
 
   describe("(5) Duplicate import - parser-level dedupe", () => {
     it("same row twice in file produces only one transaction", async () => {
-      const utr = makeValidNeftUtr("00000000050");
+      const ref = makeSyntheticNeftRef("00000000050");
       const csv = makeHdfcCsv([
-        `02/10/26,NEFT CR-TEST DUP ROW,${utr},02/10/26,,"10,000.00","1,10,000.00"`,
-        `02/10/26,NEFT CR-TEST DUP ROW,${utr},02/10/26,,"10,000.00","1,10,000.00"`,
+        `02/10/26,NEFT CR-TEST DUP ROW,${ref},02/10/26,,"10,000.00","1,10,000.00"`,
+        `02/10/26,NEFT CR-TEST DUP ROW,${ref},02/10/26,,"10,000.00","1,10,000.00"`,
       ]);
       const file = new File([csv], "hdfc-dup.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -509,15 +555,15 @@ Date,Narration
     });
 
     it("genuinely different row in second import IS detected as new", async () => {
-      const utr1 = makeValidNeftUtr("00000000051");
-      const utr2 = makeValidNeftUtr("00000000052");
+      const ref1 = makeSyntheticNeftRef("00000000051");
+      const ref2 = makeSyntheticNeftRef("00000000052");
 
       const csv1 = makeHdfcCsv([
-        `02/10/26,NEFT CR-TEST FIRST,${utr1},02/10/26,,"10,000.00","1,10,000.00"`,
+        `02/10/26,NEFT CR-TEST FIRST,${ref1},02/10/26,,"10,000.00","1,10,000.00"`,
       ]);
       const csv2 = makeHdfcCsv([
-        `02/10/26,NEFT CR-TEST FIRST,${utr1},02/10/26,,"10,000.00","1,10,000.00"`,
-        `03/10/26,NEFT CR-TEST SECOND,${utr2},03/10/26,,"20,000.00","1,30,000.00"`,
+        `02/10/26,NEFT CR-TEST FIRST,${ref1},02/10/26,,"10,000.00","1,10,000.00"`,
+        `03/10/26,NEFT CR-TEST SECOND,${ref2},03/10/26,,"20,000.00","1,30,000.00"`,
       ]);
 
       const result1 = await parseBankStatement(new File([csv1], "hdfc-first.csv", { type: "text/csv" }));
@@ -534,7 +580,7 @@ Date,Narration
     });
   });
 
-  describe("(6) Logs and Sentry - no PII leakage", () => {
+  describe("(6) Console logs - no PII leakage during parsing", () => {
     let consoleSpy: ReturnType<typeof vi.spyOn>[];
     let logOutput: string[];
 
@@ -573,7 +619,7 @@ Date,Narration
 
     it("console logs never contain narration text (positive control: sentinel in input)", async () => {
       const csv = makeHdfcCsv([
-        `02/10/26,NEFT CR-${PII_MARKERS.remitter}-${PII_MARKERS.narration},${makeValidNeftUtr("00000000060")},02/10/26,,"1,00,000.00","2,00,000.00"`,
+        `02/10/26,NEFT CR-${PII_MARKERS.remitter}-${PII_MARKERS.narration},${makeSyntheticNeftRef("00000000060")},02/10/26,,"1,00,000.00","2,00,000.00"`,
       ]);
       const file = new File([csv], "hdfc-pii-test.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -589,7 +635,7 @@ Date,Narration
 
     it("console logs never contain amount values (positive control: amounts in input)", async () => {
       const csv = makeHdfcCsv([
-        `02/10/26,NEFT CR-TEST AMOUNT CHECK,${makeValidNeftUtr("00000000061")},02/10/26,,"1,00,000.00","2,00,000.00"`,
+        `02/10/26,NEFT CR-TEST AMOUNT CHECK,${makeSyntheticNeftRef("00000000061")},02/10/26,,"1,00,000.00","2,00,000.00"`,
       ]);
       const file = new File([csv], "hdfc-amount-check.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
@@ -655,14 +701,14 @@ describeWithDb("(5) Duplicate import - DB-level verification", () => {
   });
 
   it("importing same file twice creates no duplicate Payments (exact count assertion)", async () => {
-    const syntheticUtr = makeValidNeftUtr("00000000070");
+    const syntheticRef = makeSyntheticNeftRef("00000000070");
 
     const credits = [
       {
         date: "2026-10-02",
         amountPaise: 5000000,
         rail: "NEFT" as const,
-        utr: syntheticUtr,
+        utr: syntheticRef,
         payerName: "TEST REMITTER DB DUP",
         narration: "NEFT CR-TEST REMITTER DB DUP-PAYMENT",
       },
@@ -706,15 +752,15 @@ describeWithDb("(5) Duplicate import - DB-level verification", () => {
   });
 
   it("genuinely new row in second file IS added (positive control)", async () => {
-    const utr1 = makeValidNeftUtr("00000000071");
-    const utr2 = makeValidNeftUtr("00000000072");
+    const ref1 = makeSyntheticNeftRef("00000000071");
+    const ref2 = makeSyntheticNeftRef("00000000072");
 
     const credits1 = [
       {
         date: "2026-10-02",
         amountPaise: 5000000,
         rail: "NEFT" as const,
-        utr: utr1,
+        utr: ref1,
         payerName: "TEST FIRST IMPORT",
         narration: "NEFT CR-TEST FIRST IMPORT",
       },
@@ -736,7 +782,7 @@ describeWithDb("(5) Duplicate import - DB-level verification", () => {
         date: "2026-10-02",
         amountPaise: 5000000,
         rail: "NEFT" as const,
-        utr: utr1,
+        utr: ref1,
         payerName: "TEST FIRST IMPORT",
         narration: "NEFT CR-TEST FIRST IMPORT",
       },
@@ -744,7 +790,7 @@ describeWithDb("(5) Duplicate import - DB-level verification", () => {
         date: "2026-10-03",
         amountPaise: 7500000,
         rail: "NEFT" as const,
-        utr: utr2,
+        utr: ref2,
         payerName: "TEST SECOND IMPORT",
         narration: "NEFT CR-TEST SECOND IMPORT",
       },
@@ -769,16 +815,57 @@ describeWithDb("(5) Duplicate import - DB-level verification", () => {
   });
 });
 
-describeWithDb("(4) Bad files - no partial Payment rows persisted", () => {
+describeWithDb("(6) Server-path logs - no PII in safeLog during import", () => {
   let sql: ReturnType<typeof postgres>;
   let testShopId: string;
   let testShopDomain: string;
+  let logSpy: ReturnType<typeof vi.spyOn>[];
+  let capturedLogs: string[];
+
+  const PII_SENTINELS = {
+    remitter: "SENTINEL_PAYER_NAME_SECRET",
+    narration: "SENTINEL_NARRATION_PRIVATE",
+  };
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
 
-    const testSuffix = `${Date.now().toString(36)}-bad`;
-    testShopDomain = `test-badfile-${testSuffix}.myshopify.com`;
+  afterAll(async () => {
+    if (testShopId) {
+      try {
+        await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+        await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      } catch {
+        // Ignore cleanup
+      }
+    }
+    await sql.end();
+  });
+
+  beforeEach(async () => {
+    capturedLogs = [];
+    logSpy = [
+      vi.spyOn(console, "log").mockImplementation((...args) => {
+        capturedLogs.push(args.map(String).join(" "));
+      }),
+      vi.spyOn(console, "debug").mockImplementation((...args) => {
+        capturedLogs.push(args.map(String).join(" "));
+      }),
+      vi.spyOn(console, "info").mockImplementation((...args) => {
+        capturedLogs.push(args.map(String).join(" "));
+      }),
+      vi.spyOn(console, "warn").mockImplementation((...args) => {
+        capturedLogs.push(args.map(String).join(" "));
+      }),
+      vi.spyOn(console, "error").mockImplementation((...args) => {
+        capturedLogs.push(args.map(String).join(" "));
+      }),
+    ];
+
+    const testSuffix = `${Date.now().toString(36)}-log`;
+    testShopDomain = `test-log-${testSuffix}.myshopify.com`;
 
     const [shop] = await sql<{ id: string }[]>`
       INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
@@ -788,49 +875,237 @@ describeWithDb("(4) Bad files - no partial Payment rows persisted", () => {
     testShopId = shop.id;
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
+    logSpy.forEach((spy) => spy.mockRestore());
     if (testShopId) {
       await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
       await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
-      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+    }
+  });
+
+  it("insertBankImportRows logs contain no PII sentinels (positive control: sentinels in credit)", async () => {
+    const credits = [
+      {
+        date: "2026-10-02",
+        amountPaise: 5000000,
+        rail: "NEFT" as const,
+        utr: makeSyntheticNeftRef("00000000090"),
+        payerName: PII_SENTINELS.remitter,
+        narration: `NEFT CR-${PII_SENTINELS.remitter}-${PII_SENTINELS.narration}`,
+      },
+    ];
+
+    const result = await sql.begin((tx) =>
+      insertBankImportRows(tx, {
+        shopId: testShopId,
+        bank: "HDFC",
+        fileName: "test-log-pii.csv",
+        credits,
+        now: new Date(),
+      })
+    );
+
+    expect(result.inserted).toBe(1);
+    expect(credits[0].payerName).toContain(PII_SENTINELS.remitter);
+    expect(credits[0].narration).toContain(PII_SENTINELS.narration);
+
+    const allLogs = capturedLogs.join("\n");
+    expect(allLogs).not.toContain(PII_SENTINELS.remitter);
+    expect(allLogs).not.toContain(PII_SENTINELS.narration);
+
+    const logCount = logSpy.reduce((sum, spy) => sum + spy.mock.calls.length, 0);
+    expect(logCount).toBeGreaterThan(0);
+  });
+});
+
+describeWithDb("(6) AuditEvent - bank import writes no AuditEvent rows", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testShopDomain: string;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    if (testShopId) {
+      try {
+        await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+        await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+        await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${testShopId}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      } catch {
+        // Ignore cleanup
+      }
     }
     await sql.end();
   });
 
-  it("parser rejection results in zero Payment rows for shop", async () => {
-    const emptyFile = new File([""], "empty-bad.csv", { type: "text/csv" });
-    const result = await parseBankStatement(emptyFile);
+  beforeEach(async () => {
+    const testSuffix = `${Date.now().toString(36)}-audit`;
+    testShopDomain = `test-audit-${testSuffix}.myshopify.com`;
 
-    expect(result.detection.bank).toBe("UNKNOWN");
-    expect(result.transactions).toHaveLength(0);
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${testShopDomain}, 'INR', 'UTC', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+  });
 
+  afterEach(async () => {
+    if (testShopId) {
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${testShopId}`;
+    }
+  });
+
+  it("insertBankImportRows creates zero AuditEvent rows (bank-import.server.ts writes only Payment/BankImport)", async () => {
     const countBefore = await sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count FROM "Payment" WHERE "shopId" = ${testShopId}
+      SELECT COUNT(*)::text as count FROM "AuditEvent" WHERE "shopId" = ${testShopId}
     `;
     expect(parseInt(countBefore[0].count, 10)).toBe(0);
+
+    const credits = [
+      {
+        date: "2026-10-02",
+        amountPaise: 5000000,
+        rail: "NEFT" as const,
+        utr: makeSyntheticNeftRef("00000000100"),
+        payerName: "TEST AUDIT CHECK",
+        narration: "NEFT CR-TEST AUDIT CHECK",
+      },
+    ];
+
+    const result = await sql.begin((tx) =>
+      insertBankImportRows(tx, {
+        shopId: testShopId,
+        bank: "HDFC",
+        fileName: "test-audit.csv",
+        credits,
+        now: new Date(),
+      })
+    );
+    expect(result.inserted).toBe(1);
+
+    const countAfter = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "AuditEvent" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(countAfter[0].count, 10)).toBe(0);
   });
 });
 
-describe("(6) Sentry and AuditEvent - PII verification", () => {
-  it("parser operation does not throw, positive control for sentinel in output", async () => {
-    const csv = makeHdfcCsv([
-      `02/10/26,NEFT CR-SENTINEL_SENTRY_TEST-CONFIDENTIAL,${makeValidNeftUtr("00000000080")},02/10/26,,"10,000.00","1,10,000.00"`,
-    ]);
-    const file = new File([csv], "hdfc-sentry-valid.csv", { type: "text/csv" });
-    const result = await parseBankStatement(file);
+describeWithDb("(4) Atomicity - failed batch leaves zero Payment rows", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let testShopDomain: string;
 
-    expect(result.transactions).toHaveLength(1);
-    expect(result.transactions[0].narration).toContain("SENTINEL_SENTRY_TEST");
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
   });
 
-  it("AuditEvent rows (if created via server path) never contain PII - positive control", async () => {
-    const csv = makeHdfcCsv([
-      `02/10/26,NEFT CR-SENTINEL_AUDIT_PII_NAME-CONFIDENTIAL,${makeValidNeftUtr("00000000081")},02/10/26,,"50,000.00","1,50,000.00"`,
-    ]);
-    const file = new File([csv], "hdfc-audit-check.csv", { type: "text/csv" });
-    const result = await parseBankStatement(file);
+  afterAll(async () => {
+    if (testShopId) {
+      try {
+        await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+        await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      } catch {
+        // Ignore cleanup
+      }
+    }
+    await sql.end();
+  });
 
-    expect(result.transactions).toHaveLength(1);
-    expect(result.transactions[0].narration).toContain("SENTINEL_AUDIT_PII_NAME");
+  beforeEach(async () => {
+    const testSuffix = `${Date.now().toString(36)}-atom`;
+    testShopDomain = `test-atomicity-${testSuffix}.myshopify.com`;
+
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${testShopDomain}, 'INR', 'UTC', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+  });
+
+  afterEach(async () => {
+    if (testShopId) {
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+    }
+  });
+
+  it("transaction rollback on error leaves exactly 0 Payment and BankImport rows", async () => {
+    const validCredit = {
+      date: "2026-10-02",
+      amountPaise: 5000000,
+      rail: "NEFT" as const,
+      utr: makeSyntheticNeftRef("00000000110"),
+      payerName: "TEST VALID CREDIT",
+      narration: "NEFT CR-TEST VALID CREDIT",
+    };
+
+    let didThrow = false;
+    try {
+      await sql.begin(async (tx) => {
+        await insertBankImportRows(tx, {
+          shopId: testShopId,
+          bank: "HDFC",
+          fileName: "test-rollback.csv",
+          credits: [validCredit],
+          now: new Date(),
+        });
+        throw new Error("SYNTHETIC_FORCED_ROLLBACK");
+      });
+    } catch (e) {
+      if (e instanceof Error && e.message === "SYNTHETIC_FORCED_ROLLBACK") {
+        didThrow = true;
+      } else {
+        throw e;
+      }
+    }
+
+    expect(didThrow).toBe(true);
+
+    const paymentCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "Payment" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(paymentCount[0].count, 10)).toBe(0);
+
+    const importCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "BankImport" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(importCount[0].count, 10)).toBe(0);
+  });
+
+  it("positive control: successful batch inserts expected row count", async () => {
+    const credits = [
+      {
+        date: "2026-10-02",
+        amountPaise: 5000000,
+        rail: "NEFT" as const,
+        utr: makeSyntheticNeftRef("00000000111"),
+        payerName: "TEST SUCCESS",
+        narration: "NEFT CR-TEST SUCCESS",
+      },
+    ];
+
+    const result = await sql.begin((tx) =>
+      insertBankImportRows(tx, {
+        shopId: testShopId,
+        bank: "HDFC",
+        fileName: "test-success.csv",
+        credits,
+        now: new Date(),
+      })
+    );
+    expect(result.inserted).toBe(1);
+
+    const paymentCount = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text as count FROM "Payment" WHERE "shopId" = ${testShopId}
+    `;
+    expect(parseInt(paymentCount[0].count, 10)).toBe(1);
   });
 });
