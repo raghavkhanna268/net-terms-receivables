@@ -414,6 +414,403 @@ describeWithDb("G4 reminder fixture (DB)", () => {
     await cleanupByDomain(sql, domain);
   });
 
+  // Email filter tests: buyers without email are not counted in wouldEnqueue
+  // (matches s18_enqueue_reminders Part 3 filter from #568).
+
+  it("COMPANY with email: counted in wouldEnqueueNonFixture", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `company-with-email-${suffix}`;
+    const otherInvoice = `inv-company-email-${suffix}`;
+    const otherOrder = `order-company-email-${suffix}`;
+    const otherRule = `rule-company-email-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Company With Email', 'buyer@example.com', 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(1);
+    expect(result.sideEffects.otherDueToday).toBe(1);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("COMPANY with NULL email: not counted in wouldEnqueueNonFixture", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `company-null-email-${suffix}`;
+    const otherInvoice = `inv-company-null-${suffix}`;
+    const otherOrder = `order-company-null-${suffix}`;
+    const otherRule = `rule-company-null-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Company Null Email', NULL, 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(0);
+    expect(result.sideEffects.otherDueToday).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("COMPANY with empty string email: not counted in wouldEnqueueNonFixture", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `company-empty-email-${suffix}`;
+    const otherInvoice = `inv-company-empty-${suffix}`;
+    const otherOrder = `order-company-empty-${suffix}`;
+    const otherRule = `rule-company-empty-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Company Empty Email', '', 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(0);
+    expect(result.sideEffects.otherDueToday).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("COMPANY with whitespace-only email: not counted in wouldEnqueueNonFixture", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `company-ws-email-${suffix}`;
+    const otherInvoice = `inv-company-ws-${suffix}`;
+    const otherOrder = `order-company-ws-${suffix}`;
+    const otherRule = `rule-company-ws-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Company Whitespace Email', '   ', 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(0);
+    expect(result.sideEffects.otherDueToday).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("TAGGED_CUSTOMER with email in s8_tagged_customers: counted in wouldEnqueueNonFixture", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `tc-with-email-${suffix}`;
+    const otherInvoice = `inv-tc-email-${suffix}`;
+    const otherOrder = `order-tc-email-${suffix}`;
+    const otherRule = `rule-tc-email-${suffix}`;
+    const customerId = `cust-id-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'TAGGED_CUSTOMER', ${customerId}, NULL, NULL, 'Tagged Customer', NULL, 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, email, created_at)
+      VALUES (${shopId}, ${customerId}, 'customer@example.com', NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(1);
+    expect(result.sideEffects.otherDueToday).toBe(1);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("TAGGED_CUSTOMER with NULL email in s8_tagged_customers: not counted in wouldEnqueueNonFixture", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `tc-null-email-${suffix}`;
+    const otherInvoice = `inv-tc-null-${suffix}`;
+    const otherOrder = `order-tc-null-${suffix}`;
+    const otherRule = `rule-tc-null-${suffix}`;
+    const customerId = `cust-null-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'TAGGED_CUSTOMER', ${customerId}, NULL, NULL, 'Tagged Customer Null', NULL, 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO s8_tagged_customers (shop_id, customer_id, email, created_at)
+      VALUES (${shopId}, ${customerId}, NULL, NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(0);
+    expect(result.sideEffects.otherDueToday).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("TAGGED_CUSTOMER with no s8_tagged_customers row: not counted in wouldEnqueueNonFixture", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `tc-no-row-${suffix}`;
+    const otherInvoice = `inv-tc-no-row-${suffix}`;
+    const otherOrder = `order-tc-no-row-${suffix}`;
+    const otherRule = `rule-tc-no-row-${suffix}`;
+    const customerId = `cust-no-row-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "customerId", "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'TAGGED_CUSTOMER', ${customerId}, NULL, NULL, 'Tagged No Row', NULL, 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(0);
+    expect(result.sideEffects.otherDueToday).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("gated COMPANY with NULL email: not counted in otherGatedDueToday", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const gatedAccount = `gated-null-email-${suffix}`;
+    const gatedInvoice = `inv-gated-null-${suffix}`;
+    const gatedOrder = `order-gated-null-${suffix}`;
+    const gatedRule = `rule-gated-null-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", gated_at, "createdAt", "updatedAt")
+      VALUES (${gatedAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Gated Null Email', NULL, 'OK', now(), NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${gatedRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${gatedInvoice}, ${shopId}, ${gatedAccount}, ${gatedOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.otherGatedDueToday).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("gated COMPANY with email: counted in otherGatedDueToday", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const gatedAccount = `gated-with-email-${suffix}`;
+    const gatedInvoice = `inv-gated-email-${suffix}`;
+    const gatedOrder = `order-gated-email-${suffix}`;
+    const gatedRule = `rule-gated-email-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", gated_at, "createdAt", "updatedAt")
+      VALUES (${gatedAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Gated With Email', 'gated@example.com', 'OK', now(), NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${gatedRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${gatedInvoice}, ${shopId}, ${gatedAccount}, ${gatedOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.otherGatedDueToday).toBe(1);
+    await cleanupByDomain(sql, domain);
+  });
+
+  it("allowlist: buyer with reserved domain email counted as wouldEnqueue but expectedSkip (no ReminderLog row)", async () => {
+    const suffix = freshSuffix();
+    const tz = etcZoneForLocalHour(await dbNow(), 12);
+    const { shopId, domain } = await insertShop({ suffix, timezone: tz });
+
+    const otherAccount = `reserved-domain-${suffix}`;
+    const otherInvoice = `inv-reserved-${suffix}`;
+    const otherOrder = `order-reserved-${suffix}`;
+    const otherRule = `rule-reserved-${suffix}`;
+    await sql`
+      INSERT INTO "BuyerAccount" (id, "shopId", kind, "companyId", "companyLocationId", name, "mainContactEmail", "holdState", "createdAt", "updatedAt")
+      VALUES (${otherAccount}, ${shopId}, 'COMPANY', ${`company-${suffix}`}, ${`loc-${suffix}`}, 'Reserved Domain Buyer', 'buyer@test.invalid', 'OK', NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+      VALUES (${otherRule}, ${shopId}, 0, 'email', true, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "Invoice" (id, "shopId", "buyerAccountId", "orderId", name, total, outstanding, "issuedAt", "dueAt", "dueSource", status, "createdAt", "updatedAt")
+      VALUES (
+        ${otherInvoice}, ${shopId}, ${otherAccount}, ${otherOrder}, 'INV-1', 500.00, 500.00,
+        now() - interval '10 days',
+        (((now() AT TIME ZONE ${tz})::date + time '12:00') AT TIME ZONE ${tz}),
+        'none', 'open', NOW(), NOW()
+      )
+    `;
+
+    const result = await runG4Write(sql, {
+      shopDomain: domain,
+      recipient: "qa-fixture@example.com",
+      dryRun: true,
+    });
+
+    expect(result.sideEffects.wouldEnqueueNonFixture).toBe(1);
+    expect(result.sideEffects.wouldEnqueueExpectedSkip).toBe(1);
+    expect(result.sideEffects.wouldEnqueueExpectedSend).toBe(0);
+    expect(result.sideEffects.otherDueToday).toBe(1);
+    expect(result.sideEffects.otherSendableToday).toBe(0);
+    const logs = await sql<{ c: number }[]>`SELECT count(*)::int AS c FROM "ReminderLog" WHERE "invoiceId" = ${otherInvoice}`;
+    expect(logs[0].c).toBe(0);
+    await cleanupByDomain(sql, domain);
+  });
+
   // Live-write parity: the shared lookup drives the live reused/created value too.
   it("live write reports reused with an existing offset-0 rule and created without", async () => {
     // (a) existing enabled offset-0 email rule => reused, and no seed rule added.

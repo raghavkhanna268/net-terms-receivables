@@ -468,6 +468,8 @@ async function collectG4SideEffects(
 ): Promise<G4SideEffects> {
   // One row per (invoice, enabled email rule) pair the enqueue would pick today,
   // mirroring s18_enqueue_reminders (gated accounts excluded, no existing log).
+  // Email filter mirrors the migration: COMPANY uses mainContactEmail; otherwise
+  // if customerId is set, s8_tagged_customers.email; otherwise no email (excluded).
   const pairs = await tx<{ invoice_id: string; email: string | null; opted_out: boolean }[]>`
     SELECT
       i.id AS invoice_id,
@@ -484,6 +486,17 @@ async function collectG4SideEffects(
       AND ((i."dueAt" AT TIME ZONE ${tz})::date + r."offsetDays") = (now() AT TIME ZONE ${tz})::date
       AND NOT EXISTS (
         SELECT 1 FROM "ReminderLog" rl WHERE rl."ruleId" = r.id AND rl."invoiceId" = i.id
+      )
+      AND (
+        CASE
+          WHEN ba.kind = 'COMPANY' THEN btrim(COALESCE(ba."mainContactEmail", '')) <> ''
+          WHEN ba."customerId" IS NOT NULL THEN EXISTS (
+            SELECT 1 FROM s8_tagged_customers tc2
+            WHERE tc2.shop_id = i."shopId" AND tc2.customer_id = ba."customerId"
+              AND btrim(COALESCE(tc2.email, '')) <> ''
+          )
+          ELSE false
+        END
       )
   `;
 
@@ -508,6 +521,7 @@ async function collectG4SideEffects(
     // other_due_today / other_sendable_today describe the post-write state. The
     // NOT EXISTS keeps this disjoint from the pairs above, so there is no double
     // count. The live write passes false, leaving its counts and abort unchanged.
+    // Email filter mirrors the migration (same as pairs query).
     const extra = await tx<{ invoice_id: string; email: string | null; opted_out: boolean }[]>`
       SELECT
         i.id AS invoice_id,
@@ -526,6 +540,17 @@ async function collectG4SideEffects(
           WHERE r."shopId" = i."shopId" AND r.enabled AND r.channel = 'email'
             AND ((i."dueAt" AT TIME ZONE ${tz})::date + r."offsetDays") = (now() AT TIME ZONE ${tz})::date
         )
+        AND (
+          CASE
+            WHEN ba.kind = 'COMPANY' THEN btrim(COALESCE(ba."mainContactEmail", '')) <> ''
+            WHEN ba."customerId" IS NOT NULL THEN EXISTS (
+              SELECT 1 FROM s8_tagged_customers tc2
+              WHERE tc2.shop_id = i."shopId" AND tc2.customer_id = ba."customerId"
+                AND btrim(COALESCE(tc2.email, '')) <> ''
+            )
+            ELSE false
+          END
+        )
     `;
     for (const row of extra) {
       dueInvoices.add(row.invoice_id);
@@ -543,6 +568,7 @@ async function collectG4SideEffects(
   // separate key reports them. When no enabled offset-0 email rule exists the
   // would-be offset-0 rule is folded in (second disjunct) to match the post-write
   // rule set. Uses the same date expression as the pairs query.
+  // Email filter: buyers without email wouldn't be enqueued anyway; exclude them.
   const gatedRows = await tx<{ invoice_id: string }[]>`
     SELECT DISTINCT i.id AS invoice_id
     FROM "Invoice" i
@@ -560,6 +586,17 @@ async function collectG4SideEffects(
           ${opts.includeWouldBeOffset0Gated}::boolean
           AND (i."dueAt" AT TIME ZONE ${tz})::date = (now() AT TIME ZONE ${tz})::date
         )
+      )
+      AND (
+        CASE
+          WHEN ba.kind = 'COMPANY' THEN btrim(COALESCE(ba."mainContactEmail", '')) <> ''
+          WHEN ba."customerId" IS NOT NULL THEN EXISTS (
+            SELECT 1 FROM s8_tagged_customers tc2
+            WHERE tc2.shop_id = i."shopId" AND tc2.customer_id = ba."customerId"
+              AND btrim(COALESCE(tc2.email, '')) <> ''
+          )
+          ELSE false
+        END
       )
   `;
   const otherGatedDueToday = gatedRows.length;
