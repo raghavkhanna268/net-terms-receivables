@@ -592,22 +592,22 @@ export async function processOrderLines(
     `;
     const invoiceByOrderId = new Map(existingOrphanInvoices.map((i) => [i.orderId, i.id]));
 
-    // Build arrays for batched UPDATE
-    const updateIds: string[] = [];
-    const updateDueAts: string[] = [];
-    const updateReasons: string[] = [];
+    // Build rows for batched UPDATE using jsonb_to_recordset (fetch_types:false compatible)
+    const updateRows: { id: string; dueAt: string; dueReason: string }[] = [];
 
     for (const schedule of orphanSchedules) {
       const invoiceId = invoiceByOrderId.get(schedule.__parentId);
       if (invoiceId && schedule.dueAt) {
-        updateIds.push(invoiceId);
-        updateDueAts.push(schedule.dueAt);
-        updateReasons.push("Payment schedule from Shopify (orphan reconcile)");
+        updateRows.push({
+          id: invoiceId,
+          dueAt: schedule.dueAt,
+          dueReason: "Payment schedule from Shopify (orphan reconcile)",
+        });
       }
     }
 
-    // Batch UPDATE using unnest
-    if (updateIds.length > 0) {
+    // Batch UPDATE using jsonb_to_recordset (compatible with fetch_types:false)
+    if (updateRows.length > 0) {
       const result = await sql`
         UPDATE "Invoice" AS i
         SET
@@ -615,11 +615,11 @@ export async function processOrderLines(
           "dueSource" = 'schedule',
           "dueBasis" = NULL,
           "dueReason" = v."dueReason"
-        FROM unnest(
-          ${updateIds}::text[],
-          ${updateDueAts}::timestamptz[],
-          ${updateReasons}::text[]
-        ) AS v(id, "dueAt", "dueReason")
+        FROM jsonb_to_recordset(${sql.json(updateRows)}) AS v(
+          id text,
+          "dueAt" timestamptz,
+          "dueReason" text
+        )
         WHERE i.id = v.id
           AND (i."dueAt" IS DISTINCT FROM v."dueAt"::timestamptz)
       `;

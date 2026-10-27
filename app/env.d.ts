@@ -8,6 +8,11 @@ declare global {
     SENTRY_DSN?: string;
     /** Sentry traces sample rate (0-1). Default is 0 for Workers Free CPU limits. */
     SENTRY_TRACES_SAMPLE_RATE?: string;
+    /**
+     * Plan selection redirect flag. Only the exact string "true" enables the redirect.
+     * When enabled, merchants without an active subscription are redirected to the plan page.
+     */
+    PLAN_SELECTION_REDIRECT_ENABLED?: string;
   }
 }
 

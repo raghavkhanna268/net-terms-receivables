@@ -4,7 +4,7 @@ import {
   verifyPayloadShopMatch,
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
-import { getRequestSql } from "~/lib/request-context.server";
+import { getRequestSql, getRequestWaitUntil } from "~/lib/request-context.server";
 import {
   deleteShop,
   purgePgmqMessages,
@@ -15,7 +15,7 @@ import {
   sendDataRequestNotification,
 } from "~/services/compliance";
 import { getOfflineAdminContext } from "~/lib/offline-admin.server";
-import { safeLog, shopHash } from "~/lib/log.server";
+import { safeLog, shopHash, toErrorCode } from "~/lib/log.server";
 import type { Sql } from "~/lib/db-light.server";
 
 /**
@@ -157,32 +157,52 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           `data request id=${id}`
       );
 
-      // Send email notification to shop owner (gated on RESEND_API_KEY)
-      // Fetch shop owner email via Admin API using offline session with proper locking
-      const shopOwnerEmail = await fetchShopOwnerEmail(sql, payloadShop);
+      // Email notification work: fetches shop owner email and sends notification.
+      const emailWork = async () => {
+        try {
+          const shopOwnerEmail = await fetchShopOwnerEmail(sql, payloadShop);
 
-      if (shopOwnerEmail) {
-        const emailResult = await sendDataRequestNotification(
-          payloadShop,
-          shopOwnerEmail,
-          requestId
-        );
-        if (emailResult.sent) {
-          console.log(
-            "[Compliance] customers/data_request: Email notification sent"
-          );
-        } else if (emailResult.error) {
-          console.log(
-            "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
-          );
+          if (shopOwnerEmail) {
+            const emailResult = await sendDataRequestNotification(
+              payloadShop,
+              shopOwnerEmail,
+              requestId
+            );
+            if (emailResult.sent) {
+              console.log(
+                "[Compliance] customers/data_request: Email notification sent"
+              );
+            } else if (emailResult.error) {
+              console.log(
+                "[Compliance] customers/data_request: Email notification failed error=email_send_failed"
+              );
+            }
+          } else {
+            console.log(
+              `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
+            );
+          }
+        } catch (err) {
+          const hash = await shopHash(payloadShop);
+          safeLog("error", "data_request_email_failed", {
+            shopHash: hash,
+            requestId,
+            err: toErrorCode(err),
+          });
         }
-        // Note: skipped emails are logged inside sendDataRequestNotification
-      } else {
-        console.log(
-          `data_request_email_skipped request_id=${requestId} reason=no_shop_email`
-        );
+      };
+
+      // If waitUntil is available, defer email work and return 200 immediately.
+      // Otherwise, await the email work inline before returning.
+      const waitUntil = getRequestWaitUntil();
+      if (waitUntil) {
+        waitUntil(emailWork());
+        return new Response(null, { status: 200 });
       }
-      break;
+
+      // Fallback: waitUntil unavailable, run email work inline
+      await emailWork();
+      return new Response(null, { status: 200 });
     }
 
     case "CUSTOMERS_REDACT": {
