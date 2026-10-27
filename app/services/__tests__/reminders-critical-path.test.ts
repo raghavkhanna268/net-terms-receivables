@@ -1278,6 +1278,13 @@ describeWithDb("Critical Path: DB-backed tests", () => {
     await sql.end();
   });
 
+  afterAll(() => {
+    const envAfter = Object.fromEntries(
+      ENV_VARS_TO_TRACK.map(k => [k, Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined])
+    );
+    expect(envAfter).toEqual(envBefore);
+  });
+
   afterEach(async () => {
     await sql`DELETE FROM "ReminderLog" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
@@ -1711,12 +1718,5 @@ describeWithDb("Critical Path: DB-backed tests", () => {
       restoreEnv();
       vi.useRealTimers();
     }
-  });
-
-  it("handleReminderSend test restores env vars to original state", () => {
-    const envAfter = Object.fromEntries(
-      ENV_VARS_TO_TRACK.map(k => [k, Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined])
-    );
-    expect(envAfter).toEqual(envBefore);
   });
 });
