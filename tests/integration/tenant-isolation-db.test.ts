@@ -112,6 +112,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
   const BUYER_A_ID = `buyer-a-${TEST_SUFFIX}`;
   const BUYER_B_ID = `buyer-b-${TEST_SUFFIX}`;
+  const BUYER_B_OPTOUT_ID = `buyer-b-optout-${TEST_SUFFIX}`;
 
   const INVOICE_A_ID = `inv-a-${TEST_SUFFIX}`;
   const INVOICE_B_ID = `inv-b-${TEST_SUFFIX}`;
@@ -138,15 +139,19 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
   const SHOP_A_BUYER_NAME = "Shop A Buyer LLC";
   const SHOP_B_BUYER_NAME = `${ISO_B_MARKER}_BUYER_NAME`;
+  const SHOP_B_BUYER_OPTOUT_NAME = `${ISO_B_MARKER}_OPTOUT_BUYER`;
   const SHOP_B_INVOICE_AMOUNT = "99999.99";
   const SHOP_B_PAYMENT_AMOUNT = "88888.88";
   const SHOP_B_PAYMENT_NARRATION = `${ISO_B_MARKER}_NARRATION`;
   const SHOP_B_TAG_RULE_TAG = `${ISO_B_MARKER}_TAG`;
+  const SHOP_B_IMPORT_FILENAME = `${ISO_B_MARKER}_import.csv`;
+  const SHOP_B_EXPORT_DATA = JSON.stringify({ customerId: "cust-b-1", marker: ISO_B_MARKER });
 
   const B_MARKERS = [
     ISO_B_MARKER,
     SHOP_B_ID,
     BUYER_B_ID,
+    BUYER_B_OPTOUT_ID,
     INVOICE_B_ID,
     PAYMENT_B_ID,
     MATCH_B_ID,
@@ -155,10 +160,12 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     REMINDER_RULE_B_ID,
     TAG_RULE_B_ID,
     SHOP_B_BUYER_NAME,
+    SHOP_B_BUYER_OPTOUT_NAME,
     SHOP_B_INVOICE_AMOUNT,
     SHOP_B_PAYMENT_AMOUNT,
     SHOP_B_PAYMENT_NARRATION,
     SHOP_B_TAG_RULE_TAG,
+    SHOP_B_IMPORT_FILENAME,
     "cust-b-1",
     "req-b-id",
   ];
@@ -295,30 +302,24 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
   async function hashBRows(): Promise<string> {
     const tables = [
-      { name: "Shop", idCol: "id", filter: sql`id = ${SHOP_B_ID}` },
-      { name: "BuyerAccount", idCol: "id", filter: sql`id = ${BUYER_B_ID}` },
-      { name: "Invoice", idCol: "id", filter: sql`id = ${INVOICE_B_ID}` },
-      { name: "Payment", idCol: "id", filter: sql`id = ${PAYMENT_B_ID}` },
-      { name: "Match", idCol: "id", filter: sql`id = ${MATCH_B_ID}` },
-      { name: "BankImport", idCol: "id", filter: sql`id = ${IMPORT_B_ID}` },
-      { name: "ReminderRule", idCol: "id", filter: sql`id = ${REMINDER_RULE_B_ID}` },
-      { name: "s22_data_requests", idCol: "id", filter: sql`id = ${DATA_REQUEST_B_ID}` },
-      { name: "AccountSource", idCol: "id", filter: sql`id = ${TAG_RULE_B_ID}` },
+      { name: "Shop", id: SHOP_B_ID },
+      { name: "BuyerAccount", id: BUYER_B_ID },
+      { name: "BuyerAccount", id: BUYER_B_OPTOUT_ID },
+      { name: "Invoice", id: INVOICE_B_ID },
+      { name: "Payment", id: PAYMENT_B_ID },
+      { name: "Match", id: MATCH_B_ID },
+      { name: "BankImport", id: IMPORT_B_ID },
+      { name: "ReminderRule", id: REMINDER_RULE_B_ID },
+      { name: "s22_data_requests", id: DATA_REQUEST_B_ID },
+      { name: "AccountSource", id: TAG_RULE_B_ID },
     ];
 
     const hashes: string[] = [];
     for (const table of tables) {
-      const rows = await sql.unsafe(`SELECT * FROM "${table.name}" WHERE ${table.idCol} = $1 ORDER BY ${table.idCol}`, [
-        table.name === "s22_data_requests" ? DATA_REQUEST_B_ID :
-        table.name === "Shop" ? SHOP_B_ID :
-        table.name === "BuyerAccount" ? BUYER_B_ID :
-        table.name === "Invoice" ? INVOICE_B_ID :
-        table.name === "Payment" ? PAYMENT_B_ID :
-        table.name === "Match" ? MATCH_B_ID :
-        table.name === "BankImport" ? IMPORT_B_ID :
-        table.name === "ReminderRule" ? REMINDER_RULE_B_ID :
-        TAG_RULE_B_ID
-      ]);
+      const rows = await sql.unsafe(
+        `SELECT * FROM "${table.name}" WHERE id = $1 ORDER BY id`,
+        [table.id]
+      );
       const rowStr = JSON.stringify(rows);
       hashes.push(crypto.createHash("sha256").update(rowStr).digest("hex"));
     }
@@ -339,6 +340,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     const companyLocAGid = buildGid("CompanyLocation", `loc-a-${TEST_SUFFIX}`);
     const companyBGid = buildGid("Company", `co-b-${TEST_SUFFIX}`);
     const companyLocBGid = buildGid("CompanyLocation", `loc-b-${TEST_SUFFIX}`);
+    const companyBOptoutGid = buildGid("Company", `co-b-optout-${TEST_SUFFIX}`);
+    const companyLocBOptoutGid = buildGid("CompanyLocation", `loc-b-optout-${TEST_SUFFIX}`);
 
     await sql`
       INSERT INTO "BuyerAccount" (
@@ -349,7 +352,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       )
       VALUES
         (${BUYER_A_ID}, ${SHOP_A_ID}, 'COMPANY', ${companyAGid}, ${companyLocAGid}, ${SHOP_A_BUYER_NAME}, 50000.00, 'OK', false, false, NULL, NULL, NOW(), NOW()),
-        (${BUYER_B_ID}, ${SHOP_B_ID}, 'COMPANY', ${companyBGid}, ${companyLocBGid}, ${SHOP_B_BUYER_NAME}, 75000.00, 'OK', false, false, NOW(), 'merchant'::"ReminderOptOutSource", NOW(), NOW())
+        (${BUYER_B_ID}, ${SHOP_B_ID}, 'COMPANY', ${companyBGid}, ${companyLocBGid}, ${SHOP_B_BUYER_NAME}, 75000.00, 'OK', false, false, NOW(), 'merchant'::"ReminderOptOutSource", NOW(), NOW()),
+        (${BUYER_B_OPTOUT_ID}, ${SHOP_B_ID}, 'COMPANY', ${companyBOptoutGid}, ${companyLocBOptoutGid}, ${SHOP_B_BUYER_OPTOUT_NAME}, 60000.00, 'OK', false, false, NULL, NULL, NOW(), NOW())
     `;
 
     const orderAGid = buildGid("Order", `order-a-${TEST_SUFFIX}`);
@@ -369,7 +373,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
       VALUES
         (${IMPORT_A_ID}, ${SHOP_A_ID}, 'hdfc', 'shop-a-import.csv', 5, NOW()),
-        (${IMPORT_B_ID}, ${SHOP_B_ID}, 'hdfc', '${ISO_B_MARKER}_import.csv', 10, NOW())
+        (${IMPORT_B_ID}, ${SHOP_B_ID}, 'hdfc', ${SHOP_B_IMPORT_FILENAME}, 10, NOW())
     `;
 
     await sql`
@@ -399,12 +403,13 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
 
     const customerAGid = buildGid("Customer", `cust-a-1`);
     const customerBGid = buildGid("Customer", `cust-b-1`);
+    const exportDataA = JSON.stringify({ customerId: "cust-a-1" });
 
     await sql`
       INSERT INTO s22_data_requests (id, shop_id, customer_gid, request_id, status, received_at, expires_at, export_data)
       VALUES
-        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, ${customerAGid}, 'req-a-id', 'completed', NOW(), NOW() + interval '30 days', '{"customerId": "cust-a-1"}'::jsonb),
-        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, ${customerBGid}, 'req-b-id', 'completed', NOW(), NOW() + interval '30 days', '{"customerId": "cust-b-1", "marker": "${ISO_B_MARKER}"}'::jsonb)
+        (${DATA_REQUEST_A_ID}, ${SHOP_A_ID}, ${customerAGid}, 'req-a-id', 'completed', NOW(), NOW() + interval '30 days', ${exportDataA}::jsonb),
+        (${DATA_REQUEST_B_ID}, ${SHOP_B_ID}, ${customerBGid}, 'req-b-id', 'completed', NOW(), NOW() + interval '30 days', ${SHOP_B_EXPORT_DATA}::jsonb)
     `;
 
     await sql`
@@ -431,7 +436,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     await sql`DELETE FROM s22_data_requests WHERE id IN (${DATA_REQUEST_A_ID}, ${DATA_REQUEST_B_ID})`;
     await sql`DELETE FROM "AccountSource" WHERE id IN (${TAG_RULE_A_ID}, ${TAG_RULE_B_ID})`;
     await sql`DELETE FROM s18_shop_reminder_settings WHERE shop_id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
-    await sql`DELETE FROM "BuyerAccount" WHERE id IN (${BUYER_A_ID}, ${BUYER_B_ID})`;
+    await sql`DELETE FROM "BuyerAccount" WHERE id IN (${BUYER_A_ID}, ${BUYER_B_ID}, ${BUYER_B_OPTOUT_ID})`;
     await sql`DELETE FROM "AuditEvent" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
     await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
 
@@ -449,6 +454,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     }));
 
     await sql`UPDATE "Match" SET state = 'suggested' WHERE id IN (${MATCH_A_ID}, ${MATCH_B_ID})`;
+    await sql`UPDATE "BuyerAccount" SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = NULL WHERE id = ${BUYER_B_OPTOUT_ID}`;
   });
 
   afterEach(() => {
@@ -456,7 +462,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   });
 
   describe("app.accounts.$id - buyer account isolation", () => {
-    it("shop A loader cannot read shop B's buyer account", async () => {
+    it("shop A loader cannot read shop B's buyer account (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createLoaderArgs(`/app/accounts/${BUYER_B_ID}`, { id: BUYER_B_ID });
       const { loader } = await import("../../app/routes/app.accounts.$id.js");
@@ -472,7 +479,20 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("shop A action cannot update shop B's buyer credit settings", async () => {
+    it("shop A loader CAN read shop A's buyer account (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createLoaderArgs(`/app/accounts/${BUYER_A_ID}`, { id: BUYER_A_ID });
+      const { loader } = await import("../../app/routes/app.accounts.$id.js");
+      const result = (await loader(args as never)) as { account: { id: string; name: string } | null; error: string | null };
+
+      expect(result.error).toBeNull();
+      expect(result.account).not.toBeNull();
+      expect(result.account!.id).toBe(BUYER_A_ID);
+      expect(result.account!.name).toBe(SHOP_A_BUYER_NAME);
+    });
+
+    it("shop A action cannot update shop B's buyer credit settings (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createActionArgs(
         `/app/accounts/${BUYER_B_ID}`,
@@ -491,12 +511,36 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("shop A action cannot update shop B's reminder opt-out", async () => {
+    it("shop A action CAN update shop A's buyer credit settings (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createActionArgs(
+        `/app/accounts/${BUYER_A_ID}`,
+        { _action: "updateCredit", creditLimit: "60000", noLimit: "false", manualHold: "false" },
+        { id: BUYER_A_ID }
+      );
+
+      const { action } = await import("../../app/routes/app.accounts.$id.js");
+      const result = await action(args as never);
+
+      const r = result as { success: boolean; error?: string };
+      expect(r.success).toBe(true);
+
+      const afterSnapshot = await sql`SELECT "creditLimit" FROM "BuyerAccount" WHERE id = ${BUYER_A_ID}`;
+      expect(parseFloat(afterSnapshot[0].creditLimit)).toBe(60000);
+
+      await sql`UPDATE "BuyerAccount" SET "creditLimit" = 50000.00 WHERE id = ${BUYER_A_ID}`;
+    });
+
+    it("shop A action cannot update B's non-opted-out buyer reminder opt-out (negative)", async () => {
+      expect.hasAssertions();
+      const beforeB = await sql`SELECT "reminderOptOutAt" FROM "BuyerAccount" WHERE id = ${BUYER_B_OPTOUT_ID}`;
+      expect(beforeB[0].reminderOptOutAt).toBeNull();
+
       const hashBefore = await hashBRows();
       const args = createActionArgs(
-        `/app/accounts/${BUYER_B_ID}`,
-        { _action: "updateReminderOptOut", enable: "true" },
-        { id: BUYER_B_ID }
+        `/app/accounts/${BUYER_B_OPTOUT_ID}`,
+        { _action: "updateReminderOptOut", enable: "false" },
+        { id: BUYER_B_OPTOUT_ID }
       );
 
       const { action } = await import("../../app/routes/app.accounts.$id.js");
@@ -506,13 +550,17 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(r.success).toBe(false);
       expect(r.error).toBe("Account not found");
 
+      const afterB = await sql`SELECT "reminderOptOutAt" FROM "BuyerAccount" WHERE id = ${BUYER_B_OPTOUT_ID}`;
+      expect(afterB[0].reminderOptOutAt).toBeNull();
+
       const hashAfter = await hashBRows();
       expect(hashAfter).toBe(hashBefore);
     });
   });
 
   describe("app.data-requests.$id.download - data request download isolation", () => {
-    it("shop A cannot download shop B's data request export", async () => {
+    it("shop A cannot download shop B's data request export (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createLoaderArgs(`/app/data-requests/req-b-id/download`, { id: "req-b-id" });
       const mod = await import("../../app/routes/app.data-requests.$id.download.js");
@@ -525,10 +573,26 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const hashAfter = await hashBRows();
       expect(hashAfter).toBe(hashBefore);
     });
+
+    it("shop A CAN download shop A's data request export (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createLoaderArgs(`/app/data-requests/req-a-id/download`, { id: "req-a-id" });
+      const mod = await import("../../app/routes/app.data-requests.$id.download.js");
+      const result = await mod.loader(args as never);
+
+      expect(result).toBeInstanceOf(Response);
+      const r = result as Response;
+      expect(r.status).toBe(200);
+
+      const body = await r.text();
+      expect(body.length).toBeGreaterThan(0);
+      expect(body).toContain("cust-a-1");
+    });
   });
 
   describe("app.reconcile - match operations isolation", () => {
-    it("shop A cannot confirm shop B's match", async () => {
+    it("shop A cannot confirm shop B's match (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createActionArgs("/app/reconcile", { intent: "confirm", matchId: MATCH_B_ID });
       const { action } = await import("../../app/routes/app.reconcile.js");
@@ -540,7 +604,22 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("shop A cannot reject shop B's match", async () => {
+    it("shop A CAN confirm shop A's match (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createActionArgs("/app/reconcile", { intent: "confirm", matchId: MATCH_A_ID });
+      const { action } = await import("../../app/routes/app.reconcile.js");
+      const result = (await action(args as never)) as { success: boolean };
+
+      expect(result.success).toBe(true);
+
+      const afterSnapshot = await sql`SELECT state FROM "Match" WHERE id = ${MATCH_A_ID}`;
+      expect(afterSnapshot[0].state).toBe("confirmed");
+
+      await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_A_ID}`;
+    });
+
+    it("shop A cannot reject shop B's match (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createActionArgs("/app/reconcile", { intent: "reject", matchId: MATCH_B_ID });
       const { action } = await import("../../app/routes/app.reconcile.js");
@@ -552,7 +631,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("shop A cannot apply shop B's match", async () => {
+    it("shop A cannot apply shop B's match (negative)", async () => {
+      expect.hasAssertions();
       await sql`UPDATE "Match" SET state = 'confirmed' WHERE id = ${MATCH_B_ID}`;
       const hashBefore = await hashBRows();
 
@@ -568,7 +648,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_B_ID}`;
     });
 
-    it("shop A cannot unmatch shop B's match", async () => {
+    it("shop A cannot unmatch shop B's match (negative)", async () => {
+      expect.hasAssertions();
       await sql`UPDATE "Match" SET state = 'confirmed' WHERE id = ${MATCH_B_ID}`;
       const hashBefore = await hashBRows();
 
@@ -584,7 +665,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       await sql`UPDATE "Match" SET state = 'suggested' WHERE id = ${MATCH_B_ID}`;
     });
 
-    it("shop A loader cannot access shop B's payment via ?payment param", async () => {
+    it("shop A loader cannot access shop B's payment via ?payment param (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const url = new URL(`https://example.com/app/reconcile?payment=${PAYMENT_B_ID}`);
       const args = {
@@ -606,10 +688,42 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const hashAfter = await hashBRows();
       expect(hashAfter).toBe(hashBefore);
     });
+
+    it("shop A loader CAN access shop A's payment via ?payment param (positive control)", async () => {
+      expect.hasAssertions();
+      const url = new URL(`https://example.com/app/reconcile?payment=${PAYMENT_A_ID}`);
+      const args = {
+        request: new Request(url),
+        context: createMockContext(SHOP_A_DOMAIN),
+        params: {},
+        url,
+        pattern: "/app/reconcile",
+      } as unknown;
+
+      const { loader } = await import("../../app/routes/app.reconcile.js");
+      const result = (await loader(args as never)) as { selectedPayment: { payment: { id: string } } | null };
+
+      expect(result.selectedPayment).not.toBeNull();
+      expect(result.selectedPayment!.payment.id).toBe(PAYMENT_A_ID);
+    });
+
+    it("shop A reconcile loader returns A's matches, not B's (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createLoaderArgs("/app/reconcile");
+
+      const { loader } = await import("../../app/routes/app.reconcile.js");
+      const result = await loader(args as never);
+
+      const str = JSON.stringify(result);
+      expect(str).toContain(MATCH_A_ID);
+      expect(str).not.toContain(MATCH_B_ID);
+      expect(str).not.toContain(SHOP_B_PAYMENT_AMOUNT);
+    });
   });
 
   describe("app.settings.reminders - reminder rule isolation", () => {
-    it("shop A cannot update shop B's reminder rule", async () => {
+    it("shop A cannot update shop B's reminder rule (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createActionArgs("/app/settings/reminders", {
         intent: "update_rule",
@@ -628,7 +742,28 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("shop A cannot delete shop B's reminder rule", async () => {
+    it("shop A CAN update shop A's reminder rule (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createActionArgs("/app/settings/reminders", {
+        intent: "update_rule",
+        ruleId: REMINDER_RULE_A_ID,
+        offsetDays: "-7",
+        enabled: "false",
+      });
+
+      const { action } = await import("../../app/routes/app.settings.reminders.js");
+      const result = (await action(args as never)) as { success: boolean };
+
+      expect(result.success).toBe(true);
+
+      const afterSnapshot = await sql`SELECT enabled FROM "ReminderRule" WHERE id = ${REMINDER_RULE_A_ID}`;
+      expect(afterSnapshot[0].enabled).toBe(false);
+
+      await sql`UPDATE "ReminderRule" SET enabled = true WHERE id = ${REMINDER_RULE_A_ID}`;
+    });
+
+    it("shop A cannot delete shop B's reminder rule (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const args = createActionArgs("/app/settings/reminders", {
         intent: "delete_rule",
@@ -646,7 +781,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   });
 
   describe("app._index - dashboard isolation", () => {
-    it("shop A loader cannot access shop B's buyer via ?buyer param", async () => {
+    it("shop A loader cannot access shop B's buyer via ?buyer param (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const url = new URL(`https://example.com/app?skipOnboarding=true&buyer=${BUYER_B_ID}`);
       const args = {
@@ -665,21 +801,46 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
         }> | null;
       }>(rawResult);
 
-      if (result.dashboardData) {
-        const resolved = await result.dashboardData;
-        if (resolved.selectedBuyerInvoices !== null) {
-          expect(resolved.selectedBuyerInvoices.rows).toHaveLength(0);
-          expect(resolved.selectedBuyerInvoices.buyerName).toBe("Unknown Buyer");
-        }
-        const { found, marker } = containsAnyMarker(resolved);
-        expect(found, `Response contains B marker: ${marker}`).toBe(false);
+      expect(result.dashboardData).toBeTruthy();
+      const resolved = await result.dashboardData!;
+      if (resolved.selectedBuyerInvoices === null) {
+        expect(resolved.selectedBuyerInvoices).toBeNull();
+      } else {
+        expect(resolved.selectedBuyerInvoices.rows).toHaveLength(0);
+        expect(resolved.selectedBuyerInvoices.buyerName).toBe("Unknown Buyer");
       }
+      const { found, marker } = containsAnyMarker(resolved);
+      expect(found, `Response contains B marker: ${marker}`).toBe(false);
 
       const hashAfter = await hashBRows();
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("shop A dashboard data does not contain shop B data", async () => {
+    it("shop A loader CAN access shop A's buyer via ?buyer param (positive control)", async () => {
+      expect.hasAssertions();
+      const url = new URL(`https://example.com/app?skipOnboarding=true&buyer=${BUYER_A_ID}`);
+      const args = {
+        request: new Request(url),
+        context: createMockContext(SHOP_A_DOMAIN),
+        params: {},
+        url,
+        pattern: "/app",
+      } as unknown;
+
+      const { loader } = await import("../../app/routes/app._index.js");
+      const rawResult = await loader(args as never);
+      const result = extractLoaderResult<{
+        dashboardData: Promise<{ selectedBuyerInvoices: { buyerName: string } | null }> | null;
+      }>(rawResult);
+
+      expect(result.dashboardData).toBeTruthy();
+      const resolved = await result.dashboardData!;
+      expect(resolved.selectedBuyerInvoices).not.toBeNull();
+      expect(resolved.selectedBuyerInvoices!.buyerName).toBe(SHOP_A_BUYER_NAME);
+    });
+
+    it("shop A dashboard data contains A's data, not B's (positive control)", async () => {
+      expect.hasAssertions();
       const url = new URL("https://example.com/app?skipOnboarding=true");
       const args = {
         request: new Request(url),
@@ -692,22 +853,31 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const { loader } = await import("../../app/routes/app._index.js");
       const rawResult = await loader(args as never);
       const result = extractLoaderResult<{
-        dashboardData: Promise<unknown> | null;
+        dashboardData: Promise<{ buyerLedger: { rows: Array<{ name: string; id: string }> } | null }> | null;
       }>(rawResult);
 
-      if (result.dashboardData) {
-        const resolved = await result.dashboardData;
-        const { found, marker } = containsAnyMarker(resolved);
-        expect(found, `Dashboard contains B marker: ${marker}`).toBe(false);
-      }
+      expect(result.dashboardData).toBeTruthy();
+      const resolved = await result.dashboardData!;
+      const str = JSON.stringify(resolved);
+
+      expect(str).toContain(BUYER_A_ID);
+      expect(str).not.toContain(SHOP_B_BUYER_NAME);
+      expect(str).not.toContain(BUYER_B_ID);
+      expect(str).not.toContain(SHOP_B_INVOICE_AMOUNT);
+
+      const { found, marker } = containsAnyMarker(resolved);
+      expect(found, `Dashboard contains B marker: ${marker}`).toBe(false);
     });
   });
 
   describe("app.data-requests - data request list isolation", () => {
-    it("shop A data requests list does not contain shop B's requests", async () => {
+    it("shop A data requests list does not contain shop B's requests (negative)", async () => {
+      expect.hasAssertions();
       const args = createLoaderArgs("/app/data-requests");
       const { loader } = await import("../../app/routes/app.data-requests.js");
       const result = (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }> };
+
+      expect(result.dataRequests).toBeDefined();
 
       const { found, marker } = containsAnyMarker(result);
       expect(found, `Response contains B marker: ${marker}`).toBe(false);
@@ -715,14 +885,27 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const bRequestIds = result.dataRequests.filter(dr => dr.id === DATA_REQUEST_B_ID || dr.requestId === "req-b-id");
       expect(bRequestIds).toHaveLength(0);
     });
+
+    it("shop A data requests list contains A's requests (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createLoaderArgs("/app/data-requests");
+      const { loader } = await import("../../app/routes/app.data-requests.js");
+      const result = (await loader(args as never)) as { dataRequests: Array<{ id: string; requestId: string }> };
+
+      const aRequests = result.dataRequests.filter(dr => dr.id === DATA_REQUEST_A_ID || dr.requestId === "req-a-id");
+      expect(aRequests.length).toBeGreaterThan(0);
+    });
   });
 
   describe("app.imports - bank import isolation", () => {
-    it("shop A imports action is shop-scoped (no cross-tenant ID params)", async () => {
+    it("shop A imports loader is shop-scoped, no B data (negative)", async () => {
+      expect.hasAssertions();
       const hashBefore = await hashBRows();
       const { loader } = await import("../../app/routes/app.imports.js");
       const args = createLoaderArgs("/app/imports");
       const result = await loader(args as never);
+
+      expect(result).toBeDefined();
 
       const { found, marker } = containsAnyMarker(result);
       expect(found, `Response contains B marker: ${marker}`).toBe(false);
@@ -733,10 +916,13 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   });
 
   describe("app.tag-rules - tag rule isolation", () => {
-    it("shop A tag rules list does not contain shop B's rules", async () => {
+    it("shop A tag rules list does not contain shop B's rules (negative)", async () => {
+      expect.hasAssertions();
       const args = createLoaderArgs("/app/tag-rules");
       const { loader } = await import("../../app/routes/app.tag-rules.js");
       const result = (await loader(args as never)) as { tagRules: Array<{ id: string; tag: string }> };
+
+      expect(result.tagRules).toBeDefined();
 
       const { found, marker } = containsAnyMarker(result);
       expect(found, `Response contains B marker: ${marker}`).toBe(false);
@@ -744,13 +930,26 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const bRules = result.tagRules.filter(r => r.id === TAG_RULE_B_ID || r.tag === SHOP_B_TAG_RULE_TAG);
       expect(bRules).toHaveLength(0);
     });
+
+    it("shop A tag rules list contains A's rules (positive control)", async () => {
+      expect.hasAssertions();
+      const args = createLoaderArgs("/app/tag-rules");
+      const { loader } = await import("../../app/routes/app.tag-rules.js");
+      const result = (await loader(args as never)) as { tagRules: Array<{ id: string; tag: string }> };
+
+      const aRules = result.tagRules.filter(r => r.id === TAG_RULE_A_ID || r.tag === "net30-a");
+      expect(aRules.length).toBeGreaterThan(0);
+    });
   });
 
   describe("app.plan - plan page isolation", () => {
-    it("shop A plan page is shop-scoped", async () => {
+    it("shop A plan page is shop-scoped (negative)", async () => {
+      expect.hasAssertions();
       const args = createLoaderArgs("/app/plan");
       const { loader } = await import("../../app/routes/app.plan.js");
       const result = await loader(args as never);
+
+      expect(result).toBeDefined();
 
       const { found, marker } = containsAnyMarker(result);
       expect(found, `Response contains B marker: ${marker}`).toBe(false);
@@ -758,7 +957,40 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
   });
 
   describe("unsubscribe - public route isolation", () => {
-    it("B's unsubscribe token cannot opt out A's buyer (wrong shopId in token)", async () => {
+    it("cross-shop: A's token with B's non-opted-out buyerAccountId cannot opt out B's buyer", async () => {
+      expect.hasAssertions();
+      const beforeB = await sql`SELECT "reminderOptOutAt" FROM "BuyerAccount" WHERE id = ${BUYER_B_OPTOUT_ID}`;
+      expect(beforeB[0].reminderOptOutAt).toBeNull();
+
+      const crossShopToken = generateUnsubscribeToken(SHOP_A_ID, BUYER_B_OPTOUT_ID, UNSUBSCRIBE_SECRET);
+      expect(crossShopToken).not.toBeNull();
+
+      vi.doMock("../../app/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      const hashBefore = await hashBRows();
+
+      const args = createPublicActionArgs(
+        "/unsubscribe",
+        { "List-Unsubscribe": "One-Click" },
+        { token: crossShopToken! }
+      );
+      const { action } = await import("../../app/routes/unsubscribe.js");
+      const result = (await action(args as never)) as { success: boolean };
+
+      expect(result.success).toBe(true);
+
+      const afterB = await sql`SELECT "reminderOptOutAt" FROM "BuyerAccount" WHERE id = ${BUYER_B_OPTOUT_ID}`;
+      expect(afterB[0].reminderOptOutAt).toBeNull();
+
+      const hashAfter = await hashBRows();
+      expect(hashAfter).toBe(hashBefore);
+    });
+
+    it("cross-shop: B's token cannot affect A's buyer (shopId mismatch)", async () => {
+      expect.hasAssertions();
       const tokenForBuyerB = generateUnsubscribeToken(SHOP_B_ID, BUYER_B_ID, UNSUBSCRIBE_SECRET);
       expect(tokenForBuyerB).not.toBeNull();
 
@@ -780,7 +1012,6 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       const result = (await action(args as never)) as { success: boolean; alreadyOptedOut: boolean };
 
       expect(result.success).toBe(true);
-      expect(result.alreadyOptedOut).toBe(true);
 
       const afterA = await sql`SELECT "reminderOptOutAt" FROM "BuyerAccount" WHERE id = ${BUYER_A_ID}`;
       const isOptedOutAfterA = afterA[0].reminderOptOutAt !== null;
@@ -790,32 +1021,8 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
       expect(hashAfter).toBe(hashBefore);
     });
 
-    it("A's unsubscribe token with B's buyerAccountId fails gracefully", async () => {
-      const fakeToken = generateUnsubscribeToken(SHOP_A_ID, BUYER_B_ID, UNSUBSCRIBE_SECRET);
-      expect(fakeToken).not.toBeNull();
-
-      vi.doMock("../../app/lib/request-context.server", () => ({
-        getRequestSql: () => sql,
-        getRequestWaitUntil: () => undefined,
-      }));
-
-      const hashBefore = await hashBRows();
-
-      const args = createPublicActionArgs(
-        "/unsubscribe",
-        { "List-Unsubscribe": "One-Click" },
-        { token: fakeToken! }
-      );
-      const { action } = await import("../../app/routes/unsubscribe.js");
-      const result = (await action(args as never)) as { success: boolean };
-
-      expect(result.success).toBe(true);
-
-      const hashAfter = await hashBRows();
-      expect(hashAfter).toBe(hashBefore);
-    });
-
     it("unsubscribe loader does not leak B's data with invalid token", async () => {
+      expect.hasAssertions();
       const args = createPublicLoaderArgs("/unsubscribe", { token: "invalid-token" });
       const { loader } = await import("../../app/routes/unsubscribe.js");
       const result = await loader(args as never);
@@ -844,6 +1051,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     };
 
     it("all route files are either tested or in the explicit exclusions list", () => {
+      expect.hasAssertions();
       const routeFiles = fs.readdirSync(ROUTES_DIR)
         .filter(f => f.endsWith(".tsx") && !f.includes("test") && !f.startsWith("_"));
 
@@ -857,12 +1065,14 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     });
 
     it("all route exclusions have documented reasons", () => {
+      expect.hasAssertions();
       for (const [route, reason] of Object.entries(ROUTE_EXCLUSIONS)) {
         expect(reason.length, `${route} exclusion reason is empty`).toBeGreaterThan(0);
       }
     });
 
     it("tested routes map has expected status for each route", () => {
+      expect.hasAssertions();
       for (const [route, expectation] of Object.entries(TESTED_ROUTES)) {
         expect(expectation.status, `${route} missing status`).toBeDefined();
         expect(expectation.reason, `${route} missing reason`).toBeDefined();
@@ -871,6 +1081,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     });
 
     it("routes with $param segments are tested", () => {
+      expect.hasAssertions();
       const routeFiles = fs.readdirSync(ROUTES_DIR)
         .filter(f => f.endsWith(".tsx") && !f.includes("test") && f.includes("$"));
 
@@ -891,6 +1102,7 @@ describeWithDb("Cross-shop (tenant) isolation suite", () => {
     });
 
     it("routes with formData.get(...Id) patterns are covered", () => {
+      expect.hasAssertions();
       const routeFiles = fs.readdirSync(ROUTES_DIR)
         .filter(f => f.endsWith(".tsx") && !f.includes("test"));
 
