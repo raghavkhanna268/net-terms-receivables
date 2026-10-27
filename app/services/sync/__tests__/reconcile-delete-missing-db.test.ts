@@ -1141,9 +1141,9 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         data: {
           id: "test-id",
           status: "RUNNING",
-          url: null,
-          fileSize: null,
-          objectCount: null,
+          url: "https://example.com/results.jsonl",
+          fileSize: 1000,
+          objectCount: "100",
           errorCode: null,
           partialDataUrl: null,
         },
