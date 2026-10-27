@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { getRequestSql } from "~/lib/request-context.server";
 import { verifyWebhook, normalizeWebhookTopic } from "~/lib/webhook-verify.server";
 import { parseTriggeredAt, recordAndEnqueueSync } from "~/lib/webhook-receipts.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
 
 /**
  * Webhook handler for customer lifecycle events (S8).
@@ -39,7 +40,7 @@ const ALLOWED_TOPICS = new Set([
   "CUSTOMERS_DELETE",
 ]);
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+const webhookAction = async ({ request }: ActionFunctionArgs): Promise<Response> => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[webhooks.customers] SHOPIFY_API_SECRET not configured");
@@ -94,3 +95,5 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);

@@ -3,6 +3,13 @@ import {
   verifyWebhook,
   normalizeWebhookTopic,
 } from "~/lib/webhook-verify.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
+
+/**
+ * Declared topic handled by this route (normalized form).
+ * Used by the webhook_handled summary to decide topic vs "unexpected".
+ */
+const ALLOWED_TOPICS = new Set(["APP_SCOPES_UPDATE"]);
 
 /**
  * Scopes update webhook handler.
@@ -16,7 +23,7 @@ import {
  *
  * CPU savings: ~5-10ms by avoiding session DB round-trip.
  */
-export const action = async ({ request, context }: ActionFunctionArgs) => {
+const webhookAction = async ({ request, context }: ActionFunctionArgs): Promise<Response> => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[scopes_update] SHOPIFY_API_SECRET not configured");
@@ -51,3 +58,5 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   return new Response();
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);

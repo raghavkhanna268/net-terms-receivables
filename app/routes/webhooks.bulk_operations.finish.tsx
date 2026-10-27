@@ -3,6 +3,13 @@ import { getRequestSql } from "~/lib/request-context.server";
 import { sendBulkMessage } from "~/lib/pgmq.server";
 import { recordWebhookReceipt, parseTriggeredAt } from "~/lib/webhook-receipts.server";
 import { safeLog, shopHash } from "~/lib/log.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
+
+/**
+ * Declared topic handled by this route (normalized form).
+ * Used by the webhook_handled summary to decide topic vs "unexpected".
+ */
+const ALLOWED_TOPICS = new Set(["BULK_OPERATIONS_FINISH"]);
 
 /**
  * Webhook handler for bulk operation completion.
@@ -26,7 +33,7 @@ import { safeLog, shopHash } from "~/lib/log.server";
  * - companies: Company/CompanyLocation backfill
  * - orders: Orders with payment terms backfill
  */
-export const action = async ({ request, context }: ActionFunctionArgs) => {
+const webhookAction = async ({ request, context }: ActionFunctionArgs): Promise<Response> => {
   const { shopify } = context;
 
   const triggeredAt = parseTriggeredAt(request);
@@ -117,6 +124,8 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);
 
 /**
  * Look up the bulk operation type from the tracking table.

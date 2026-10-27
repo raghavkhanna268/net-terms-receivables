@@ -16,7 +16,18 @@ import {
 } from "~/services/compliance";
 import { getOfflineAdminContext } from "~/lib/offline-admin.server";
 import { safeLog, shopHash } from "~/lib/log.server";
+import { withWebhookSummary } from "~/lib/webhook-summary.server";
 import type { Sql } from "~/lib/db-light.server";
+
+/**
+ * Declared compliance topics handled by this route (normalized form).
+ * Used by the webhook_handled summary to decide topic vs "unexpected".
+ */
+const ALLOWED_TOPICS = new Set([
+  "CUSTOMERS_DATA_REQUEST",
+  "CUSTOMERS_REDACT",
+  "SHOP_REDACT",
+]);
 
 /**
  * Fetch shop owner email using the offline session admin client.
@@ -83,7 +94,7 @@ async function fetchShopOwnerEmail(sql: Sql, shop: string): Promise<string | nul
  * Security: All handlers verify payload shop_domain matches header shop.
  * This prevents attackers from forging payloads to delete wrong shop's data.
  */
-export const action = async ({ request }: ActionFunctionArgs) => {
+const webhookAction = async ({ request }: ActionFunctionArgs): Promise<Response> => {
   const apiSecret = process.env.SHOPIFY_API_SECRET;
   if (!apiSecret) {
     console.error("[Compliance] SHOPIFY_API_SECRET not configured");
@@ -269,3 +280,5 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   return new Response(null, { status: 200 });
 };
+
+export const action = withWebhookSummary(ALLOWED_TOPICS, webhookAction);
