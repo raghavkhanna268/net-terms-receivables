@@ -1,24 +1,22 @@
 /**
- * Plan Welcome Service - Force-refresh plan on App Pricing redirect.
+ * Plan Welcome Service - Force-refresh plan on every welcome visit.
  *
- * When a merchant completes the App Pricing flow, Shopify redirects with
- * plan_handle (or charge_id). This service force-refreshes the plan cache
- * using the EXISTING resolvePlan path (forceRefresh=true) which goes through
- * fetchPlanFromShopify/activeSubscriptions plus resolvePlanKey, writing via
- * setCachedPlan - the only writer of plan_key.
+ * This service force-refreshes the plan cache on every visit to /app/welcome,
+ * regardless of plan_handle or charge_id values. Uses resolvePlanWithStatus
+ * (forceRefresh=true) which goes through fetchPlanFromShopify/activeSubscriptions
+ * plus resolvePlanKey, writing via setCachedPlan - the only writer of plan_key.
  *
  * Security:
- * - plan_handle triggers refresh when non-empty (trimmed, max 32 chars)
  * - Shop comes ONLY from authenticated session, never URL params
  * - Foreign-shop params silently ignored (no write)
  *
  * Failure handling:
- * - If refresh fails or throws, falls back silently to existing resolvePlan semantics
+ * - If refresh fails (error status or throws), returns refresh_failed
  * - Never throws, never gates
  */
 
 import type { Sql } from "~/lib/db-light.server";
-import { resolvePlan } from "~/services/plan.server";
+import { resolvePlanWithStatus } from "~/services/plan.server";
 
 const MAX_HANDLE_LENGTH = 32;
 
@@ -63,60 +61,34 @@ export function normalizePlanHandle(handle: string | null): string | null {
 }
 
 /**
- * Check if plan_handle is a valid trigger for refresh.
- * Non-empty (after trim), at most MAX_HANDLE_LENGTH chars.
- */
-function isValidRefreshTrigger(handle: string | null): boolean {
-  if (!handle || typeof handle !== "string") return false;
-  const trimmed = handle.trim();
-  return trimmed.length > 0 && trimmed.length <= MAX_HANDLE_LENGTH;
-}
-
-/**
- * Check if plan_handle or charge_id is present and valid for refresh.
- * charge_id presence triggers refresh even without plan_handle.
- * plan_handle triggers refresh when non-empty and at most 32 chars.
- */
-export function shouldRefreshPlan(
-  planHandle: string | null,
-  chargeId: string | null
-): boolean {
-  if (chargeId && chargeId.trim().length > 0) {
-    return true;
-  }
-  return isValidRefreshTrigger(planHandle);
-}
-
-/**
- * Force-refresh plan cache after App Pricing redirect.
+ * Force-refresh plan cache on every welcome visit.
  *
- * Uses existing resolvePlan with forceRefresh=true which goes through
+ * Uses resolvePlanWithStatus with forceRefresh=true which goes through
  * fetchPlanFromShopify/activeSubscriptions and writes via setCachedPlan.
  *
  * @param sql - Database client
  * @param sessionShop - Shop domain from authenticated session (trusted)
  * @param urlShopParam - Shop param from URL (untrusted, may differ)
- * @param planHandle - plan_handle from URL
- * @param chargeId - charge_id from URL (triggers refresh if present)
+ * @param _planHandle - plan_handle from URL (unused, kept for signature compatibility)
+ * @param _chargeId - charge_id from URL (unused, kept for signature compatibility)
  * @returns Result indicating what action was taken
  */
 export async function processPlanWelcome(
   sql: Sql,
   sessionShop: string,
   urlShopParam: string | null,
-  planHandle: string | null,
-  chargeId: string | null
+  _planHandle: string | null,
+  _chargeId: string | null
 ): Promise<PlanWelcomeResult> {
   if (urlShopParam && urlShopParam !== sessionShop) {
     return { refreshed: false, skipped: true, reason: "foreign_shop" };
   }
 
-  if (!shouldRefreshPlan(planHandle, chargeId)) {
-    return { refreshed: false, skipped: true, reason: "no_trigger" };
-  }
-
   try {
-    await resolvePlan(sql, sessionShop, true);
+    const { status } = await resolvePlanWithStatus(sql, sessionShop, true);
+    if (status === "error") {
+      return { refreshed: false, skipped: false, reason: "refresh_failed" };
+    }
     return { refreshed: true, skipped: false, reason: "refreshed" };
   } catch {
     return { refreshed: false, skipped: false, reason: "refresh_failed" };
