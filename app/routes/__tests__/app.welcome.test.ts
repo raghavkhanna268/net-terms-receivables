@@ -3,20 +3,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 /**
  * Tests for plan welcome redirect handling (App Pricing).
  *
- * Tests verify both entry points (/app/welcome and /app with plan_handle/charge_id):
- * 1. Non-empty handle (max 32 chars) triggers force-refresh via existing resolvePlan path
- * 2. charge_id triggers refresh even without plan_handle
- * 3. Over-length plan_handle → no refresh
- * 4. Foreign shop param (differs from session) → no write
- * 5. Missing params → no refresh
- * 6. Re-visits are harmless and idempotent
- * 7. Refresh failure falls back silently (no throw)
- * 8. Redirect preserves shop and host params
- * 9. Logging emits exactly {refreshed, skipped, reason, hasPlanHandle, hasChargeId}
+ * Tests verify the /app/welcome entry point:
+ * 1. Every welcome visit force-refreshes the plan via resolvePlanWithStatus
+ * 2. Params (plan_handle, charge_id) are ignored for triggering refresh
+ * 3. Foreign shop param (differs from session) → no refresh
+ * 4. Re-visits are harmless and idempotent
+ * 5. Error status from refresh → refresh_failed
+ * 6. Thrown errors → refresh_failed
+ * 7. Redirect preserves shop and host params
+ * 8. Logging emits exactly {refreshed, skipped, reason, hasPlanHandle, hasChargeId}
  */
 
 vi.mock("~/services/plan.server", () => ({
-  resolvePlan: vi.fn(),
+  resolvePlanWithStatus: vi.fn(),
 }));
 
 vi.mock("~/lib/request-context.server", () => ({
@@ -82,88 +81,63 @@ describe("Plan Welcome Service", () => {
     });
   });
 
-  describe("shouldRefreshPlan", () => {
-    it("returns true for known plan handles", async () => {
-      const { shouldRefreshPlan } = await import("~/services/plan-welcome.server");
-
-      expect(shouldRefreshPlan("starter", null)).toBe(true);
-      expect(shouldRefreshPlan("growth", null)).toBe(true);
-      expect(shouldRefreshPlan("unlimited", null)).toBe(true);
-    });
-
-    it("returns true for unknown non-empty handles (scale, pro-test)", async () => {
-      const { shouldRefreshPlan } = await import("~/services/plan-welcome.server");
-
-      expect(shouldRefreshPlan("scale", null)).toBe(true);
-      expect(shouldRefreshPlan("pro-test", null)).toBe(true);
-      expect(shouldRefreshPlan("enterprise", null)).toBe(true);
-      expect(shouldRefreshPlan("premium", null)).toBe(true);
-    });
-
-    it("returns true for any charge_id", async () => {
-      const { shouldRefreshPlan } = await import("~/services/plan-welcome.server");
-
-      expect(shouldRefreshPlan(null, "123456")).toBe(true);
-      expect(shouldRefreshPlan("anyhandle", "789")).toBe(true);
-    });
-
-    it("returns false for missing, empty or whitespace handle without charge_id", async () => {
-      const { shouldRefreshPlan } = await import("~/services/plan-welcome.server");
-
-      expect(shouldRefreshPlan(null, null)).toBe(false);
-      expect(shouldRefreshPlan("", null)).toBe(false);
-      expect(shouldRefreshPlan("   ", null)).toBe(false);
-      expect(shouldRefreshPlan("", "")).toBe(false);
-    });
-
-    it("returns false for handle longer than 32 chars", async () => {
-      const { shouldRefreshPlan } = await import("~/services/plan-welcome.server");
-
-      expect(shouldRefreshPlan("a".repeat(33), null)).toBe(false);
-      expect(shouldRefreshPlan("a".repeat(100), null)).toBe(false);
-    });
-
-    it("returns true for handle exactly 32 chars", async () => {
-      const { shouldRefreshPlan } = await import("~/services/plan-welcome.server");
-
-      expect(shouldRefreshPlan("a".repeat(32), null)).toBe(true);
-    });
-  });
-
   describe("processPlanWelcome", () => {
-    it("calls resolvePlan with forceRefresh for valid handle", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
+    it("refreshes plan when plan_handle and charge_id are empty", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
       const mockSql = vi.fn();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "growth" },
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "growth" }, subscriptionId: "gid://123", fromCache: false },
+        status: "active",
+      });
+
+      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "", "");
+
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(result.refreshed).toBe(true);
+      expect(result.skipped).toBe(false);
+      expect(result.reason).toBe("refreshed");
+    });
+
+    it("refreshes plan when plan_handle and charge_id are missing", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
+      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
+
+      const mockSql = vi.fn();
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+        status: "none",
+      });
+
+      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, null);
+
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(result.refreshed).toBe(true);
+      expect(result.skipped).toBe(false);
+      expect(result.reason).toBe("refreshed");
+    });
+
+    it("reports refresh_failed when the forced lookup returns error status", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
+      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
+
+      const mockSql = vi.fn();
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "none" }, subscriptionId: null, fromCache: true },
+        status: "error",
       });
 
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
 
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
-      expect(result.refreshed).toBe(true);
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(result.refreshed).toBe(false);
       expect(result.skipped).toBe(false);
+      expect(result.reason).toBe("refresh_failed");
     });
 
-    it("calls resolvePlan with forceRefresh for charge_id", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      const mockSql = vi.fn();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "starter" },
-      });
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, "charge123");
-
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
-      expect(result.refreshed).toBe(true);
-    });
-
-    it("skips when foreign shop param differs from session", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
+    it("does not refresh for a different shop param", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
       const mockSql = vi.fn();
@@ -173,79 +147,69 @@ describe("Plan Welcome Service", () => {
         TEST_SHOP,
         "test-other.myshopify.com",
         "growth",
-        null
+        "charge123"
       );
 
-      expect(resolvePlan).not.toHaveBeenCalled();
+      expect(resolvePlanWithStatus).not.toHaveBeenCalled();
       expect(result.skipped).toBe(true);
       expect(result.reason).toBe("foreign_shop");
     });
 
-    it("skips when empty handle and no charge_id", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
+    it("calls resolvePlanWithStatus with forceRefresh for valid handle", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
       const mockSql = vi.fn();
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "", null);
-
-      expect(resolvePlan).not.toHaveBeenCalled();
-      expect(result.skipped).toBe(true);
-      expect(result.reason).toBe("no_trigger");
-    });
-
-    it("calls resolvePlan for unknown handle (scale)", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      const mockSql = vi.fn();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "scale" },
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "growth" }, subscriptionId: "gid://123", fromCache: false },
+        status: "active",
       });
 
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "scale", null);
+      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
 
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
-      expect(result.refreshed).toBe(true);
-      expect(result.skipped).toBe(false);
-      expect(result.reason).toBe("refreshed");
-    });
-
-    it("calls resolvePlan for unknown handle (pro-test)", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
-      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
-
-      const mockSql = vi.fn();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "pro-test" },
-      });
-
-      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "pro-test", null);
-
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
       expect(result.refreshed).toBe(true);
       expect(result.skipped).toBe(false);
     });
 
-    it("skips when handle longer than 32 chars", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
+    it("calls resolvePlanWithStatus with forceRefresh for charge_id", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
       const mockSql = vi.fn();
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "starter" }, subscriptionId: "gid://456", fromCache: false },
+        status: "active",
+      });
+
+      const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, "charge123");
+
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(result.refreshed).toBe(true);
+    });
+
+    it("refreshes for over-length handles (params are not validated)", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
+      const { processPlanWelcome } = await import("~/services/plan-welcome.server");
+
+      const mockSql = vi.fn();
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+        status: "none",
+      });
 
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "a".repeat(33), null);
 
-      expect(resolvePlan).not.toHaveBeenCalled();
-      expect(result.skipped).toBe(true);
-      expect(result.reason).toBe("no_trigger");
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(result.refreshed).toBe(true);
     });
 
-    it("falls back silently on refresh failure with reason refresh_failed", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
+    it("returns refresh_failed when resolvePlanWithStatus throws", async () => {
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
       const mockSql = vi.fn();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Network error"));
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Network error"));
 
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "growth", null);
 
@@ -255,18 +219,19 @@ describe("Plan Welcome Service", () => {
     });
 
     it("re-visits are idempotent (multiple refreshes are harmless)", async () => {
-      const { resolvePlan } = await import("~/services/plan.server");
+      const { resolvePlanWithStatus } = await import("~/services/plan.server");
       const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
       const mockSql = vi.fn();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-        plan: { key: "unlimited" },
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "unlimited" }, subscriptionId: "gid://789", fromCache: false },
+        status: "active",
       });
 
       await processPlanWelcome(mockSql as never, TEST_SHOP, null, "unlimited", null);
       await processPlanWelcome(mockSql as never, TEST_SHOP, null, "unlimited", null);
 
-      expect(resolvePlan).toHaveBeenCalledTimes(2);
+      expect(resolvePlanWithStatus).toHaveBeenCalledTimes(2);
     });
   });
 });
@@ -283,13 +248,67 @@ describe("/app/welcome Route", () => {
     vi.clearAllMocks();
   });
 
-  it("redirects with embedded params preserved (shop, host)", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+  it("loader refreshes once and redirects for /app/welcome?plan_handle=&charge_id=", async () => {
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
     const mockSql = vi.fn();
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "growth" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "growth" }, subscriptionId: "gid://123", fromCache: false },
+      status: "active",
+    });
+
+    const redirectMock = vi.fn((path: string) => {
+      throw new Response(null, {
+        status: 302,
+        headers: { Location: path },
+      });
+    });
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: TEST_SHOP },
+            redirect: redirectMock,
+          }),
+        },
+      },
+    };
+
+    const { loader } = await import("../app.welcome");
+    const request = new Request(
+      "https://example.com/app/welcome?plan_handle=&charge_id="
+    );
+
+    try {
+      await loader({
+        request,
+        context: mockContext as never,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/app/welcome",
+      });
+    } catch (e) {
+      expect(e).toBeInstanceOf(Response);
+    }
+
+    expect(resolvePlanWithStatus).toHaveBeenCalledTimes(1);
+    expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+    expect(redirectMock).toHaveBeenCalledWith("/app?plan_handle=&charge_id=");
+  });
+
+  it("redirects with embedded params preserved (shop, host)", async () => {
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
+    const { getRequestSql } = await import("~/lib/request-context.server");
+
+    const mockSql = vi.fn();
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "growth" }, subscriptionId: "gid://123", fromCache: false },
+      status: "active",
+    });
 
     const redirectMock = vi.fn((path: string) => {
       throw new Response(null, {
@@ -330,12 +349,15 @@ describe("/app/welcome Route", () => {
   });
 
   it("redirect target includes empty plan_handle and charge_id to prevent double refresh", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
     const mockSql = vi.fn();
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "starter" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "starter" }, subscriptionId: "gid://456", fromCache: false },
+      status: "active",
+    });
 
     let capturedRedirectPath = "";
     const redirectMock = vi.fn((path: string) => {
@@ -392,24 +414,30 @@ describe("/app (index) Route with plan_handle", () => {
   });
 
   it("triggers refresh for valid plan_handle", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "starter" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "starter" }, subscriptionId: "gid://123", fromCache: false },
+      status: "active",
+    });
 
     const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, "starter", null);
 
     expect(result.refreshed).toBe(true);
-    expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+    expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
   });
 
   it("triggers refresh for charge_id without plan_handle", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "growth" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "growth" }, subscriptionId: "gid://456", fromCache: false },
+      status: "active",
+    });
 
     const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, "charge_456");
 
@@ -417,7 +445,7 @@ describe("/app (index) Route with plan_handle", () => {
   });
 
   it("ignores foreign shop param", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
@@ -430,28 +458,35 @@ describe("/app (index) Route with plan_handle", () => {
       null
     );
 
-    expect(resolvePlan).not.toHaveBeenCalled();
+    expect(resolvePlanWithStatus).not.toHaveBeenCalled();
     expect(result.reason).toBe("foreign_shop");
   });
 
-  it("no refresh when params missing", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+  it("refreshes when params missing (every welcome visit refreshes)", async () => {
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+      status: "none",
+    });
 
     const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, null, null);
 
-    expect(resolvePlan).not.toHaveBeenCalled();
-    expect(result.skipped).toBe(true);
+    expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+    expect(result.refreshed).toBe(true);
   });
 
   it("renders normally with charge_id and shop params (no loop)", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "growth" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "growth" }, subscriptionId: "gid://789", fromCache: false },
+      status: "active",
+    });
 
     const result = await processPlanWelcome(
       mockSql as never,
@@ -465,33 +500,39 @@ describe("/app (index) Route with plan_handle", () => {
   });
 });
 
-describe("Refresh trigger tests (tests fail if allowlist requirement restored)", () => {
+describe("Refresh trigger tests (every welcome visit refreshes)", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
   });
 
   it("unknown handles DO trigger refresh (scale, pro-test)", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
     const TEST_SHOP = "test-guard.myshopify.com";
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "scale" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "scale" }, subscriptionId: null, fromCache: false },
+      status: "none",
+    });
 
     const unknownHandles = ["scale", "pro-test", "enterprise", "premium"];
 
     for (const handle of unknownHandles) {
       vi.clearAllMocks();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: handle } });
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: handle }, subscriptionId: null, fromCache: false },
+        status: "none",
+      });
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, handle, null);
       expect(result.refreshed).toBe(true);
-      expect(resolvePlan).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
     }
   });
 
-  it("over-length handles do NOT trigger refresh", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+  it("over-length handles still trigger refresh (params not validated)", async () => {
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
@@ -501,47 +542,60 @@ describe("Refresh trigger tests (tests fail if allowlist requirement restored)",
 
     for (const handle of overLengthHandles) {
       vi.clearAllMocks();
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+        status: "none",
+      });
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, handle, null);
-      expect(result.skipped).toBe(true);
-      expect(result.reason).toBe("no_trigger");
-      expect(resolvePlan).not.toHaveBeenCalled();
+      expect(result.refreshed).toBe(true);
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
     }
   });
 
   it("known handles DO trigger refresh", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
     const TEST_SHOP = "test-guard.myshopify.com";
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "starter" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "starter" }, subscriptionId: "gid://123", fromCache: false },
+      status: "active",
+    });
 
     const knownHandles = ["starter", "growth", "unlimited"];
 
     for (const handle of knownHandles) {
       vi.clearAllMocks();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: handle } });
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: handle }, subscriptionId: "gid://123", fromCache: false },
+        status: "active",
+      });
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, handle, null);
       expect(result.refreshed).toBe(true);
-      expect(resolvePlan).toHaveBeenCalledTimes(1);
+      expect(resolvePlanWithStatus).toHaveBeenCalledTimes(1);
     }
   });
 
-  it("empty, whitespace, null handles do NOT trigger refresh", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+  it("empty, whitespace, null handles DO trigger refresh (every visit refreshes)", async () => {
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { processPlanWelcome } = await import("~/services/plan-welcome.server");
 
     const mockSql = vi.fn();
     const TEST_SHOP = "test-guard.myshopify.com";
 
-    const noTriggerHandles: (string | null)[] = [null, "", "   ", "\t", "\n"];
+    const emptyHandles: (string | null)[] = [null, "", "   ", "\t", "\n"];
 
-    for (const handle of noTriggerHandles) {
+    for (const handle of emptyHandles) {
       vi.clearAllMocks();
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+        status: "none",
+      });
       const result = await processPlanWelcome(mockSql as never, TEST_SHOP, null, handle, null);
-      expect(result.skipped).toBe(true);
-      expect(result.reason).toBe("no_trigger");
-      expect(resolvePlan).not.toHaveBeenCalled();
+      expect(result.refreshed).toBe(true);
+      expect(result.reason).toBe("refreshed");
+      expect(resolvePlanWithStatus).toHaveBeenCalledWith(mockSql, TEST_SHOP, true);
     }
   });
 });
@@ -562,12 +616,15 @@ describe("Route logging (real safeLog, spy on console)", () => {
   });
 
   it("emits event with EXACTLY {refreshed, skipped, reason, hasPlanHandle, hasChargeId}", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
     const mockSql = vi.fn();
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "growth" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "growth" }, subscriptionId: "gid://123", fromCache: false },
+      status: "active",
+    });
 
     const redirectMock = vi.fn((path: string) => {
       throw new Response(null, {
@@ -622,12 +679,15 @@ describe("Route logging (real safeLog, spy on console)", () => {
   });
 
   it("handle value and charge_id strings never appear in logged output", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
     const mockSql = vi.fn();
     (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
-    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "scale" } });
+    (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { plan: { key: "scale" }, subscriptionId: null, fromCache: false },
+      status: "none",
+    });
 
     const TEST_HANDLE = "my-secret-plan-handle";
     const TEST_CHARGE_ID = "chg_secret_charge_12345";
@@ -674,7 +734,7 @@ describe("Route logging (real safeLog, spy on console)", () => {
   });
 
   it("logs correct hasPlanHandle/hasChargeId booleans for various inputs", async () => {
-    const { resolvePlan } = await import("~/services/plan.server");
+    const { resolvePlanWithStatus } = await import("~/services/plan.server");
     const { getRequestSql } = await import("~/lib/request-context.server");
 
     const mockSql = vi.fn();
@@ -690,7 +750,10 @@ describe("Route logging (real safeLog, spy on console)", () => {
     for (const tc of testCases) {
       vi.resetModules();
       consoleSpy.mockClear();
-      (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({ plan: { key: "test" } });
+      (resolvePlanWithStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        plan: { plan: { key: "test" }, subscriptionId: null, fromCache: false },
+        status: "none",
+      });
 
       const redirectMock = vi.fn((path: string) => {
         throw new Response(null, {
