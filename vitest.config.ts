@@ -73,6 +73,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/routes/__tests__/webhooks.compliance.customers.test.ts
  * - app/routes/__tests__/admin-render-smoke.test.tsx
  * - app/routes/__tests__/tenant-isolation.test.ts
+ * - app/routes/__tests__/account-href-loader-db.test.ts
  *
  * Lib DB tests:
  * - app/lib/__tests__/after-auth-db.test.ts
@@ -229,6 +230,9 @@ const DB_TEST_PATTERNS = [
 
   // v1.1 reconcile delete-missing DB tests
   "app/services/sync/__tests__/reconcile-delete-missing-db.test.ts",
+
+  // Account href URL-encoding DB tests (loader finds decoded id)
+  "app/routes/__tests__/account-href-loader-db.test.ts",
 ];
 
 export default defineConfig({
