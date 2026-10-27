@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { isRouteErrorResponse } from "react-router";
+import { isRouteErrorResponse, UNSAFE_ErrorResponseImpl } from "react-router";
 
 describe("app.tsx ErrorBoundary", () => {
   beforeEach(() => {
@@ -75,6 +75,54 @@ describe("app.tsx ErrorBoundary", () => {
     const html = renderToString(createElement(ErrorBoundary));
 
     expect(html).toContain("Handling response");
+  });
+
+  it("renders data for real ErrorResponseImpl with status 200", async () => {
+    const bounceError = new UNSAFE_ErrorResponseImpl(
+      200,
+      "OK",
+      "<script>bounce</script>"
+    );
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => bounceError,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("bounce");
+  });
+
+  it("rethrows real ErrorResponseImpl with status 401", async () => {
+    const reauthError = new UNSAFE_ErrorResponseImpl(
+      401,
+      "Unauthorized",
+      "<b>x</b>"
+    );
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => reauthError,
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app");
+
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
   it("rethrows 404 route error response (non-bounce status)", async () => {
@@ -166,20 +214,6 @@ describe("isRouteErrorResponse structural check", () => {
     const plainError = new Error("test");
 
     expect(isRouteErrorResponse(plainError)).toBe(false);
-  });
-});
-
-describe("library bounce response status (pinning test)", () => {
-  it("render-app-bridge throws Response with status 200", async () => {
-    const html = "<!DOCTYPE html><html><body>App Bridge</body></html>";
-    const response = new Response(html, {
-      headers: { "Content-Type": "text/html" },
-    });
-
-    expect(response.status).toBe(200);
-
-    const body = await response.text();
-    expect(body).toContain("App Bridge");
   });
 });
 
