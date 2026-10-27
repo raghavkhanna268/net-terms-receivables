@@ -1247,6 +1247,103 @@ describeDedupeWithDb("Dedupe: at most ONE reminder email per invoice per local d
       `;
       expect(parseInt(sentRows[0].count)).toBe(1);
     });
+
+    it("concurrent handleReminderSend calls: exactly 1 email sent, 1 ReminderLog row", async () => {
+      // This test runs the REAL handler path (not low-level functions)
+      // to verify end-to-end dedupe with mocked email sender
+      const mockFetch = vi.fn();
+      vi.stubGlobal("fetch", mockFetch);
+
+      // Save and set env vars for email sending
+      const savedEnv = {
+        RESEND_API_KEY: process.env.RESEND_API_KEY,
+        RESEND_FROM: process.env.RESEND_FROM,
+        REMINDER_UNSUBSCRIBE_SECRET: process.env.REMINDER_UNSUBSCRIBE_SECRET,
+        SHOPIFY_APP_URL: process.env.SHOPIFY_APP_URL,
+        RESEND_TEST_RECIPIENTS: process.env.RESEND_TEST_RECIPIENTS,
+      };
+
+      try {
+        const env = process.env as Record<string, string | undefined>;
+        env.RESEND_API_KEY = "re_test_fake_key_for_concurrent_test";
+        env.RESEND_FROM = "reminders@test-dedupe.example.com";
+        env.REMINDER_UNSUBSCRIBE_SECRET = "test-secret";
+        env.SHOPIFY_APP_URL = "https://test-app.example.com";
+        env.RESEND_TEST_RECIPIENTS = `handler-conc@test-dedupe.example.com`;
+
+        // Must re-import handler after setting env (module caches env on import)
+        const { handleReminderSend } = await import("~/jobs/reminders");
+
+        // Create invoice due TODAY
+        const { invoiceId, customerId } = await createBuyerAndInvoice("handler-conc", 0);
+
+        // Update email to match RESEND_TEST_RECIPIENTS (allowlist gate)
+        await sql`
+          UPDATE s8_tagged_customers
+          SET email = 'handler-conc@test-dedupe.example.com'
+          WHERE shop_id = ${DEDUPE_SHOP_ID} AND customer_id = ${customerId}
+        `;
+
+        const ruleId = `rule-handler-conc-${DEDUPE_SUFFIX}`;
+        await sql`
+          INSERT INTO "ReminderRule" (id, "shopId", "offsetDays", channel, enabled, "createdAt", "updatedAt")
+          VALUES (${ruleId}, ${DEDUPE_SHOP_ID}, 0, 'email'::"ReminderChannel", true, NOW(), NOW())
+        `;
+
+        // Mock Resend API success
+        mockFetch.mockResolvedValue({
+          ok: true,
+          json: async () => ({ id: "resend-handler-conc-123" }),
+        });
+
+        // Build the message
+        const message = {
+          topic: "REMINDER_SEND" as const,
+          shop: DEDUPE_SHOP_DOMAIN,
+          shopId: DEDUPE_SHOP_ID,
+          invoiceId,
+          ruleId,
+          offsetDays: 0,
+          timezone: dedupeTimezone,
+          webhookId: `s18_${invoiceId}_${ruleId}_handler_conc`,
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        // Run TWO handler calls concurrently
+        const [result1, result2] = await Promise.all([
+          handleReminderSend(sql, message),
+          handleReminderSend(sql, message),
+        ]);
+
+        // Both should succeed (ack the message), but exactly one should send
+        expect(result1.success).toBe(true);
+        expect(result2.success).toBe(true);
+
+        // Exactly one should be "created" (sent), the other "skipped"
+        const actions = [result1.action, result2.action].sort();
+        expect(actions).toEqual(["created", "skipped"]);
+
+        // Fetch should be called exactly once (one email sent)
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+
+        // Verify exactly 1 sent row in ReminderLog for this invoice today
+        const sentRows = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM "ReminderLog"
+          WHERE "shopId" = ${DEDUPE_SHOP_ID}
+            AND "invoiceId" = ${invoiceId}
+            AND status = 'sent'::"ReminderLogStatus"
+        `;
+        expect(parseInt(sentRows[0].count)).toBe(1);
+      } finally {
+        // Restore env
+        const env = process.env as Record<string, string | undefined>;
+        for (const [key, value] of Object.entries(savedEnv)) {
+          if (value === undefined) delete env[key];
+          else env[key] = value;
+        }
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   describe("Wording: pre-due catch-up on due date shows 'Payment due today'", () => {
