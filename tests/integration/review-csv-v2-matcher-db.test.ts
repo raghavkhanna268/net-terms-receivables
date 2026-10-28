@@ -4,12 +4,14 @@
  * This test verifies the SECOND HDFC fixture (hdfc-review-synthetic-v2.csv)
  * produces the expected match scores and has different dedupe keys from v1.
  *
+ * IMPORTANT: V2 fixture intentionally has NO credits matching #1001.
+ * Only #1002 is matched by this fixture; #1001 stays unchanged/unmatched.
+ *
  * V2 fixture credit rows (dates: 27-29 Oct 2026):
- * - Row 1: NEFT-SYNT0010-TEST BUYER CO-#1001, ₹10,000 → Medium 58
- * - Row 2: UPI-TEST BUYER CO-SYNT0011-#1002, ₹5,000 → Medium 58
- * - Row 3: IMPS-SYNT0012-TEST BUYER CO-#1002 PARTIAL, ₹2,000 → Low 48
- * - Row 4: NEFT-SYNT0013-ACME CORP-PAYMENT, ₹3,500 → Low 10 (no invoice ref, no buyer match)
- * - Row 5: RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE, ₹7,000 → Low 10 (no invoice ref, no buyer match)
+ * - Row 1: UPI-TEST BUYER CO-SYNT0011-#1002, ₹5,000 → Medium 58
+ * - Row 2: IMPS-SYNT0012-TEST BUYER CO-#1002 PARTIAL, ₹2,000 → Low 48
+ * - Row 3: NEFT-SYNT0013-ACME CORP-PAYMENT, ₹3,500 → Low 10 (no invoice ref, no buyer match)
+ * - Row 4: RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE, ₹7,000 → Low 10 (no invoice ref, no buyer match)
  *
  * All data is FICTIONAL - no real bank data.
  */
@@ -180,60 +182,39 @@ describeWithDb("Reviewer CSV v2: Real matcher DB path", () => {
     }));
   }
 
-  it("parses v2 fixture as HDFC with 5 credits", async () => {
+  it("parses v2 fixture as HDFC with 4 credits", async () => {
     const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
     const file = new File([content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
     const result = await parseBankStatement(file);
 
     expect(result.detection.bank).toBe("HDFC");
     const credits = result.transactions.filter((t) => t.direction === "CR");
-    expect(credits.length).toBe(5);
+    expect(credits.length).toBe(4);
   });
 
-  it("seeds 5 credit payments from v2 CSV", async () => {
+  it("seeds 4 credit payments from v2 CSV", async () => {
     await seedPaymentsFromV2Csv();
-    expect(paymentIds.length).toBe(5);
+    expect(paymentIds.length).toBe(4);
   });
 
-  it("runs matcher and produces results for all 5 payments", async () => {
+  it("runs matcher and produces results for all 4 payments", async () => {
     await seedPaymentsFromV2Csv();
     const result = await runMatcher(sql, testShopId);
-    expect(result.paymentsProcessed).toBe(5);
+    expect(result.paymentsProcessed).toBe(4);
   });
 
   /**
-   * Row 1: NEFT-SYNT0010-TEST BUYER CO-#1001, ₹10,000
-   * - invoice_ref: +30 (#1001)
-   * - amount_exact: +20
-   * - payer_name: +8 (TEST BUYER CO)
-   * = 58 (Medium)
-   */
-  it("Row 1: pins ₹10,000 payment → #1001, score 58, medium", async () => {
-    await seedPaymentsFromV2Csv();
-    await runMatcher(sql, testShopId);
-
-    const matches = await getMatchesForPayment(paymentIds[0]);
-    expect(matches.length).toBeGreaterThan(0);
-
-    const topMatch = matches[0];
-    expect(topMatch.invoiceName).toBe("#1001");
-    expect(topMatch.score).toBe(58);
-    expect(getConfidenceBand(topMatch.score)).toBe("medium");
-    expect(topMatch.amount).toBe(10000);
-  });
-
-  /**
-   * Row 2: UPI-TEST BUYER CO-SYNT0011-#1002, ₹5,000
+   * Row 1: UPI-TEST BUYER CO-SYNT0011-#1002, ₹5,000
    * - invoice_ref: +30 (#1002)
    * - amount_exact: +20
    * - payer_name: +8 (TEST BUYER CO)
    * = 58 (Medium)
    */
-  it("Row 2: pins ₹5,000 payment → #1002, score 58, medium", async () => {
+  it("Row 1: pins ₹5,000 payment → #1002, score 58, medium", async () => {
     await seedPaymentsFromV2Csv();
     await runMatcher(sql, testShopId);
 
-    const matches = await getMatchesForPayment(paymentIds[1]);
+    const matches = await getMatchesForPayment(paymentIds[0]);
     expect(matches.length).toBeGreaterThan(0);
 
     const topMatch = matches[0];
@@ -244,17 +225,17 @@ describeWithDb("Reviewer CSV v2: Real matcher DB path", () => {
   });
 
   /**
-   * Row 3: IMPS-SYNT0012-TEST BUYER CO-#1002 PARTIAL, ₹2,000
+   * Row 2: IMPS-SYNT0012-TEST BUYER CO-#1002 PARTIAL, ₹2,000
    * - invoice_ref: +30 (#1002)
    * - amount_partial: +10
    * - payer_name: +8 (TEST BUYER CO)
    * = 48 (Low)
    */
-  it("Row 3: pins ₹2,000 payment → #1002, score 48, low", async () => {
+  it("Row 2: pins ₹2,000 payment → #1002, score 48, low", async () => {
     await seedPaymentsFromV2Csv();
     await runMatcher(sql, testShopId);
 
-    const matches = await getMatchesForPayment(paymentIds[2]);
+    const matches = await getMatchesForPayment(paymentIds[1]);
     expect(matches.length).toBeGreaterThan(0);
 
     const topMatch = matches[0];
@@ -265,17 +246,17 @@ describeWithDb("Reviewer CSV v2: Real matcher DB path", () => {
   });
 
   /**
-   * Row 4: NEFT-SYNT0013-ACME CORP-PAYMENT, ₹3,500
+   * Row 3: NEFT-SYNT0013-ACME CORP-PAYMENT, ₹3,500
    * - invoice_ref: 0 (no #number)
    * - amount_partial: +10 (₹3,500 in window for #1002 ₹5,000)
    * - payer_name: 0 (ACME CORP doesn't match Test Buyer Co)
    * = 10 (Low)
    */
-  it("Row 4: pins ₹3,500 payment → #1002, score 10, low", async () => {
+  it("Row 3: pins ₹3,500 payment → #1002, score 10, low", async () => {
     await seedPaymentsFromV2Csv();
     await runMatcher(sql, testShopId);
 
-    const matches = await getMatchesForPayment(paymentIds[3]);
+    const matches = await getMatchesForPayment(paymentIds[2]);
     expect(matches.length).toBeGreaterThan(0);
 
     const topMatch = matches[0];
@@ -286,17 +267,17 @@ describeWithDb("Reviewer CSV v2: Real matcher DB path", () => {
   });
 
   /**
-   * Row 5: RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE, ₹7,000
+   * Row 4: RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE, ₹7,000
    * - invoice_ref: 0 (no #number)
    * - amount_partial: +10 (₹7,000 in window for #1001 ₹10,000)
    * - payer_name: 0 (UNKNOWN SENDER doesn't match Test Buyer Co)
    * = 10 (Low)
    */
-  it("Row 5: pins ₹7,000 payment → #1001, score 10, low", async () => {
+  it("Row 4: pins ₹7,000 payment → #1001, score 10, low", async () => {
     await seedPaymentsFromV2Csv();
     await runMatcher(sql, testShopId);
 
-    const matches = await getMatchesForPayment(paymentIds[4]);
+    const matches = await getMatchesForPayment(paymentIds[3]);
     expect(matches.length).toBeGreaterThan(0);
 
     const topMatch = matches[0];
@@ -307,19 +288,40 @@ describeWithDb("Reviewer CSV v2: Real matcher DB path", () => {
   });
 
   /**
+   * CRITICAL: No credit in v2 fixture matches #1001 above Low 10.
+   * This ensures #1001 stays effectively unmatched by this fixture.
+   */
+  it("no credit matches #1001 above Low 10", async () => {
+    await seedPaymentsFromV2Csv();
+    await runMatcher(sql, testShopId);
+
+    for (let i = 0; i < paymentIds.length; i++) {
+      const matches = await getMatchesForPayment(paymentIds[i]);
+      const order1001Matches = matches.filter((m) => m.invoiceName === "#1001");
+
+      for (const match of order1001Matches) {
+        expect(match.score).toBeLessThanOrEqual(10);
+        expect(getConfidenceBand(match.score)).toBe("low");
+      }
+    }
+  });
+
+  /**
    * Summary table for v2 fixture:
    * | Row | Amount  | Narration                              | Invoice | Score | Band   |
    * |-----|---------|----------------------------------------|---------|-------|--------|
-   * | 1   | ₹10,000 | NEFT-SYNT0010-TEST BUYER CO-#1001      | #1001   | 58    | medium |
-   * | 2   | ₹5,000  | UPI-TEST BUYER CO-SYNT0011-#1002       | #1002   | 58    | medium |
-   * | 3   | ₹2,000  | IMPS-SYNT0012-TEST BUYER CO-#1002 PART | #1002   | 48    | low    |
-   * | 4   | ₹3,500  | NEFT-SYNT0013-ACME CORP-PAYMENT        | #1002   | 10    | low    |
-   * | 5   | ₹7,000  | RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE   | #1001   | 10    | low    |
+   * | 1   | ₹5,000  | UPI-TEST BUYER CO-SYNT0011-#1002       | #1002   | 58    | medium |
+   * | 2   | ₹2,000  | IMPS-SYNT0012-TEST BUYER CO-#1002 PART | #1002   | 48    | low    |
+   * | 3   | ₹3,500  | NEFT-SYNT0013-ACME CORP-PAYMENT        | #1002   | 10    | low    |
+   * | 4   | ₹7,000  | RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE   | #1001   | 10    | low    |
+   *
+   * NOTE: Row 4 matches #1001 only at Low 10 (amount window only, no invoice ref).
+   * This does NOT count as a meaningful match - #1001 stays effectively unmatched.
    */
   it("documents pinned results table", async () => {
     await seedPaymentsFromV2Csv();
     const result = await runMatcher(sql, testShopId);
-    expect(result.paymentsProcessed).toBe(5);
+    expect(result.paymentsProcessed).toBe(4);
     expect(result.highConfidenceMatches).toBe(0);
   });
 });
@@ -369,5 +371,18 @@ describe("Fixture v1 vs v2: dedupe keys differ", () => {
 
     expect(v1Lines[0]).toMatch(/^# SYNTHETIC/);
     expect(v2Lines[0]).toMatch(/^# SYNTHETIC/);
+  });
+
+  it("v2 fixture has 4 credits (not 5) - no #1001 credit", async () => {
+    const v2Content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
+    const v2File = new File([v2Content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
+    const v2Result = await parseBankStatement(v2File);
+
+    const credits = v2Result.transactions.filter((t) => t.direction === "CR");
+    expect(credits.length).toBe(4);
+
+    const narrations = credits.map((c) => c.narration);
+    const has1001 = narrations.some((n) => n.includes("#1001"));
+    expect(has1001).toBe(false);
   });
 });
