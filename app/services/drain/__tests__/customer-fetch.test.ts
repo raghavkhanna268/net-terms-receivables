@@ -366,13 +366,57 @@ describe("Real handleCustomer tests with fallback", () => {
     }));
 
     mockIncrementCounter = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("../customer-fetch.server", async () => {
-      const actual = await vi.importActual<typeof import("../customer-fetch.server")>("../customer-fetch.server");
-      return {
-        ...actual,
-        incrementCustomerPiiAccessDeniedFallback: mockIncrementCounter,
-      };
-    });
+
+    // Mock the entire customer-fetch.server module
+    // We can't use importActual because it would use real adminGraphQL
+    vi.doMock("../customer-fetch.server", () => ({
+      fetchCustomerBaseFields: vi.fn().mockImplementation(() => {
+        // Get the next adminGraphQL mock result
+        return mockAdminGraphQL().then((result: { success: boolean; data?: { node: unknown } }) => {
+          if (!result.success) {
+            return { success: false, error: result.error, retryable: result.retryable };
+          }
+          return {
+            success: true,
+            data: result.data?.node,
+            retryable: false,
+          };
+        });
+      }),
+      fetchCustomerPiiFields: vi.fn().mockImplementation(() => {
+        // Get the next adminGraphQL mock result
+        return mockAdminGraphQL().then((result: { success: boolean; data?: { node: { email?: string; displayName?: string } }; errorCode?: string }) => {
+          if (result.success) {
+            return {
+              success: true,
+              email: result.data?.node?.email ?? null,
+              displayName: result.data?.node?.displayName ?? null,
+              retryable: false,
+              usedFallback: false,
+            };
+          }
+          if (result.errorCode === "access_denied") {
+            return {
+              success: true,
+              email: null,
+              displayName: null,
+              retryable: false,
+              usedFallback: true,
+            };
+          }
+          return {
+            success: false,
+            error: result.error,
+            retryable: result.retryable,
+            usedFallback: false,
+          };
+        });
+      }),
+      incrementCustomerPiiAccessDeniedFallback: mockIncrementCounter,
+      getCustomerPiiAccessDeniedFallbackCount: vi.fn().mockResolvedValue(0),
+      fetchCustomerWithFallback: vi.fn().mockResolvedValue({ success: true, data: {} }),
+      getCustomerByNodeQuery: vi.fn().mockReturnValue("query CustomerById"),
+    }));
   });
 
   afterEach(() => {
