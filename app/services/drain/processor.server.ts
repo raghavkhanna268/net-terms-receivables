@@ -68,6 +68,12 @@ import {
   type SanitizedDeadLetterMessage,
   type SanitizationReason,
 } from "./dead-letter-sanitize.server";
+import {
+  handleDataRequest,
+  handleCustomerRedact,
+  handleShopRedact,
+  type ComplianceMessage,
+} from "~/services/compliance";
 
 /**
  * Check if a no_session error should be relabelled as shop_not_found.
@@ -119,11 +125,17 @@ async function checkNoSessionForUninstalledShop(
  * - ORDERS_PAID: marks existing invoice as paid
  * - ORDERS_CANCELLED: marks existing invoice as cancelled  
  * - DRAFT_ORDERS_DELETE: deletes existing draft order
+ * - CUSTOMERS_DATA_REQUEST: compliance data export
+ * - CUSTOMERS_REDACT: compliance customer redaction
+ * - SHOP_REDACT: compliance shop deletion
  */
 const TERMINAL_TOPICS = new Set([
   "ORDERS_PAID",
   "ORDERS_CANCELLED",
   "DRAFT_ORDERS_DELETE",
+  "CUSTOMERS_DATA_REQUEST",
+  "CUSTOMERS_REDACT",
+  "SHOP_REDACT",
 ]);
 
 /**
@@ -1112,6 +1124,42 @@ registerSyncHandler("REMINDER_SEND", handleReminderSend);
 registerSyncHandler("REMINDER_CATCHUP", handleReminderCatchup);
 
 // =============================================================================
+// S22 COMPLIANCE HANDLERS
+// =============================================================================
+
+/**
+ * Handler for CUSTOMERS_DATA_REQUEST topic.
+ * Generates data export, persists it, and sends email notification.
+ */
+async function handleComplianceDataRequest(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  const complianceMessage = message as unknown as ComplianceMessage;
+  return handleDataRequest(sql, complianceMessage);
+}
+
+/**
+ * Handler for CUSTOMERS_REDACT topic.
+ * Deletes all customer data.
+ */
+async function handleComplianceCustomerRedact(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  const complianceMessage = message as unknown as ComplianceMessage;
+  return handleCustomerRedact(sql, complianceMessage);
+}
+
+/**
+ * Handler for SHOP_REDACT topic.
+ * Deletes shop and all its data.
+ */
+async function handleComplianceShopRedact(sql: Sql, message: SyncMessage): Promise<SyncResult> {
+  const complianceMessage = message as unknown as ComplianceMessage;
+  return handleShopRedact(sql, complianceMessage);
+}
+
+// Register S22 compliance handlers
+registerSyncHandler("CUSTOMERS_DATA_REQUEST", handleComplianceDataRequest);
+registerSyncHandler("CUSTOMERS_REDACT", handleComplianceCustomerRedact);
+registerSyncHandler("SHOP_REDACT", handleComplianceShopRedact);
+
+// =============================================================================
 // DRAIN RESULT & QUEUE OPERATIONS
 // =============================================================================
 
@@ -1315,6 +1363,21 @@ export async function moveToDeadLetter(
         NOW()
       )
     `;
+
+    const COMPLIANCE_TOPICS = new Set([
+      "CUSTOMERS_DATA_REQUEST",
+      "CUSTOMERS_REDACT",
+      "SHOP_REDACT",
+    ]);
+
+    if (COMPLIANCE_TOPICS.has(message.topic)) {
+      safeLog("warn", "compliance_job_dlq", {
+        topic: message.topic,
+        msgId,
+        readCt,
+      });
+    }
+
     return true;
   });
 }

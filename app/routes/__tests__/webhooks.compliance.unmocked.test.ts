@@ -69,9 +69,18 @@ const mockSessionStorage = {
 };
 
 const mockSqlResult = Object.assign([], { count: 0 });
-const mockSql = Object.assign(
+const mockTx = Object.assign(
   vi.fn().mockResolvedValue(mockSqlResult),
   { json: vi.fn((v) => v) }
+);
+const mockSql = Object.assign(
+  vi.fn().mockResolvedValue(mockSqlResult),
+  {
+    json: vi.fn((v) => v),
+    begin: vi.fn(async (callback: (tx: typeof mockTx) => Promise<unknown>) => {
+      return callback(mockTx);
+    }),
+  }
 );
 
 vi.mock("~/lib/request-context.server", () => ({
@@ -128,6 +137,12 @@ vi.mock("~/lib/webhook-receipts.server", () => ({
   recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
   parseTriggeredAt: (...args: unknown[]) => mockParseTriggeredAt(...args),
   deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
+}));
+
+const mockSendSyncMessage = vi.fn().mockResolvedValue({ msgId: "mock-msg-123" });
+vi.mock("~/lib/pgmq.server", () => ({
+  sendSyncMessage: (...args: unknown[]) => mockSendSyncMessage(...args),
+  S6_QUEUES: { SYNC: "s6_sync", BULK: "s6_bulk" },
 }));
 
 const mockGraphql = vi.fn().mockResolvedValue({
@@ -187,8 +202,16 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockGenerateCustomerDataExport).toHaveBeenCalled();
-      expect(mockPersistDataRequest).toHaveBeenCalled();
+      expect(mockRecordWebhookReceipt).toHaveBeenCalled();
+      expect(mockSendSyncMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          topic: "CUSTOMERS_DATA_REQUEST",
+          shop: TEST_SHOP,
+          requestId: "789",
+          customerId: "456",
+        })
+      );
     });
 
     it("customers/redact with valid HMAC returns 200", async () => {
@@ -205,7 +228,15 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockRedactCustomer).toHaveBeenCalled();
+      expect(mockRecordWebhookReceipt).toHaveBeenCalled();
+      expect(mockSendSyncMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          topic: "CUSTOMERS_REDACT",
+          shop: TEST_SHOP,
+          customerId: "456",
+        })
+      );
     });
 
     it("shop/redact with valid HMAC returns 200", async () => {
@@ -219,7 +250,15 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
       const response = await action(createMockActionArgs(request));
 
       expect(response.status).toBe(200);
-      expect(mockDeleteShop).toHaveBeenCalledWith(expect.anything(), TEST_SHOP);
+      expect(mockRecordWebhookReceipt).toHaveBeenCalled();
+      expect(mockSendSyncMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          topic: "SHOP_REDACT",
+          shop: TEST_SHOP,
+          shopId: "123",
+        })
+      );
     });
   });
 
@@ -431,7 +470,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
         status: 400,
       });
 
-      expect(mockDeleteShop).not.toHaveBeenCalled();
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
     });
 
     it("returns 400 when payload shop_domain is missing", async () => {
@@ -445,7 +484,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
         status: 400,
       });
 
-      expect(mockDeleteShop).not.toHaveBeenCalled();
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -465,7 +504,7 @@ describe("webhooks.compliance unmocked HMAC tests (#39)", () => {
         status: 400,
       });
 
-      expect(mockRedactCustomer).not.toHaveBeenCalled();
+      expect(mockSendSyncMessage).not.toHaveBeenCalled();
     });
   });
 

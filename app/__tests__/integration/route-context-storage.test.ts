@@ -56,6 +56,13 @@ vi.mock("~/lib/webhook-receipts.server", () => ({
   deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
 }));
 
+// Mock PGMQ for compliance webhook queue (fast-ack behavior)
+const mockSendSyncMessage = vi.fn().mockResolvedValue({ msgId: "mock-msg-123" });
+vi.mock("~/lib/pgmq.server", () => ({
+  sendSyncMessage: (...args: unknown[]) => mockSendSyncMessage(...args),
+  S6_QUEUES: { SYNC: "s6_sync", BULK: "s6_bulk" },
+}));
+
 // Mock session storage that tracks method calls (matches PrismaSessionStorage interface)
 function createMockSessionStorage() {
   return {

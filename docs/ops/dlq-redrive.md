@@ -151,6 +151,12 @@ WHERE id IN (SELECT id FROM requeued);
 COMMIT;
 ```
 
+## Compliance Jobs (customers/data_request, customers/redact, shop/redact)
+
+A dead-lettered compliance job is replayed by hand within the 30-day window,
+only after Team Lead's OK. Compliance jobs stay in the DLQ when retries are
+exhausted (never silently dropped).
+
 ## Post-Redrive Verification
 
 1. Run Prod Diagnostics again to confirm DLQ count decreased
