@@ -1,6 +1,6 @@
 import type { EntryContext, AppLoadContext } from "react-router";
 import { ServerRouter, isRouteErrorResponse } from "react-router";
-import { renderToReadableStream } from "react-dom/server";
+import { renderToReadableStream } from "react-dom/server.browser";
 import { isbot } from "isbot";
 import { captureExceptionWithTags } from "./lib/sentry";
 import { safeLog, toErrorCode } from "./lib/log.server";

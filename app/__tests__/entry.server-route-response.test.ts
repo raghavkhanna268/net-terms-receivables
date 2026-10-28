@@ -25,7 +25,7 @@ vi.mock("~/lib/sentry", () => ({
 
 let renderError: unknown = null;
 
-vi.mock("react-dom/server", () => ({
+vi.mock("react-dom/server.browser", () => ({
   renderToReadableStream: vi.fn(
     async (
       _element: ReactNode,
