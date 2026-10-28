@@ -132,6 +132,7 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
       SET "reminderOptOutAt" = NULL, "reminderOptOutSource" = NULL, 
           "mainContactEmail" = ${B2B_EMAIL}, "mainContactName" = ${B2B_CONTACT_DISPLAY},
           "mainContactCustomerId" = ${B2B_CONTACT_CUSTOMER_ID}, gated_at = NULL,
+          name = 'B2B Test Company',
           "updatedAt" = NOW()
       WHERE id = ${B2B_ACCOUNT_ID}
     `;
@@ -316,6 +317,235 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         expect(result.action).toBe("skipped");
         expect(result.skipReason).toContain("no email");
         expect(mockFetch).not.toHaveBeenCalled();
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("B2B greeting name fallback", () => {
+    it("uses mainContactName when set", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: `${B2B_EMAIL},${TAGGED_EMAIL}`,
+      };
+
+      const invoiceId = `inv-b2b-contact-name-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/b2b-contact-name-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
+          '#B2B-CONTACT', 10000.00, 10000.00, 'open',
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-contact-name" }) });
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        const fetchCall = mockFetch.mock.calls[0];
+        const requestBody = JSON.parse(fetchCall[1].body as string);
+        expect(requestBody.html).toContain(`Dear ${B2B_CONTACT_DISPLAY},`);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("falls back to account name when mainContactName is NULL", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: `${B2B_EMAIL},${TAGGED_EMAIL}`,
+      };
+
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "mainContactName" = NULL, name = 'Test Buyer Co'
+        WHERE id = ${B2B_ACCOUNT_ID}
+      `;
+
+      const invoiceId = `inv-b2b-acct-name-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/b2b-acct-name-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
+          '#B2B-ACCT', 10000.00, 10000.00, 'open',
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-acct-name" }) });
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        const fetchCall = mockFetch.mock.calls[0];
+        const requestBody = JSON.parse(fetchCall[1].body as string);
+        expect(requestBody.html).toContain("Dear Test Buyer Co,");
+        expect(requestBody.html).not.toContain(`Dear ${B2B_CONTACT_DISPLAY},`);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("falls back to Customer when mainContactName is NULL and name is empty", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: `${B2B_EMAIL},${TAGGED_EMAIL}`,
+      };
+
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "mainContactName" = NULL, name = ''
+        WHERE id = ${B2B_ACCOUNT_ID}
+      `;
+
+      const invoiceId = `inv-b2b-no-name-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/b2b-no-name-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
+          '#B2B-NONAME', 10000.00, 10000.00, 'open',
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-no-name" }) });
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        const fetchCall = mockFetch.mock.calls[0];
+        const requestBody = JSON.parse(fetchCall[1].body as string);
+        expect(requestBody.html).toContain("Dear Customer,");
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("treats whitespace-only mainContactName as missing", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: `${B2B_EMAIL},${TAGGED_EMAIL}`,
+      };
+
+      await sql`
+        UPDATE "BuyerAccount"
+        SET "mainContactName" = '   ', name = 'Test Contact Fallback'
+        WHERE id = ${B2B_ACCOUNT_ID}
+      `;
+
+      const invoiceId = `inv-b2b-ws-name-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/b2b-ws-name-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${B2B_ACCOUNT_ID}, ${orderId},
+          '#B2B-WS', 10000.00, 10000.00, 'open',
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-ws-name" }) });
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        const fetchCall = mockFetch.mock.calls[0];
+        const requestBody = JSON.parse(fetchCall[1].body as string);
+        expect(requestBody.html).toContain("Dear Test Contact Fallback,");
       } finally {
         luxonSpy.mockRestore();
       }
@@ -550,6 +780,123 @@ describeWithDb("B2B contact payment reminders (DB)", () => {
         expect(secondCall.to).toEqual([TAGGED_EMAIL]);
       } finally {
         luxonSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("tagged customer greeting name fallback", () => {
+    it("uses display_name from s8_tagged_customers when set", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: `${B2B_EMAIL},${TAGGED_EMAIL}`,
+      };
+
+      const invoiceId = `inv-tag-display-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/tag-display-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TAGGED_ACCOUNT_ID}, ${orderId},
+          '#TAG-DISPLAY', 10000.00, 10000.00, 'open',
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-tag-display" }) });
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        const fetchCall = mockFetch.mock.calls[0];
+        const requestBody = JSON.parse(fetchCall[1].body as string);
+        expect(requestBody.html).toContain(`Dear ${TAGGED_DISPLAY},`);
+      } finally {
+        luxonSpy.mockRestore();
+      }
+    });
+
+    it("falls back to account name when display_name is NULL", async () => {
+      const { sendPaymentReminder } = await import("../reminders.server");
+      const validEnv = {
+        RESEND_API_KEY: "re_test_1234",
+        RESEND_FROM: "noreply@example.com",
+        REMINDER_UNSUBSCRIBE_SECRET: "test-secret-fake",
+        SHOPIFY_APP_URL: "https://app.example.com",
+        RESEND_TEST_RECIPIENTS: `${B2B_EMAIL},${TAGGED_EMAIL}`,
+      };
+
+      await sql`
+        UPDATE s8_tagged_customers
+        SET display_name = NULL
+        WHERE shop_id = ${TEST_SHOP_ID} AND customer_id = ${TAGGED_CUSTOMER_ID}
+      `;
+
+      const invoiceId = `inv-tag-acct-${TEST_SUFFIX}`;
+      const orderId = `gid://shopify/Order/tag-acct-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, outstanding,
+          status, "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${invoiceId}, ${TEST_SHOP_ID}, ${TAGGED_ACCOUNT_ID}, ${orderId},
+          '#TAG-ACCT', 10000.00, 10000.00, 'open',
+          ${FIXED_TODAY}::DATE - INTERVAL '5 days', ${FIXED_TODAY}::DATE, NOW(), NOW()
+        )
+      `;
+
+      const luxon = await import("luxon");
+      const mockNow = luxon.DateTime.fromObject(FIXED_TODAY_IST, { zone: "Asia/Kolkata" });
+      const luxonSpy = vi.spyOn(luxon.DateTime, "now").mockReturnValue(mockNow as ReturnType<typeof luxon.DateTime.now>);
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ id: "email-tag-acct" }) });
+
+      try {
+        const result = await sendPaymentReminder(
+          sql,
+          TEST_SHOP_ID,
+          invoiceId,
+          TEST_RULE_ID,
+          0,
+          "Asia/Kolkata",
+          validEnv
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.action).toBe("sent");
+
+        const fetchCall = mockFetch.mock.calls[0];
+        const requestBody = JSON.parse(fetchCall[1].body as string);
+        expect(requestBody.html).toContain("Dear Tagged Test Account,");
+      } finally {
+        luxonSpy.mockRestore();
+        await sql`
+          UPDATE s8_tagged_customers
+          SET display_name = ${TAGGED_DISPLAY}
+          WHERE shop_id = ${TEST_SHOP_ID} AND customer_id = ${TAGGED_CUSTOMER_ID}
+        `;
       }
     });
   });
