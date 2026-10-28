@@ -57,7 +57,10 @@
     // The domain must be verified in Resend. Sending also requires the
     // RESEND_API_KEY secret, and the RESEND_TEST_RECIPIENTS allowlist guard
     // stays fail-closed until RESEND_RECIPIENT_ALLOWLIST_ENFORCED is "false".
-    "RESEND_FROM": "reminders@mail.termwiseapp.com"
+    "RESEND_FROM": "reminders@mail.termwiseapp.com",
+    // G4 (Raghav-gated): turns off the pre-launch RESEND_TEST_RECIPIENTS
+    // allowlist guard so reminders reach real buyers. Only exactly "false" disables it.
+    "RESEND_RECIPIENT_ALLOWLIST_ENFORCED": "false"
   },
 
   "observability": {

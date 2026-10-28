@@ -260,10 +260,16 @@ export default function PlanPage() {
                       {importsAtLimit ? " importing bank statements" : ""}.
                     </s-text>
                   </s-banner>
+                ) : gatingEnforced ? (
+                  <s-paragraph>
+                    <s-text>
+                      Every plan includes every feature. Upgrade for more buyer accounts.
+                    </s-text>
+                  </s-paragraph>
                 ) : (
                   <s-paragraph>
                     <s-text>
-                      Upgrade to unlock more features and higher limits.
+                      Every plan includes every feature. Compare plans to choose the one that fits your store.
                     </s-text>
                   </s-paragraph>
                 )}

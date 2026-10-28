@@ -439,4 +439,40 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Credit check paused");
     });
   });
+
+  describe("payment reminder opt-out aside copy", () => {
+    it("renders one-click unsubscribe option copy in Payment Reminders aside", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: false,
+      });
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain("one-click unsubscribe option");
+      expect(html).not.toContain("unsubscribe link in each reminder");
+    });
+
+    it("renders 'via email unsubscribe' suffix (not 'via email unsubscribe link')", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: false,
+      });
+      const loaderDataWithOptOut = {
+        ...loaderData,
+        reminderOptOut: {
+          optedOut: true,
+          optOutAt: new Date().toISOString(),
+          optOutSource: "link" as const,
+        },
+      };
+      mockUseLoaderData.mockReturnValue(loaderDataWithOptOut);
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain("via email unsubscribe");
+      expect(html).not.toContain("via email unsubscribe link");
+    });
+  });
 });
