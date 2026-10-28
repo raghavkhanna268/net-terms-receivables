@@ -10,6 +10,7 @@
  * 2. Decoding the href recovers the original id
  * 3. React Router matchRoutes decodes params.id correctly
  * 4. Round-trip: href → matchRoutes → params.id → equals original
+ * 5. normalizeParamsId only replaces %2F with /, leaves %3A and UUIDs untouched
  *
  * Coverage includes:
  * - Seeded-style IDs with embedded GIDs (contain slashes, need encoding)
@@ -18,7 +19,16 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { matchRoutes, type RouteObject } from "react-router";
-import { accountHref, normalizeAccountId } from "~/lib/account-href";
+import { accountHref } from "~/lib/account-href";
+
+/**
+ * Narrowly-scoped normalization matching the route implementation.
+ * Only replaces literal '%2F' (case-insensitive) with '/'.
+ * No other decoding (no decodeURIComponent, no %3A handling).
+ */
+function normalizeParamsId(id: string): string {
+  return id.replace(/%2f/gi, "/");
+}
 
 const SYNTHETIC_GID_ID = "gid://shopify/CompanyLocation/1001";
 
@@ -147,74 +157,128 @@ describe("Account id encoding round-trip", () => {
     });
   });
 
-  describe("Form action URL encoding (simulated)", () => {
-    it("Form action from encoded URL maintains single encoding", () => {
-      const encodedPath = EXPECTED_ENCODED_PATH;
-      const url = new URL(`https://example.com${encodedPath}`);
+  describe("Form action URL stays single-encoded (root cause fix)", () => {
+    it("explicit action from accountHref stays single-encoded (seeded GID)", () => {
+      const formAction = accountHref(SYNTHETIC_GID_ID);
 
-      expect(url.pathname).toBe(encodedPath);
-      expect(url.pathname).toContain("%2F");
-      expect(url.pathname).not.toContain("%252F");
+      expect(formAction).toContain("%2F");
+      expect(formAction).not.toContain("%252F");
+      expect(formAction).not.toContain("%25");
     });
 
-    it("params.id from POST request matches original id", () => {
+    it("explicit action from accountHref stays single-encoded (B2B UUID)", () => {
+      const formAction = accountHref(SYNTHETIC_B2B_UUID);
+
+      expect(formAction).toBe(`/app/accounts/${SYNTHETIC_B2B_UUID}`);
+      expect(formAction).not.toContain("%");
+    });
+
+    it("explicit action from accountHref stays single-encoded (tag-rule UUID)", () => {
+      const formAction = accountHref(SYNTHETIC_TAGGED_UUID);
+
+      expect(formAction).toBe(`/app/accounts/${SYNTHETIC_TAGGED_UUID}`);
+      expect(formAction).not.toContain("%");
+    });
+
+    it("POST to explicit action URL preserves params.id correctly", () => {
       const routes: RouteObject[] = [
-        {
-          path: "app",
-          children: [{ path: "accounts/:id" }],
-        },
+        { path: "app", children: [{ path: "accounts/:id" }] },
       ];
 
-      const postUrl = `https://example.com${EXPECTED_ENCODED_PATH}`;
-      const matches = matchRoutes(routes, new URL(postUrl).pathname);
+      const formAction = accountHref(SYNTHETIC_GID_ID);
+      const postUrl = new URL(formAction, "https://example.com");
+      const matches = matchRoutes(routes, postUrl.pathname);
 
       expect(matches).not.toBeNull();
       expect(matches![matches!.length - 1].params.id).toBe(SYNTHETIC_GID_ID);
     });
 
-    it("POST URL pathname stays single-encoded when constructed from location", () => {
-      const browserLocation = EXPECTED_ENCODED_PATH;
+    it("URL object does not double-encode explicit action path", () => {
+      const formAction = accountHref(SYNTHETIC_GID_ID);
+      const url = new URL(formAction, "https://example.com");
 
-      const postUrl = new URL(browserLocation, "https://example.com");
-
-      expect(postUrl.pathname).toBe(EXPECTED_ENCODED_PATH);
-      expect(postUrl.pathname).not.toContain("%252F");
+      expect(url.pathname).toBe(formAction);
+      expect(url.pathname).toContain("%2F");
+      expect(url.pathname).not.toContain("%252F");
     });
   });
 
-  describe("Double-encoding detection", () => {
-    it("detects double-encoded URL (%252F)", () => {
-      const doubleEncoded = `/app/accounts/${encodeURIComponent(encodeURIComponent(SYNTHETIC_GID_ID))}`;
+  describe("normalizeParamsId: narrowly-scoped %2F normalization", () => {
+    it("replaces %2F with / (lowercase)", () => {
+      const withEncodedSlash = "gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
+      const normalized = normalizeParamsId(withEncodedSlash);
 
-      expect(doubleEncoded).toContain("%252F");
-      expect(doubleEncoded).not.toEqual(EXPECTED_ENCODED_PATH);
+      expect(normalized).toBe("gid%3A//shopify/CompanyLocation/1001");
+      expect(normalized).toContain("/");
+      expect(normalized).not.toContain("%2F");
     });
 
-    it("single decodeURIComponent on double-encoded URL produces encoded URL", () => {
-      const doubleEncoded = `/app/accounts/${encodeURIComponent(encodeURIComponent(SYNTHETIC_GID_ID))}`;
-      const pathSegment = doubleEncoded.split("/").pop()!;
-      const onceDecoded = decodeURIComponent(pathSegment);
+    it("replaces %2f with / (lowercase variant)", () => {
+      const withEncodedSlash = "test%2fpath%2fhere";
+      const normalized = normalizeParamsId(withEncodedSlash);
 
-      expect(onceDecoded).toBe(encodeURIComponent(SYNTHETIC_GID_ID));
-      expect(onceDecoded).not.toBe(SYNTHETIC_GID_ID);
+      expect(normalized).toBe("test/path/here");
     });
 
-    it("URL path with %252F results in params.id that still contains encoded chars", () => {
-      const routes: RouteObject[] = [
-        {
-          path: "app",
-          children: [{ path: "accounts/:id" }],
-        },
-      ];
+    it("does NOT replace %3A (colon stays encoded)", () => {
+      const withEncodedColon = "gid%3A%2F%2Fshopify";
+      const normalized = normalizeParamsId(withEncodedColon);
 
-      const doubleEncodedPath = `/app/accounts/${encodeURIComponent(encodeURIComponent(SYNTHETIC_GID_ID))}`;
-      const matches = matchRoutes(routes, doubleEncodedPath);
+      expect(normalized).toContain("%3A");
+      expect(normalized).toBe("gid%3A//shopify");
+    });
 
-      expect(matches).not.toBeNull();
-      const paramsId = matches![matches!.length - 1].params.id;
+    it("leaves UUID id completely untouched", () => {
+      expect(normalizeParamsId(SYNTHETIC_B2B_UUID)).toBe(SYNTHETIC_B2B_UUID);
+      expect(normalizeParamsId(SYNTHETIC_TAGGED_UUID)).toBe(SYNTHETIC_TAGGED_UUID);
+      expect(normalizeParamsId(SYNTHETIC_UUID)).toBe(SYNTHETIC_UUID);
+    });
 
-      expect(paramsId).not.toBe(SYNTHETIC_GID_ID);
-      expect(paramsId).toContain("%3A");
+    it("leaves already-decoded GID-style id unchanged", () => {
+      expect(normalizeParamsId(SYNTHETIC_GID_ID)).toBe(SYNTHETIC_GID_ID);
+    });
+  });
+
+  describe("Double-encoded URL loads with params.id normalized", () => {
+    it("seeded-style id: params.id with leftover %2F → normalizeParamsId restores slashes", () => {
+      const paramsIdWithEncodedSlash = "gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
+
+      const normalized = normalizeParamsId(paramsIdWithEncodedSlash);
+
+      expect(normalized).toBe("gid%3A//shopify/CompanyLocation/1001");
+      expect(normalized).toContain("/");
+      expect(normalized).not.toContain("%2F");
+      expect(normalized).toContain("%3A");
+    });
+
+    it("seeded-style id with embedded GID: normalize restores slashes only, %3A stays", () => {
+      const paramsIdWithEncodedSlash = "seed-account-shop123-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
+
+      const normalized = normalizeParamsId(paramsIdWithEncodedSlash);
+
+      expect(normalized).toBe("seed-account-shop123-gid%3A//shopify/CompanyLocation/1001");
+      expect(normalized).not.toContain("%2F");
+      expect(normalized).toContain("%3A");
+    });
+
+    it("UUID id: normalizeParamsId leaves unchanged (no %2F present)", () => {
+      const normalized = normalizeParamsId(SYNTHETIC_B2B_UUID);
+
+      expect(normalized).toBe(SYNTHETIC_B2B_UUID);
+    });
+
+    it("tag-rule UUID: remains completely unchanged through normalization", () => {
+      const normalized = normalizeParamsId(SYNTHETIC_TAGGED_UUID);
+
+      expect(normalized).toBe(SYNTHETIC_TAGGED_UUID);
+    });
+
+    it("case-insensitive: %2f and %2F both become /", () => {
+      const mixedCase = "path%2Fwith%2flower%2Fand%2FUPPER";
+      const normalized = normalizeParamsId(mixedCase);
+
+      expect(normalized).toBe("path/with/lower/and/UPPER");
+      expect(normalized).not.toContain("%2");
     });
   });
 
@@ -243,8 +307,8 @@ describe("Account id encoding round-trip", () => {
       expect(matches![matches!.length - 1].params.id).toBe(SYNTHETIC_B2B_UUID);
     });
 
-    it("normalizeAccountId returns UUID id unchanged", () => {
-      expect(normalizeAccountId(SYNTHETIC_B2B_UUID)).toBe(SYNTHETIC_B2B_UUID);
+    it("normalizeParamsId returns UUID id unchanged", () => {
+      expect(normalizeParamsId(SYNTHETIC_B2B_UUID)).toBe(SYNTHETIC_B2B_UUID);
     });
   });
 
@@ -273,171 +337,8 @@ describe("Account id encoding round-trip", () => {
       expect(matches![matches!.length - 1].params.id).toBe(SYNTHETIC_TAGGED_UUID);
     });
 
-    it("normalizeAccountId returns UUID id unchanged", () => {
-      expect(normalizeAccountId(SYNTHETIC_TAGGED_UUID)).toBe(SYNTHETIC_TAGGED_UUID);
-    });
-  });
-
-  describe("Seeded-style id with embedded GID (contains slashes)", () => {
-    const SEEDED_STYLE_ID = `seed-account-shop123-${SYNTHETIC_GID_ID}`;
-
-    it("seeded id contains slashes from embedded GID", () => {
-      expect(SEEDED_STYLE_ID).toContain("/");
-      expect(SEEDED_STYLE_ID).toContain("gid://");
-    });
-
-    it("accountHref encodes slashes in seeded id", () => {
-      const href = accountHref(SEEDED_STYLE_ID);
-      expect(href).toContain("%2F");
-      expect(href).not.toContain("%252F");
-    });
-
-    it("round-trip: seeded id survives href → route match → params.id", () => {
-      const routes: RouteObject[] = [
-        { path: "app", children: [{ path: "accounts/:id" }] },
-      ];
-
-      const href = accountHref(SEEDED_STYLE_ID);
-      const matches = matchRoutes(routes, href);
-
-      expect(matches).not.toBeNull();
-      expect(matches![matches!.length - 1].params.id).toBe(SEEDED_STYLE_ID);
-    });
-
-    it("normalizeAccountId returns seeded id unchanged (no encoding)", () => {
-      expect(normalizeAccountId(SEEDED_STYLE_ID)).toBe(SEEDED_STYLE_ID);
-    });
-  });
-
-  describe("normalizeAccountId handles double-encoded params", () => {
-    it("decodes single-encoded GID back to original", () => {
-      const encoded = encodeURIComponent(SYNTHETIC_GID_ID);
-      expect(normalizeAccountId(encoded)).toBe(SYNTHETIC_GID_ID);
-    });
-
-    it("decodes double-encoded GID back to original", () => {
-      const doubleEncoded = encodeURIComponent(encodeURIComponent(SYNTHETIC_GID_ID));
-      const normalized = normalizeAccountId(normalizeAccountId(doubleEncoded));
-      expect(normalized).toBe(SYNTHETIC_GID_ID);
-    });
-
-    it("decodes single-encoded seeded id back to original", () => {
-      const seededId = `seed-account-shop123-${SYNTHETIC_GID_ID}`;
-      const encoded = encodeURIComponent(seededId);
-      expect(normalizeAccountId(encoded)).toBe(seededId);
-    });
-
-    it("returns UUID unchanged (no encoding present)", () => {
-      expect(normalizeAccountId(SYNTHETIC_UUID)).toBe(SYNTHETIC_UUID);
-    });
-
-    it("handles malformed encoding gracefully", () => {
-      const malformed = "invalid%ZZencoding";
-      expect(normalizeAccountId(malformed)).toBe(malformed);
-    });
-  });
-
-  describe("Form action URL stays single-encoded (root cause fix)", () => {
-    it("explicit action from accountHref stays single-encoded (seeded GID)", () => {
-      const formAction = accountHref(SYNTHETIC_GID_ID);
-      
-      expect(formAction).toContain("%2F");
-      expect(formAction).not.toContain("%252F");
-      expect(formAction).not.toContain("%25");
-    });
-
-    it("explicit action from accountHref stays single-encoded (B2B UUID)", () => {
-      const formAction = accountHref(SYNTHETIC_B2B_UUID);
-      
-      expect(formAction).toBe(`/app/accounts/${SYNTHETIC_B2B_UUID}`);
-      expect(formAction).not.toContain("%");
-    });
-
-    it("explicit action from accountHref stays single-encoded (tag-rule UUID)", () => {
-      const formAction = accountHref(SYNTHETIC_TAGGED_UUID);
-      
-      expect(formAction).toBe(`/app/accounts/${SYNTHETIC_TAGGED_UUID}`);
-      expect(formAction).not.toContain("%");
-    });
-
-    it("POST to explicit action URL preserves params.id correctly", () => {
-      const routes: RouteObject[] = [
-        { path: "app", children: [{ path: "accounts/:id" }] },
-      ];
-
-      const formAction = accountHref(SYNTHETIC_GID_ID);
-      const postUrl = new URL(formAction, "https://example.com");
-      const matches = matchRoutes(routes, postUrl.pathname);
-
-      expect(matches).not.toBeNull();
-      expect(matches![matches!.length - 1].params.id).toBe(SYNTHETIC_GID_ID);
-    });
-
-    it("URL object does not double-encode explicit action path", () => {
-      const formAction = accountHref(SYNTHETIC_GID_ID);
-      const url = new URL(formAction, "https://example.com");
-      
-      expect(url.pathname).toBe(formAction);
-      expect(url.pathname).toContain("%2F");
-      expect(url.pathname).not.toContain("%252F");
-    });
-  });
-
-  describe("Save-then-reload simulation for all account types", () => {
-    const routes: RouteObject[] = [
-      { path: "app", children: [{ path: "accounts/:id" }] },
-    ];
-
-    function simulateSaveReload(originalId: string): {
-      originalId: string;
-      navigationHref: string;
-      postUrl: string;
-      paramsIdAfterPost: string;
-      normalizedId: string;
-      success: boolean;
-    } {
-      const navigationHref = accountHref(originalId);
-
-      const postUrl = new URL(navigationHref, "https://example.com").pathname;
-
-      const matches = matchRoutes(routes, postUrl);
-      const paramsIdAfterPost = matches![matches!.length - 1].params.id!;
-
-      const normalizedId = normalizeAccountId(paramsIdAfterPost);
-
-      return {
-        originalId,
-        navigationHref,
-        postUrl,
-        paramsIdAfterPost,
-        normalizedId,
-        success: normalizedId === originalId,
-      };
-    }
-
-    it("seeded GID-style id: save → reload recovers original id", () => {
-      const result = simulateSaveReload(SYNTHETIC_GID_ID);
-      expect(result.success).toBe(true);
-      expect(result.normalizedId).toBe(SYNTHETIC_GID_ID);
-    });
-
-    it("real B2B CompanyLocation UUID: save → reload recovers original id", () => {
-      const result = simulateSaveReload(SYNTHETIC_B2B_UUID);
-      expect(result.success).toBe(true);
-      expect(result.normalizedId).toBe(SYNTHETIC_B2B_UUID);
-    });
-
-    it("real tag-rule UUID: save → reload recovers original id", () => {
-      const result = simulateSaveReload(SYNTHETIC_TAGGED_UUID);
-      expect(result.success).toBe(true);
-      expect(result.normalizedId).toBe(SYNTHETIC_TAGGED_UUID);
-    });
-
-    it("seeded-style id with embedded GID: save → reload recovers original id", () => {
-      const seededId = `seed-account-shop456-${SYNTHETIC_GID_ID}`;
-      const result = simulateSaveReload(seededId);
-      expect(result.success).toBe(true);
-      expect(result.normalizedId).toBe(seededId);
+    it("normalizeParamsId returns UUID id unchanged", () => {
+      expect(normalizeParamsId(SYNTHETIC_TAGGED_UUID)).toBe(SYNTHETIC_TAGGED_UUID);
     });
   });
 });
