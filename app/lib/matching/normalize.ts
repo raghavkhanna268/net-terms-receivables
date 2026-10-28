@@ -262,3 +262,56 @@ export function findBestBuyerMatch(
 
   return bestMatch && bestMatch.score >= 0.5 ? bestMatch : null;
 }
+
+/**
+ * Find ALL buyers tied with the best score for a given payer text.
+ * Preserves the input array order (createdAt) for tie-breaking by caller.
+ * Returns an empty array if no buyer meets the 0.5 threshold.
+ */
+export function findAllTiedBuyerMatches(
+  payerText: string,
+  buyers: Array<{
+    id: string;
+    name: string;
+    aliases: string[];
+    email: string | null;
+  }>
+): Array<{ buyerId: string; score: number }> {
+  const normalizedPayer = normalizeNarrationForLookup(payerText);
+  if (normalizedPayer.length < 3) return [];
+
+  const buyerScores: Array<{ buyerId: string; score: number }> = [];
+
+  for (const buyer of buyers) {
+    let buyerBestScore = 0;
+
+    for (const alias of buyer.aliases) {
+      if (alias === normalizedPayer || normalizedPayer.includes(alias)) {
+        const score = alias === normalizedPayer ? 1 : 0.9;
+        buyerBestScore = Math.max(buyerBestScore, score);
+      }
+    }
+
+    const normalizedBuyerName = normalizeName(buyer.name);
+    const nameSim = nameSimilarity(normalizedPayer, normalizedBuyerName);
+    if (nameSim > 0.5) {
+      buyerBestScore = Math.max(buyerBestScore, nameSim);
+    }
+
+    if (buyer.email) {
+      const emailPrefix = buyer.email.split("@")[0].toLowerCase();
+      if (normalizedPayer.includes(emailPrefix) && emailPrefix.length >= 4) {
+        buyerBestScore = Math.max(buyerBestScore, 0.7);
+      }
+    }
+
+    if (buyerBestScore >= 0.5) {
+      buyerScores.push({ buyerId: buyer.id, score: buyerBestScore });
+    }
+  }
+
+  if (buyerScores.length === 0) return [];
+
+  const topScore = Math.max(...buyerScores.map((b) => b.score));
+  return buyerScores.filter((b) => b.score === topScore);
+}

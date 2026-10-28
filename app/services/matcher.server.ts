@@ -29,6 +29,7 @@ import {
 import {
   normalizeNarrationForLookup,
   findBestBuyerMatch,
+  findAllTiedBuyerMatches,
 } from "~/lib/matching/normalize";
 import {
   getUnmatchedPayments,
@@ -196,6 +197,7 @@ async function matchSinglePayment(
 
   // Try to identify the buyer from payer text or narration (using confirmed aliases only)
   let targetBuyer: BuyerForScoring | null = null;
+  let tiedBuyerMatches: Array<{ buyerId: string; score: number }> = [];
 
   if (payment.payerText) {
     // Try alias lookup first (only looks at confirmed/persisted aliases)
@@ -208,8 +210,11 @@ async function matchSinglePayment(
       const match = findBestBuyerMatch(payment.payerText, buyers);
       if (match) {
         targetBuyer = buyers.find((b) => b.id === match.buyerId) ?? null;
+        tiedBuyerMatches = findAllTiedBuyerMatches(payment.payerText, buyers);
         // P1.4: Do NOT call upsertPayerAlias here - only on confirmMatch
       }
+    } else {
+      tiedBuyerMatches = findAllTiedBuyerMatches(payment.payerText, buyers);
     }
   }
 
@@ -235,11 +240,29 @@ async function matchSinglePayment(
       (inv) => !rejectedInvoiceIds.has(inv.id)
     );
 
-    // Fallback: if the resolved buyer has no candidates after filtering,
-    // widen to the amount window. This handles cases where a company has
-    // multiple location accounts with similar names, and fuzzy matching
-    // resolves to an account with no open invoices while a sibling account
-    // has the correct invoice.
+    // If the resolved buyer has no candidates, try other tied buyers with open invoices
+    // before falling back to the amount window
+    if (candidateInvoices.length === 0 && tiedBuyerMatches.length > 1) {
+      for (const tiedMatch of tiedBuyerMatches) {
+        if (tiedMatch.buyerId === targetBuyer.id) continue;
+        const tiedBuyerInvoices = await getOpenInvoicesForBuyer(
+          sql,
+          shopId,
+          tiedMatch.buyerId
+        );
+        const filteredInvoices = tiedBuyerInvoices.filter(
+          (inv) => !rejectedInvoiceIds.has(inv.id)
+        );
+        if (filteredInvoices.length > 0) {
+          candidateInvoices = filteredInvoices;
+          targetBuyer = buyers.find((b) => b.id === tiedMatch.buyerId) ?? null;
+          break;
+        }
+      }
+    }
+
+    // Fallback: if still no candidates after checking tied buyers,
+    // widen to the amount window.
     if (candidateInvoices.length === 0) {
       candidateInvoices = await getOpenInvoicesInAmountWindow(
         sql,

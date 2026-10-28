@@ -231,6 +231,9 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Tied buyer name resolution DB tests
+  "tests/integration/matcher-tied-buyer-db.test.ts",
 ];
 
 export default defineConfig({
