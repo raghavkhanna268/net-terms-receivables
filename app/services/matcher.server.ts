@@ -94,6 +94,8 @@ export async function runMatcher(
     limit?: number;
     /** Offset for pagination */
     offset?: number;
+    /** Optional import ID to scope matching to a single import */
+    importId?: string;
   } = {}
 ): Promise<MatcherRunSummary> {
   // Cap the limit to respect CPU budget
@@ -114,6 +116,7 @@ export async function runMatcher(
   const { payments } = await getUnmatchedPayments(sql, shopId, {
     limit: limit + 1,
     offset,
+    importId: options.importId,
   });
 
   if (payments.length === 0) {
@@ -227,6 +230,27 @@ async function matchSinglePayment(
       shopId,
       targetBuyer.id
     );
+    // Filter out rejected invoices
+    candidateInvoices = candidateInvoices.filter(
+      (inv) => !rejectedInvoiceIds.has(inv.id)
+    );
+
+    // Fallback: if the resolved buyer has no candidates after filtering,
+    // widen to the amount window. This handles cases where a company has
+    // multiple location accounts with similar names, and fuzzy matching
+    // resolves to an account with no open invoices while a sibling account
+    // has the correct invoice.
+    if (candidateInvoices.length === 0) {
+      candidateInvoices = await getOpenInvoicesInAmountWindow(
+        sql,
+        shopId,
+        minPaise,
+        maxPaise
+      );
+      candidateInvoices = candidateInvoices.filter(
+        (inv) => !rejectedInvoiceIds.has(inv.id)
+      );
+    }
   } else {
     // Otherwise, get invoices in the amount window
     candidateInvoices = await getOpenInvoicesInAmountWindow(
@@ -235,12 +259,11 @@ async function matchSinglePayment(
       minPaise,
       maxPaise
     );
+    // Filter out rejected invoices
+    candidateInvoices = candidateInvoices.filter(
+      (inv) => !rejectedInvoiceIds.has(inv.id)
+    );
   }
-
-  // Filter out rejected invoices
-  candidateInvoices = candidateInvoices.filter(
-    (inv) => !rejectedInvoiceIds.has(inv.id)
-  );
 
   if (candidateInvoices.length === 0) {
     return {

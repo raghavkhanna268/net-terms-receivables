@@ -13,7 +13,7 @@
 --     Resend / RESEND_FROM sends; native rules do not email).
 --   enqueue_gated_email_7d: also applies the remaining gates of Part 3 of
 --     public.s18_enqueue_reminders()
---     (prisma/migrations/20261122000000_s18_catchup_amount_ordering/migration.sql):
+--     (prisma/migrations/20261127000000_s18_enqueue_email_filter/migration.sql):
 --     shop reminders enabled (s18_shop_reminder_settings), shop installed, plus
 --     the Worker's data-side send gates: shop currency INR (isShopCurrencySupported)
 --     and a recipient address present. Plan gating is off (PLAN_GATING_ENFORCED=false).

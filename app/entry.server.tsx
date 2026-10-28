@@ -1,21 +1,34 @@
 import type { EntryContext, AppLoadContext } from "react-router";
-import { ServerRouter } from "react-router";
+import { ServerRouter, isRouteErrorResponse } from "react-router";
 import { renderToReadableStream } from "react-dom/server";
 import { isbot } from "isbot";
 import { captureExceptionWithTags } from "./lib/sentry";
 import { safeLog, toErrorCode } from "./lib/log.server";
 
+function isExpectedResponse(e: unknown): boolean {
+  if (isRouteErrorResponse(e)) {
+    return e.status < 500;
+  }
+  if (e instanceof Response) {
+    return e.status < 500;
+  }
+  return false;
+}
+
 export const streamTimeout = 5000;
 
 /**
  * React Router error handler - reports uncaught errors to Sentry.
- * Skips aborted requests (user navigated away).
+ * Skips aborted requests (user navigated away) and expected 4xx route responses.
  */
 export function handleError(
   error: unknown,
   { request }: { request: Request }
 ): void {
   if (request.signal.aborted) {
+    return;
+  }
+  if (isExpectedResponse(error)) {
     return;
   }
   const code = toErrorCode(error);
@@ -43,6 +56,9 @@ export default async function handleRequest(
     {
       signal: AbortSignal.timeout(streamTimeout),
       onError(error: unknown) {
+        if (isExpectedResponse(error)) {
+          return;
+        }
         safeLog("error", "ssr_render_error", { err: toErrorCode(error) });
         responseStatusCode = 500;
       },

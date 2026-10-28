@@ -38,6 +38,7 @@ on:
           - s18-reminder-rule-dupes
           - s18-reminders-due-7d
           - s22-retention-purge-preview
+          - schedule-dueat-utc-time
       msg_ids:
         description: "Comma-separated pgmq msg_ids (e.g. 162,163); used by canary-orders-backstop and redriven-webhook-receipts"
         required: false
@@ -161,7 +162,7 @@ jobs:
           # scripts/ci/shop-labels.ts.
           # shop-labels-guard:start
           case "$QUERY_NAME" in
-            offline-session-preflight|post-drain-aggregates|s12-hold-coverage|s18-reminder-rule-dupes|s18-reminders-due-7d)
+            offline-session-preflight|post-drain-aggregates|s12-hold-coverage|s18-reminder-rule-dupes|s18-reminders-due-7d|schedule-dueat-utc-time)
               if [ -z "$ALLOWED" ] || [ -z "$E2E" ] || [ "$ALLOWED" = "$E2E" ]; then
                 echo "::error::ALLOWED_DEV_STORE and E2E_SHOP secrets must both be set, valid and different (required for shop_kind labels by $QUERY_NAME)"
                 exit 1

@@ -318,4 +318,248 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
       expect(line).not.toContain(shopId);
     }
   });
+
+  it("emits suggestion lines with r<row>_<band>_<score>_<label> format", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    expect(suggestionLines.length).toBeGreaterThan(0);
+
+    for (const line of suggestionLines) {
+      const value = line.split("=")[1];
+      expect(value).toMatch(/^r\d+_(high|medium|low)_\d+_(order_\d+|other)$/);
+      expect(value).not.toContain("#");
+      expect(value).toBe(value.toLowerCase());
+    }
+
+    const truncatedLine = c.lines.find((l) => l.startsWith("suggestion_lines_truncated="));
+    expect(truncatedLine).toBeDefined();
+    expect(truncatedLine).toMatch(/^suggestion_lines_truncated=(true|false)$/);
+  });
+
+  it("suggestion lines use exact row numbers from fixture CSV (13-15 for credits, no r0)", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    const rows = suggestionLines.map((l) => {
+      const m = l.match(/^suggestion=r(\d+)_/);
+      return m ? Number(m[1]) : 0;
+    });
+    const uniqueRows = [...new Set(rows)].sort((a, b) => a - b);
+    expect(uniqueRows).toEqual([13, 14, 15]);
+    expect(rows.every((r) => r > 0)).toBe(true);
+    expect(rows.some((r) => r === 0)).toBe(false);
+  });
+
+  it("suggestion lines for seed invoices use order_<digits> label", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    const seedLabels = suggestionLines.filter((l) => l.includes("_order_1001") || l.includes("_order_1002"));
+    expect(seedLabels.length).toBeGreaterThan(0);
+  });
+
+  it("suggestion lines never contain forbidden fields", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    const forbidden = [
+      "SYNT0001", "SYNT0002", "SYNT0003",
+      "gid" + "://", "example" + ".com", "." + "myshopify" + ".com",
+      "TEST BUYER", "NEFT-", "UPI-", "IMPS-",
+      "10000", "5000", "2500",
+      shopId,
+    ];
+    for (const line of suggestionLines) {
+      for (const pattern of forbidden) {
+        expect(line, `line contains "${pattern}"`).not.toContain(pattern);
+      }
+    }
+  });
+
+  it("emits suggestion_lines_truncated=false when under 64 suggestions", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionCount = c.lines.filter((l) => l.startsWith("suggestion=")).length;
+    expect(suggestionCount).toBeLessThanOrEqual(64);
+    const truncatedLine = c.lines.find((l) => l.startsWith("suggestion_lines_truncated="));
+    expect(truncatedLine).toBe("suggestion_lines_truncated=false");
+  });
+
+  it("suggestion labels use 'other' for non-seed invoices (verified via unit tests)", async () => {
+    // This test verifies that if a match WERE created for a non-seed invoice,
+    // it would use the 'other' label. The actual label logic is unit-tested
+    // in scripts/ci/__tests__/e2e-bank-import-workflow.test.ts which covers
+    // formatSuggestionLabel directly without relying on matcher behavior.
+    //
+    // The matcher's scoring algorithm may not produce matches for every invoice
+    // (depends on amount alignment, narration signals, etc.), so we cannot
+    // reliably test integration-level 'other' labels here.
+    //
+    // Instead, we verify that all emitted suggestion lines have valid labels.
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+
+    for (const line of suggestionLines) {
+      const value = line.split("=")[1];
+      // Every label must be order_<digits> or 'other'
+      expect(value).toMatch(/_(order_\d+|other)$/);
+      // No raw invoice names in output
+      expect(value).not.toContain("#");
+    }
+  });
+
+  it("apply with pre-existing import leaves other import's matches untouched", async () => {
+    // Create a pre-existing import with payments and matches
+    const preExistingImportId = `pre-existing-import-${runId}`;
+    const preExistingPaymentId = `pre-existing-payment-${runId}`;
+
+    await sql`
+      INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+      VALUES (${preExistingImportId}, ${shopId}, 'hdfc', 'pre-existing.csv', 1, NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingPaymentId}, ${shopId}, ${preExistingImportId},
+        '2026-10-20'::date, ${REVIEWER_DEMO_AMOUNTS.order1}, 'NEFT', 'SYNTPRE001',
+        'TEST BUYER CO', 'NEFT-SYNTPRE001-TEST BUYER CO-#1001', 'unmatched', NOW(), NOW()
+      )
+    `;
+
+    // Create a suggested match for the pre-existing payment
+    const preExistingMatchId = `pre-existing-match-${runId}`;
+    const [invoice] = await sql<{ id: string }[]>`
+      SELECT id FROM "Invoice" WHERE "shopId" = ${shopId} AND name = '#1001' LIMIT 1
+    `;
+
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingMatchId}, ${shopId}, ${preExistingPaymentId}, ${invoice.id},
+        ${REVIEWER_DEMO_AMOUNTS.order1}, 58, '[]'::jsonb, 'suggested', NOW(), NOW()
+      )
+    `;
+
+    // Snapshot the pre-existing match
+    const [matchBefore] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    // Run the e2e script in apply mode
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    expect(c.out.result).toBe("imported");
+    expect(c.out.rolled_back).toBe(false);
+    expect(c.out.statement_lines_inserted).toBe(3);
+    expect(c.out.matcher_payments_processed).toBe(3);
+    // 3 credits in fixture, < 10, so no more
+    expect(c.out.matcher_has_more).toBe(false);
+    expect(c.out.matches_not_suggested).toBe(0);
+    expect(c.out.payments_not_unmatched).toBe(0);
+    expect(c.out.payer_alias_delta).toBe(0);
+    expect(c.out.confirm_audit_events_delta).toBe(0);
+
+    // Verify pre-existing match is untouched
+    const [matchAfter] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    expect(matchAfter.id).toBe(matchBefore.id);
+    expect(matchAfter.score).toBe(matchBefore.score);
+    expect(matchAfter.amount).toBe(matchBefore.amount);
+    expect(matchAfter.state).toBe(matchBefore.state);
+
+    // Cleanup for other tests
+    await sql`DELETE FROM "Match" WHERE id = ${preExistingMatchId}`;
+    await sql`DELETE FROM "Payment" WHERE id = ${preExistingPaymentId}`;
+    await sql`DELETE FROM "BankImport" WHERE id = ${preExistingImportId}`;
+  });
+
+  it("dry_run with pre-existing import leaves other import's matches untouched", async () => {
+    // Create a pre-existing import with payments and matches
+    const preExistingImportId = `pre-existing-dry-${runId}`;
+    const preExistingPaymentId = `pre-existing-dry-payment-${runId}`;
+
+    await sql`
+      INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+      VALUES (${preExistingImportId}, ${shopId}, 'hdfc', 'pre-existing-dry.csv', 1, NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingPaymentId}, ${shopId}, ${preExistingImportId},
+        '2026-10-20'::date, ${REVIEWER_DEMO_AMOUNTS.order1}, 'NEFT', 'SYNTPREDRY',
+        'TEST BUYER CO', 'NEFT-SYNTPREDRY-TEST BUYER CO-#1001', 'unmatched', NOW(), NOW()
+      )
+    `;
+
+    // Create a suggested match for the pre-existing payment
+    const preExistingMatchId = `pre-existing-dry-match-${runId}`;
+    const [invoice] = await sql<{ id: string }[]>`
+      SELECT id FROM "Invoice" WHERE "shopId" = ${shopId} AND name = '#1001' LIMIT 1
+    `;
+
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingMatchId}, ${shopId}, ${preExistingPaymentId}, ${invoice.id},
+        ${REVIEWER_DEMO_AMOUNTS.order1}, 58, '[]'::jsonb, 'suggested', NOW(), NOW()
+      )
+    `;
+
+    // Snapshot the pre-existing match
+    const [matchBefore] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    // Run the e2e script in dry_run mode
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    expect(c.out.result).toBe("dry_run_ok");
+    expect(c.out.rolled_back).toBe(true);
+    expect(c.out.statement_lines_inserted).toBe(3);
+    expect(c.out.matcher_payments_processed).toBe(3);
+    expect(c.out.matcher_has_more).toBe(false);
+
+    // Verify pre-existing match is untouched (was outside the rolled-back transaction)
+    const [matchAfter] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    expect(matchAfter.id).toBe(matchBefore.id);
+    expect(matchAfter.score).toBe(matchBefore.score);
+    expect(matchAfter.amount).toBe(matchBefore.amount);
+    expect(matchAfter.state).toBe(matchBefore.state);
+
+    // Cleanup
+    await sql`DELETE FROM "Match" WHERE id = ${preExistingMatchId}`;
+    await sql`DELETE FROM "Payment" WHERE id = ${preExistingPaymentId}`;
+    await sql`DELETE FROM "BankImport" WHERE id = ${preExistingImportId}`;
+  });
+
+  it("matcher_payments_processed equals statement_lines_inserted (scope proof)", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    // The fixture has 3 credits (lines 13-15), all are inserted
+    expect(c.out.statement_lines_inserted).toBe(3);
+    // With importId scoping, matcher only processes payments from this import
+    expect(c.out.matcher_payments_processed).toBe(3);
+    // Since 3 < MAX_PAYMENTS_PER_REQUEST (10), no more to process
+    expect(c.out.matcher_has_more).toBe(false);
+  });
 });

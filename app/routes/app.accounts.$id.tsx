@@ -54,6 +54,7 @@ import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { pluralizeWithCount } from "~/lib/copy-helpers";
+import { validateTimezone } from "~/lib/aging-dates.server";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -74,6 +75,7 @@ type SyncState = "pending_retry" | "needs_attention" | "synced";
 interface LoaderData {
   notSupported?: boolean;
   shopCurrency?: string;
+  shopTimezone: string;
   account: {
     id: string;
     name: string;
@@ -173,6 +175,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone: validateTimezone(null),
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -183,9 +186,11 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     } satisfies LoaderData;
   }
 
-  const [shop] = await sql<{ id: string; currency: string | null }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null; timezone: string | null }[]>`
+    SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  const shopTimezone = validateTimezone(shop?.timezone);
 
   if (!shop) {
     return {
@@ -196,6 +201,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -218,6 +224,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: false,
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -258,6 +265,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -423,6 +431,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     gatingEnforced,
     reminderOptOut,
     upgradeUrl,
+    shopTimezone,
     newAccountsPausedBanner,
     error: null,
   } satisfies LoaderData;
@@ -585,9 +594,11 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
 function InvoiceTable({
   invoices,
   currency,
+  shopTimezone,
 }: {
   invoices: LoaderData["invoices"]["rows"];
   currency: string;
+  shopTimezone: string;
 }) {
   if (invoices.length === 0) {
     return (
@@ -619,7 +630,7 @@ function InvoiceTable({
               <s-table-cell>
                 {inv.dueAt
                   ? new Date(inv.dueAt).toLocaleDateString("en-IN", {
-                      timeZone: "Asia/Kolkata",
+                      timeZone: shopTimezone,
                     })
                   : "—"}
               </s-table-cell>
@@ -637,7 +648,7 @@ function InvoiceTable({
               </s-table-cell>
               <s-table-cell>
                 {orderUrl ? (
-                  <s-link href={orderUrl}>View</s-link>
+                  <s-link href={orderUrl} target="_top">View</s-link>
                 ) : (
                   "—"
                 )}
@@ -652,7 +663,7 @@ function InvoiceTable({
 
 export default function AccountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, newAccountsPausedBanner, error } = loaderData;
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, shopTimezone, newAccountsPausedBanner, error } = loaderData;
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -1053,9 +1064,9 @@ export default function AccountPage() {
               {reminderOptOut.optedOut && reminderOptOut.optOutAt && (
                 <s-paragraph>
                   Opted out on {new Date(reminderOptOut.optOutAt).toLocaleDateString("en-IN", {
-                    timeZone: "Asia/Kolkata",
+                    timeZone: shopTimezone,
                   })}
-                  {reminderOptOut.optOutSource === "link" && " via email unsubscribe link"}
+                  {reminderOptOut.optOutSource === "link" && " via email unsubscribe"}
                   {reminderOptOut.optOutSource === "merchant" && " by merchant"}
                 </s-paragraph>
               )}
@@ -1082,7 +1093,7 @@ export default function AccountPage() {
       )}
 
       <s-section heading="Recent Invoices">
-        <InvoiceTable invoices={invoices.rows} currency={currency} />
+        <InvoiceTable invoices={invoices.rows} currency={currency} shopTimezone={shopTimezone} />
         {invoices.totalCount > 10 && (
           <s-paragraph>
             <s-text>
@@ -1124,7 +1135,7 @@ export default function AccountPage() {
 
       <s-section slot="aside" heading="Payment Reminders">
         <s-paragraph>
-          Buyers can opt out of payment reminder emails via the unsubscribe link in each reminder.
+          Buyers can opt out of payment reminder emails via the one-click unsubscribe option in each reminder.
         </s-paragraph>
         <s-paragraph>
           Only merchants can re-enable reminders for an opted-out buyer.

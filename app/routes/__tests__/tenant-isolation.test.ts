@@ -948,6 +948,7 @@ describe("Tenant Isolation - Route coverage guard", () => {
     "app.settings.reminders.tsx": "Covered by ruleId action isolation tests (update_rule, delete_rule)",
     "app.plan.tsx": "No record IDs",
     "app.tag-rules.tsx": "No record ID params (create_tag_rule only, no update/delete with ID)",
+    "app.$.tsx": "Catch-all 404 route, no record IDs (renders static not-found page)",
   };
 
   const TESTED_ROUTES = [

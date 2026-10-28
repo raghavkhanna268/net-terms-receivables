@@ -46,6 +46,16 @@ export function isGatingEnforced(): boolean {
 }
 
 /**
+ * Check if plan selection redirect is enabled.
+ * Only the exact string "true" enables the redirect.
+ * Missing, empty, "false", "True", "TRUE", "1", or any other value means OFF.
+ */
+export function isPlanSelectionRedirectEnabled(): boolean {
+  const env = process.env.PLAN_SELECTION_REDIRECT_ENABLED as string | undefined;
+  return env === "true";
+}
+
+/**
  * Build the lock key string for the ba_limit advisory lock.
  * @param shopId - Internal shop ID
  * @returns Lock key string for use with hashtextextended()
