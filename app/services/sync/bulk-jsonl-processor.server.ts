@@ -213,6 +213,7 @@ export async function handleReconcileDeleteMissing(
     const [opRow] = await sql<{ lines_processed: string | null; completed_at: Date | null }[]>`
       SELECT lines_processed, completed_at FROM s6_bulk_operations
       WHERE bulk_operation_id = ${bulkOperationId}
+        AND shop = ${shop}
     `;
     if (!opRow || !opRow.completed_at) return;
 

@@ -1522,7 +1522,7 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
   });
 
   describe("Deactivate race condition guards", () => {
-    it("deactivateMissingTaggedCustomers respects shop_id and tag_active in final UPDATE", async () => {
+    it("concurrent last_seen_bulk_op_id update between candidate selection and UPDATE prevents deactivation", async () => {
       const bulkOpId = `bulk-op-deactivate-race-${TEST_SUFFIX}`;
       const customerId = `customer-deactivate-race-${TEST_SUFFIX}`;
 
@@ -1534,9 +1534,16 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         )
       `;
 
-      const adminGraphQLMock = vi.fn().mockResolvedValue({
-        success: true,
-        data: { nodes: [] },
+      const adminGraphQLMock = vi.fn().mockImplementation(async () => {
+        await sql`
+          UPDATE s8_tagged_customers
+          SET last_seen_bulk_op_id = ${bulkOpId}
+          WHERE customer_id = ${customerId}
+        `;
+        return {
+          success: true,
+          data: { nodes: [] },
+        };
       });
 
       const result = await deactivateMissingTaggedCustomers(
@@ -1547,7 +1554,50 @@ describeWithDb("v1.1 reconcile delete-missing (DB-backed)", () => {
         adminGraphQLMock
       );
 
-      expect(result.deactivatedCount).toBe(1);
+      expect(result.deactivatedCount).toBe(0);
+
+      const [row] = await sql<{ tag_active: boolean; last_seen_bulk_op_id: string }[]>`
+        SELECT tag_active, last_seen_bulk_op_id FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      `;
+      expect(row.tag_active).toBe(true);
+      expect(row.last_seen_bulk_op_id).toBe(bulkOpId);
+
+      await sql`DELETE FROM s8_tagged_customers WHERE customer_id = ${customerId}`;
+    });
+
+    it("concurrent tag_active flip between candidate selection and UPDATE prevents deactivation", async () => {
+      const bulkOpId = `bulk-op-deactivate-race-tag-${TEST_SUFFIX}`;
+      const customerId = `customer-deactivate-race-tag-${TEST_SUFFIX}`;
+
+      await sql`
+        INSERT INTO s8_tagged_customers (
+          shop_id, customer_id, tags, tag_active, last_seen_bulk_op_id, created_at, updated_at
+        ) VALUES (
+          ${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, ${OLD_BULK_OP_ID}, NOW(), NOW()
+        )
+      `;
+
+      const adminGraphQLMock = vi.fn().mockImplementation(async () => {
+        await sql`
+          UPDATE s8_tagged_customers
+          SET tag_active = false
+          WHERE customer_id = ${customerId}
+        `;
+        return {
+          success: true,
+          data: { nodes: [] },
+        };
+      });
+
+      const result = await deactivateMissingTaggedCustomers(
+        sql,
+        TEST_SHOP_ID,
+        TEST_SHOP_DOMAIN,
+        bulkOpId,
+        adminGraphQLMock
+      );
+
+      expect(result.deactivatedCount).toBe(0);
 
       const [row] = await sql<{ tag_active: boolean }[]>`
         SELECT tag_active FROM s8_tagged_customers WHERE customer_id = ${customerId}
