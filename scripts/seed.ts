@@ -225,6 +225,7 @@ export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
   try {
     const url = new URL(databaseUrl);
     const host = url.hostname.toLowerCase();
+    // Note: IPv6 in URLs uses brackets, so [::1] becomes "::1" in hostname
     return host === "localhost" || host === "127.0.0.1" || host === "::1";
   } catch {
     return false;

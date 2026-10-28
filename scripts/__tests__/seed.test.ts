@@ -7191,8 +7191,8 @@ describe("isLocalhostDatabaseUrl", () => {
     expect(isLocalhostDatabaseUrl("postgresql://user:pass@127.0.0.1:5432/db")).toBe(true);
   });
 
-  it("returns true for ::1", () => {
-    expect(isLocalhostDatabaseUrl("postgresql://user:pass@::1:5432/db")).toBe(true);
+  it("returns true for [::1] (IPv6 localhost)", () => {
+    expect(isLocalhostDatabaseUrl("postgresql://user:pass@[::1]:5432/db")).toBe(true);
   });
 
   it("returns false for remote host", () => {

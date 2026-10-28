@@ -378,13 +378,13 @@ describeWithDb("seed account ID migration (DB)", () => {
     // Run dry run (dryRun = true)
     const result = await migrateSeedAccountIds(sql, true);
     
-    // Should report 1 account to change
-    expect(result.accountsToChange).toBe(1);
+    // Should report at least 1 account to change (may find more from other tests)
+    expect(result.accountsToChange).toBeGreaterThanOrEqual(1);
     expect(result.applied).toBe(false);
     
-    // Verify id is unchanged (dry run did not write)
+    // Verify OUR account's id is unchanged (dry run did not write)
     const [afterAccount] = await sql<[{ id: string; updatedAt: Date }]>`
-      SELECT id, "updatedAt" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+      SELECT id, "updatedAt" FROM "BuyerAccount" WHERE id = ${oldAccountId}
     `;
     expect(afterAccount.id).toBe(oldAccountId);
     
