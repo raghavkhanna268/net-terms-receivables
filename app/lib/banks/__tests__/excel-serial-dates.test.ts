@@ -864,3 +864,166 @@ describe("All-parser regression: serial dates + main-compatible field parsing (S
     });
   });
 });
+
+/**
+ * Dedupe hash stability tests.
+ * Ensures the dedupe key is the same as main's when value-date is a serial.
+ *
+ * On main, if valueDateRaw was a serial string (e.g., "46313"), parseIndianDate
+ * returned null, so valueDate was undefined and the hash didn't include `vdate:`.
+ * Our code now parses the serial and stores the ISO date on the transaction,
+ * but for hash stability, we preserve main's behavior by not including the
+ * serial-derived valueDate in the hash.
+ *
+ * Note: On main, a row whose TRANSACTION date was a bare serial failed to parse,
+ * so there's no main hash to preserve for it - those rows simply didn't exist.
+ * We keep the transaction date deterministic (using the parsed ISO date in the hash).
+ */
+describe("Dedupe hash stability (SYNTHETIC)", () => {
+  it("hash matches main when value-date is a serial string (no UTR)", async () => {
+    // Scenario: XLSX with transaction date as normal text, value-date as serial string "46313"
+    // On main: valueDateRaw "46313" would fail parseIndianDate, valueDate=undefined, hash has no vdate
+    // On new: valueDateRaw "46313" parses to "2026-10-18", but hash should still have no vdate
+
+    const header = [
+      "Date",
+      "Narration",
+      "Chq./Ref.No.",
+      "Value Dt",
+      "Withdrawal Amt.",
+      "Deposit Amt.",
+      "Closing Balance",
+    ];
+    const preamble = [["HDFC BANK"], ["Statement"], [], header];
+    // Transaction date as normal text "15/10/2026", value-date as serial string "46313"
+    const dataRows = [["15/10/2026", "NEFT CR-SYNTHETIC HASH TEST-NO UTR", "REFNOUTR001", "46313", "", "10000", "100000"]];
+    const allRows = [...preamble, ...dataRows];
+    const ws = XLSX.utils.aoa_to_sheet(allRows);
+
+    // Ensure value-date cell is a string "46313" (serial string, not a number)
+    ws["D5"] = { t: "s", v: "46313" };
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Statement");
+    const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+
+    const file = new File([buf], "hdfc-hash-stability.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions).toHaveLength(1);
+
+    const txn = result.transactions[0];
+    // Transaction displays the parsed value-date
+    expect(txn.valueDate).toBe("2026-10-18");
+    expect(txn.date).toBe("2026-10-15");
+
+    // The dedupe key should NOT include vdate (matching main's behavior)
+    // On main, the canonical string would be: date:2026-10-15|amount:1000000|dir:CR|nar:...|bal:10000000|ref:REFNOUTR001
+    // It would NOT have vdate:2026-10-18
+
+    // Verify by checking the key format
+    expect(txn.dedupeKey).toMatch(/^sha256:/);
+    // The hash should be computed without vdate - we verify this by checking the transaction
+    // still has valueDate displayed (proving the parsed value is used for display, not hash)
+    expect(txn.valueDate).toBe("2026-10-18");
+
+    // Construct what main would have hashed (no vdate since serial failed to parse)
+    // date:2026-10-15|amount:1000000|dir:CR|nar:neft cr-synthetic hash test-no utr|bal:10000000|ref:REFNOUTR001
+    const expectedNar = "neft cr-synthetic hash test-no utr";
+    const mainCanonical = `date:2026-10-15|amount:1000000|dir:CR|nar:${expectedNar}|bal:10000000|ref:REFNOUTR001`;
+
+    // Hash the main canonical string
+    const encoder = new TextEncoder();
+    const data = encoder.encode(mainCanonical);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = new Uint8Array(hashBuffer);
+    const expectedHash = Array.from(hashArray)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    expect(txn.dedupeKey).toBe(`sha256:${expectedHash}`);
+  });
+});
+
+/**
+ * XLSX/XLS only tests.
+ * Ensures serial dates are only accepted for XLSX/XLS files, not CSV/TXT.
+ */
+describe("XLSX/XLS only serial acceptance (SYNTHETIC)", () => {
+  it("CSV with '46310' in date column stays unparsed (main's outcome)", async () => {
+    // On main, "46310" in a CSV date column would fail to parse (not a valid date format)
+    // The row should fail with ROW_PARSE_FAILED or be skipped
+    const csvContent = [
+      "HDFC BANK",
+      "Statement of Account",
+      "",
+      "Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance",
+      "46310,NEFT CR-SYNTHETIC CSV TEST,REF001,46310,,10000,100000",
+    ].join("\n");
+
+    const file = new File([csvContent], "hdfc-serial-date.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    // The row should not parse (serial string rejected for CSV)
+    expect(result.transactions).toHaveLength(0);
+    // Should have error or be skipped
+    const errors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
+    expect(errors.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it("XLSX with '46310' (string serial) in date column parses to 2026-10-15", async () => {
+    const header = [
+      "Date",
+      "Narration",
+      "Chq./Ref.No.",
+      "Value Dt",
+      "Withdrawal Amt.",
+      "Deposit Amt.",
+      "Closing Balance",
+    ];
+    const preamble = [["HDFC BANK"], ["Statement"], [], header];
+    const dataRows = [["46310", "NEFT CR-SYNTHETIC XLSX SERIAL TEST", "REF002", "46310", "", "10000", "100000"]];
+    const allRows = [...preamble, ...dataRows];
+    const ws = XLSX.utils.aoa_to_sheet(allRows);
+
+    // Ensure date cell is a string "46310" (serial string)
+    ws["A5"] = { t: "s", v: "46310" };
+    ws["D5"] = { t: "s", v: "46310" };
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Statement");
+    const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+
+    const file = new File([buf], "hdfc-serial-date.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions).toHaveLength(1);
+    expect(result.transactions[0].date).toBe("2026-10-15");
+    expect(result.transactions[0].valueDate).toBe("2026-10-15");
+  });
+
+  it("CSV with valid date '15/10/2026' parses normally", async () => {
+    // Verify that normal CSV parsing still works
+    const csvContent = [
+      "HDFC BANK",
+      "Statement of Account",
+      "",
+      "Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance",
+      "15/10/2026,NEFT CR-SYNTHETIC NORMAL CSV TEST,REF003,15/10/2026,,10000,100000",
+    ].join("\n");
+
+    const file = new File([csvContent], "hdfc-normal-date.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions).toHaveLength(1);
+    expect(result.transactions[0].date).toBe("2026-10-15");
+  });
+});

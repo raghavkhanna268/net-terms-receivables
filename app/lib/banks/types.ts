@@ -126,6 +126,12 @@ export interface ParseOptions {
   fileName?: string;
 }
 
+/** Context passed to parsers for file-type-aware parsing */
+export interface ParserContext {
+  /** File type - xlsx/xls allows serial dates, csv/txt does not */
+  fileType: FileType;
+}
+
 /** Supported file types */
 export type FileType = "xlsx" | "xls" | "csv" | "txt";
 

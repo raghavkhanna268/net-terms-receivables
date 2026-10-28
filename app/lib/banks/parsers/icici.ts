@@ -21,6 +21,7 @@ import type {
   ParseError,
   ParseResult,
   DetectionResult,
+  ParserContext,
 } from "../types.js";
 import { detectHeaderRow, detectFooterRows, isNarrationContinuationWithDateCol } from "../detection.js";
 
@@ -33,7 +34,7 @@ function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): bool
   }
   return true;
 }
-import { parseIndianDate, parseIndianAmount, isBlankOrZero, normalizeIciciRef, looksLikeExcelSerialString } from "../normalisers.js";
+import { parseIndianDate, parseIndianAmount, isBlankOrZero, normalizeIciciRef, looksLikeExcelSerialString, wasUnparseableOnMain } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
 
@@ -56,11 +57,15 @@ interface IciciColumnMap {
 export async function parseIciciStatement(
   sheet: SheetData,
   detection: DetectionResult,
-  existingKeys?: Set<string>
+  existingKeys?: Set<string>,
+  context?: ParserContext
 ): Promise<ParseResult> {
   const transactions: NormalisedTxn[] = [];
   const errors: ParseError[] = [];
   let skippedRows = 0;
+
+  // Determine if this is a spreadsheet format (xlsx/xls) where serial dates are accepted
+  const isSpreadsheet = context?.fileType === "xlsx" || context?.fileType === "xls";
 
   // Find header row
   const headerResult = detectHeaderRow(sheet);
@@ -164,7 +169,7 @@ export async function parseIciciStatement(
     }
 
     // Parse this row
-    const rawRow = extractIciciRow(row, columns, i + 1);
+    const rawRow = extractIciciRow(row, columns, i + 1, isSpreadsheet);
     if (!rawRow) {
       const dateCell = String(row[columns.dateCol] ?? "").trim();
       const narrationContent = String(row[columns.narrationCol] ?? "").trim();
@@ -307,11 +312,13 @@ function mapIciciColumns(headers: string[]): IciciColumnMap | null {
 
 /**
  * Extract raw data from a row.
+ * @param isSpreadsheet True for xlsx/xls files where serial dates are accepted
  */
 function extractIciciRow(
   row: (string | number | Date | boolean | null)[],
   columns: IciciColumnMap,
-  sourceRow: number
+  sourceRow: number,
+  isSpreadsheet: boolean
 ): RawTxnRow | null {
   const dateRaw = row[columns.dateCol];
   const narration = String(row[columns.narrationCol] ?? "").trim();
@@ -323,17 +330,21 @@ function extractIciciRow(
 
   // Check if date looks valid:
   // - Date objects are valid
-  // - Numbers are valid (Excel serial dates handled by parseIndianDate)
+  // - Numbers are valid ONLY for xlsx/xls (Excel serial dates handled by parseIndianDate)
   // - Strings must contain digits and be at least 6 chars,
-  //   OR be a 5-digit Excel serial string (e.g., "46310")
+  //   OR be a 5-digit Excel serial string ONLY for xlsx/xls (e.g., "46310")
   if (dateRaw instanceof Date) {
     // Date object - OK
   } else if (typeof dateRaw === "number") {
-    // Numeric Excel serial - OK, parseIndianDate will validate range
+    // Numeric Excel serial - only OK for spreadsheet formats
+    if (!isSpreadsheet) {
+      return null;
+    }
   } else {
     const dateStr = String(dateRaw).trim();
     const isValidLength = dateStr.match(/\d/) && dateStr.length >= 6;
-    const isSerialString = looksLikeExcelSerialString(dateStr);
+    // Serial strings only accepted for spreadsheet formats
+    const isSerialString = isSpreadsheet && looksLikeExcelSerialString(dateStr);
     if (!isValidLength && !isSerialString) {
       return null;
     }
@@ -420,6 +431,11 @@ async function normalizeIciciRow(raw: RawTxnRow): Promise<NormalisedTxn | null> 
     parsed.utr = utr;
   }
 
+  // For dedupe hash stability: on main, if valueDateRaw was a serial (number or 5-digit string),
+  // parseIndianDate returned null, so the hash didn't include vdate at all.
+  // We preserve that by passing undefined to generateDedupeKey when valueDateRaw was unparseable on main.
+  const valueDateForHash = wasUnparseableOnMain(raw.valueDateRaw) ? undefined : valueDate;
+
   // Generate dedupe key with all relevant fields
   const dedupeKey = await generateDedupeKey(
     date,
@@ -429,7 +445,7 @@ async function normalizeIciciRow(raw: RawTxnRow): Promise<NormalisedTxn | null> 
     parsed.rail,
     utr ?? undefined,
     balancePaise,
-    valueDate,
+    valueDateForHash,
     raw.refNo
   );
 

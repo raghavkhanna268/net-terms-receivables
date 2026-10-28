@@ -34,6 +34,18 @@ export function looksLikeExcelSerialString(s: string): boolean {
 }
 
 /**
+ * Check if a raw date value was a serial (number or 5-digit string) that main couldn't parse.
+ * Used for dedupe hash stability: on main, serial values failed to parse and weren't
+ * included in the hash. We need to preserve that behavior even though we now parse them.
+ */
+export function wasUnparseableOnMain(raw: string | Date | number | null | undefined): boolean {
+  if (raw === null || raw === undefined) return false;
+  if (raw instanceof Date) return false;
+  if (typeof raw === "number") return true;
+  return looksLikeExcelSerialString(String(raw).trim());
+}
+
+/**
  * Convert Excel serial date to ISO 8601 date string (YYYY-MM-DD).
  * Uses 1899-12-30 epoch with no +1 adjustment.
  * Drops fractional time part.
