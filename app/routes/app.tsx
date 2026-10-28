@@ -1,7 +1,9 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, isRouteErrorResponse, data } from "react-router";
+import { Outlet, useLoaderData, useRouteError, useRouteLoaderData, isRouteErrorResponse, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
+import { AppErrorPage } from "~/components/AppErrorPage";
+import type { loader as rootLoader } from "~/root";
 import { runAfterAuth } from "~/lib/after-auth.server";
 import { useEffect } from "react";
 import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
@@ -121,27 +123,39 @@ export default function App() {
 
   return (
     <AppProvider apiKey={apiKey}>
-      <s-app-nav>
-        {/* @ts-expect-error rel="home" is valid per Shopify App Bridge docs but not in @shopify/polaris-types */}
-        <s-link href="/app" rel="home">Home</s-link>
-        <s-link href="/app/reconcile">Reconcile</s-link>
-        <s-link href="/app/imports">Imports</s-link>
-        <s-link href="/app/settings/reminders">Reminders</s-link>
-        <s-link href="/app/tag-rules">Tag Rules</s-link>
-        <s-link href="/app/plan">Plan</s-link>
-        <s-link href="/app/onboarding">Setup Guide</s-link>
-        {/* Future navigation items for B2B features */}
-        {/* <s-link href="/app/buyers">Buyers</s-link> */}
-        {/* <s-link href="/app/invoices">Invoices</s-link> */}
-        {/* <s-link href="/app/settings">Settings</s-link> */}
-      </s-app-nav>
+      <AppNav />
       <Outlet />
     </AppProvider>
   );
 }
 
+function AppNav() {
+  return (
+    <s-app-nav>
+      {/* @ts-expect-error rel="home" is valid per Shopify App Bridge docs but not in @shopify/polaris-types */}
+      <s-link href="/app" rel="home">Home</s-link>
+      <s-link href="/app/reconcile">Reconcile</s-link>
+      <s-link href="/app/imports">Imports</s-link>
+      <s-link href="/app/settings/reminders">Reminders</s-link>
+      <s-link href="/app/tag-rules">Tag Rules</s-link>
+      <s-link href="/app/plan">Plan</s-link>
+      <s-link href="/app/onboarding">Setup Guide</s-link>
+      {/* Future navigation items for B2B features */}
+      {/* <s-link href="/app/buyers">Buyers</s-link> */}
+      {/* <s-link href="/app/invoices">Invoices</s-link> */}
+      {/* <s-link href="/app/settings">Settings</s-link> */}
+    </s-app-nav>
+  );
+}
+
+function isAuthStatus(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
 export function ErrorBoundary() {
   const error = useRouteError();
+  const rootData = useRouteLoaderData<typeof rootLoader>("root");
+  const apiKey = rootData?.apiKey || "";
 
   if (
     isRouteErrorResponse(error) &&
@@ -152,6 +166,30 @@ export function ErrorBoundary() {
       <div
         dangerouslySetInnerHTML={{ __html: error.data || "Handling response" }}
       />
+    );
+  }
+
+  if (isRouteErrorResponse(error)) {
+    if (isAuthStatus(error.status)) {
+      throw error;
+    }
+
+    if (error.status >= 400) {
+      return (
+        <AppProvider apiKey={apiKey}>
+          <AppNav />
+          <AppErrorPage status={error.status} />
+        </AppProvider>
+      );
+    }
+  }
+
+  if (!isRouteErrorResponse(error)) {
+    return (
+      <AppProvider apiKey={apiKey}>
+        <AppNav />
+        <AppErrorPage status={500} />
+      </AppProvider>
     );
   }
 

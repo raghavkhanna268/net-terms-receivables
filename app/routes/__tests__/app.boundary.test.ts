@@ -39,6 +39,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => anonymousError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -66,6 +67,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => new AnonymousErrorResponse(),
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -91,6 +93,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => bounceError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -116,6 +119,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => reauthError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -125,7 +129,31 @@ describe("app.tsx ErrorBoundary", () => {
     expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
-  it("rethrows 404 route error response (non-bounce status)", async () => {
+  it("rethrows real ErrorResponseImpl with status 403", async () => {
+    const forbiddenError = new UNSAFE_ErrorResponseImpl(
+      403,
+      "Forbidden",
+      null
+    );
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => forbiddenError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app");
+
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+  });
+
+  it("renders 404 route error in-layout with nav", async () => {
     const notFoundError = {
       status: 404,
       statusText: "Not Found",
@@ -140,13 +168,18 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => notFoundError,
+        useNavigate: () => vi.fn(),
+        useRouteLoaderData: () => ({ apiKey: "test-api-key-12345" }),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-app-nav");
+    expect(html).toContain("Page not found");
   });
 
   it("rethrows 200 route error with non-string data", async () => {
@@ -164,6 +197,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => nonStringDataError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -173,7 +207,7 @@ describe("app.tsx ErrorBoundary", () => {
     expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
-  it("rethrows plain Error for root boundary to handle", async () => {
+  it("renders plain Error in-layout with nav and generic message", async () => {
     const plainError = new Error("Unexpected failure");
 
     vi.doMock("react-router", async () => {
@@ -183,15 +217,44 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => plainError,
+        useNavigate: () => vi.fn(),
+        useRouteLoaderData: () => ({ apiKey: "test-api-key-12345" }),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    expect(() => renderToString(createElement(ErrorBoundary))).toThrow(
-      "Unexpected failure"
-    );
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-app-nav");
+    expect(html).toContain("Something went wrong");
+    expect(html).not.toContain("Unexpected failure");
+  });
+
+  it("passes apiKey from root loader to AppProvider in ErrorBoundary", async () => {
+    const notFoundError = new UNSAFE_ErrorResponseImpl(404, "Not Found", null);
+    const testApiKey = "sk_test_boundary_key_xyz789";
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => notFoundError,
+        useNavigate: () => vi.fn(),
+        useRouteLoaderData: () => ({ apiKey: testApiKey }),
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-app-nav");
+    expect(html).toContain("Page not found");
   });
 });
 
