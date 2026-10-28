@@ -9,6 +9,7 @@ const EXCEL_EPOCH_MS = Date.UTC(1899, 11, 30);
 const MS_PER_DAY = 86400000;
 const EXCEL_SERIAL_MIN = 32874;
 const EXCEL_SERIAL_MAX = 73415;
+const EXCEL_SERIAL_STRING_PATTERN = /^\d{5}(\.\d+)?$/;
 
 /**
  * Check if a number is a valid Excel serial date in the plausible range.
@@ -17,6 +18,18 @@ const EXCEL_SERIAL_MAX = 73415;
 function isValidExcelSerial(n: number): boolean {
   if (!Number.isFinite(n)) return false;
   const intPart = Math.floor(n);
+  return intPart >= EXCEL_SERIAL_MIN && intPart <= EXCEL_SERIAL_MAX;
+}
+
+/**
+ * Check if a string looks like a 5-digit Excel serial date in the plausible range.
+ * Pattern: exactly 5 digits, optionally followed by decimal fraction.
+ * This does NOT collide with dd/mm/yy (6 digits) or dd/mm/yyyy (8 digits).
+ * Used by parsers to allow serial strings through the "date looks valid" check.
+ */
+export function looksLikeExcelSerialString(s: string): boolean {
+  if (!EXCEL_SERIAL_STRING_PATTERN.test(s)) return false;
+  const intPart = Math.floor(parseFloat(s));
   return intPart >= EXCEL_SERIAL_MIN && intPart <= EXCEL_SERIAL_MAX;
 }
 
@@ -123,6 +136,13 @@ export function parseIndianDate(input: string | Date | number | null | undefined
   if (timestampMatch) {
     const [, dayStr, monthStr, yearStr] = timestampMatch;
     return parseComponents(dayStr, monthStr, yearStr);
+  }
+
+  // Handle string representation of Excel serial date (5-digit number, optionally fractional)
+  // This handles XLSX cells with General format where raw:false returns the number as a string
+  if (looksLikeExcelSerialString(str)) {
+    const serial = parseFloat(str);
+    return excelSerialToIsoDate(serial);
   }
 
   return null;

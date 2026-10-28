@@ -34,7 +34,7 @@ function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): bool
   }
   return true;
 }
-import { parseIndianDate, parseIndianAmount, isBlankOrZero } from "../normalisers.js";
+import { parseIndianDate, parseIndianAmount, isBlankOrZero, looksLikeExcelSerialString } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
 
@@ -306,14 +306,17 @@ function extractHdfcRow(
   // Check if date looks valid:
   // - Date objects are valid
   // - Numbers are valid (Excel serial dates handled by parseIndianDate)
-  // - Strings must contain digits and be at least 6 chars (e.g., "01/10/26")
+  // - Strings must contain digits and be at least 6 chars (e.g., "01/10/26"),
+  //   OR be a 5-digit Excel serial string (e.g., "46310")
   if (dateRaw instanceof Date) {
     // Date object - OK
   } else if (typeof dateRaw === "number") {
     // Numeric Excel serial - OK, parseIndianDate will validate range
   } else {
-    const dateStr = String(dateRaw);
-    if (!dateStr.match(/\d/) || dateStr.length < 6) {
+    const dateStr = String(dateRaw).trim();
+    const isValidLength = dateStr.match(/\d/) && dateStr.length >= 6;
+    const isSerialString = looksLikeExcelSerialString(dateStr);
+    if (!isValidLength && !isSerialString) {
       return null;
     }
   }
