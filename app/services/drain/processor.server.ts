@@ -27,6 +27,7 @@ import {
   type CustomerPiiMode,
   getTagRules,
   shouldFetchCustomerPii,
+  isCustomerTracked,
 } from "~/services/sync/customer.server";
 import { validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
@@ -760,8 +761,8 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
 
   const tagRules = await getTagRules(sql, shop.id);
 
-  // Step 3: Check if customer needs PII fetched
-  const needsPii = piiEnabled && await shouldFetchCustomerPii(
+  // Step 3: Check if customer matches a tag rule (only matching customers get PII)
+  const matchesTagRule = piiEnabled && await shouldFetchCustomerPii(
     sql,
     shop.id,
     customer.id,
@@ -769,14 +770,18 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     tagRules
   );
 
+  // Check if customer is already tracked (for piiMode decision)
+  const isTracked = await isCustomerTracked(sql, shop.id, customer.id);
+
   let piiMode: CustomerPiiMode;
   let usedFallback = false;
 
   if (!piiEnabled) {
     piiMode = "disabled";
-  } else if (!needsPii) {
-    // Customer does not match and is not tracked - skip PII fetch entirely
-    piiMode = "disabled";
+  } else if (!matchesTagRule) {
+    // Customer does not match tag rule - no PII fetch
+    // Use 'fallback' for tracked customers to preserve stored PII
+    piiMode = isTracked ? "fallback" : "disabled";
   } else {
     // Step 4: Fetch PII fields for matching/tracked customers
     const piiResult = await fetchCustomerPiiFields(message.shop, message.resourceGid);

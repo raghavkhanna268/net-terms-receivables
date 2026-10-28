@@ -767,16 +767,13 @@ export async function isCustomerTracked(
  * @returns True if PII fields should be fetched
  */
 export async function shouldFetchCustomerPii(
-  sql: Sql,
-  shopId: string,
-  customerId: string,
+  _sql: Sql,
+  _shopId: string,
+  _customerId: string,
   customerTags: string[],
   tagRules: Array<{ tag: string; defaultTermsDays: number }>
 ): Promise<boolean> {
-  const matchesRule = findMatchingTagRule(customerTags, tagRules) !== undefined;
-  if (matchesRule) return true;
-
-  return isCustomerTracked(sql, shopId, customerId);
+  return findMatchingTagRule(customerTags, tagRules) !== undefined;
 }
 
 /**

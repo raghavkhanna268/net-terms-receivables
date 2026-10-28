@@ -73,6 +73,7 @@ vi.mock("~/services/sync/customer.server", () => ({
   }),
   getTagRules: vi.fn().mockResolvedValue([{ tag: "net-terms", defaultTermsDays: 30 }]),
   shouldFetchCustomerPii: vi.fn().mockResolvedValue(true),
+  isCustomerTracked: vi.fn().mockResolvedValue(false),
 }));
 
 // S8 draft order processor mock
@@ -1326,8 +1327,20 @@ describe("Handler registration completeness", () => {
 });
 
 describe("S8 Customer handler path tests", () => {
-  beforeEach(() => {
+  let mockFetchBaseFields: ReturnType<typeof vi.fn>;
+  let mockFetchPiiFields: ReturnType<typeof vi.fn>;
+  let mockProcessCustomerWebhook: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
     vi.clearAllMocks();
+    vi.resetModules();
+
+    const { fetchCustomerBaseFields, fetchCustomerPiiFields } = await import("../customer-fetch.server");
+    const { processCustomerWebhook } = await import("~/services/sync/customer.server");
+
+    mockFetchBaseFields = fetchCustomerBaseFields as ReturnType<typeof vi.fn>;
+    mockFetchPiiFields = fetchCustomerPiiFields as ReturnType<typeof vi.fn>;
+    mockProcessCustomerWebhook = processCustomerWebhook as ReturnType<typeof vi.fn>;
   });
 
   it("CUSTOMERS_CREATE handler is registered", async () => {
@@ -1346,6 +1359,225 @@ describe("S8 Customer handler path tests", () => {
     const { getSyncHandler } = await import("../processor.server");
     const handler = getSyncHandler("CUSTOMERS_DELETE");
     expect(handler).toBeDefined();
+  });
+
+  it("CUSTOMERS_CREATE fetches base fields via fetchCustomerBaseFields", async () => {
+    mockFetchBaseFields.mockResolvedValue({
+      success: true,
+      data: { id: "gid://shopify/Customer/test-create-1", tags: ["net-terms"] },
+      retryable: false,
+    });
+    mockFetchPiiFields.mockResolvedValue({
+      success: true,
+      email: "test-create@test-proc.example.com",
+      displayName: "Test Create",
+      retryable: false,
+      usedFallback: false,
+    });
+    mockProcessCustomerWebhook.mockResolvedValue({
+      success: true,
+      action: "created",
+      entityId: "account-test-create-1",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_CREATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ id: "shop-1" }]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_CREATE",
+      shop: "test-proc.myshopify.com",
+      webhookId: "wh-cust-create-1",
+      resourceGid: "gid://shopify/Customer/test-create-1",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(true);
+    expect(mockFetchBaseFields).toHaveBeenCalledWith("test-proc.myshopify.com", "gid://shopify/Customer/test-create-1");
+    expect(mockProcessCustomerWebhook).toHaveBeenCalled();
+  });
+
+  it("CUSTOMERS_DELETE skips GraphQL fetch and processes directly", async () => {
+    mockProcessCustomerWebhook.mockResolvedValue({
+      success: true,
+      action: "skipped",
+      skipReason: "Customer deleted",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_DELETE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ id: "shop-1" }]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_DELETE",
+      shop: "test-proc.myshopify.com",
+      webhookId: "wh-cust-delete-1",
+      resourceGid: "gid://shopify/Customer/test-delete-1",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(true);
+    expect(mockFetchBaseFields).not.toHaveBeenCalled();
+    expect(mockFetchPiiFields).not.toHaveBeenCalled();
+    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test-proc.myshopify.com",
+      "CUSTOMERS_DELETE",
+      expect.objectContaining({ id: "gid://shopify/Customer/test-delete-1" }),
+      "wh-cust-delete-1",
+      expect.any(String)
+    );
+  });
+
+  it("Customer base fetch 5xx error is retryable", async () => {
+    mockFetchBaseFields.mockResolvedValue({
+      success: false,
+      error: "Internal server error",
+      retryable: true,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ id: "shop-1" }]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test-proc.myshopify.com",
+      webhookId: "wh-cust-5xx-1",
+      resourceGid: "gid://shopify/Customer/test-5xx-1",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toContain("Internal server error");
+    expect(mockProcessCustomerWebhook).not.toHaveBeenCalled();
+  });
+
+  it("Customer base fetch ACCESS_DENIED error is non-retryable", async () => {
+    mockFetchBaseFields.mockResolvedValue({
+      success: false,
+      error: "ACCESS_DENIED: read_customers scope required",
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ id: "shop-1" }]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test-proc.myshopify.com",
+      webhookId: "wh-cust-access-denied-1",
+      resourceGid: "gid://shopify/Customer/test-access-denied-1",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain("ACCESS_DENIED");
+    expect(mockProcessCustomerWebhook).not.toHaveBeenCalled();
+  });
+
+  it("Customer base fetch null (deleted customer) triggers delete path", async () => {
+    mockFetchBaseFields.mockResolvedValue({
+      success: true,
+      data: null,
+      retryable: false,
+    });
+    mockProcessCustomerWebhook.mockResolvedValue({
+      success: true,
+      action: "skipped",
+      skipReason: "Customer deleted",
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ id: "shop-1" }]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test-proc.myshopify.com",
+      webhookId: "wh-cust-null-1",
+      resourceGid: "gid://shopify/Customer/test-null-1",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(true);
+    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+      mockSql,
+      "test-proc.myshopify.com",
+      "CUSTOMERS_DELETE",
+      expect.objectContaining({ id: "gid://shopify/Customer/test-null-1" }),
+      "wh-cust-null-1",
+      expect.any(String)
+    );
+  });
+
+  it("Customer PII fetch 5xx error for matching customer is retryable", async () => {
+    mockFetchBaseFields.mockResolvedValue({
+      success: true,
+      data: { id: "gid://shopify/Customer/test-pii-5xx-1", tags: ["net-terms"] },
+      retryable: false,
+    });
+    mockFetchPiiFields.mockResolvedValue({
+      success: false,
+      error: "Internal server error during PII fetch",
+      retryable: true,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([{ id: "shop-1" }]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: "test-proc.myshopify.com",
+      webhookId: "wh-cust-pii-5xx-1",
+      resourceGid: "gid://shopify/Customer/test-pii-5xx-1",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toContain("Internal server error");
+    expect(mockProcessCustomerWebhook).not.toHaveBeenCalled();
   });
 });
 

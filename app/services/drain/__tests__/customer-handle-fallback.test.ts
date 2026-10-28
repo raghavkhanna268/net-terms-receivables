@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   processCustomerWebhook: vi.fn(),
   getTagRules: vi.fn(),
   shouldFetchCustomerPii: vi.fn(),
+  isCustomerTracked: vi.fn(),
   isWebhookProcessed: vi.fn(),
   markWebhookProcessed: vi.fn(),
   incrementCounter: vi.fn(),
@@ -58,6 +59,7 @@ vi.mock("~/services/sync/customer.server", () => ({
   processCustomerWebhook: mocks.processCustomerWebhook,
   getTagRules: mocks.getTagRules,
   shouldFetchCustomerPii: mocks.shouldFetchCustomerPii,
+  isCustomerTracked: mocks.isCustomerTracked,
   CustomerPiiMode: {} as never,
 }));
 
@@ -141,6 +143,7 @@ describe("handleCustomer with fallback behavior", () => {
     });
     mocks.getTagRules.mockResolvedValue([{ tag: "net-terms", defaultTermsDays: 30 }]);
     mocks.shouldFetchCustomerPii.mockResolvedValue(true);
+    mocks.isCustomerTracked.mockResolvedValue(false);
     mocks.isWebhookProcessed.mockResolvedValue(false);
     mocks.markWebhookProcessed.mockResolvedValue(undefined);
     mocks.incrementCounter.mockResolvedValue(undefined);
@@ -242,8 +245,8 @@ describe("handleCustomer with fallback behavior", () => {
     });
     mocks.fetchPiiFields.mockResolvedValue({
       success: true,
-      email: "customer@example.com",
-      displayName: "John Doe",
+      email: "test-fallback@test-cust.example.com",
+      displayName: "Test Fallback User",
       retryable: false,
       usedFallback: false,
     });
@@ -280,7 +283,7 @@ describe("handleCustomer with fallback behavior", () => {
       "CUSTOMERS_UPDATE",
       expect.objectContaining({
         id: "gid://shopify/Customer/789",
-        email: "customer@example.com",
+        email: "test-fallback@test-cust.example.com",
       }),
       "wh-success-1",
       "fetched"

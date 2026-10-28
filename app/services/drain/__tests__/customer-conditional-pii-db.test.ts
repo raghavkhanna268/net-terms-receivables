@@ -6,13 +6,13 @@ import { sqlOptions } from "~/lib/db-light.server";
  * Tests for conditional customer PII fetch.
  *
  * Verifies that name/email fields are only requested from Shopify for customers
- * that match a tag rule or are already tracked, not for every customer webhook.
+ * that match a tag rule, not for every customer webhook.
  *
  * Tests:
  * (a) Non-matching customer: one GraphQL request, no email/displayName in query
  * (b) Matching customer: second request with PII, stores name/email as before
  * (c) ACCESS_DENIED fallback works for matching customers
- * (d) Tracked customer (tag removed) still gets PII fetched and cleared
+ * (d) Tracked customer with tag removed: one request, no PII, preserves stored values
  */
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -246,20 +246,20 @@ describeWithDb("Customer conditional PII fetch", () => {
     });
   });
 
-  describe("(d) Tracked customer (tag removed) gets PII fetched and cleared", () => {
-    it("fetches PII for tracked customer even when tag is removed, and clears tag_active", async () => {
+  describe("(d) Tracked customer with tag removed: one request, no PII, preserves stored values", () => {
+    it("makes exactly one request without email/displayName, sets tag_active false, preserves stored PII", async () => {
       const customerId = `gid://shopify/Customer/tagremoved-${TEST_SUFFIX}`;
 
       await sql`
         INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, email, display_name)
-        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'tracked@test-condpii.example.com', 'Tracked Buyer')
+        VALUES (${TEST_SHOP_ID}, ${customerId}, '["net-terms"]'::jsonb, true, 'stored@test-condpii.example.com', 'Stored Name')
       `;
 
       await sql`
         INSERT INTO "BuyerAccount" (
           "shopId", kind, "customerId", name, "holdState", "createdAt", "updatedAt"
         ) VALUES (
-          ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${customerId}, 'Tracked Buyer', 'OK', NOW(), NOW()
+          ${TEST_SHOP_ID}, 'TAGGED_CUSTOMER', ${customerId}, 'Stored Name', 'OK', NOW(), NOW()
         )
       `;
 
@@ -269,19 +269,6 @@ describeWithDb("Customer conditional PII fetch", () => {
           node: {
             id: customerId,
             tags: ["other-tag"],
-          },
-        },
-        retryable: false,
-      });
-
-      mockAdminGraphQL.mockResolvedValueOnce({
-        success: true,
-        data: {
-          node: {
-            id: customerId,
-            tags: ["other-tag"],
-            email: "tracked@test-condpii.example.com",
-            displayName: "Tracked Buyer",
           },
         },
         retryable: false,
@@ -302,19 +289,21 @@ describeWithDb("Customer conditional PII fetch", () => {
 
       expect(result.success).toBe(true);
 
-      expect(mockAdminGraphQL).toHaveBeenCalledTimes(2);
+      expect(mockAdminGraphQL).toHaveBeenCalledTimes(1);
 
-      const firstQueryText = mockAdminGraphQL.mock.calls[0][1] as string;
-      expect(firstQueryText).not.toContain("email");
+      const queryText = mockAdminGraphQL.mock.calls[0][1] as string;
+      expect(queryText).toContain("id");
+      expect(queryText).toContain("tags");
+      expect(queryText).not.toContain("email");
+      expect(queryText).not.toContain("displayName");
 
-      const secondQueryText = mockAdminGraphQL.mock.calls[1][1] as string;
-      expect(secondQueryText).toContain("email");
-
-      const [tagRecord] = await sql<{ tag_active: boolean; tag_deactivated_at: Date | null }[]>`
-        SELECT tag_active, tag_deactivated_at FROM s8_tagged_customers WHERE customer_id = ${customerId}
+      const [tagRecord] = await sql<{ tag_active: boolean; tag_deactivated_at: Date | null; email: string | null; display_name: string | null }[]>`
+        SELECT tag_active, tag_deactivated_at, email, display_name FROM s8_tagged_customers WHERE customer_id = ${customerId}
       `;
       expect(tagRecord.tag_active).toBe(false);
       expect(tagRecord.tag_deactivated_at).not.toBeNull();
+      expect(tagRecord.email).toBe("stored@test-condpii.example.com");
+      expect(tagRecord.display_name).toBe("Stored Name");
     });
   });
 });

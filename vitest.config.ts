@@ -45,7 +45,6 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts
  * - app/services/drain/__tests__/company-location-pii-db.test.ts
  * - app/services/drain/__tests__/load-shop-currencies-db.test.ts
- * - app/services/drain/__tests__/customer-conditional-pii-db.test.ts
  *
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
@@ -105,6 +104,9 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - tests/integration/confirm-reimport-pin-db.test.ts
  * - tests/integration/bank-upload-robustness-db.test.ts
  * - tests/integration/ingestion-paths-db.test.ts
+ *
+ * Customer conditional PII DB tests (added last; #599, #600 also bump count):
+ * - app/services/drain/__tests__/customer-conditional-pii-db.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
@@ -145,7 +147,6 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
   "app/services/drain/__tests__/company-location-pii-db.test.ts",
   "app/services/drain/__tests__/load-shop-currencies-db.test.ts",
-  "app/services/drain/__tests__/customer-conditional-pii-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
@@ -233,6 +234,9 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Customer conditional PII DB tests (added last; #599, #600 also bump count)
+  "app/services/drain/__tests__/customer-conditional-pii-db.test.ts",
 ];
 
 export default defineConfig({
