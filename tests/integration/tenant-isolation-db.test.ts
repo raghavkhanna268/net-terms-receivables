@@ -87,6 +87,7 @@ const ROUTE_EXCLUSIONS: Record<string, string> = {
   "auth.$.tsx": "Auth redirect, no tenant data",
   "jobs.drain.tsx": "Internal job processor, not accessible via HTTP params",
   "privacy.tsx": "Static privacy policy page, no tenant data",
+  "terms.tsx": "Static terms page, no tenant data",
   "webhooks.app.scopes_update.tsx": "Shopify webhook, authenticated by Shopify HMAC, not admin session",
   "webhooks.app.subscriptions_update.tsx": "Shopify webhook, authenticated by Shopify HMAC, not admin session",
   "webhooks.app.uninstalled.tsx": "Shopify webhook, authenticated by Shopify HMAC, not admin session",
