@@ -1,12 +1,17 @@
 /**
  * Integration tests for double-encoding fix.
  *
+ * Root cause: React Router's useFormAction resolves '.' from match.pathname.
+ * RR's decodePath leaves inner '%2F' as text, then useRoutesImpl does
+ * pathname.replace(/%/g,'%25') plus encodeLocation, which gives %252F.
+ *
+ * Fix: explicit action={accountHref(account.id)} on all Forms.
+ *
  * These tests verify:
  * 1. Form has explicit action attribute (single-encoded, no %25)
- * 2. After save, URL stays single-encoded
- * 3. Second save also stays single-encoded (no %25252F)
- * 4. Reload gets params.id === original id
- * 5. Narrow normalization: %2F only, %3A untouched, UUID unchanged
+ * 2. Action attribute equals accountHref(id)
+ * 3. All 3 Forms have explicit action (comprehensive check)
+ * 4. Narrow normalization: %2F only, %3A untouched, %41 unchanged
  *
  * Tests cover ALL THREE id kinds via table-driven it.each:
  * - Seeded-style synthetic id with GID segment containing ':' and '/'
@@ -16,9 +21,10 @@
  * FAIL ON MAIN EVIDENCE:
  * Without the fix, Forms have no explicit action attribute, so React Router
  * resolves action from the current pathname, which re-encodes %2F to %252F.
- * These tests fail on main because:
- * - action attribute is missing or undefined
- * - normalizeParamsId doesn't exist in the original code
+ * On main, Forms render as <form method="post"> without action=... attribute.
+ * These tests fail because:
+ * - action attribute is missing (Form has no explicit action on main)
+ * - html.match(/action="..."/g) returns fewer matches than form count
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToString } from "react-dom/server";
@@ -34,10 +40,6 @@ const ALL_ID_KINDS = [
   { kind: "native B2B UUID", id: SYNTHETIC_B2B_UUID, hasSpecialChars: false },
   { kind: "tag-rule UUID", id: SYNTHETIC_TAGGED_UUID, hasSpecialChars: false },
 ] as const;
-
-function normalizeParamsId(id: string): string {
-  return id.replace(/%2f/gi, "/");
-}
 
 vi.mock("react-router", async () => {
   return {
@@ -126,7 +128,7 @@ describe("Account Form action integration (explicit action fix)", () => {
     vi.clearAllMocks();
   });
 
-  describe("all id kinds: save, no %25, second save, reload, right id", () => {
+  describe("all id kinds: form has explicit action, no double-encoding", () => {
     it.each(ALL_ID_KINDS)(
       "$kind: form has explicit action attribute equal to accountHref(id)",
       ({ id }) => {
@@ -157,7 +159,7 @@ describe("Account Form action integration (explicit action fix)", () => {
     );
 
     it.each(ALL_ID_KINDS)(
-      "$kind: second save uses same action (still no %25)",
+      "$kind: multiple saves use same action (still no %25)",
       ({ id }) => {
         mockUseLoaderData.mockReturnValue(buildLoaderData(id));
 
@@ -176,7 +178,7 @@ describe("Account Form action integration (explicit action fix)", () => {
     );
 
     it.each(ALL_ID_KINDS)(
-      "$kind: reload gets params.id that decodes to original id",
+      "$kind: action decodes to original id",
       ({ id }) => {
         const expectedAction = accountHref(id);
         mockUseLoaderData.mockReturnValue(buildLoaderData(id));
@@ -206,6 +208,58 @@ describe("Account Form action integration (explicit action fix)", () => {
         expect(actionCount).toBe(formCount);
       }
     );
+  });
+
+  describe("narrow params.id normalization: %2F only", () => {
+    it("replaces %2F with / (case-insensitive)", () => {
+      const withEncodedSlash = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
+      const normalized = withEncodedSlash.replace(/%2F/gi, "/");
+
+      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
+      expect(normalized).toContain("/");
+      expect(normalized).not.toContain("%2F");
+    });
+
+    it("does NOT replace %3A (colon stays encoded)", () => {
+      const withEncodedColon = "gid%3A%2F%2Fshopify";
+      const normalized = withEncodedColon.replace(/%2F/gi, "/");
+
+      expect(normalized).toContain("%3A");
+      expect(normalized).toBe("gid%3A//shopify");
+    });
+
+    it("leaves other percent sequences unchanged (e.g. %41 stays %41)", () => {
+      const withOtherPercent = "test%41value%2Fpath";
+      const normalized = withOtherPercent.replace(/%2F/gi, "/");
+
+      expect(normalized).toBe("test%41value/path");
+      expect(normalized).toContain("%41");
+    });
+
+    it.each(ALL_ID_KINDS)(
+      "$kind: normalization handles correctly",
+      ({ id, hasSpecialChars }) => {
+        if (hasSpecialChars) {
+          const encoded = encodeURIComponent(id);
+          const normalized = encoded.replace(/%2F/gi, "/");
+
+          expect(normalized).toContain("/");
+          expect(normalized).not.toContain("%2F");
+          expect(normalized).toContain("%3A");
+        } else {
+          expect(id.replace(/%2F/gi, "/")).toBe(id);
+        }
+      }
+    );
+
+    it("double-encoded %252F after RR decode becomes %2F, then / via normalize", () => {
+      const afterRrDecode = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
+      const normalized = afterRrDecode.replace(/%2F/gi, "/");
+
+      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
+      expect(normalized).not.toContain("%2F");
+      expect(normalized).toContain("%3A");
+    });
   });
 
   describe("seeded-style id specifics (contains : and /)", () => {
@@ -240,50 +294,6 @@ describe("Account Form action integration (explicit action fix)", () => {
     it("accountHref does not encode UUIDs", () => {
       expect(accountHref(SYNTHETIC_B2B_UUID)).toBe(`/app/accounts/${SYNTHETIC_B2B_UUID}`);
       expect(accountHref(SYNTHETIC_TAGGED_UUID)).toBe(`/app/accounts/${SYNTHETIC_TAGGED_UUID}`);
-    });
-  });
-
-  describe("narrow normalizeParamsId: %2F only", () => {
-    it("replaces %2F with / (case-insensitive)", () => {
-      const withEncodedSlash = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
-      const normalized = normalizeParamsId(withEncodedSlash);
-
-      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
-      expect(normalized).toContain("/");
-      expect(normalized).not.toContain("%2F");
-    });
-
-    it("does NOT replace %3A (colon stays encoded)", () => {
-      const withEncodedColon = "gid%3A%2F%2Fshopify";
-      const normalized = normalizeParamsId(withEncodedColon);
-
-      expect(normalized).toContain("%3A");
-      expect(normalized).toBe("gid%3A//shopify");
-    });
-
-    it.each(ALL_ID_KINDS)(
-      "$kind: normalizeParamsId handles correctly",
-      ({ id, hasSpecialChars }) => {
-        if (hasSpecialChars) {
-          const encoded = encodeURIComponent(id);
-          const normalized = normalizeParamsId(encoded);
-
-          expect(normalized).toContain("/");
-          expect(normalized).not.toContain("%2F");
-          expect(normalized).toContain("%3A");
-        } else {
-          expect(normalizeParamsId(id)).toBe(id);
-        }
-      }
-    );
-
-    it("double-encoded %252F after RR decode becomes %2F, then / via normalize", () => {
-      const afterRrDecode = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
-      const normalized = normalizeParamsId(afterRrDecode);
-
-      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
-      expect(normalized).not.toContain("%2F");
-      expect(normalized).toContain("%3A");
     });
   });
 });

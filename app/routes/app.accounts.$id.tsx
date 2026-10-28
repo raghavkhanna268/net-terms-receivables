@@ -57,15 +57,6 @@ import { pluralizeWithCount } from "~/lib/copy-helpers";
 import { validateTimezone } from "~/lib/aging-dates.server";
 import { accountHref } from "~/lib/account-href";
 
-/**
- * Normalize a leftover double-encoded slash in params.id.
- * Only replaces literal '%2F' (case-insensitive) with '/'.
- * No other decoding (no decodeURIComponent, no %3A handling).
- */
-function normalizeParamsId(id: string): string {
-  return id.replace(/%2f/gi, "/");
-}
-
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
   { value: "PAYMENT_OVERDUE", label: "Payment overdue" },
@@ -165,7 +156,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id ? normalizeParamsId(params.id) : undefined;
+  const accountId = params.id?.replace(/%2F/gi, "/");
 
   const upgradeUrl = (() => {
     const handle = getAppHandle();
@@ -452,7 +443,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
   const { session } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id ? normalizeParamsId(params.id) : undefined;
+  const accountId = params.id?.replace(/%2F/gi, "/");
 
   if (!accountId) {
     return { success: false, error: "Account ID is required" } satisfies ActionData;
