@@ -29,6 +29,7 @@ import {
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 import type { ActionFunctionArgs } from "react-router";
 import { requestContext } from "~/lib/request-context.server";
 
@@ -1034,6 +1035,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + ACCOUNT_A_ID + '%'}`;
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [SHOP_A_DOMAIN, SHOP_B_DOMAIN]);
 
       const messagesBeforeReinstall = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"
@@ -1053,6 +1055,7 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${SHOP_A_DOMAIN}`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${'credit_recompute:' + ACCOUNT_A_ID + '%'}`;
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [SHOP_A_DOMAIN, SHOP_B_DOMAIN]);
 
       const messagesAfterReinstall = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"

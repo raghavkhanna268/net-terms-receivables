@@ -15,6 +15,7 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { processOrderWebhook } from "../order.server";
 import type { ShopifyOrder } from "../types";
+import { archiveForeignQueueRows } from "../../../../tests/helpers/archive-foreign-queue-rows";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -87,6 +88,8 @@ describeWithDb("Due date normalization for midnight UTC values (DB)", () => {
       await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shop.id}`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-duenorm-" + suffix + "-" + TEST_SUFFIX + "%"}`;
     }
+    const ownShopDomains = TIMEZONES.map(({ suffix }) => shops[suffix].domain);
+    await archiveForeignQueueRows(sql, ownShopDomains);
   });
 
   describe("Order webhook path (processOrderWebhook)", () => {
