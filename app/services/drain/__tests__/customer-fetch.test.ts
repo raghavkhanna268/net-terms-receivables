@@ -325,17 +325,14 @@ describe("Real handleCustomer tests with fallback", () => {
   let mockIsWebhookProcessed: ReturnType<typeof vi.fn>;
   let mockMarkWebhookProcessed: ReturnType<typeof vi.fn>;
   let mockIncrementCounter: ReturnType<typeof vi.fn>;
+  let mockFetchBaseFields: ReturnType<typeof vi.fn>;
+  let mockFetchPiiFields: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
 
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    // Re-mock dependencies for handleCustomer
-    vi.doMock("../admin-client.server", () => ({
-      adminGraphQL: mockAdminGraphQL,
-    }));
 
     vi.doMock("~/lib/request-context.server", () => ({
       getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
@@ -367,60 +364,14 @@ describe("Real handleCustomer tests with fallback", () => {
 
     mockIncrementCounter = vi.fn().mockResolvedValue(undefined);
 
-    // Mock the entire customer-fetch.server module
-    // We can't use importActual because it would use real adminGraphQL
-    interface MockAdminResult {
-      success: boolean;
-      data?: { node: unknown };
-      error?: string;
-      errorCode?: string;
-      retryable?: boolean;
-    }
+    // Create mock functions that will be configured per-test
+    mockFetchBaseFields = vi.fn();
+    mockFetchPiiFields = vi.fn();
 
+    // Mock the entire customer-fetch.server module with mocks we control
     vi.doMock("../customer-fetch.server", () => ({
-      fetchCustomerBaseFields: vi.fn().mockImplementation(() => {
-        // Get the next adminGraphQL mock result
-        return mockAdminGraphQL().then((result: MockAdminResult) => {
-          if (!result.success) {
-            return { success: false, error: result.error, retryable: result.retryable };
-          }
-          return {
-            success: true,
-            data: result.data?.node,
-            retryable: false,
-          };
-        });
-      }),
-      fetchCustomerPiiFields: vi.fn().mockImplementation(() => {
-        // Get the next adminGraphQL mock result
-        return mockAdminGraphQL().then((result: MockAdminResult) => {
-          if (result.success) {
-            const node = result.data?.node as { email?: string; displayName?: string } | undefined;
-            return {
-              success: true,
-              email: node?.email ?? null,
-              displayName: node?.displayName ?? null,
-              retryable: false,
-              usedFallback: false,
-            };
-          }
-          if (result.errorCode === "access_denied") {
-            return {
-              success: true,
-              email: null,
-              displayName: null,
-              retryable: false,
-              usedFallback: true,
-            };
-          }
-          return {
-            success: false,
-            error: result.error,
-            retryable: result.retryable,
-            usedFallback: false,
-          };
-        });
-      }),
+      fetchCustomerBaseFields: mockFetchBaseFields,
+      fetchCustomerPiiFields: mockFetchPiiFields,
       incrementCustomerPiiAccessDeniedFallback: mockIncrementCounter,
       getCustomerPiiAccessDeniedFallbackCount: vi.fn().mockResolvedValue(0),
       fetchCustomerWithFallback: vi.fn().mockResolvedValue({ success: true, data: {} }),
@@ -434,18 +385,18 @@ describe("Real handleCustomer tests with fallback", () => {
   });
 
   it("fallback succeeds: logs warning, increments counter, passes 'fallback' piiMode", async () => {
-    // Base fields call: success (always made first now)
-    mockAdminGraphQL.mockResolvedValueOnce({
+    // Set up mock returns
+    mockFetchBaseFields.mockResolvedValue({
       success: true,
-      data: { node: { id: "gid://shopify/Customer/123", tags: ["net-terms"] } },
+      data: { id: "gid://shopify/Customer/123", tags: ["net-terms"] },
       retryable: false,
     });
-    // PII call: ACCESS_DENIED
-    mockAdminGraphQL.mockResolvedValueOnce({
-      success: false,
-      error: "Access denied: Required scope read_customers Level 1 + Email",
+    mockFetchPiiFields.mockResolvedValue({
+      success: true,
+      email: null,
+      displayName: null,
       retryable: false,
-      errorCode: "access_denied",
+      usedFallback: true,  // ACCESS_DENIED case
     });
 
     const { getSyncHandler } = await import("../processor.server");
@@ -497,8 +448,8 @@ describe("Real handleCustomer tests with fallback", () => {
   });
 
   it("base fetch denied: returns failure, no counter increment", async () => {
-    // Base fields call: ACCESS_DENIED
-    mockAdminGraphQL.mockResolvedValueOnce({
+    // Base fields fetch fails
+    mockFetchBaseFields.mockResolvedValue({
       success: false,
       error: "Access denied",
       retryable: false,
@@ -530,24 +481,18 @@ describe("Real handleCustomer tests with fallback", () => {
   });
 
   it("both calls succeed: no warning, no counter, 'fetched' piiMode", async () => {
-    // Base fields call: success
-    mockAdminGraphQL.mockResolvedValueOnce({
+    // Set up mock returns for both fetch calls
+    mockFetchBaseFields.mockResolvedValue({
       success: true,
-      data: { node: { id: "gid://shopify/Customer/789", tags: ["premium"] } },
+      data: { id: "gid://shopify/Customer/789", tags: ["premium"] },
       retryable: false,
     });
-    // PII call: success with PII
-    mockAdminGraphQL.mockResolvedValueOnce({
+    mockFetchPiiFields.mockResolvedValue({
       success: true,
-      data: {
-        node: {
-          id: "gid://shopify/Customer/789",
-          tags: ["premium"],
-          email: "customer@example.com",
-          displayName: "John Doe",
-        },
-      },
+      email: "customer@example.com",
+      displayName: "John Doe",
       retryable: false,
+      usedFallback: false,
     });
 
     const { getSyncHandler } = await import("../processor.server");
@@ -595,18 +540,18 @@ describe("Real handleCustomer tests with fallback", () => {
   });
 
   it("counter insert throws: message still succeeds (best-effort)", async () => {
-    // Base fields call: success
-    mockAdminGraphQL.mockResolvedValueOnce({
+    // Set up mock returns for fallback scenario
+    mockFetchBaseFields.mockResolvedValue({
       success: true,
-      data: { node: { id: "gid://shopify/Customer/999", tags: [] } },
+      data: { id: "gid://shopify/Customer/999", tags: [] },
       retryable: false,
     });
-    // PII call: ACCESS_DENIED
-    mockAdminGraphQL.mockResolvedValueOnce({
-      success: false,
-      error: "Access denied",
+    mockFetchPiiFields.mockResolvedValue({
+      success: true,
+      email: null,
+      displayName: null,
       retryable: false,
-      errorCode: "access_denied",
+      usedFallback: true,  // ACCESS_DENIED case
     });
 
     // Counter throws (e.g., table doesn't exist, migration not applied)
