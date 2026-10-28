@@ -104,6 +104,9 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - tests/integration/confirm-reimport-pin-db.test.ts
  * - tests/integration/bank-upload-robustness-db.test.ts
  * - tests/integration/ingestion-paths-db.test.ts
+ *
+ * Onboarding steps DB tests:
+ * - app/lib/__tests__/onboarding-steps-db.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
@@ -186,7 +189,6 @@ const DB_TEST_PATTERNS = [
   "app/lib/__tests__/reinstall-sync-reset-db.test.ts",
   "app/lib/__tests__/schema-trigger-guard-db.test.ts",
   "app/lib/__tests__/uninstall-lifecycle-db.test.ts",
-  "app/lib/__tests__/onboarding-steps-db.test.ts",
   "app/lib/matching/__tests__/integration.test.ts",
 
   // Bank import edge-case DB tests
@@ -232,6 +234,9 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Onboarding steps DB tests (buyer account counts query)
+  "app/lib/__tests__/onboarding-steps-db.test.ts",
 ];
 
 export default defineConfig({
