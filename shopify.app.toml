@@ -45,11 +45,6 @@ api_version = "2026-10"
   topics = ["app/scopes_update"]
   uri = "/webhooks/app/scopes_update"
 
-  # S21: App subscription update webhook (billing/plan changes)
-  [[webhooks.subscriptions]]
-  topics = ["app_subscriptions/update"]
-  uri = "/webhooks/app/subscriptions_update"
-
   # Mandatory compliance topics for public apps (GDPR/CCPA)
   [[webhooks.subscriptions]]
   uri = "/webhooks/compliance"
