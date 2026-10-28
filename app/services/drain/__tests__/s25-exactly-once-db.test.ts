@@ -15,6 +15,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { syncClockToDb } from "../../../../tests/helpers/db-clock";
+import { archiveForeignQueueRows } from "../../../../tests/helpers/archive-foreign-queue-rows";
 
 /**
  * Generate a letters-only random string (a-z) to avoid /\d{5,}/ assertion conflicts.
@@ -93,30 +94,6 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
   }
   function secondsFromNow(n: number): Date {
     return new Date(dbNow.getTime() + n * 1000);
-  }
-
-  /**
-   * Archive (not delete) foreign queue rows that don't belong to this test run.
-   * Foreign = message->>'shop' IS NULL OR doesn't match test-*-{TEST_SUFFIX}.myshopify.com.
-   * Uses pgmq.archive so rows move to archive tables instead of being lost.
-   * Call before batchSize=1 drain tests to ensure foreign rows can't take the only slot.
-   */
-  async function archiveForeignQueueRows(): Promise<void> {
-    const testDomainPattern = `%-${TEST_SUFFIX}.myshopify.com`;
-    await sql`
-      SELECT pgmq.archive('s6_sync', ARRAY(
-        SELECT msg_id FROM pgmq.q_s6_sync
-        WHERE message->>'shop' IS NULL
-           OR message->>'shop' NOT LIKE ${testDomainPattern}
-      ))
-    `;
-    await sql`
-      SELECT pgmq.archive('s6_bulk', ARRAY(
-        SELECT msg_id FROM pgmq.q_s6_bulk
-        WHERE message->>'shop' IS NULL
-           OR message->>'shop' NOT LIKE ${testDomainPattern}
-      ))
-    `;
   }
 
   beforeAll(async () => {
@@ -2100,7 +2077,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         `;
 
         // Archive foreign queue rows so they can't take the batchSize=1 slot
-        await archiveForeignQueueRows();
+        await archiveForeignQueueRows(sql, [SHOP_DOMAIN]);
 
         // Process the drain (which processes both sync and bulk queues)
         await runDrain(sql, {
@@ -3498,7 +3475,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         `;
 
         // Archive foreign queue rows so they can't take the batchSize=1 slot
-        await archiveForeignQueueRows();
+        await archiveForeignQueueRows(sql, [DLQ_SHOP_DOMAIN]);
 
         // Run drain - should dead-letter the message
         await runDrain(sql, {
@@ -4973,7 +4950,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       `;
 
       // Archive foreign queue rows so they can't take the batchSize=1 slot
-      await archiveForeignQueueRows();
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       // Process the drain (which processes both sync and bulk queues)
       await runDrain(sql, { 
@@ -5060,7 +5037,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
       `;
 
       // Archive foreign queue rows so they can't take the batchSize=1 slot
-      await archiveForeignQueueRows();
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       // Process the drain
       await runDrain(sql, { 
