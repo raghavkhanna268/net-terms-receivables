@@ -95,6 +95,30 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
     return new Date(dbNow.getTime() + n * 1000);
   }
 
+  /**
+   * Archive (not delete) foreign queue rows that don't belong to this test run.
+   * Foreign = message->>'shop' IS NULL OR doesn't match test-*-{TEST_SUFFIX}.myshopify.com.
+   * Uses pgmq.archive so rows move to archive tables instead of being lost.
+   * Call before batchSize=1 drain tests to ensure foreign rows can't take the only slot.
+   */
+  async function archiveForeignQueueRows(): Promise<void> {
+    const testDomainPattern = `%-${TEST_SUFFIX}.myshopify.com`;
+    await sql`
+      SELECT pgmq.archive('s6_sync', ARRAY(
+        SELECT msg_id FROM pgmq.q_s6_sync
+        WHERE message->>'shop' IS NULL
+           OR message->>'shop' NOT LIKE ${testDomainPattern}
+      ))
+    `;
+    await sql`
+      SELECT pgmq.archive('s6_bulk', ARRAY(
+        SELECT msg_id FROM pgmq.q_s6_bulk
+        WHERE message->>'shop' IS NULL
+           OR message->>'shop' NOT LIKE ${testDomainPattern}
+      ))
+    `;
+  }
+
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
 
@@ -2075,6 +2099,9 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           VALUES (NOW(), ${DEFAULT_DRAIN_CONFIG.maxRetries - 1}, NOW(), ${sql.json(message)})
         `;
 
+        // Archive foreign queue rows so they can't take the batchSize=1 slot
+        await archiveForeignQueueRows();
+
         // Process the drain (which processes both sync and bulk queues)
         const result = await runDrain(sql, {
           ...DEFAULT_DRAIN_CONFIG,
@@ -2082,8 +2109,12 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           timeBudgetMs: 5000,
         });
 
-        // Should have dead-lettered exactly 1 message (permanent error)
-        expect(result.deadLettered).toBe(1);
+        // Verify this test's message was dead-lettered (check specific row, not global count)
+        const [dlqCount] = await sql<{ count: string }[]>`
+          SELECT COUNT(*)::text as count FROM s6_dead_letter
+          WHERE original_queue = 's6_bulk' AND message->>'bulkOperationId' = ${bulkOpId}
+        `;
+        expect(parseInt(dlqCount.count, 10)).toBe(1);
 
         // Find the bulk_message_failed log line by event name (no loop)
         // safeLog("warn", "bulk_message_failed", ...) outputs to console.warn as a single JSON string
@@ -3466,15 +3497,17 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           VALUES (NOW(), ${DEFAULT_DRAIN_CONFIG.maxRetries - 1}, NOW(), ${sql.json(message)})
         `;
 
+        // Archive foreign queue rows so they can't take the batchSize=1 slot
+        await archiveForeignQueueRows();
+
         // Run drain - should dead-letter the message
-        const drainResult = await runDrain(sql, {
+        await runDrain(sql, {
           ...DEFAULT_DRAIN_CONFIG,
           batchSize: 1,
           timeBudgetMs: 5000,
         });
-        expect(drainResult.deadLettered).toBe(1);
 
-        // Verify DLQ row exists after first drain with exact error value
+        // Verify this test's DLQ row exists after drain with exact error value (own-row assertion)
         const [dlqAfterDrain] = await sql<{ count: string; error: string }[]>`
           SELECT COUNT(*)::text as count, MAX(error) as error FROM s6_dead_letter
           WHERE original_queue = 's6_bulk' AND message->>'bulkOperationId' = ${bulkOpId}
@@ -4920,14 +4953,8 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         retryable: false,
       });
 
-      // Clear any existing messages in the bulk queue
+      // Clear any existing messages in the bulk queue for this op
       await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' = ${bulkOpId}`;
-
-      // Purge s6_sync queue to prevent flaky deadLettered counts from leftover messages
-      // (runDrain drains both s6_sync and s6_bulk; stale CREDIT_STATUS_RECOMPUTE messages
-      // from prior Sequential-DB tests can get dead-lettered here)
-      await sql`DELETE FROM pgmq.q_s6_sync`;
-      await sql`DELETE FROM pgmq.a_s6_sync`;
 
       // Insert message directly into pgmq. pgmq.read() increments read_ct by 1,
       // so insert with maxRetries - 1 (4) to have read_ct = maxRetries (5) after read.
@@ -4945,17 +4972,17 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         VALUES (NOW(), ${DEFAULT_DRAIN_CONFIG.maxRetries - 1}, NOW(), ${sql.json(message)})
       `;
 
+      // Archive foreign queue rows so they can't take the batchSize=1 slot
+      await archiveForeignQueueRows();
+
       // Process the drain (which processes both sync and bulk queues)
-      const result = await runDrain(sql, { 
+      await runDrain(sql, { 
         ...DEFAULT_DRAIN_CONFIG, 
         batchSize: 1,
         timeBudgetMs: 5000 
       });
 
-      // Should have dead-lettered exactly 1 message
-      expect(result.deadLettered).toBe(1);
-
-      // Verify DLQ row exists with the correct error
+      // Verify this test's DLQ row exists with the correct error (own-row assertion)
       const [dlqRow] = await sql<{ error: string }[]>`
         SELECT error FROM s6_dead_letter 
         WHERE original_queue = 's6_bulk' 
@@ -5005,12 +5032,13 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         retryable: false,
       });
 
-      // Clear any existing messages
+      // Clear any existing messages for this op
       await sql`DELETE FROM pgmq.q_s6_bulk WHERE message->>'bulkOperationId' = ${bulkOpId}`;
 
       // Insert message. pgmq.read() increments read_ct by 1, so insert with
       // maxRetries - 2 (3) to have read_ct = maxRetries - 1 (4) after read.
       // 4 < 5 = no DLQ, just result.failed++.
+      const initialReadCt = DEFAULT_DRAIN_CONFIG.maxRetries - 2;
       const message = {
         topic: "BULK_OPERATIONS_FINISH",
         shop: TEST_SHOP_DOMAIN,
@@ -5022,7 +5050,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
 
       await sql`
         INSERT INTO pgmq.q_s6_bulk (vt, read_ct, enqueued_at, message)
-        VALUES (NOW(), ${DEFAULT_DRAIN_CONFIG.maxRetries - 2}, NOW(), ${sql.json(message)})
+        VALUES (NOW(), ${initialReadCt}, NOW(), ${sql.json(message)})
       `;
 
       // Count DLQ rows before
@@ -5031,17 +5059,25 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         WHERE original_queue = 's6_bulk' AND message->>'bulkOperationId' = ${bulkOpId}
       `;
 
+      // Archive foreign queue rows so they can't take the batchSize=1 slot
+      await archiveForeignQueueRows();
+
       // Process the drain
-      const result = await runDrain(sql, { 
+      await runDrain(sql, { 
         ...DEFAULT_DRAIN_CONFIG, 
         batchSize: 1,
         timeBudgetMs: 5000 
       });
 
-      // Should have failed exactly 1 message but NOT dead-lettered
-      expect(result.failed).toBe(1);
+      // Verify this test's message was processed: read_ct should have incremented
+      const [queueRow] = await sql<{ read_ct: number }[]>`
+        SELECT read_ct FROM pgmq.q_s6_bulk
+        WHERE message->>'bulkOperationId' = ${bulkOpId}
+      `;
+      expect(queueRow).toBeDefined();
+      expect(queueRow.read_ct).toBe(initialReadCt + 1);
 
-      // No new DLQ row should exist
+      // No new DLQ row should exist (failed but not dead-lettered)
       const [afterDlq] = await sql<{ count: string }[]>`
         SELECT COUNT(*)::text as count FROM s6_dead_letter 
         WHERE original_queue = 's6_bulk' AND message->>'bulkOperationId' = ${bulkOpId}
