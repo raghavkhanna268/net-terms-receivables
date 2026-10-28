@@ -15,6 +15,7 @@ import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { processOrderWebhook } from "../order.server";
 import type { ShopifyOrder } from "../types";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -71,14 +72,27 @@ describeWithDb("Due date normalization for midnight UTC values (DB)", () => {
   });
 
   afterAll(async () => {
-    for (const { suffix } of TIMEZONES) {
-      const shop = shops[suffix];
-      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shop.id}`;
-      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shop.id}`;
-      await sql`DELETE FROM "Shop" WHERE id = ${shop.id}`;
-      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-duenorm-" + suffix + "-" + TEST_SUFFIX + "%"}`;
+    const allShopDomains = TIMEZONES.map(({ suffix }) => shops[suffix].domain);
+
+    try {
+      // Clean up queue messages for all test shops before deleting them (prevents flakes in later test files)
+      for (const domain of allShopDomains) {
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${domain}`;
+        await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${domain}`;
+      }
+
+      for (const { suffix } of TIMEZONES) {
+        const shop = shops[suffix];
+        await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shop.id}`;
+        await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shop.id}`;
+        await sql`DELETE FROM "Shop" WHERE id = ${shop.id}`;
+        await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-duenorm-" + suffix + "-" + TEST_SUFFIX + "%"}`;
+      }
+
+      await assertNoQueueLeftovers(sql, allShopDomains, "due-date-normalize-db.test.ts");
+    } finally {
+      await sql.end();
     }
-    await sql.end();
   });
 
   beforeEach(async () => {

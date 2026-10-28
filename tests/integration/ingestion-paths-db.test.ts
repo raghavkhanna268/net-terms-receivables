@@ -35,6 +35,7 @@ import {
   companyLocationGid,
   customerGid,
 } from "../helpers/gid.js";
+import { assertNoQueueLeftovers } from "../helpers/queue-leftovers.js";
 import { calculateDaysPastDue } from "../../app/lib/aging-dates.server.js";
 import { getBucketForDaysPastDue, type AgingBucketKey } from "../../app/lib/aging.js";
 import { getBuyerLedger } from "../../app/lib/aging-queries.server.js";
@@ -95,13 +96,22 @@ describeWithDb("Ingestion Paths Integration", () => {
   });
 
   afterAll(async () => {
-    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "AccountSource" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
-    await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-ing-" + TEST_SUFFIX + "%"}`;
-    await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
-    await sql.end();
+    try {
+      // Clean up queue messages for this shop before deleting it (prevents flakes in later test files)
+      await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+      await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
+      await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
+      await sql`DELETE FROM "AccountSource" WHERE "shopId" = ${TEST_SHOP_ID}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
+      await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-ing-" + TEST_SUFFIX + "%"}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+      await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "ingestion-paths-db.test.ts");
+    } finally {
+      await sql.end();
+    }
   });
 
   beforeEach(async () => {
