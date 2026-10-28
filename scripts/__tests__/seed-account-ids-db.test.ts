@@ -72,14 +72,17 @@ describeWithDb("seed account ID migration (DB)", () => {
     shopId: string;
     companyLocationId: string;
     name?: string;
+    companyId?: string;
   }): Promise<void> {
+    // kind = 'COMPANY' requires companyId to be set per BuyerAccount_kind_consistency check
+    const companyId = opts.companyId ?? ("gid:" + "//shopify/Company/test" + Date.now());
     await sql`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", kind, "companyLocationId", name,
+        id, "shopId", kind, "companyId", "companyLocationId", name,
         "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt"
       )
       VALUES (
-        ${opts.id}, ${opts.shopId}, 'COMPANY', ${opts.companyLocationId},
+        ${opts.id}, ${opts.shopId}, 'COMPANY', ${companyId}, ${opts.companyLocationId},
         ${opts.name ?? "Test Account"}, 30, 'explicit', 'OK', NOW(), NOW()
       )
     `;
