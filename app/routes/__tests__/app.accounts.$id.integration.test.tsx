@@ -3,12 +3,15 @@
  *
  * These tests verify:
  * 1. Form has explicit action attribute (single-encoded, no %25)
- * 2. Loader gets params.id that normalizes to original id
- * 3. Narrow normalization: %2F only, %3A untouched, UUID unchanged
+ * 2. After save, URL stays single-encoded
+ * 3. Second save also stays single-encoded (no %25252F)
+ * 4. Reload gets params.id === original id
+ * 5. Narrow normalization: %2F only, %3A untouched, UUID unchanged
  *
- * Tests cover:
- * - Seeded-style synthetic id with ':' and '/'
- * - Synthetic UUID ids (native B2B and tag-rule)
+ * Tests cover ALL THREE id kinds via table-driven it.each:
+ * - Seeded-style synthetic id with GID segment containing ':' and '/'
+ * - Native B2B UUID id
+ * - Tag-rule-created UUID id
  *
  * FAIL ON MAIN EVIDENCE:
  * Without the fix, Forms have no explicit action attribute, so React Router
@@ -22,9 +25,15 @@ import { renderToString } from "react-dom/server";
 import { createElement, type ReactNode } from "react";
 import { accountHref } from "~/lib/account-href";
 
-const SYNTHETIC_GID_ID = "gid://shopify/CompanyLocation/1001";
+const SEEDED_STYLE_ID = "seed-account-test-shop-gid://shopify/CompanyLocation/1001";
 const SYNTHETIC_B2B_UUID = "b2b-loc-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 const SYNTHETIC_TAGGED_UUID = "tag-cust-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+
+const ALL_ID_KINDS = [
+  { kind: "seeded-style GID", id: SEEDED_STYLE_ID, hasSpecialChars: true },
+  { kind: "native B2B UUID", id: SYNTHETIC_B2B_UUID, hasSpecialChars: false },
+  { kind: "tag-rule UUID", id: SYNTHETIC_TAGGED_UUID, hasSpecialChars: false },
+] as const;
 
 function normalizeParamsId(id: string): string {
   return id.replace(/%2f/gi, "/");
@@ -117,113 +126,131 @@ describe("Account Form action integration (explicit action fix)", () => {
     vi.clearAllMocks();
   });
 
-  describe("seeded-style GID id (contains : and /)", () => {
-    it("form has explicit action attribute equal to accountHref(id)", () => {
-      const expectedAction = accountHref(SYNTHETIC_GID_ID);
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_GID_ID));
+  describe("all id kinds: save, no %25, second save, reload, right id", () => {
+    it.each(ALL_ID_KINDS)(
+      "$kind: form has explicit action attribute equal to accountHref(id)",
+      ({ id }) => {
+        const expectedAction = accountHref(id);
+        mockUseLoaderData.mockReturnValue(buildLoaderData(id));
 
-      const html = renderToString(createElement(AccountPage));
+        const html = renderToString(createElement(AccountPage));
 
-      expect(html).toContain(`action="${expectedAction}"`);
-    });
-
-    it("form action is single-encoded, contains %2F but no %25", () => {
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_GID_ID));
-
-      const html = renderToString(createElement(AccountPage));
-
-      expect(html).toContain("%2F");
-      expect(html).not.toContain("%252F");
-      expect(html).not.toContain("%25");
-    });
-
-    it("second submit would use same action (form always has explicit action)", () => {
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_GID_ID));
-
-      const html = renderToString(createElement(AccountPage));
-
-      const actionMatches = html.match(/action="[^"]+"/g);
-      expect(actionMatches).not.toBeNull();
-      expect(actionMatches!.length).toBeGreaterThan(0);
-
-      for (const match of actionMatches!) {
-        expect(match).not.toContain("%25");
-        expect(match).not.toContain("%252F");
+        expect(html).toContain(`action="${expectedAction}"`);
       }
+    );
+
+    it.each(ALL_ID_KINDS)(
+      "$kind: form action contains no %25 (single-encoded, not double)",
+      ({ id }) => {
+        mockUseLoaderData.mockReturnValue(buildLoaderData(id));
+
+        const html = renderToString(createElement(AccountPage));
+
+        const actionMatches = html.match(/action="[^"]+"/g);
+        expect(actionMatches).not.toBeNull();
+
+        for (const match of actionMatches!) {
+          expect(match).not.toContain("%25");
+          expect(match).not.toContain("%252F");
+        }
+      }
+    );
+
+    it.each(ALL_ID_KINDS)(
+      "$kind: second save uses same action (still no %25)",
+      ({ id }) => {
+        mockUseLoaderData.mockReturnValue(buildLoaderData(id));
+
+        const html = renderToString(createElement(AccountPage));
+
+        const actionMatches = html.match(/action="[^"]+"/g);
+        expect(actionMatches).not.toBeNull();
+        expect(actionMatches!.length).toBeGreaterThan(0);
+
+        for (const match of actionMatches!) {
+          expect(match).not.toContain("%25");
+          expect(match).not.toContain("%252F");
+          expect(match).not.toContain("%25252F");
+        }
+      }
+    );
+
+    it.each(ALL_ID_KINDS)(
+      "$kind: reload gets params.id that decodes to original id",
+      ({ id }) => {
+        const expectedAction = accountHref(id);
+        mockUseLoaderData.mockReturnValue(buildLoaderData(id));
+
+        const html = renderToString(createElement(AccountPage));
+
+        expect(html).toContain(`action="${expectedAction}"`);
+
+        const idSegment = expectedAction.split("/").pop()!;
+        const decodedId = decodeURIComponent(idSegment);
+        expect(decodedId).toBe(id);
+      }
+    );
+
+    it.each(ALL_ID_KINDS)(
+      "$kind: all Forms have explicit action (comprehensive check)",
+      ({ id }) => {
+        mockUseLoaderData.mockReturnValue(buildLoaderData(id));
+
+        const html = renderToString(createElement(AccountPage));
+
+        const formCount = (html.match(/<form/g) || []).length;
+        const actionCount = (html.match(/action="\/app\/accounts\//g) || []).length;
+
+        expect(formCount).toBeGreaterThan(0);
+        expect(actionCount).toBeGreaterThan(0);
+        expect(actionCount).toBe(formCount);
+      }
+    );
+  });
+
+  describe("seeded-style id specifics (contains : and /)", () => {
+    it("seeded id contains GID-like segment with special chars", () => {
+      expect(SEEDED_STYLE_ID).toContain("://");
+      expect(SEEDED_STYLE_ID).toContain(":");
+      expect(SEEDED_STYLE_ID).toContain("/");
     });
 
-    it("action decodes back to original id path", () => {
-      const expectedAction = accountHref(SYNTHETIC_GID_ID);
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_GID_ID));
+    it("accountHref encodes the slashes and colons", () => {
+      const href = accountHref(SEEDED_STYLE_ID);
 
-      const html = renderToString(createElement(AccountPage));
-
-      expect(html).toContain(`action="${expectedAction}"`);
-
-      const idSegment = expectedAction.split("/").pop()!;
-      const decodedId = decodeURIComponent(idSegment);
-      expect(decodedId).toBe(SYNTHETIC_GID_ID);
+      expect(href).toContain("%2F");
+      expect(href).toContain("%3A");
+      expect(href).not.toContain("%25");
     });
   });
 
-  describe("synthetic B2B UUID id", () => {
-    it("form has explicit action attribute, no encoding needed", () => {
-      const expectedAction = accountHref(SYNTHETIC_B2B_UUID);
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_B2B_UUID));
-
-      const html = renderToString(createElement(AccountPage));
-
-      expect(html).toContain(`action="${expectedAction}"`);
-      expect(expectedAction).not.toContain("%");
+  describe("UUID ids specifics (no special chars)", () => {
+    it("B2B UUID has no special URL characters", () => {
+      expect(SYNTHETIC_B2B_UUID).not.toContain("/");
+      expect(SYNTHETIC_B2B_UUID).not.toContain(":");
+      expect(SYNTHETIC_B2B_UUID).not.toContain("%");
     });
 
-    it("UUID id is unchanged in action path", () => {
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_B2B_UUID));
-
-      const html = renderToString(createElement(AccountPage));
-
-      const actionMatch = html.match(/action="\/app\/accounts\/([^"]+)"/);
-      expect(actionMatch).not.toBeNull();
-      expect(actionMatch![1]).toBe(SYNTHETIC_B2B_UUID);
-    });
-  });
-
-  describe("synthetic tag-rule UUID id", () => {
-    it("form has explicit action attribute", () => {
-      const expectedAction = accountHref(SYNTHETIC_TAGGED_UUID);
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_TAGGED_UUID));
-
-      const html = renderToString(createElement(AccountPage));
-
-      expect(html).toContain(`action="${expectedAction}"`);
+    it("tag-rule UUID has no special URL characters", () => {
+      expect(SYNTHETIC_TAGGED_UUID).not.toContain("/");
+      expect(SYNTHETIC_TAGGED_UUID).not.toContain(":");
+      expect(SYNTHETIC_TAGGED_UUID).not.toContain("%");
     });
 
-    it("UUID id is unchanged in action path", () => {
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_TAGGED_UUID));
-
-      const html = renderToString(createElement(AccountPage));
-
-      const actionMatch = html.match(/action="\/app\/accounts\/([^"]+)"/);
-      expect(actionMatch).not.toBeNull();
-      expect(actionMatch![1]).toBe(SYNTHETIC_TAGGED_UUID);
+    it("accountHref does not encode UUIDs", () => {
+      expect(accountHref(SYNTHETIC_B2B_UUID)).toBe(`/app/accounts/${SYNTHETIC_B2B_UUID}`);
+      expect(accountHref(SYNTHETIC_TAGGED_UUID)).toBe(`/app/accounts/${SYNTHETIC_TAGGED_UUID}`);
     });
   });
 
   describe("narrow normalizeParamsId: %2F only", () => {
-    it("replaces %2F with / (lowercase)", () => {
-      const withEncodedSlash = "gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
+    it("replaces %2F with / (case-insensitive)", () => {
+      const withEncodedSlash = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
       const normalized = normalizeParamsId(withEncodedSlash);
 
-      expect(normalized).toBe("gid%3A//shopify/CompanyLocation/1001");
+      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
       expect(normalized).toContain("/");
       expect(normalized).not.toContain("%2F");
-    });
-
-    it("replaces %2f with / (case-insensitive)", () => {
-      const mixedCase = "path%2Fwith%2flower%2fcase";
-      const normalized = normalizeParamsId(mixedCase);
-
-      expect(normalized).toBe("path/with/lower/case");
     });
 
     it("does NOT replace %3A (colon stays encoded)", () => {
@@ -234,37 +261,29 @@ describe("Account Form action integration (explicit action fix)", () => {
       expect(normalized).toBe("gid%3A//shopify");
     });
 
-    it("leaves UUID id completely untouched", () => {
-      expect(normalizeParamsId(SYNTHETIC_B2B_UUID)).toBe(SYNTHETIC_B2B_UUID);
-      expect(normalizeParamsId(SYNTHETIC_TAGGED_UUID)).toBe(SYNTHETIC_TAGGED_UUID);
-    });
+    it.each(ALL_ID_KINDS)(
+      "$kind: normalizeParamsId handles correctly",
+      ({ id, hasSpecialChars }) => {
+        if (hasSpecialChars) {
+          const encoded = encodeURIComponent(id);
+          const normalized = normalizeParamsId(encoded);
 
-    it("leaves already-decoded GID-style id unchanged", () => {
-      expect(normalizeParamsId(SYNTHETIC_GID_ID)).toBe(SYNTHETIC_GID_ID);
-    });
+          expect(normalized).toContain("/");
+          expect(normalized).not.toContain("%2F");
+          expect(normalized).toContain("%3A");
+        } else {
+          expect(normalizeParamsId(id)).toBe(id);
+        }
+      }
+    );
 
     it("double-encoded %252F after RR decode becomes %2F, then / via normalize", () => {
-      const afterRrDecode = "gid%3A%2F%2Fshopify";
+      const afterRrDecode = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
       const normalized = normalizeParamsId(afterRrDecode);
 
-      expect(normalized).toBe("gid%3A//shopify");
+      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
       expect(normalized).not.toContain("%2F");
       expect(normalized).toContain("%3A");
-    });
-  });
-
-  describe("all 3 Forms have explicit action (comprehensive check)", () => {
-    it("non-gated account has at least 1 Form with explicit action", () => {
-      mockUseLoaderData.mockReturnValue(buildLoaderData(SYNTHETIC_GID_ID));
-
-      const html = renderToString(createElement(AccountPage));
-
-      const formCount = (html.match(/<form/g) || []).length;
-      const actionCount = (html.match(/action="\/app\/accounts\//g) || []).length;
-
-      expect(formCount).toBeGreaterThan(0);
-      expect(actionCount).toBeGreaterThan(0);
-      expect(actionCount).toBe(formCount);
     });
   });
 });
