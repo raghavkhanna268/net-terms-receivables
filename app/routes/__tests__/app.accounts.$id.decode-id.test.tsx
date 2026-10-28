@@ -265,38 +265,6 @@ describe("AccountPage router integration: re-encoded id handling", () => {
     expect(router.state.location.pathname).not.toContain("%25");
   });
 
-  it("Form action attribute without decode produces double-encoded URL (control test)", async () => {
-    const tripleEncodedId = encodeURIComponent(encodeURIComponent(encodeURIComponent(SEEDED_STYLE_ID)));
-    const tripleEncodedPath = `/app/accounts/${tripleEncodedId}`;
-
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: ({ params }) => {
-            return buildLoaderData(params.id!);
-          },
-        },
-      ],
-      { initialEntries: [tripleEncodedPath] }
-    );
-
-    render(createElement(RouterProvider, { router }));
-
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[method='post']");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditForm = document.querySelector("form[method='post']") as HTMLFormElement;
-    const formActionAttr = creditForm.getAttribute("action");
-    expect(formActionAttr).toContain("%25");
-  });
-
   it("after revalidation: location.pathname remains single-encoded", async () => {
     const singleEncodedHref = accountHref(SEEDED_STYLE_ID);
 

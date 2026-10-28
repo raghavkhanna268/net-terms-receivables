@@ -212,7 +212,12 @@ describeWithDb("account-href encoded id DB test (loader and action)", () => {
   const ACCOUNT_ID = `${TEST_ID_WITH_SLASHES}-${TEST_SUFFIX}`;
   const COMPANY_ID = `company-enc-${TEST_SUFFIX}`;
   const LOCATION_ID = `location-enc-${TEST_SUFFIX}`;
-  const NONEXISTENT_ACCOUNT_ID = `test-nonexistent/path:segment-${TEST_SUFFIX}`;
+
+  const SHOP2_ID = `shop-enc2-${TEST_SUFFIX}`;
+  const SHOP2_DOMAIN = `test-enc2-${TEST_SUFFIX}.example.com`;
+  const ACCOUNT2_ID = `${TEST_ID_WITH_SLASHES}-foreign-${TEST_SUFFIX}`;
+  const COMPANY2_ID = `company-enc2-${TEST_SUFFIX}`;
+  const LOCATION2_ID = `location-enc2-${TEST_SUFFIX}`;
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, sqlOptions);
@@ -231,12 +236,27 @@ describeWithDb("account-href encoded id DB test (loader and action)", () => {
         'Test Encoded Account', 50000.00, 'OK', false, NOW(), NOW()
       )
     `;
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP2_ID}, ${SHOP2_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", "manualHold", "holdReasonCode", "createdAt", "updatedAt"
+      ) VALUES (
+        ${ACCOUNT2_ID}, ${SHOP2_ID}, 'COMPANY', ${COMPANY2_ID}, ${LOCATION2_ID},
+        'Foreign Shop Account', 75000.00, 'OK', false, NULL, NOW(), NOW()
+      )
+    `;
   });
 
   afterAll(async () => {
-    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${SHOP_ID}`;
-    await sql`DELETE FROM "BuyerAccount" WHERE id = ${ACCOUNT_ID}`;
-    await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" IN (${SHOP_ID}, ${SHOP2_ID})`;
+    await sql`DELETE FROM "BuyerAccount" WHERE id IN (${ACCOUNT_ID}, ${ACCOUNT2_ID})`;
+    await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_ID}, ${SHOP2_ID})`;
     await sql.end();
   });
 
@@ -382,12 +402,12 @@ describeWithDb("account-href encoded id DB test (loader and action)", () => {
     `;
   });
 
-  it("loader returns 'Account not found' for nonexistent double-encoded id", async () => {
+  it("loader returns 'Account not found' for foreign shop's account (cross-shop isolation)", async () => {
     const { requestContext } = await import("~/lib/request-context.server");
     const { loader } = await import("../app.accounts.$id");
 
-    const doubleEncodedId = encodeURIComponent(encodeURIComponent(NONEXISTENT_ACCOUNT_ID));
-    const href = `/app/accounts/${doubleEncodedId}`;
+    const doubleEncodedForeignId = encodeURIComponent(encodeURIComponent(ACCOUNT2_ID));
+    const href = `/app/accounts/${doubleEncodedForeignId}`;
     const url = new URL(`https://example.com${href}`);
     const request = new Request(url.toString());
 
@@ -406,7 +426,7 @@ describeWithDb("account-href encoded id DB test (loader and action)", () => {
     const args = {
       request,
       context: mockContext,
-      params: { id: doubleEncodedId },
+      params: { id: doubleEncodedForeignId },
       url,
       pattern: "/app/accounts/:id",
     };
@@ -420,23 +440,34 @@ describeWithDb("account-href encoded id DB test (loader and action)", () => {
     expect(data.error).toBe("Account not found");
   });
 
-  it("action returns 'Account not found' for nonexistent double-encoded id (no write)", async () => {
+  it("action returns 'Account not found' for foreign shop's account (no update, no audit)", async () => {
     const { requestContext } = await import("~/lib/request-context.server");
     const { action } = await import("../app.accounts.$id");
 
-    const [countBefore] = await sql<{ count: string }[]>`
-      SELECT COUNT(*) AS count FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}
+    const [beforeRow] = await sql<{
+      manualHold: boolean;
+      holdState: string;
+      holdReasonCode: string | null;
+      creditLimit: string | null;
+    }[]>`
+      SELECT "manualHold", "holdState", "holdReasonCode", "creditLimit"::text
+      FROM "BuyerAccount" WHERE id = ${ACCOUNT2_ID}
     `;
 
-    const doubleEncodedId = encodeURIComponent(encodeURIComponent(NONEXISTENT_ACCOUNT_ID));
-    const href = `/app/accounts/${doubleEncodedId}`;
+    const [auditCountBefore] = await sql<{ count: string }[]>`
+      SELECT COUNT(*) AS count FROM "AuditEvent"
+      WHERE data->>'buyerAccountId' = ${ACCOUNT2_ID}
+    `;
+
+    const doubleEncodedForeignId = encodeURIComponent(encodeURIComponent(ACCOUNT2_ID));
+    const href = `/app/accounts/${doubleEncodedForeignId}`;
     const url = new URL(`https://example.com${href}`);
 
     const formData = new FormData();
     formData.append("_action", "updateCredit");
     formData.append("manualHold", "true");
     formData.append("holdReasonCode", "MANUAL_HOLD");
-    formData.append("noLimit", "true");
+    formData.append("creditLimit", "100000");
 
     const request = new Request(url.toString(), {
       method: "POST",
@@ -458,7 +489,7 @@ describeWithDb("account-href encoded id DB test (loader and action)", () => {
     const args = {
       request,
       context: mockContext,
-      params: { id: doubleEncodedId },
+      params: { id: doubleEncodedForeignId },
       url,
       pattern: "/app/accounts/:id",
     };
@@ -471,9 +502,25 @@ describeWithDb("account-href encoded id DB test (loader and action)", () => {
     expect(data.success).toBe(false);
     expect(data.error).toBe("Account not found");
 
-    const [countAfter] = await sql<{ count: string }[]>`
-      SELECT COUNT(*) AS count FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}
+    const [afterRow] = await sql<{
+      manualHold: boolean;
+      holdState: string;
+      holdReasonCode: string | null;
+      creditLimit: string | null;
+    }[]>`
+      SELECT "manualHold", "holdState", "holdReasonCode", "creditLimit"::text
+      FROM "BuyerAccount" WHERE id = ${ACCOUNT2_ID}
     `;
-    expect(countAfter.count).toBe(countBefore.count);
+
+    expect(afterRow.manualHold).toBe(beforeRow.manualHold);
+    expect(afterRow.holdState).toBe(beforeRow.holdState);
+    expect(afterRow.holdReasonCode).toBe(beforeRow.holdReasonCode);
+    expect(afterRow.creditLimit).toBe(beforeRow.creditLimit);
+
+    const [auditCountAfter] = await sql<{ count: string }[]>`
+      SELECT COUNT(*) AS count FROM "AuditEvent"
+      WHERE data->>'buyerAccountId' = ${ACCOUNT2_ID}
+    `;
+    expect(auditCountAfter.count).toBe(auditCountBefore.count);
   });
 });
