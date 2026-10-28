@@ -230,7 +230,7 @@ describe("/privacy markdown rendering", () => {
 
 describe("markdownToHtml function", () => {
   it("handles inline code before emphasis processing", async () => {
-    const { _markdownToHtml } = await import("../privacy");
+    const { _markdownToHtml } = await import("../../lib/legal-page.server");
 
     const input = "Use `read_all_orders` scope and `RESEND_API_KEY` var";
     const output = _markdownToHtml(input);
@@ -241,7 +241,7 @@ describe("markdownToHtml function", () => {
   });
 
   it("does not convert snake_case to italics", async () => {
-    const { _markdownToHtml } = await import("../privacy");
+    const { _markdownToHtml } = await import("../../lib/legal-page.server");
 
     const input = "The s8_tagged_customers table and s22_data_requests record";
     const output = _markdownToHtml(input);
@@ -253,7 +253,7 @@ describe("markdownToHtml function", () => {
   });
 
   it("does not convert asterisk markers on identifiers to italics", async () => {
-    const { _markdownToHtml } = await import("../privacy");
+    const { _markdownToHtml } = await import("../../lib/legal-page.server");
 
     const input = "Fields: email*, displayName*, and name*";
     const output = _markdownToHtml(input);
@@ -265,7 +265,7 @@ describe("markdownToHtml function", () => {
   });
 
   it("still converts proper emphasis with word boundaries", async () => {
-    const { _markdownToHtml } = await import("../privacy");
+    const { _markdownToHtml } = await import("../../lib/legal-page.server");
 
     const input = "This is *emphasized* text and _also emphasized_ here";
     const output = _markdownToHtml(input);
@@ -275,7 +275,7 @@ describe("markdownToHtml function", () => {
   });
 
   it("preserves snake_case in privacy-implementation.md (verbatim coverage)", async () => {
-    const { _markdownToHtml } = await import("../privacy");
+    const { _markdownToHtml } = await import("../../lib/legal-page.server");
 
     const implPath = resolve(
       process.cwd(),
@@ -298,7 +298,7 @@ describe("markdownToHtml function", () => {
   });
 
   it("preserves code spans in privacy-implementation.md", async () => {
-    const { _markdownToHtml } = await import("../privacy");
+    const { _markdownToHtml } = await import("../../lib/legal-page.server");
 
     const implPath = resolve(
       process.cwd(),
@@ -316,7 +316,7 @@ describe("markdownToHtml function", () => {
   });
 
   it("preserves email*/displayName* asterisk markers in privacy-implementation.md", async () => {
-    const { _markdownToHtml } = await import("../privacy");
+    const { _markdownToHtml } = await import("../../lib/legal-page.server");
 
     const implPath = resolve(
       process.cwd(),
@@ -608,5 +608,30 @@ describe("legal docs contain no TBD or TODO markers", () => {
 
   it("merchant-terms.md contains no '[Raghav to confirm' markers", () => {
     expect(termsContent).not.toContain("[Raghav to confirm");
+  });
+});
+
+describe("/privacy HTML output stability", () => {
+  it("renders byte-identical HTML after refactoring to shared module", async () => {
+    const { createHash } = await import("crypto");
+    const { loader } = await import("../privacy");
+
+    const request = new Request("https://example.com/privacy");
+
+    const response = await loader({
+      request,
+      context: {} as never,
+      params: {},
+      url: new URL(request.url),
+      pattern: "/privacy",
+    });
+
+    const html = await response.text();
+    const hash = createHash("sha256").update(html).digest("hex");
+
+    expect(hash).toBe(
+      "57bcf73d6af3bc1623ba02c07fedb84455339927cc8bcb927f80f93f8edb84da"
+    );
+    expect(html.length).toBe(29181);
   });
 });
