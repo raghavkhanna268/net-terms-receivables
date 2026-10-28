@@ -2103,7 +2103,7 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
         await archiveForeignQueueRows();
 
         // Process the drain (which processes both sync and bulk queues)
-        const result = await runDrain(sql, {
+        await runDrain(sql, {
           ...DEFAULT_DRAIN_CONFIG,
           batchSize: 1,
           timeBudgetMs: 5000,
