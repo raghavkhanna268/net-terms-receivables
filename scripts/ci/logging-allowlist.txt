@@ -12,12 +12,6 @@
 app/root.tsx:raw-error-arg:1
 
 # =============================================================================
-# App routes - shop interpolation
-# =============================================================================
-# app.imports.tsx: 1 console.log with ${shopDomain} interpolation
-app/routes/app.imports.tsx:shop-interpolation:1
-
-# =============================================================================
 # Scripts - shop interpolation and domain literals
 # =============================================================================
 # refresh-offline-token.ts: 1 help text with myshopify.com example
