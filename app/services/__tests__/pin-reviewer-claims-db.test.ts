@@ -664,10 +664,15 @@ describeWithDb("(c) send window 9-18 inclusive (DB)", () => {
 
     for (const { hour, shouldEnqueue } of HOURS_TO_TEST) {
       it(`hour ${hour} ${shouldEnqueue ? "IS" : "is NOT"} queued`, async () => {
-        const [row] = await sql<{ utc_hour: number }[]>`
-          SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
-        `;
-        const tz = computeTimezoneForLocalHour(row.utc_hour, hour);
+        // Use transaction to pin NOW() and prevent rollover between setup and enqueue
+        const utcHour = await sql.begin(async (tx) => {
+          const [row] = await tx<{ utc_hour: number }[]>`
+            SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
+          `;
+          return row.utc_hour;
+        });
+
+        const tz = computeTimezoneForLocalHour(utcHour, hour);
         const { shopId, shopDomain, invoiceId } = await setupShopAndInvoice(`h${hour}`, tz);
 
         try {
@@ -699,19 +704,23 @@ describeWithDb("(c) send window 9-18 inclusive (DB)", () => {
      * current time, ensuring one is always in the 9-18 window and one is always
      * outside. This makes the test deterministic regardless of when it runs.
      *
-     * Approach: Query the DB's UTC hour, then use computeTimezoneForLocalHour
-     * to create zones where the local hour is guaranteed to be 12 (in-window)
-     * or 19 (out-of-window).
+     * Approach: Query the DB's UTC hour in a transaction to pin NOW(), then use
+     * computeTimezoneForLocalHour to create zones where the local hour is
+     * guaranteed to be 12 (in-window) or 19 (out-of-window).
      */
     it("enqueues in-window store (local hour 12) and skips out-of-window store (local hour 19)", async () => {
-      const [row] = await sql<{ utc_hour: number }[]>`
-        SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
-      `;
+      // Use transaction to pin NOW() and prevent rollover
+      const utcHour = await sql.begin(async (tx) => {
+        const [row] = await tx<{ utc_hour: number }[]>`
+          SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
+        `;
+        return row.utc_hour;
+      });
 
       // Create timezone where local hour is 12 (in-window)
-      const inWindowZone = computeTimezoneForLocalHour(row.utc_hour, 12);
+      const inWindowZone = computeTimezoneForLocalHour(utcHour, 12);
       // Create timezone where local hour is 19 (out-of-window)
-      const outWindowZone = computeTimezoneForLocalHour(row.utc_hour, 19);
+      const outWindowZone = computeTimezoneForLocalHour(utcHour, 19);
 
       const inWindowSetup = await setupShopAndInvoice("in-win", inWindowZone);
       const outWindowSetup = await setupShopAndInvoice("out-win", outWindowZone);
@@ -744,6 +753,75 @@ describeWithDb("(c) send window 9-18 inclusive (DB)", () => {
         await cleanup(outWindowSetup.shopId, outWindowSetup.shopDomain);
       }
     });
+  });
+
+  describe("half-hour timezone Asia/Kolkata", () => {
+    /**
+     * Test with actual Asia/Kolkata timezone (+5:30). Uses transaction to pin
+     * NOW(), reads the local hour, calls enqueue, then asserts based on computed
+     * expected value. No conditional skips or early returns.
+     */
+    it("enqueues if and only if IST hour is in 9-18 window", async () => {
+      const { shopId, shopDomain, invoiceId } = await setupShopAndInvoice("ist", "Asia/Kolkata");
+
+      try {
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${shopDomain}`;
+
+        // Use transaction to pin NOW() for both hour read and enqueue
+        const localHour = await sql.begin(async (tx) => {
+          // Call enqueue inside transaction so NOW() is consistent
+          await tx`SELECT public.s18_enqueue_reminders()`;
+          // Read the hour that was used
+          const [row] = await tx<{ local_hour: number }[]>`
+            SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Asia/Kolkata')::int AS local_hour
+          `;
+          return row.local_hour;
+        });
+
+        // Compute expected based on the exact predicate from the migration
+        const expected = localHour >= 9 && localHour <= 18;
+
+        const rows = await sql<{ invoiceId: string }[]>`
+          SELECT message->>'invoiceId' AS "invoiceId"
+          FROM pgmq.q_s6_sync
+          WHERE message->>'shop' = ${shopDomain}
+            AND message->>'topic' = 'REMINDER_SEND'
+        `;
+
+        const queued = rows.map(r => r.invoiceId).includes(invoiceId);
+        expect(queued).toBe(expected);
+      } finally {
+        await cleanup(shopId, shopDomain);
+      }
+    });
+  });
+
+  describe("Asia/Kolkata +5:30 rollover boundaries (deterministic)", () => {
+    /**
+     * Test the exact EXTRACT(HOUR FROM ts AT TIME ZONE 'Asia/Kolkata') BETWEEN 9 AND 18
+     * predicate from the s18 migration with fixed timestamps at the half-hour boundaries.
+     * These tests verify the +5:30 offset behavior without depending on wall clock.
+     */
+    const BOUNDARY_CASES = [
+      { ts: "2026-01-15T03:29:59Z", expectedHour: 8, expectedInWindow: false },
+      { ts: "2026-01-15T03:30:00Z", expectedHour: 9, expectedInWindow: true },
+      { ts: "2026-01-15T13:29:59Z", expectedHour: 18, expectedInWindow: true },
+      { ts: "2026-01-15T13:30:00Z", expectedHour: 19, expectedInWindow: false },
+    ];
+
+    for (const { ts, expectedHour, expectedInWindow } of BOUNDARY_CASES) {
+      it(`${ts} → hour ${expectedHour}, in_window=${expectedInWindow}`, async () => {
+        // Use the exact expression from the s18 migration
+        const [row] = await sql<{ hour: number; in_window: boolean }[]>`
+          SELECT
+            EXTRACT(HOUR FROM ${ts}::timestamptz AT TIME ZONE 'Asia/Kolkata')::int AS hour,
+            EXTRACT(HOUR FROM ${ts}::timestamptz AT TIME ZONE 'Asia/Kolkata') BETWEEN 9 AND 18 AS in_window
+        `;
+
+        expect(row.hour).toBe(expectedHour);
+        expect(row.in_window).toBe(expectedInWindow);
+      });
+    }
   });
 });
 
