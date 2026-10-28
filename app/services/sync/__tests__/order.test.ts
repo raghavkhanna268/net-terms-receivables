@@ -9,6 +9,7 @@ import {
 } from "../order.server";
 import type { ShopifyOrder } from "../types";
 import type { EligibilityResult } from "~/lib/invoice-eligibility";
+import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftovers";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -54,8 +55,15 @@ describeWithDb("Order Sync", () => {
   });
 
   afterAll(async () => {
+    // Clean up queue messages for this shop before deleting it (prevents flakes in later test files)
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-ord-" + TEST_SUFFIX + "%"}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "order.test.ts");
+
     await sql.end();
   });
 
@@ -1687,10 +1695,17 @@ describeWithDb("Bulk JSONL Processor - existing invoice handling (DB-backed)", (
   });
 
   afterAll(async () => {
+    // Clean up queue messages for this shop before deleting it (prevents flakes in later test files)
+    await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+    await sql`DELETE FROM pgmq.a_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
+
     await sql`DELETE FROM order_outstanding_missing WHERE shop = ${TEST_SHOP_DOMAIN}`;
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM "Shop" WHERE id = ${TEST_SHOP_ID}`;
+
+    await assertNoQueueLeftovers(sql, [TEST_SHOP_DOMAIN], "order.test.ts (bulk)");
+
     await sql.end();
   });
 
