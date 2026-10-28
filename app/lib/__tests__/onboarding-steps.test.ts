@@ -123,6 +123,36 @@ describe("onboarding-steps", () => {
       const step = computeValidationStep(validation);
       expect(step.status).toBe("pending");
     });
+
+    it("sets actionTarget _top when complete with admin URL", () => {
+      const validation: ValidationInfo = {
+        id: "gid://shopify/Validation/123",
+        handle: "credit-check-validation",
+        enabled: true,
+        title: "Termwise Credit Check",
+      };
+      const step = computeValidationStep(validation);
+      expect(step.actionUrl).toBe("shopify://admin/settings/checkout");
+      expect(step.actionTarget).toBe("_top");
+    });
+
+    it("sets actionTarget _top when attention with admin URL", () => {
+      const validation: ValidationInfo = {
+        id: "gid://shopify/Validation/123",
+        handle: "credit-check-validation",
+        enabled: false,
+        title: "Termwise Credit Check",
+      };
+      const step = computeValidationStep(validation);
+      expect(step.actionUrl).toBe("shopify://admin/settings/checkout");
+      expect(step.actionTarget).toBe("_top");
+    });
+
+    it("does not set actionTarget when no actionUrl", () => {
+      const step = computeValidationStep(null);
+      expect(step.actionUrl).toBeUndefined();
+      expect(step.actionTarget).toBeUndefined();
+    });
   });
 
   describe("computePaymentCustomizationStep", () => {
@@ -153,6 +183,36 @@ describe("onboarding-steps", () => {
       const step = computePaymentCustomizationStep(null);
       expect(step.status).toBe("attention");
       expect(step.helpText).toContain("not registered");
+    });
+
+    it("sets actionTarget _top when complete with admin URL", () => {
+      const customization: PaymentCustomizationInfo = {
+        id: "gid://shopify/PaymentCustomization/123",
+        handle: "hide-terms-payment",
+        enabled: true,
+        title: "Termwise Payment Hide",
+      };
+      const step = computePaymentCustomizationStep(customization);
+      expect(step.actionUrl).toBe("shopify://admin/settings/payments");
+      expect(step.actionTarget).toBe("_top");
+    });
+
+    it("sets actionTarget _top when attention with admin URL", () => {
+      const customization: PaymentCustomizationInfo = {
+        id: "gid://shopify/PaymentCustomization/123",
+        handle: "hide-terms-payment",
+        enabled: false,
+        title: "Termwise Payment Hide",
+      };
+      const step = computePaymentCustomizationStep(customization);
+      expect(step.actionUrl).toBe("shopify://admin/settings/payments");
+      expect(step.actionTarget).toBe("_top");
+    });
+
+    it("does not set actionTarget when no actionUrl", () => {
+      const step = computePaymentCustomizationStep(null);
+      expect(step.actionUrl).toBeUndefined();
+      expect(step.actionTarget).toBeUndefined();
     });
   });
 

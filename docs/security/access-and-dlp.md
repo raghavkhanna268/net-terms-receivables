@@ -54,17 +54,18 @@
 
 ## 3. Shopify OAuth Scopes — Least Privilege
 
-The app requests 8 scopes as defined in `shopify.app.toml:33`:
+The app requests 9 scopes as defined in `shopify.app.toml:34`:
 
 ```
-scopes = "read_draft_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations"
+scopes = "read_draft_orders,read_all_orders,read_payment_terms,write_companies,write_customers,write_merchant_managed_fulfillment_orders,write_orders,write_payment_customizations,write_validations"
 ```
 
-### Read-Only Scopes (2)
+### Read-Only Scopes (3)
 
 | Scope | Purpose |
 |-------|---------|
 | `read_draft_orders` | View draft orders to calculate pending credit exposure |
+| `read_all_orders` | Extends write_orders read access to orders >60 days old |
 | `read_payment_terms` | View payment terms on orders and company locations |
 
 ### Write Scopes (6)
