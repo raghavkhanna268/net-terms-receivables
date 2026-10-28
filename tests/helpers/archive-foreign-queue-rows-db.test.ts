@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import postgres from "postgres";
-import { sqlOptions } from "~/lib/db-light.server";
+import { sqlOptions } from "../../app/lib/db-light.server.js";
 import { archiveForeignQueueRows } from "./archive-foreign-queue-rows";
 import { assertNoQueueLeftovers } from "./queue-leftovers";
 
