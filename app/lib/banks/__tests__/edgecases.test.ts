@@ -1107,5 +1107,65 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.detection.bank).toBe("HDFC");
       expect(result.transactions.length).toBe(13);
     });
+
+    it("HDFC XLSX: bare Total row followed by numeric serial dates parses correctly", async () => {
+      const XLSX = await import("xlsx");
+
+      const rows = [
+        ["HDFC BANK"],
+        ["Statement of Account"],
+        ["Account No: SYNT00111222333"],
+        [],
+        ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"],
+        ["Opening Balance", "", "", "", "", "", 50000],
+        ["Total", "", "", "", 1500, 25000, ""],
+        [new Date(Date.UTC(2026, 9, 15)), "NEFT-SYNTN001-SYNTHETIC CORP-PAYMENT", "SYNTN001", new Date(Date.UTC(2026, 9, 15)), "", 10000, 60000],
+        [new Date(Date.UTC(2026, 9, 18)), "UPI-SYNTHETIC VENDOR-vendor@synt-SYNT0002", "SYNT0002", new Date(Date.UTC(2026, 9, 18)), 1500, "", 58500],
+        [new Date(Date.UTC(2026, 9, 20)), "IMPS-SYNTN002-SYNTHETIC SENDER-ADVANCE", "SYNTN002", new Date(Date.UTC(2026, 9, 20)), "", 15000, 73500],
+      ];
+
+      const worksheet = XLSX.utils.aoa_to_sheet(rows, { cellDates: true });
+
+      const dateFormat = "DD/MM/YY";
+      for (let r = 7; r <= 9; r++) {
+        const cellA = XLSX.utils.encode_cell({ r, c: 0 });
+        const cellD = XLSX.utils.encode_cell({ r, c: 3 });
+        if (worksheet[cellA]) worksheet[cellA].z = dateFormat;
+        if (worksheet[cellD]) worksheet[cellD].z = dateFormat;
+      }
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Statement");
+
+      const xlsxBuffer = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
+      const file = new File([xlsxBuffer], "hdfc-total-serial-dates.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+
+      const result = await parseBankStatement(file);
+
+      expect(result.detection.bank).toBe("HDFC");
+
+      const rowParseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
+      expect(rowParseFailedErrors.length).toBe(0);
+
+      expect(result.transactions.length).toBe(3);
+
+      const credits = result.transactions.filter((t) => t.direction === "CR");
+      const debits = result.transactions.filter((t) => t.direction === "DR");
+
+      expect(credits.length).toBe(2);
+      expect(debits.length).toBe(1);
+
+      const creditTotal = credits.reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(2500000);
+
+      const debitTotal = debits.reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(150000);
+
+      expect(result.transactions[0].date).toBe("2026-10-15");
+      expect(result.transactions[1].date).toBe("2026-10-18");
+      expect(result.transactions[2].date).toBe("2026-10-20");
+    });
   });
 });
