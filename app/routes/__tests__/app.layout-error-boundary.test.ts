@@ -4,7 +4,8 @@
  * Verifies that:
  * - ErrorResponses with status 200 and string data render the embedded HTML
  *   (the re-auth bounce case from #532)
- * - 4xx/5xx errors render in-layout with nav (v1.1 behavior)
+ * - 401/403 auth errors rethrow for Shopify auth flow (preserved from original)
+ * - Non-auth 4xx/5xx errors render in-layout with nav (v1.1 behavior)
  * - Plain Errors render in-layout with generic message
  * - 200 with non-string data rethrows to root boundary
  */
@@ -20,13 +21,15 @@ describe("app.tsx ErrorBoundary", () => {
     vi.resetModules();
   });
 
-  function setupRouterMocks(errorValue: unknown, mockNavigate = false) {
+  function setupRouterMocks(errorValue: unknown, options: { mockNavigate?: boolean; mockApiKey?: string } = {}) {
+    const apiKey = options.mockApiKey ?? "test-api-key";
     vi.doMock("react-router", async () => {
       const actual = await vi.importActual<typeof import("react-router")>("react-router");
       return {
         ...actual,
         useRouteError: () => errorValue,
-        ...(mockNavigate ? { useNavigate: () => vi.fn() } : {}),
+        useRouteLoaderData: () => ({ apiKey }),
+        ...(options.mockNavigate ? { useNavigate: () => vi.fn() } : {}),
       };
     });
   }
@@ -71,10 +74,32 @@ describe("app.tsx ErrorBoundary", () => {
     });
   });
 
-  describe("renders 4xx/5xx errors in-layout with nav", () => {
+  describe("rethrows auth errors for Shopify auth flow", () => {
+    it("rethrows status 401 for re-auth flow", async () => {
+      const errorResponse = new ErrorResponseImpl(401, "Unauthorized", null);
+      setupRouterMocks(errorResponse);
+
+      vi.resetModules();
+      const { ErrorBoundary } = await import("../app");
+
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+    });
+
+    it("rethrows status 403 for permission flow", async () => {
+      const errorResponse = new ErrorResponseImpl(403, "Forbidden", null);
+      setupRouterMocks(errorResponse);
+
+      vi.resetModules();
+      const { ErrorBoundary } = await import("../app");
+
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+    });
+  });
+
+  describe("renders non-auth 4xx/5xx errors in-layout with nav", () => {
     it("renders status 404 ErrorResponse in-layout", async () => {
       const errorResponse = new ErrorResponseImpl(404, "Not Found", null);
-      setupRouterMocks(errorResponse, true);
+      setupRouterMocks(errorResponse, { mockNavigate: true, mockApiKey: "test-key" });
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -87,7 +112,7 @@ describe("app.tsx ErrorBoundary", () => {
 
     it("renders status 500 ErrorResponse in-layout", async () => {
       const errorResponse = new ErrorResponseImpl(500, "Internal Server Error", null);
-      setupRouterMocks(errorResponse, true);
+      setupRouterMocks(errorResponse, { mockNavigate: true, mockApiKey: "test-key" });
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -99,7 +124,7 @@ describe("app.tsx ErrorBoundary", () => {
     });
 
     it("renders plain Error in-layout with generic message", async () => {
-      setupRouterMocks(new Error("Unexpected failure"), true);
+      setupRouterMocks(new Error("Unexpected failure"), { mockNavigate: true, mockApiKey: "test-key" });
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");

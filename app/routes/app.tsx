@@ -1,8 +1,9 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, isRouteErrorResponse, data } from "react-router";
+import { Outlet, useLoaderData, useRouteError, useRouteLoaderData, isRouteErrorResponse, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { AppErrorPage } from "~/components/AppErrorPage";
+import type { loader as rootLoader } from "~/root";
 import { runAfterAuth } from "~/lib/after-auth.server";
 import { useEffect } from "react";
 import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
@@ -147,8 +148,14 @@ function AppNav() {
   );
 }
 
+function isAuthStatus(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
 export function ErrorBoundary() {
   const error = useRouteError();
+  const rootData = useRouteLoaderData<typeof rootLoader>("root");
+  const apiKey = rootData?.apiKey || "";
 
   if (
     isRouteErrorResponse(error) &&
@@ -162,18 +169,24 @@ export function ErrorBoundary() {
     );
   }
 
-  if (isRouteErrorResponse(error) && error.status >= 400) {
-    return (
-      <AppProvider apiKey="">
-        <AppNav />
-        <AppErrorPage status={error.status} />
-      </AppProvider>
-    );
+  if (isRouteErrorResponse(error)) {
+    if (isAuthStatus(error.status)) {
+      throw error;
+    }
+
+    if (error.status >= 400) {
+      return (
+        <AppProvider apiKey={apiKey}>
+          <AppNav />
+          <AppErrorPage status={error.status} />
+        </AppProvider>
+      );
+    }
   }
 
   if (!isRouteErrorResponse(error)) {
     return (
-      <AppProvider apiKey="">
+      <AppProvider apiKey={apiKey}>
         <AppNav />
         <AppErrorPage status={500} />
       </AppProvider>

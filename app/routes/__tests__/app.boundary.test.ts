@@ -39,6 +39,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => anonymousError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -66,6 +67,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => new AnonymousErrorResponse(),
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -91,6 +93,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => bounceError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -102,7 +105,7 @@ describe("app.tsx ErrorBoundary", () => {
     expect(html).toContain("bounce");
   });
 
-  it("renders 401 route error in-layout with nav", async () => {
+  it("rethrows real ErrorResponseImpl with status 401", async () => {
     const reauthError = new UNSAFE_ErrorResponseImpl(
       401,
       "Unauthorized",
@@ -116,18 +119,38 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => reauthError,
-        useNavigate: () => vi.fn(),
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    const html = renderToString(createElement(ErrorBoundary));
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+  });
 
-    expect(html).toContain("s-app-nav");
-    expect(html).toContain("Something went wrong");
-    expect(html).not.toContain("<b>x</b>");
+  it("rethrows real ErrorResponseImpl with status 403", async () => {
+    const forbiddenError = new UNSAFE_ErrorResponseImpl(
+      403,
+      "Forbidden",
+      null
+    );
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => forbiddenError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app");
+
+    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
   it("renders 404 route error in-layout with nav", async () => {
@@ -146,6 +169,7 @@ describe("app.tsx ErrorBoundary", () => {
         ...actual,
         useRouteError: () => notFoundError,
         useNavigate: () => vi.fn(),
+        useRouteLoaderData: () => ({ apiKey: "test-api-key-12345" }),
       };
     });
 
@@ -173,6 +197,7 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => nonStringDataError,
+        useRouteLoaderData: () => ({ apiKey: "test-key" }),
       };
     });
 
@@ -193,6 +218,7 @@ describe("app.tsx ErrorBoundary", () => {
         ...actual,
         useRouteError: () => plainError,
         useNavigate: () => vi.fn(),
+        useRouteLoaderData: () => ({ apiKey: "test-api-key-12345" }),
       };
     });
 
@@ -204,6 +230,31 @@ describe("app.tsx ErrorBoundary", () => {
     expect(html).toContain("s-app-nav");
     expect(html).toContain("Something went wrong");
     expect(html).not.toContain("Unexpected failure");
+  });
+
+  it("passes apiKey from root loader to AppProvider in ErrorBoundary", async () => {
+    const notFoundError = new UNSAFE_ErrorResponseImpl(404, "Not Found", null);
+    const testApiKey = "sk_test_boundary_key_xyz789";
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>(
+        "react-router"
+      );
+      return {
+        ...actual,
+        useRouteError: () => notFoundError,
+        useNavigate: () => vi.fn(),
+        useRouteLoaderData: () => ({ apiKey: testApiKey }),
+      };
+    });
+
+    vi.resetModules();
+    const { ErrorBoundary } = await import("../app");
+
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-app-nav");
+    expect(html).toContain("Page not found");
   });
 });
 

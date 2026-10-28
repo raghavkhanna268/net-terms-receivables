@@ -7,6 +7,7 @@
  * - No stack traces, error messages, IDs, or shop data leaked
  * - HTTP status code preserved
  * - Sentry not called for 4xx errors
+ * - 401/403 auth errors rethrow for Shopify auth flow
  *
  * The ErrorBoundary handles errors that bubble up from child routes when
  * they don't have their own ErrorBoundary. It renders them in-layout
@@ -22,6 +23,18 @@ vi.mock("~/lib/sentry", () => ({
   captureExceptionWithTags: vi.fn(),
 }));
 
+function setupRouterMock(error: unknown, apiKey = "test-api-key") {
+  vi.doMock("react-router", async () => {
+    const actual = await vi.importActual<typeof import("react-router")>("react-router");
+    return {
+      ...actual,
+      useRouteError: () => error,
+      useNavigate: () => vi.fn(),
+      useRouteLoaderData: () => ({ apiKey }),
+    };
+  });
+}
+
 describe("app.tsx ErrorBoundary in-layout rendering", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -31,18 +44,48 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
     vi.restoreAllMocks();
   });
 
-  describe("404 Not Found", () => {
-    it("renders nav for 404 route error response", async () => {
-      const notFoundError = new UNSAFE_ErrorResponseImpl(404, "Not Found", null);
+  describe("401/403 auth errors rethrow for Shopify auth flow", () => {
+    it("rethrows 401 for re-auth flow", async () => {
+      const reauthError = new UNSAFE_ErrorResponseImpl(401, "Unauthorized", null);
 
       vi.doMock("react-router", async () => {
         const actual = await vi.importActual<typeof import("react-router")>("react-router");
         return {
           ...actual,
-          useRouteError: () => notFoundError,
-          useNavigate: () => vi.fn(),
+          useRouteError: () => reauthError,
+          useRouteLoaderData: () => ({ apiKey: "test-key" }),
         };
       });
+
+      vi.resetModules();
+      const { ErrorBoundary } = await import("../app");
+
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+    });
+
+    it("rethrows 403 for permission flow", async () => {
+      const forbiddenError = new UNSAFE_ErrorResponseImpl(403, "Forbidden", null);
+
+      vi.doMock("react-router", async () => {
+        const actual = await vi.importActual<typeof import("react-router")>("react-router");
+        return {
+          ...actual,
+          useRouteError: () => forbiddenError,
+          useRouteLoaderData: () => ({ apiKey: "test-key" }),
+        };
+      });
+
+      vi.resetModules();
+      const { ErrorBoundary } = await import("../app");
+
+      expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+    });
+  });
+
+  describe("404 Not Found", () => {
+    it("renders nav for 404 route error response", async () => {
+      const notFoundError = new UNSAFE_ErrorResponseImpl(404, "Not Found", null);
+      setupRouterMock(notFoundError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -56,15 +99,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
 
     it("shows correct 404 message", async () => {
       const notFoundError = new UNSAFE_ErrorResponseImpl(404, "Not Found", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => notFoundError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(notFoundError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -82,15 +117,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
         "Not Found",
         { secretData: "shop-12345.example.com", requestId: "req-abc123" }
       );
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => notFoundError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(notFoundError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -109,15 +136,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
   describe("410 Gone", () => {
     it("renders nav for 410 route error response", async () => {
       const goneError = new UNSAFE_ErrorResponseImpl(410, "Gone", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => goneError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(goneError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -131,15 +150,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
 
     it("shows correct 410 message", async () => {
       const goneError = new UNSAFE_ErrorResponseImpl(410, "Gone", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => goneError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(goneError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -157,15 +168,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
         "Gone",
         { shopDomain: "test-store.example.com", userId: "user-xyz789" }
       );
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => goneError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(goneError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -182,15 +185,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
   describe("500 Internal Server Error", () => {
     it("renders nav for 500 route error response", async () => {
       const serverError = new UNSAFE_ErrorResponseImpl(500, "Internal Server Error", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => serverError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(serverError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -204,15 +199,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
 
     it("shows correct 500 message", async () => {
       const serverError = new UNSAFE_ErrorResponseImpl(500, "Internal Server Error", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => serverError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(serverError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -230,15 +217,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
         "Internal Server Error",
         { message: "Database connection failed", stack: "Error: at line 42" }
       );
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => serverError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(serverError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -253,15 +232,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
 
     it("renders nav for thrown Error (non-Response)", async () => {
       const thrownError = new Error("Unexpected failure in loader");
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => thrownError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(thrownError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -289,6 +260,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
           ...actual,
           useRouteError: () => bounceError,
           useNavigate: () => vi.fn(),
+          useRouteLoaderData: () => ({ apiKey: "test-key" }),
         };
       });
 
@@ -305,15 +277,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
   describe("Polaris components rendered", () => {
     it("renders s-page and s-section for error display", async () => {
       const notFoundError = new UNSAFE_ErrorResponseImpl(404, "Not Found", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => notFoundError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(notFoundError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
@@ -328,15 +292,7 @@ describe("app.tsx ErrorBoundary in-layout rendering", () => {
 
     it("includes link back to app home", async () => {
       const serverError = new UNSAFE_ErrorResponseImpl(500, "Internal Server Error", null);
-
-      vi.doMock("react-router", async () => {
-        const actual = await vi.importActual<typeof import("react-router")>("react-router");
-        return {
-          ...actual,
-          useRouteError: () => serverError,
-          useNavigate: () => vi.fn(),
-        };
-      });
+      setupRouterMock(serverError);
 
       vi.resetModules();
       const { ErrorBoundary } = await import("../app");
