@@ -29,6 +29,7 @@ import {
 import {
   normalizeNarrationForLookup,
   findBestBuyerMatch,
+  findAllTiedBuyerMatches,
 } from "~/lib/matching/normalize";
 import {
   getUnmatchedPayments,
@@ -235,11 +236,32 @@ async function matchSinglePayment(
       (inv) => !rejectedInvoiceIds.has(inv.id)
     );
 
-    // Fallback: if the resolved buyer has no candidates after filtering,
-    // widen to the amount window. This handles cases where a company has
-    // multiple location accounts with similar names, and fuzzy matching
-    // resolves to an account with no open invoices while a sibling account
-    // has the correct invoice.
+    // If the resolved buyer has no candidates, try other tied buyers with open invoices
+    // before falling back to the amount window. Compute tied list lazily.
+    if (candidateInvoices.length === 0 && payment.payerText) {
+      const tiedBuyerMatches = findAllTiedBuyerMatches(payment.payerText, buyers);
+      if (tiedBuyerMatches.length > 1) {
+        for (const tiedMatch of tiedBuyerMatches) {
+          if (tiedMatch.buyerId === targetBuyer.id) continue;
+          const tiedBuyerInvoices = await getOpenInvoicesForBuyer(
+            sql,
+            shopId,
+            tiedMatch.buyerId
+          );
+          const filteredInvoices = tiedBuyerInvoices.filter(
+            (inv) => !rejectedInvoiceIds.has(inv.id)
+          );
+          if (filteredInvoices.length > 0) {
+            candidateInvoices = filteredInvoices;
+            targetBuyer = buyers.find((b) => b.id === tiedMatch.buyerId) ?? null;
+            break;
+          }
+        }
+      }
+    }
+
+    // Fallback: if still no candidates after checking tied buyers,
+    // widen to the amount window.
     if (candidateInvoices.length === 0) {
       candidateInvoices = await getOpenInvoicesInAmountWindow(
         sql,

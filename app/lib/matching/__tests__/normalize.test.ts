@@ -12,6 +12,7 @@ import {
   normalizeNarrationForLookup,
   nameSimilarity,
   findBestBuyerMatch,
+  findAllTiedBuyerMatches,
 } from "../normalize";
 
 describe("normalizeName", () => {
@@ -358,5 +359,87 @@ describe("ICICI-style narration parsing", () => {
     );
     expect(normalized).toContain("synthetic");
     expect(normalized).toContain("vendor");
+  });
+});
+
+describe("findAllTiedBuyerMatches", () => {
+  it("first tied buyer matches findBestBuyerMatch result", () => {
+    const buyers = [
+      { id: "buyer-older", name: "Test Buyer Co", aliases: [], email: null },
+      { id: "buyer-newer", name: "Test Buyer Co", aliases: [], email: null },
+    ];
+    const payerText = "TEST BUYER CO PVT LTD";
+
+    const best = findBestBuyerMatch(payerText, buyers);
+    const allTied = findAllTiedBuyerMatches(payerText, buyers);
+
+    expect(best).not.toBeNull();
+    expect(allTied.length).toBe(2);
+    expect(allTied[0].buyerId).toBe(best!.buyerId);
+    expect(allTied[0].score).toBe(best!.score);
+  });
+
+  it("preserves input array order for tied buyers", () => {
+    const buyers = [
+      { id: "first", name: "Synthetic Corp", aliases: [], email: null },
+      { id: "second", name: "Synthetic Corp", aliases: [], email: null },
+      { id: "third", name: "Synthetic Corp", aliases: [], email: null },
+    ];
+    const payerText = "SYNTHETIC CORP";
+
+    const allTied = findAllTiedBuyerMatches(payerText, buyers);
+
+    expect(allTied.length).toBe(3);
+    expect(allTied[0].buyerId).toBe("first");
+    expect(allTied[1].buyerId).toBe("second");
+    expect(allTied[2].buyerId).toBe("third");
+  });
+
+  it("returns empty array for payer text shorter than 3 chars after normalization", () => {
+    const buyers = [
+      { id: "buyer-1", name: "Test Company", aliases: [], email: null },
+    ];
+
+    expect(findAllTiedBuyerMatches("AB", buyers)).toEqual([]);
+    expect(findAllTiedBuyerMatches("", buyers)).toEqual([]);
+  });
+
+  it("returns empty array when no buyer meets 0.5 threshold", () => {
+    const buyers = [
+      { id: "buyer-1", name: "Alpha Corp", aliases: [], email: null },
+      { id: "buyer-2", name: "Beta Ltd", aliases: [], email: null },
+    ];
+
+    const result = findAllTiedBuyerMatches("UNKNOWN COMPANY XYZ", buyers);
+    expect(result).toEqual([]);
+  });
+
+  it("excludes lower-scoring non-tied buyers", () => {
+    const buyers = [
+      { id: "high-score", name: "Synthetic Wholesale", aliases: ["synthetic"], email: null },
+      { id: "low-score", name: "Different Name", aliases: [], email: "accounts@synthetic.example.com" },
+      { id: "tied-high", name: "Other Name", aliases: ["synthetic"], email: null },
+    ];
+    const payerText = "SYNTHETIC VENDOR";
+
+    const allTied = findAllTiedBuyerMatches(payerText, buyers);
+
+    const buyerIds = allTied.map((b) => b.buyerId);
+    expect(buyerIds).toContain("high-score");
+    expect(buyerIds).toContain("tied-high");
+    expect(buyerIds).not.toContain("low-score");
+    expect(allTied.length).toBe(2);
+    expect(allTied[0].score).toBe(allTied[1].score);
+  });
+
+  it("returns single buyer when only one meets threshold", () => {
+    const buyers = [
+      { id: "match", name: "Synthetic Corp", aliases: [], email: null },
+      { id: "no-match", name: "Alpha Beta", aliases: [], email: null },
+    ];
+
+    const result = findAllTiedBuyerMatches("SYNTHETIC CORP", buyers);
+    expect(result.length).toBe(1);
+    expect(result[0].buyerId).toBe("match");
   });
 });
