@@ -69,14 +69,18 @@ function runFilter(input: string) {
 describe("e2e-bank-import.yml", () => {
   const wf = fs.readFileSync(WORKFLOW, "utf8");
 
-  it("is dispatch-only, main-only, with a single boolean dry_run defaulting to true", () => {
+  it("is dispatch-only, main-only, with dry_run and fixture inputs", () => {
     expect(wf).toMatch(/^on:\n {2}workflow_dispatch:\n {4}inputs:\n {6}dry_run:\n/m);
     expect(wf).not.toMatch(/^\s+(push|pull_request|schedule|workflow_run):/m);
     expect(wf).toContain("if: github.ref == 'refs/heads/main'");
     const inputs = wf.split("inputs:")[1].split("permissions:")[0];
-    expect(inputs.match(/^ {6}[a-z_]+:$/gm)).toEqual(["      dry_run:"]);
+    expect(inputs.match(/^ {6}[a-z_]+:$/gm)).toEqual(["      dry_run:", "      fixture:"]);
     expect(inputs).toContain("type: boolean");
     expect(inputs).toContain("default: true");
+    expect(inputs).toContain("type: choice");
+    expect(inputs).toContain("- hdfc");
+    expect(inputs).toContain("- hdfc_v2");
+    expect(inputs).toContain("default: hdfc");
     expect(wf).not.toMatch(/inputs\.(shop|domain|file|path)/i);
   });
 

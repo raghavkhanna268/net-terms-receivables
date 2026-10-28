@@ -66,9 +66,41 @@ import {
   mapCreditsForImport,
 } from "~/routes/app.imports";
 
-/** Fixed fixture: never an input. */
-export const FIXTURE_RELATIVE_PATH = "tests/fixtures/banks/synthetic/hdfc-review-synthetic.csv";
-export const FIXTURE_FILE_NAME = "hdfc-review-synthetic.csv";
+/**
+ * Fixture selection via FIXTURE env var (default: hdfc).
+ * Valid values: hdfc, hdfc_v2 (mapped to file paths below).
+ * Never accepts raw file paths - only the enum keys.
+ */
+export type FixtureKey = "hdfc" | "hdfc_v2";
+
+const FIXTURE_MAP: Record<FixtureKey, { path: string; fileName: string }> = {
+  hdfc: {
+    path: "tests/fixtures/banks/synthetic/hdfc-review-synthetic.csv",
+    fileName: "hdfc-review-synthetic.csv",
+  },
+  hdfc_v2: {
+    path: "tests/fixtures/banks/synthetic/hdfc-review-synthetic-v2.csv",
+    fileName: "hdfc-review-synthetic-v2.csv",
+  },
+};
+
+export function resolveFixture(env: Record<string, string | undefined>): {
+  key: FixtureKey;
+  path: string;
+  fileName: string;
+} {
+  const raw = (env.FIXTURE ?? "hdfc").trim().toLowerCase();
+  if (raw !== "hdfc" && raw !== "hdfc_v2") {
+    throw new E2eImportError("fixture_key_invalid");
+  }
+  const key = raw as FixtureKey;
+  const fixture = FIXTURE_MAP[key];
+  return { key, path: fixture.path, fileName: fixture.fileName };
+}
+
+/** Default fixture (for backwards compatibility with tests). */
+export const FIXTURE_RELATIVE_PATH = FIXTURE_MAP.hdfc.path;
+export const FIXTURE_FILE_NAME = FIXTURE_MAP.hdfc.fileName;
 
 /** Same band cut-offs as Reconcile's ScoreBadge (app/routes/app.reconcile.tsx). */
 export const MEDIUM_BAND_MIN = 50;
@@ -213,11 +245,15 @@ export function assertE2eShop(env: Record<string, string | undefined>): string {
   return shop;
 }
 
-/** Parse the fixed fixture with the app parser and build the import payload. */
-export async function loadFixturePayload(rootDir: string) {
-  const buf = readFileSync(join(rootDir, FIXTURE_RELATIVE_PATH));
+/** Parse the fixture with the app parser and build the import payload. */
+export async function loadFixturePayload(
+  rootDir: string,
+  fixturePath: string = FIXTURE_RELATIVE_PATH,
+  fixtureFileName: string = FIXTURE_FILE_NAME
+) {
+  const buf = readFileSync(join(rootDir, fixturePath));
   const content = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-  const parsed = await parseBankStatement(content, { fileName: FIXTURE_FILE_NAME });
+  const parsed = await parseBankStatement(content, { fileName: fixtureFileName });
   // Same shape the Imports page builds from parseBankStatement before
   // mapCreditsForImport (app/routes/app.imports.tsx, ImportsPage).
   const creditTxns = parsed.transactions.filter((t) => t.direction === "CR");
@@ -264,7 +300,7 @@ export async function loadFixturePayload(rootDir: string) {
     skippedRows: parsed.skippedRows,
     parseErrors: parsed.errors.length,
     debits: parsed.transactions.length - creditTxns.length,
-    body: { bank: parsed.detection.bank, fileName: FIXTURE_FILE_NAME, credits },
+    body: { bank: parsed.detection.bank, fileName: fixtureFileName, credits },
     utrToSourceRow,
   };
 }
@@ -306,6 +342,9 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
   const now = opts.now ?? new Date();
   emit("mode", dryRun ? "dry_run" : "apply");
 
+  // 0. Resolve fixture from env (default: hdfc)
+  const fixtureConfig = resolveFixture(env);
+
   // 1. Shop allowlist (fails closed before any DB access)
   const shopDomain = assertE2eShop(env);
   emit("shop_guard", "ok");
@@ -335,8 +374,8 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
   `;
   emit("reviewer_demo_invoices_present", Number(demo?.n ?? 0));
 
-  // 3. Parse + validate the fixed fixture with the app's code
-  const fixture = await loadFixturePayload(rootDir);
+  // 3. Parse + validate the fixture with the app's code
+  const fixture = await loadFixturePayload(rootDir, fixtureConfig.path, fixtureConfig.fileName);
   emit("fixture_bank", fixture.bank.toLowerCase());
   emit("fixture_rows_total", fixture.totalRows);
   emit("fixture_rows_skipped", fixture.skippedRows);
@@ -365,7 +404,7 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
   // 4. Re-run guard (no write)
   const [existing] = await sql<{ n: string }[]>`
     SELECT COUNT(*)::text AS n FROM "BankImport"
-    WHERE "shopId" = ${shop.id} AND "fileName" = ${FIXTURE_FILE_NAME}
+    WHERE "shopId" = ${shop.id} AND "fileName" = ${fixtureConfig.fileName}
   `;
   if (Number(existing.n) > 0) {
     emit("already_imported", true);
@@ -382,7 +421,7 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
       await tx`SELECT pg_advisory_xact_lock(${ADVISORY_LOCK_KEY})`;
       const [again] = await tx<{ n: string }[]>`
         SELECT COUNT(*)::text AS n FROM "BankImport"
-        WHERE "shopId" = ${shop.id} AND "fileName" = ${FIXTURE_FILE_NAME}
+        WHERE "shopId" = ${shop.id} AND "fileName" = ${fixtureConfig.fileName}
       `;
       if (Number(again.n) > 0) throw new E2eImportError("already_imported_concurrently");
 
