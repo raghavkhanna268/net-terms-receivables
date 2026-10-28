@@ -373,6 +373,7 @@ export async function getInvoiceForReminder(
       customerId: string | null;
       mainContactEmail: string | null;
       mainContactDisplayName: string | null;
+      buyerAccountName: string | null;
       buyerAccountGatedAt: Date | null;
       shopUninstalledAt: Date | null;
     }[]
@@ -393,6 +394,7 @@ export async function getInvoiceForReminder(
       ba."customerId",
       ba."mainContactEmail",
       ba."mainContactName" AS "mainContactDisplayName",
+      ba.name AS "buyerAccountName",
       ba.gated_at AS "buyerAccountGatedAt",
       s."uninstalledAt" AS "shopUninstalledAt"
     FROM "Invoice" i
@@ -410,10 +412,13 @@ export async function getInvoiceForReminder(
   let buyerEmail: string | null = null;
   let buyerDisplayName: string | null = null;
 
+  const nonEmpty = (s: string | null | undefined): string | null =>
+    s && s.trim() ? s.trim() : null;
+
   if (row.accountKind === "COMPANY") {
-    // B2B: use mainContactEmail and mainContactName from BuyerAccount
+    // B2B: use mainContactEmail; name fallback: mainContactName → accountName
     buyerEmail = row.mainContactEmail;
-    buyerDisplayName = row.mainContactDisplayName;
+    buyerDisplayName = nonEmpty(row.mainContactDisplayName) ?? nonEmpty(row.buyerAccountName);
   } else if (row.customerId) {
     // Tagged customer: get email/displayName from s8_tagged_customers
     // This data is only present when CUSTOMER_PII_FIELDS=1 (S8)
@@ -425,7 +430,9 @@ export async function getInvoiceForReminder(
     `;
     if (customer) {
       buyerEmail = customer.email;
-      buyerDisplayName = customer.displayName;
+      buyerDisplayName = nonEmpty(customer.displayName) ?? nonEmpty(row.buyerAccountName);
+    } else {
+      buyerDisplayName = nonEmpty(row.buyerAccountName);
     }
   }
 
