@@ -317,16 +317,20 @@ describe("Customer PII ACCESS_DENIED fallback", () => {
   });
 });
 
+// Shared mock registry for handleCustomer tests - populated in beforeEach, read by vi.doMock
+const handleCustomerMocks = {
+  processCustomerWebhook: vi.fn(),
+  getTagRules: vi.fn(),
+  shouldFetchCustomerPii: vi.fn(),
+  isWebhookProcessed: vi.fn(),
+  markWebhookProcessed: vi.fn(),
+  incrementCounter: vi.fn(),
+  fetchBaseFields: vi.fn(),
+  fetchPiiFields: vi.fn(),
+};
+
 describe("Real handleCustomer tests with fallback", () => {
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
-  let mockProcessCustomerWebhook: ReturnType<typeof vi.fn>;
-  let mockGetTagRules: ReturnType<typeof vi.fn>;
-  let mockShouldFetchCustomerPii: ReturnType<typeof vi.fn>;
-  let mockIsWebhookProcessed: ReturnType<typeof vi.fn>;
-  let mockMarkWebhookProcessed: ReturnType<typeof vi.fn>;
-  let mockIncrementCounter: ReturnType<typeof vi.fn>;
-  let mockFetchBaseFields: ReturnType<typeof vi.fn>;
-  let mockFetchPiiFields: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -334,45 +338,41 @@ describe("Real handleCustomer tests with fallback", () => {
 
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
+    // Reset all mock implementations
+    handleCustomerMocks.processCustomerWebhook.mockReset().mockResolvedValue({
+      success: true,
+      action: "created",
+      entityId: "contact-123",
+    });
+    handleCustomerMocks.getTagRules.mockReset().mockResolvedValue([{ tag: "net-terms", defaultTermsDays: 30 }]);
+    handleCustomerMocks.shouldFetchCustomerPii.mockReset().mockResolvedValue(true);
+    handleCustomerMocks.isWebhookProcessed.mockReset().mockResolvedValue(false);
+    handleCustomerMocks.markWebhookProcessed.mockReset().mockResolvedValue(undefined);
+    handleCustomerMocks.incrementCounter.mockReset().mockResolvedValue(undefined);
+    handleCustomerMocks.fetchBaseFields.mockReset();
+    handleCustomerMocks.fetchPiiFields.mockReset();
+
     vi.doMock("~/lib/request-context.server", () => ({
       getRequestEnv: vi.fn(() => ({ CUSTOMER_PII_FIELDS: "1" })),
       getRequestSql: vi.fn(() => ({})),
     }));
 
-    mockProcessCustomerWebhook = vi.fn().mockResolvedValue({
-      success: true,
-      action: "created",
-      entityId: "contact-123",
-    });
-    mockGetTagRules = vi.fn().mockResolvedValue([{ tag: "net-terms", defaultTermsDays: 30 }]);
-    mockShouldFetchCustomerPii = vi.fn().mockResolvedValue(true);
-
-    mockIsWebhookProcessed = vi.fn().mockResolvedValue(false);
-    mockMarkWebhookProcessed = vi.fn().mockResolvedValue(undefined);
-
     vi.doMock("~/services/sync/customer.server", () => ({
-      processCustomerWebhook: mockProcessCustomerWebhook,
-      getTagRules: mockGetTagRules,
-      shouldFetchCustomerPii: mockShouldFetchCustomerPii,
+      processCustomerWebhook: handleCustomerMocks.processCustomerWebhook,
+      getTagRules: handleCustomerMocks.getTagRules,
+      shouldFetchCustomerPii: handleCustomerMocks.shouldFetchCustomerPii,
       CustomerPiiMode: {} as never,
     }));
 
     vi.doMock("~/services/sync/company.server", () => ({
-      isWebhookProcessed: mockIsWebhookProcessed,
-      markWebhookProcessed: mockMarkWebhookProcessed,
+      isWebhookProcessed: handleCustomerMocks.isWebhookProcessed,
+      markWebhookProcessed: handleCustomerMocks.markWebhookProcessed,
     }));
 
-    mockIncrementCounter = vi.fn().mockResolvedValue(undefined);
-
-    // Create mock functions that will be configured per-test
-    mockFetchBaseFields = vi.fn();
-    mockFetchPiiFields = vi.fn();
-
-    // Mock the entire customer-fetch.server module with mocks we control
     vi.doMock("../customer-fetch.server", () => ({
-      fetchCustomerBaseFields: mockFetchBaseFields,
-      fetchCustomerPiiFields: mockFetchPiiFields,
-      incrementCustomerPiiAccessDeniedFallback: mockIncrementCounter,
+      fetchCustomerBaseFields: handleCustomerMocks.fetchBaseFields,
+      fetchCustomerPiiFields: handleCustomerMocks.fetchPiiFields,
+      incrementCustomerPiiAccessDeniedFallback: handleCustomerMocks.incrementCounter,
       getCustomerPiiAccessDeniedFallbackCount: vi.fn().mockResolvedValue(0),
       fetchCustomerWithFallback: vi.fn().mockResolvedValue({ success: true, data: {} }),
       getCustomerByNodeQuery: vi.fn().mockReturnValue("query CustomerById"),
@@ -386,12 +386,12 @@ describe("Real handleCustomer tests with fallback", () => {
 
   it("fallback succeeds: logs warning, increments counter, passes 'fallback' piiMode", async () => {
     // Set up mock returns
-    mockFetchBaseFields.mockResolvedValue({
+    handleCustomerMocks.fetchBaseFields.mockResolvedValue({
       success: true,
       data: { id: "gid://shopify/Customer/123", tags: ["net-terms"] },
       retryable: false,
     });
-    mockFetchPiiFields.mockResolvedValue({
+    handleCustomerMocks.fetchPiiFields.mockResolvedValue({
       success: true,
       email: null,
       displayName: null,
@@ -434,10 +434,10 @@ describe("Real handleCustomer tests with fallback", () => {
     expect(fallbackLog).toContain('"fields"');
 
     // Verify counter was incremented
-    expect(mockIncrementCounter).toHaveBeenCalledWith(mockSql, "test.myshopify.com");
+    expect(handleCustomerMocks.incrementCounter).toHaveBeenCalledWith(mockSql, "test.myshopify.com");
 
     // Verify processCustomerWebhook was called with 'fallback' mode
-    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+    expect(handleCustomerMocks.processCustomerWebhook).toHaveBeenCalledWith(
       mockSql,
       "test.myshopify.com",
       "CUSTOMERS_UPDATE",
@@ -449,7 +449,7 @@ describe("Real handleCustomer tests with fallback", () => {
 
   it("base fetch denied: returns failure, no counter increment", async () => {
     // Base fields fetch fails
-    mockFetchBaseFields.mockResolvedValue({
+    handleCustomerMocks.fetchBaseFields.mockResolvedValue({
       success: false,
       error: "Access denied",
       retryable: false,
@@ -475,19 +475,19 @@ describe("Real handleCustomer tests with fallback", () => {
     expect(result.error).toContain("Access denied");
 
     // Counter should NOT be called (processing failed)
-    expect(mockIncrementCounter).not.toHaveBeenCalled();
+    expect(handleCustomerMocks.incrementCounter).not.toHaveBeenCalled();
     // processCustomerWebhook should NOT be called (fetch failed)
-    expect(mockProcessCustomerWebhook).not.toHaveBeenCalled();
+    expect(handleCustomerMocks.processCustomerWebhook).not.toHaveBeenCalled();
   });
 
   it("both calls succeed: no warning, no counter, 'fetched' piiMode", async () => {
     // Set up mock returns for both fetch calls
-    mockFetchBaseFields.mockResolvedValue({
+    handleCustomerMocks.fetchBaseFields.mockResolvedValue({
       success: true,
       data: { id: "gid://shopify/Customer/789", tags: ["premium"] },
       retryable: false,
     });
-    mockFetchPiiFields.mockResolvedValue({
+    handleCustomerMocks.fetchPiiFields.mockResolvedValue({
       success: true,
       email: "customer@example.com",
       displayName: "John Doe",
@@ -523,10 +523,10 @@ describe("Real handleCustomer tests with fallback", () => {
     expect(fallbackLog).toBeUndefined();
 
     // Counter should NOT be called
-    expect(mockIncrementCounter).not.toHaveBeenCalled();
+    expect(handleCustomerMocks.incrementCounter).not.toHaveBeenCalled();
 
     // processCustomerWebhook should be called with 'fetched' mode
-    expect(mockProcessCustomerWebhook).toHaveBeenCalledWith(
+    expect(handleCustomerMocks.processCustomerWebhook).toHaveBeenCalledWith(
       mockSql,
       "test.myshopify.com",
       "CUSTOMERS_UPDATE",
@@ -541,12 +541,12 @@ describe("Real handleCustomer tests with fallback", () => {
 
   it("counter insert throws: message still succeeds (best-effort)", async () => {
     // Set up mock returns for fallback scenario
-    mockFetchBaseFields.mockResolvedValue({
+    handleCustomerMocks.fetchBaseFields.mockResolvedValue({
       success: true,
       data: { id: "gid://shopify/Customer/999", tags: [] },
       retryable: false,
     });
-    mockFetchPiiFields.mockResolvedValue({
+    handleCustomerMocks.fetchPiiFields.mockResolvedValue({
       success: true,
       email: null,
       displayName: null,
@@ -555,7 +555,7 @@ describe("Real handleCustomer tests with fallback", () => {
     });
 
     // Counter throws (e.g., table doesn't exist, migration not applied)
-    mockIncrementCounter.mockRejectedValueOnce(new Error("relation s10b_customer_pii_fallback does not exist"));
+    handleCustomerMocks.incrementCounter.mockRejectedValueOnce(new Error("relation s10b_customer_pii_fallback does not exist"));
 
     const { getSyncHandler } = await import("../processor.server");
     const handler = getSyncHandler("CUSTOMERS_UPDATE");
@@ -584,6 +584,6 @@ describe("Real handleCustomer tests with fallback", () => {
     );
 
     // processCustomerWebhook should still have been called
-    expect(mockProcessCustomerWebhook).toHaveBeenCalled();
+    expect(handleCustomerMocks.processCustomerWebhook).toHaveBeenCalled();
   });
 });
