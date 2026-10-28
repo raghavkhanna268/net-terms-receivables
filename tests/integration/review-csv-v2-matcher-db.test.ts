@@ -26,7 +26,7 @@ import { parseBankStatement } from "../../app/lib/banks/index.js";
 import { runMatcher } from "../../app/services/matcher.server.js";
 import { CONFIDENCE_THRESHOLD } from "../../app/lib/matching/score.js";
 import { REVIEWER_DEMO_AMOUNTS, REVIEWER_DEMO_BUYER } from "../fixtures/reviewer-demo";
-import { computeDateBounds, validateImportRequest, mapCreditsForImport } from "../../app/routes/app.imports";
+import { computeDateBounds, mapCreditsForImport } from "../../app/routes/app.imports";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
