@@ -16,6 +16,7 @@ import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } 
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -126,8 +127,9 @@ describeWithDb("drain: in-flight message for a redacted shop (#239)", () => {
     await sqlRef.end();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     redactTriggered.done = false;
+    await archiveForeignQueueRows(sqlRef, [A.domain, B.domain, C.domain]);
   });
 
   afterEach(() => {
@@ -324,22 +326,7 @@ describeWithDb("drain guards: Shop existence check (#239)", () => {
   });
 
   beforeEach(async () => {
-    // Archive foreign bulk messages to prevent cross-test pollution when tests run shuffled
-    const allDomains = [NO_SHOP_DOMAIN, LIVE_SHOP_DOMAIN, UNINSTALLED_SHOP_DOMAIN];
-    await sql`
-      WITH visible AS (
-        SELECT msg_id FROM pgmq.q_s6_bulk
-        WHERE message->>'shop' NOT IN ${sql(allDomains)}
-      )
-      SELECT pgmq.archive('s6_bulk', msg_id) FROM visible
-    `;
-    await sql`
-      WITH visible AS (
-        SELECT msg_id FROM pgmq.q_s6_sync
-        WHERE message->>'shop' NOT IN ${sql(allDomains)}
-      )
-      SELECT pgmq.archive('s6_sync', msg_id) FROM visible
-    `;
+    await archiveForeignQueueRows(sql, [NO_SHOP_DOMAIN, LIVE_SHOP_DOMAIN, UNINSTALLED_SHOP_DOMAIN]);
   });
 
   afterAll(async () => {

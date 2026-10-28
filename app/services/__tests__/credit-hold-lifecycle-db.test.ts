@@ -18,6 +18,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 import type { CreditStatus } from "~/lib/metafields-contract";
 
 let metafieldWriteCount = 0;
@@ -366,6 +367,7 @@ describeWithDb("S17 credit-hold lifecycle (overdue)", () => {
     const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -787,6 +789,7 @@ describeWithDb("S17 credit-hold lifecycle (gated accounts)", () => {
     const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 

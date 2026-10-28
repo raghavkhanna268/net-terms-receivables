@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 import { S6_QUEUES, type BulkMessage } from "~/lib/pgmq.server";
 import {
   runDrain,
@@ -66,6 +67,10 @@ describeWithDb("S10b processBulkQueue Integration", () => {
     await assertNoQueueLeftovers(sql, [TEST_SHOP], "s10b-bulk-queue.test.ts");
 
     await sql.end();
+  });
+
+  beforeEach(async () => {
+    await archiveForeignQueueRows(sql, [TEST_SHOP]);
   });
 
   afterEach(() => {

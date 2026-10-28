@@ -17,6 +17,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { syncClockToDb } from "../../../tests/helpers/db-clock";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 
 // Track metafield write calls
 let metafieldWriteCount = 0;
@@ -813,6 +814,7 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     const [result] = await sql<{ accounts_enqueued: number; messages_skipped: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -858,6 +860,7 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     const [result] = await sql<{ accounts_enqueued: number; messages_skipped: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -910,6 +913,7 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     const [result] = await sql<{ accounts_enqueued: number; messages_skipped: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -953,6 +957,7 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
 
     // Run the cron function
     await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     // Verify no message was enqueued for this account
     const [queueMsg] = await sql<{ message: unknown }[]>`
@@ -992,6 +997,7 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
 
     // Run the cron function
     await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     // Verify no message was enqueued
     const [queueMsg] = await sql<{ message: unknown }[]>`
@@ -1034,6 +1040,7 @@ describeWithDb("enqueue_credit_status_recomputes SQL function", () => {
     const [result] = await sql<{ accounts_enqueued: number; messages_skipped: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     // Should be skipped
     expect(result.messages_skipped).toBeGreaterThanOrEqual(1);
@@ -1333,6 +1340,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       const [result] = await sql<{ accounts_enqueued: number; messages_skipped: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -1358,6 +1366,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       const [result] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
     });
@@ -1370,6 +1379,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       `;
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const [queueMsg] = await sql<{ message: unknown }[]>`
         SELECT message FROM pgmq.q_s6_sync
@@ -1389,6 +1399,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       `;
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const [queueMsg] = await sql<{ message: unknown }[]>`
         SELECT message FROM pgmq.q_s6_sync
@@ -1415,6 +1426,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 
       try {
         await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+        await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
         const [queueMsg] = await sql<{ message: unknown }[]>`
           SELECT message FROM pgmq.q_s6_sync
@@ -1474,6 +1486,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 
       try {
         await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+        await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
         const [queueMsg] = await sql<{ message: unknown }[]>`
           SELECT message FROM pgmq.q_s6_sync
@@ -1498,6 +1511,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       `;
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const [queueMsg] = await sql<{ message: unknown }[]>`
         SELECT message FROM pgmq.q_s6_sync
@@ -1540,6 +1554,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       try {
         // Day 1
         await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+        await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
         
         // Verify none were enqueued
         for (const acc of excludedAccounts) {
@@ -1558,6 +1573,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 
         // Day 2
         await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+        await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
         // Still none enqueued (exclusion criteria still apply)
         for (const acc of excludedAccounts) {
@@ -1600,6 +1616,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       const [result] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -1652,6 +1669,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 
       try {
         await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+        await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
         // Get messages for our test accounts - filter in JS since array syntax varies
         const allMessages = await sql<{ message: { buyerAccountId: string } }[]>`
@@ -1695,6 +1713,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
       const [result1] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       expect(result1.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -1717,6 +1736,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 
       // Second run same day - should not enqueue again (dedupe key exists)
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       // No new messages for this account (dedupe key already in s6_processed_webhooks)
       const [newMsg] = await sql<{ message: unknown }[]>`
@@ -1750,6 +1770,7 @@ describeWithDb("Part 3 resync pass (#204)", () => {
 
       // Run resync
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       // holdState should be unchanged
       const [after] = await sql<{ holdState: string }[]>`
@@ -2387,6 +2408,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
       expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
       const [newQueueMsg] = await sql<{ message: unknown }[]>`
@@ -2465,6 +2487,7 @@ describeWithDb("drain integration - dead letter and error handling (#204)", () =
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${TEST_SHOP_DOMAIN}`;
       
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
       
       // Check that no resync message was enqueued for this account
       const [newQueueMsg] = await sql<{ message: unknown }[]>`
@@ -3081,6 +3104,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
       expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
       // Get our message's msg_id
@@ -3201,6 +3225,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
       expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
       // Get our message's msg_id
@@ -3287,6 +3312,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -3314,6 +3340,7 @@ describeWithDb("release and hold direction end-to-end (#204)", () => {
       const [sweepResult] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       expect(sweepResult.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -3409,6 +3436,7 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
     const [result] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -3445,6 +3473,7 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
     const [result] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
   });
@@ -3470,6 +3499,7 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
     `;
 
     await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     const [queueMsg] = await sql<{ message: unknown }[]>`
       SELECT message FROM pgmq.q_s6_sync
@@ -3510,6 +3540,7 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
     const [result] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
@@ -3531,6 +3562,7 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
     `;
 
     await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     const [queueMsg] = await sql<{ message: unknown }[]>`
       SELECT message FROM pgmq.q_s6_sync
@@ -3566,6 +3598,7 @@ describeWithDb("Part 1 and Part 2 regression (#204)", () => {
     const [result] = await sql<{ accounts_enqueued: number }[]>`
       SELECT * FROM enqueue_credit_status_recomputes()
     `;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
     expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 

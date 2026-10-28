@@ -21,6 +21,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 
 // Track metafield write calls
 let metafieldWriteCount = 0;
@@ -255,6 +256,7 @@ describeWithDb("gated account behavior (PLAN_GATING_ENFORCED=true)", () => {
       const [result] = await sql<{ accounts_enqueued: number }[]>`
         SELECT * FROM enqueue_credit_status_recomputes()
       `;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       expect(result.accounts_enqueued).toBeGreaterThanOrEqual(1);
 
