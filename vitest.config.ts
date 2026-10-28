@@ -231,6 +231,9 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Matcher import scope isolation DB tests
+  "tests/integration/matcher-import-scope-db.test.ts",
 ];
 
 export default defineConfig({
