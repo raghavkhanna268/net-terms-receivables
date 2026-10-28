@@ -629,14 +629,12 @@ describe("Import Results UI - Parse Result Structure", () => {
   });
 
   describe("retail fixture errors", () => {
-    it("HDFC retail fixture has exactly 1 error at row 27", async () => {
+    it("HDFC retail fixture has 0 errors (bare Total row is recognized as footer)", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-retail-synthetic.csv"));
       const file = new File([content], "hdfc-retail-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
-      expect(result.errors.length).toBe(1);
-      expect(result.errors[0].row).toBe(27);
-      expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
+      expect(result.errors.length).toBe(0);
     });
   });
 

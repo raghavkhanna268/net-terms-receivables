@@ -402,6 +402,7 @@ export function detectFooterRows(sheet: SheetData, dataStartRow: number): Set<nu
     /^Opening\s*Balance/i,
     /^Closing\s*Balance/i,
     /^Total\s*(?:Debit|Credit|Withdrawal|Deposit)/i,
+    /^Total\s*:?\s*$/i,
     /^Dr\s*Count/i,
     /^Cr\s*Count/i,
     /^B\/F$/i, // Brought forward

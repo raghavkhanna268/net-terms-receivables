@@ -151,7 +151,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      * - Line 12: "Opening Balance" row
      * - Lines 13-16: 4 transaction rows (3 credits + 1 debit)
      * - Line 17: Empty line
-     * - Line 18: "Total" summary row (this causes parse error - has amounts but no date)
+     * - Line 18: "Total" summary row (recognized as footer - bare "Total" with amounts)
      * - Line 19: Empty line
      * - Line 20: "Statement Summary"
      * - Line 21: "Opening Balance: 50,000.00"
@@ -161,9 +161,8 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      * - Line 25: Empty line
      * - Line 26: "This is a computer generated..."
      *
-     * Parse error: The "Total" row (line 18) has amounts in the withdrawal/deposit
-     * columns but no date, triggering ROW_PARSE_FAILED. This is consistent with
-     * hdfc-retail-synthetic.csv which has the same Total row format.
+     * The bare "Total" row (line 18) is recognized as a footer/summary row
+     * and skipped without error.
      */
     it("pins exact row counts", () => {
       // Total rows in file (all lines including comments, preamble, footer)
@@ -178,10 +177,8 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       // Non-credits (debits/withdrawals) - parsed but filtered by direction
       expect(debits.length).toBe(1);
 
-      // Parse errors: "Total" summary row has amounts but no date
-      // This matches hdfc-retail-synthetic.csv behavior
-      expect(parseResult.errors.length).toBe(1);
-      expect(parseResult.errors[0].code).toBe("ROW_PARSE_FAILED");
+      // No parse errors - bare "Total" row is recognized as footer
+      expect(parseResult.errors.length).toBe(0);
 
       // Skipped rows (preamble, header, opening balance, footer, summary)
       expect(parseResult.skippedRows).toBeGreaterThan(0);
@@ -196,9 +193,7 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
      * Lines 943-947: Credits Found display
      *   "Credits Found: 3 (debits: 1, not imported)"
      *
-     * Lines 951-992: Parse errors banner
-     *   "1 row(s) could not be parsed"
-     *   "Row 18: ROW_PARSE_FAILED - Could not parse this row"
+     * Bare "Total" rows are recognized as footer/summary rows and skipped without error.
      */
     it("documents UI display values", () => {
       // What the UI would show for "Credits Found"
@@ -207,8 +202,8 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
       // What the UI would show for "debits: X, not imported"
       expect(debits.length).toBe(1);
 
-      // What the UI would show for "N row(s) could not be parsed"
-      expect(parseResult.errors.length).toBe(1);
+      // No parse errors - bare "Total" row is recognized as footer
+      expect(parseResult.errors.length).toBe(0);
     });
 
     it("parses all credits with SYNT marker in narration", () => {
@@ -453,19 +448,16 @@ describe("HDFC reviewer synthetic CSV parse and match", () => {
 
   describe("comparison with hdfc-retail-synthetic.csv", () => {
     /**
-     * The existing hdfc-retail-synthetic.csv has the same "Total" row format
-     * that causes a ROW_PARSE_FAILED error. This is expected HDFC behavior.
+     * The existing hdfc-retail-synthetic.csv has the same bare "Total" row format.
+     * This is recognized as a footer/summary row and skipped without error.
      */
-    it("hdfc-retail-synthetic.csv also has Total row parse error", async () => {
+    it("hdfc-retail-synthetic.csv also recognizes bare Total row as footer", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-retail-synthetic.csv"));
       const file = new File([content], "hdfc-retail-synthetic.csv", { type: "text/csv" });
       const retailResult = await parseBankStatement(file);
 
-      // Should also have a parse error for Total row
-      const totalRowError = retailResult.errors.find(
-        (e) => e.code === "ROW_PARSE_FAILED"
-      );
-      expect(totalRowError).toBeDefined();
+      // No ROW_PARSE_FAILED errors for bare Total row - it's recognized as footer
+      expect(retailResult.errors.length).toBe(0);
     });
   });
 

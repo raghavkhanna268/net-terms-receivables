@@ -755,16 +755,16 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([19]);
     });
 
-    it("HDFC retail: matches main error list, no spurious error at row 28", async () => {
+    it("HDFC retail: matches main error list, no spurious error at row 27 or 28", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-retail-synthetic.csv"));
       const file = new File([content], "hdfc-retail-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(14);
-      expect(result.errors.length).toBe(1);
-      expect(result.errors[0].row).toBe(27);
-      expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
+      expect(result.errors.length).toBe(0);
+      const hasRow27Error = result.errors.some((e) => e.row === 27);
+      expect(hasRow27Error).toBe(false);
       const hasRow28Error = result.errors.some((e) => e.row === 28);
       expect(hasRow28Error).toBe(false);
     });
@@ -1068,6 +1068,44 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const impsTxn = impsTxns.find((t) => t.narration.includes("IMPS-123456789012"));
       expect(impsTxn).toBeDefined();
       expect(impsTxn!.parsed.utr).toBe("123456789012");
+    });
+  });
+
+  describe("bare Total footer row handling", () => {
+    it("HDFC v2 fixture: bare 'Total' row is recognized as footer, produces 0 parse errors", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
+      const file = new File([content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      expect(result.detection.bank).toBe("HDFC");
+      expect(result.errors.length).toBe(0);
+    });
+
+    it("HDFC v2 fixture: parses exactly 4 credits", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
+      const file = new File([content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const credits = result.transactions.filter((t) => t.direction === "CR");
+      expect(credits.length).toBe(4);
+    });
+
+    it("HDFC v2 fixture: bare Total row does not produce ROW_PARSE_FAILED", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
+      const file = new File([content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const rowParseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
+      expect(rowParseFailedErrors.length).toBe(0);
+    });
+
+    it("HDFC: transaction with narration starting 'TOTAL ...' is parsed as transaction, not footer", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-edgecases-synthetic.csv"));
+      const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      expect(result.detection.bank).toBe("HDFC");
+      expect(result.transactions.length).toBe(13);
     });
   });
 });
