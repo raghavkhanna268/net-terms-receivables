@@ -1151,3 +1151,5 @@ export default function AccountPage() {
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
+
+export { RouteErrorBoundary as ErrorBoundary } from "~/components/RouteErrorBoundary";

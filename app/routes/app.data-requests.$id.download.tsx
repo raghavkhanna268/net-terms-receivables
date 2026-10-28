@@ -81,3 +81,5 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
+
+export { RouteErrorBoundary as ErrorBoundary } from "~/components/RouteErrorBoundary";

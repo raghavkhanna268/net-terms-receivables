@@ -1298,3 +1298,5 @@ export default function ReconcilePage() {
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
+
+export { RouteErrorBoundary as ErrorBoundary } from "~/components/RouteErrorBoundary";
