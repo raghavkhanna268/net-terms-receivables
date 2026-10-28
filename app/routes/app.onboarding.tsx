@@ -467,6 +467,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     defaultTermsDays: dbData.defaultTermsDays,
     buyerAccountCount: dbData.buyerAccountCount,
     tagRuleCount: dbData.tagRuleCount,
+    buyerCounts: dbData.buyerCounts,
+    initialSyncStatus: syncState?.status,
     validation,
     paymentCustomization,
     emailSendingConfigured,

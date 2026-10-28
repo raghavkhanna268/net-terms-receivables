@@ -13,6 +13,7 @@
  */
 
 import type { Sql } from "~/lib/db-light.server";
+import { pluralizeWithCount } from "~/lib/copy-helpers";
 
 /**
  * Step status indicating the current state of an onboarding step.
@@ -76,14 +77,32 @@ export interface PaymentCustomizationInfo {
 export type OnboardingPlanStatus = "active" | "none" | "error";
 
 /**
+ * Buyer account counts for step 2 (configure buyer accounts).
+ * Split by AccountKind for precise copy.
+ */
+export interface BuyerAccountCounts {
+  /** L: COMPANY-kind accounts (one per company location) */
+  locationCount: number;
+  /** C: COUNT(DISTINCT companyId) among COMPANY-kind accounts */
+  companyCount: number;
+  /** T: TAGGED_CUSTOMER-kind accounts */
+  taggedCustomerCount: number;
+}
+
+/**
  * Data needed to compute onboarding step states.
  * All fields are fetched from real sources (DB or Admin API).
  */
 export interface OnboardingStepInputs {
   shopId: string;
   defaultTermsDays: number | null;
+  /** @deprecated Use buyerCounts instead */
   buyerAccountCount: number;
   tagRuleCount: number;
+  /** Detailed buyer account counts by kind */
+  buyerCounts?: BuyerAccountCounts;
+  /** Initial sync status for empty-state detection */
+  initialSyncStatus?: "not_started" | "in_progress" | "done" | "failed";
   validation: ValidationInfo | null;
   paymentCustomization: PaymentCustomizationInfo | null;
   /** True only when BOTH RESEND_API_KEY and RESEND_FROM are configured. */
@@ -121,28 +140,85 @@ export function computeDefaultTermsStep(
 }
 
 /**
+ * Build step 2 helpText from detailed counts.
+ *
+ * Copy rules (approved):
+ * - Company accounts only, C == L: '{C} B2B companies synced'
+ * - Company accounts only, C != L: '{C} B2B companies synced ({L} locations, one buyer account each)'
+ * - Tagged customers only (T > 0, L == 0): '{T} tagged customers synced from {R} tag rules'. If R == 0, just '{T} tagged customers synced'
+ * - Both L > 0 and T > 0: '{C} B2B companies ({L} locations) and {T} tagged customers synced'
+ * - Rules but no accounts (L == 0, T == 0, R > 0): '{R} customer tag rules configured'
+ * - Sync done, nothing found (L == 0, T == 0, R == 0, sync == done): 'No company locations or tag rules found yet. Add a location to a B2B company in Shopify, or create a tag rule.'
+ * - Nothing (default): 'Sync B2B companies or create tag rules to identify net-terms buyers'
+ */
+function buildBuyerSetupHelpText(
+  L: number,
+  C: number,
+  T: number,
+  R: number,
+  syncDone: boolean
+): string {
+  const hasCompanyAccounts = L > 0;
+  const hasTaggedCustomers = T > 0;
+  const hasRules = R > 0;
+
+  if (hasCompanyAccounts && hasTaggedCustomers) {
+    const companiesCopy = pluralizeWithCount(C, "B2B company", "B2B companies");
+    const locationsCopy = pluralizeWithCount(L, "location");
+    const customersCopy = pluralizeWithCount(T, "tagged customer");
+    return `${companiesCopy} (${locationsCopy}) and ${customersCopy} synced`;
+  }
+
+  if (hasCompanyAccounts) {
+    const companiesCopy = pluralizeWithCount(C, "B2B company", "B2B companies");
+    if (C === L) {
+      return `${companiesCopy} synced`;
+    }
+    const locationsCopy = pluralizeWithCount(L, "location");
+    return `${companiesCopy} synced (${locationsCopy}, one buyer account each)`;
+  }
+
+  if (hasTaggedCustomers) {
+    const customersCopy = pluralizeWithCount(T, "tagged customer");
+    if (R === 0) {
+      return `${customersCopy} synced`;
+    }
+    const rulesCopy = pluralizeWithCount(R, "tag rule");
+    return `${customersCopy} synced from ${rulesCopy}`;
+  }
+
+  if (hasRules) {
+    return `${pluralizeWithCount(R, "customer tag rule")} configured`;
+  }
+
+  if (syncDone) {
+    return "No company locations or tag rules found yet. Add a location to a B2B company in Shopify, or create a tag rule.";
+  }
+
+  return "Sync B2B companies or create tag rules to identify net-terms buyers";
+}
+
+/**
  * Compute step 2: First buyer account or tag rule created.
  * Links to /app/tag-rules when not complete (S23-03).
  */
 export function computeBuyerSetupStep(
   buyerAccountCount: number,
-  tagRuleCount: number
+  tagRuleCount: number,
+  buyerCounts?: BuyerAccountCounts,
+  initialSyncStatus?: "not_started" | "in_progress" | "done" | "failed"
 ): OnboardingStep {
-  const hasAccounts = buyerAccountCount > 0;
-  const hasTagRules = tagRuleCount > 0;
+  const L = buyerCounts?.locationCount ?? buyerAccountCount;
+  const C = buyerCounts?.companyCount ?? buyerAccountCount;
+  const T = buyerCounts?.taggedCustomerCount ?? 0;
+  const R = tagRuleCount;
+  const syncDone = initialSyncStatus === "done";
+
+  const hasAccounts = (L + T) > 0;
+  const hasTagRules = R > 0;
   const isComplete = hasAccounts || hasTagRules;
 
-  let helpText: string;
-  if (hasAccounts && hasTagRules) {
-    helpText = `${buyerAccountCount} buyer account(s) and ${tagRuleCount} tag rule(s) configured`;
-  } else if (hasAccounts) {
-    helpText = `${buyerAccountCount} buyer account(s) synced from B2B companies`;
-  } else if (hasTagRules) {
-    helpText = `${tagRuleCount} customer tag rule(s) configured`;
-  } else {
-    helpText =
-      "Sync B2B companies or create tag rules to identify net-terms buyers";
-  }
+  const helpText = buildBuyerSetupHelpText(L, C, T, R, syncDone);
 
   return {
     id: "buyer-setup",
@@ -343,7 +419,12 @@ export function computeOnboardingState(
     // Re-enable in v1.1 once a default-terms settings route exists
     // computeDefaultTermsStep(inputs.defaultTermsDays),
     computePlanStep(inputs.planStatus, inputs.planSelectionUrl),
-    computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
+    computeBuyerSetupStep(
+      inputs.buyerAccountCount,
+      inputs.tagRuleCount,
+      inputs.buyerCounts,
+      inputs.initialSyncStatus
+    ),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),
     computeReminderStep(inputs.emailSendingConfigured, inputs.remindersEnabled),
@@ -390,6 +471,7 @@ export async function fetchShopOnboardingData(
   defaultTermsDays: number | null;
   buyerAccountCount: number;
   tagRuleCount: number;
+  buyerCounts: BuyerAccountCounts;
   dismissedAt: Date | null;
   currency: string | null;
 } | null> {
@@ -408,9 +490,12 @@ export async function fetchShopOnboardingData(
 
   if (!shop) return null;
 
-  const [accountCountResult, tagRuleCountResult] = await Promise.all([
-    sql<{ count: string }[]>`
-      SELECT COUNT(*)::text as count
+  const [accountCountsResult, tagRuleCountResult] = await Promise.all([
+    sql<{ locationCount: string; companyCount: string; taggedCustomerCount: string }[]>`
+      SELECT
+        COUNT(*) FILTER (WHERE kind = 'COMPANY')::text AS "locationCount",
+        COUNT(DISTINCT "companyId") FILTER (WHERE kind = 'COMPANY')::text AS "companyCount",
+        COUNT(*) FILTER (WHERE kind = 'TAGGED_CUSTOMER')::text AS "taggedCustomerCount"
       FROM "BuyerAccount"
       WHERE "shopId" = ${shop.id}
     `,
@@ -421,11 +506,20 @@ export async function fetchShopOnboardingData(
     `,
   ]);
 
+  const locationCount = parseInt(accountCountsResult[0]?.locationCount ?? "0", 10);
+  const companyCount = parseInt(accountCountsResult[0]?.companyCount ?? "0", 10);
+  const taggedCustomerCount = parseInt(accountCountsResult[0]?.taggedCustomerCount ?? "0", 10);
+
   return {
     shopId: shop.id,
     defaultTermsDays: shop.defaultTermsDays,
-    buyerAccountCount: parseInt(accountCountResult[0]?.count ?? "0", 10),
+    buyerAccountCount: locationCount + taggedCustomerCount,
     tagRuleCount: parseInt(tagRuleCountResult[0]?.count ?? "0", 10),
+    buyerCounts: {
+      locationCount,
+      companyCount,
+      taggedCustomerCount,
+    },
     dismissedAt: shop.onboardingDismissedAt,
     currency: shop.currency,
   };

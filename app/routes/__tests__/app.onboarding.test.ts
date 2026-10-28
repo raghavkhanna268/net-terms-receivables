@@ -4109,3 +4109,148 @@ describe("Initial sync card shows loader status, not stale actionData", () => {
     expect(html).not.toContain('tone="critical">Failed</s-badge>');
   });
 });
+
+/**
+ * @vitest-environment jsdom
+ */
+describe("revalidate-poll", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    vi.resetModules();
+  });
+
+  it("calls revalidate after 5000ms when sync is in_progress and currency is supported", async () => {
+    const revalidateMock = vi.fn();
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "in_progress" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: revalidateMock }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+
+    const React = await import("react");
+    const ReactDOMClient = await import("react-dom/client");
+    const { act } = await import("react");
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root: ReturnType<typeof ReactDOMClient.createRoot>;
+
+    await act(async () => {
+      root = ReactDOMClient.createRoot(container);
+      root.render(React.createElement(OnboardingPage));
+    });
+
+    expect(revalidateMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+
+    expect(revalidateMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+
+    expect(revalidateMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  });
+
+  it("does NOT call revalidate when sync is done", async () => {
+    const revalidateMock = vi.fn();
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          error: null,
+          state: {
+            steps: [],
+            isComplete: false,
+            completedCount: 2,
+            totalCount: 4,
+            dismissedAt: null,
+          },
+          registrationStatus: null,
+          initialSyncState: { status: "done" },
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          currencySupported: true,
+          currencyFlipBlocked: false,
+        }),
+        useActionData: () => null,
+        useNavigation: () => ({ state: "idle", formData: null }),
+        useRevalidator: () => ({ state: "idle", revalidate: revalidateMock }),
+        Form: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) =>
+          createElement("form", props, children),
+      };
+    });
+
+    vi.resetModules();
+
+    const React = await import("react");
+    const ReactDOMClient = await import("react-dom/client");
+    const { act } = await import("react");
+    const { default: OnboardingPage } = await import("../app.onboarding");
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root: ReturnType<typeof ReactDOMClient.createRoot>;
+
+    await act(async () => {
+      root = ReactDOMClient.createRoot(container);
+      root.render(React.createElement(OnboardingPage));
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+
+    expect(revalidateMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+
+    expect(revalidateMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.removeChild(container);
+  });
+});
