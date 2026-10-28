@@ -516,6 +516,79 @@ describe("detection", () => {
       expect(footers.has(3)).toBe(true);
     });
 
+    it("detects bare 'Total' row with numeric amounts as footer", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "Transaction", "REF", "01/10/26", "", "1000", "101000"],
+          ["Total", "", "", "", "500.00", "12,000.00", ""],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true);
+    });
+
+    it("detects 'Total:' variant as footer", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "Transaction", "REF", "01/10/26", "", "1000", "101000"],
+          ["Total:", "", "", "", "500.00", "12,000.00", ""],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true);
+    });
+
+    it("detects 'TOTAL' case-insensitive variant as footer", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "Transaction", "REF", "01/10/26", "", "1000", "101000"],
+          ["TOTAL", "", "", "", "500.00", "12,000.00", ""],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true);
+    });
+
+    it("does not treat transaction row with narration starting 'TOTAL ...' as footer", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "TOTAL ENERGIES PAYMENT FOR FUEL", "REF", "01/10/26", "5000", "", "96000"],
+          ["02/10/26", "NEFT-SALARY", "REF2", "02/10/26", "", "50000", "146000"],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(1)).toBe(false);
+      expect(footers.has(2)).toBe(false);
+    });
+
+    it("still detects 'Total Debit' and 'Total Credit' patterns after bare Total support", () => {
+      const sheet: SheetData = {
+        name: "Sheet1",
+        rows: [
+          ["Header"],
+          ["01/10/26", "Transaction", "REF", "01/10/26", "", "1000", "101000"],
+          ["Total Debit", "", "", "", "50000", "", ""],
+          ["Total Credit", "", "", "", "", "75000", ""],
+        ],
+      };
+
+      const footers = detectFooterRows(sheet, 1);
+      expect(footers.has(2)).toBe(true);
+      expect(footers.has(3)).toBe(true);
+    });
+
     it("detects disclaimer rows", () => {
       const sheet: SheetData = {
         name: "Sheet1",

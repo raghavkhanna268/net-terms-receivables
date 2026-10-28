@@ -755,16 +755,16 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       expect(result.errors.filter((e) => e.code === "NORMALIZE_FAILED").map((e) => e.row)).toEqual([19]);
     });
 
-    it("HDFC retail: matches main error list, no spurious error at row 28", async () => {
+    it("HDFC retail: matches main error list, no spurious error at row 27 or 28", async () => {
       const content = readFileSync(join(FIXTURES_DIR, "hdfc-retail-synthetic.csv"));
       const file = new File([content], "hdfc-retail-synthetic.csv", { type: "text/csv" });
       const result = await parseBankStatement(file);
 
       expect(result.transactions.length + result.errors.length + result.skippedRows).toBe(result.totalRows);
       expect(result.transactions.length).toBe(14);
-      expect(result.errors.length).toBe(1);
-      expect(result.errors[0].row).toBe(27);
-      expect(result.errors[0].code).toBe("ROW_PARSE_FAILED");
+      expect(result.errors.length).toBe(0);
+      const hasRow27Error = result.errors.some((e) => e.row === 27);
+      expect(hasRow27Error).toBe(false);
       const hasRow28Error = result.errors.some((e) => e.row === 28);
       expect(hasRow28Error).toBe(false);
     });
@@ -1068,6 +1068,172 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
       const impsTxn = impsTxns.find((t) => t.narration.includes("IMPS-123456789012"));
       expect(impsTxn).toBeDefined();
       expect(impsTxn!.parsed.utr).toBe("123456789012");
+    });
+  });
+
+  describe("bare Total footer row handling", () => {
+    it("HDFC v2 fixture: bare 'Total' row is recognized as footer, produces 0 parse errors", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
+      const file = new File([content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      expect(result.detection.bank).toBe("HDFC");
+      expect(result.errors.length).toBe(0);
+    });
+
+    it("HDFC v2 fixture: parses exactly 4 credits", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
+      const file = new File([content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const credits = result.transactions.filter((t) => t.direction === "CR");
+      expect(credits.length).toBe(4);
+    });
+
+    it("HDFC v2 fixture: bare Total row does not produce ROW_PARSE_FAILED", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-review-synthetic-v2.csv"));
+      const file = new File([content], "hdfc-review-synthetic-v2.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      const rowParseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
+      expect(rowParseFailedErrors.length).toBe(0);
+    });
+
+    it("HDFC: transaction with narration starting 'TOTAL ...' is parsed as transaction, not footer", async () => {
+      const content = readFileSync(join(FIXTURES_DIR, "hdfc-edgecases-synthetic.csv"));
+      const file = new File([content], "hdfc-edgecases-synthetic.csv", { type: "text/csv" });
+      const result = await parseBankStatement(file);
+
+      expect(result.detection.bank).toBe("HDFC");
+      expect(result.transactions.length).toBe(13);
+    });
+
+    it("HDFC XLSX: bare Total row followed by numeric serial dates parses correctly", async () => {
+      const XLSX = await import("xlsx");
+
+      const rows = [
+        ["HDFC BANK"],
+        ["Statement of Account"],
+        ["Account No: SYNT00111222333"],
+        [],
+        ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"],
+        ["Opening Balance", "", "", "", "", "", 50000],
+        ["Total", "", "", "", 1500, 25000, ""],
+        [new Date(Date.UTC(2026, 9, 15)), "NEFT-SYNTN001-SYNTHETIC CORP-PAYMENT", "SYNTN001", new Date(Date.UTC(2026, 9, 15)), "", 10000, 60000],
+        [new Date(Date.UTC(2026, 9, 18)), "UPI-SYNTHETIC VENDOR-vendor@synt-SYNT0002", "SYNT0002", new Date(Date.UTC(2026, 9, 18)), 1500, "", 58500],
+        [new Date(Date.UTC(2026, 9, 20)), "IMPS-SYNTN002-SYNTHETIC SENDER-ADVANCE", "SYNTN002", new Date(Date.UTC(2026, 9, 20)), "", 15000, 73500],
+      ];
+
+      const worksheet = XLSX.utils.aoa_to_sheet(rows, { cellDates: true });
+
+      const dateFormat = "DD/MM/YY";
+      for (let r = 7; r <= 9; r++) {
+        const cellA = XLSX.utils.encode_cell({ r, c: 0 });
+        const cellD = XLSX.utils.encode_cell({ r, c: 3 });
+        if (worksheet[cellA]) worksheet[cellA].z = dateFormat;
+        if (worksheet[cellD]) worksheet[cellD].z = dateFormat;
+      }
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Statement");
+
+      const xlsxBuffer = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
+      const file = new File([xlsxBuffer], "hdfc-total-serial-dates.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+
+      const result = await parseBankStatement(file);
+
+      expect(result.detection.bank).toBe("HDFC");
+
+      const rowParseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
+      expect(rowParseFailedErrors.length).toBe(0);
+
+      expect(result.transactions.length).toBe(3);
+
+      const credits = result.transactions.filter((t) => t.direction === "CR");
+      const debits = result.transactions.filter((t) => t.direction === "DR");
+
+      expect(credits.length).toBe(2);
+      expect(debits.length).toBe(1);
+
+      const creditTotal = credits.reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(2500000);
+
+      const debitTotal = debits.reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(150000);
+
+      expect(result.transactions[0].date).toBe("2026-10-15");
+      expect(result.transactions[1].date).toBe("2026-10-18");
+      expect(result.transactions[2].date).toBe("2026-10-20");
+    });
+
+    // TODO: parseIndianDate does not handle raw Excel serial numbers; needs app code change
+    it.skip("HDFC XLSX: bare Total row followed by unformatted numeric serials parses correctly", async () => {
+      const XLSX = await import("xlsx");
+
+      // Excel serial = days since 1899-12-30 (epoch absorbs the 1900 leap year bug)
+      // Formula: Math.floor((Date.UTC(y,m-1,d) - Date.UTC(1899,11,30)) / 86400000)
+      const SERIAL_2026_10_15 = 46310;
+      const SERIAL_2026_10_18 = 46313;
+      const SERIAL_2026_10_20 = 46315;
+
+      const rows: (string | number | null)[][] = [
+        ["HDFC BANK"],
+        ["Statement of Account"],
+        ["Account No: SYNT00111222333"],
+        [],
+        ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"],
+        ["Opening Balance", "", "", "", "", "", 50000],
+        ["Total", "", "", "", 1500, 25000, ""],
+        [null, "NEFT-SYNTN001-SYNTHETIC CORP-PAYMENT", "SYNTN001", null, "", 10000, 60000],
+        [null, "UPI-SYNTHETIC VENDOR-vendor@synt-SYNT0002", "SYNT0002", null, 1500, "", 58500],
+        [null, "IMPS-SYNTN002-SYNTHETIC SENDER-ADVANCE", "SYNTN002", null, "", 15000, 73500],
+      ];
+
+      const worksheet = XLSX.utils.aoa_to_sheet(rows);
+
+      const serials = [SERIAL_2026_10_15, SERIAL_2026_10_18, SERIAL_2026_10_20];
+      for (let i = 0; i < 3; i++) {
+        const r = 7 + i;
+        const cellA = XLSX.utils.encode_cell({ r, c: 0 });
+        const cellD = XLSX.utils.encode_cell({ r, c: 3 });
+        worksheet[cellA] = { t: "n", v: serials[i] };
+        worksheet[cellD] = { t: "n", v: serials[i] };
+      }
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Statement");
+
+      const xlsxBuffer = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
+      const file = new File([xlsxBuffer], "hdfc-total-raw-serials.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+
+      const result = await parseBankStatement(file);
+
+      expect(result.detection.bank).toBe("HDFC");
+
+      const rowParseFailedErrors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
+      expect(rowParseFailedErrors.length).toBe(0);
+
+      expect(result.transactions.length).toBe(3);
+
+      const credits = result.transactions.filter((t) => t.direction === "CR");
+      const debits = result.transactions.filter((t) => t.direction === "DR");
+
+      expect(credits.length).toBe(2);
+      expect(debits.length).toBe(1);
+
+      const creditTotal = credits.reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(creditTotal).toBe(2500000);
+
+      const debitTotal = debits.reduce((sum, t) => sum + t.amountPaise, 0);
+      expect(debitTotal).toBe(150000);
+
+      expect(result.transactions[0].date).toBe("2026-10-15");
+      expect(result.transactions[1].date).toBe("2026-10-18");
+      expect(result.transactions[2].date).toBe("2026-10-20");
     });
   });
 });
