@@ -268,6 +268,7 @@ async function upsertTaggedCustomer(
 
   if (piiMode === "fallback") {
     // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
+    // Use CASE WHEN to only update PII if new value is non-null, preserving existing otherwise
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
       VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
@@ -280,8 +281,8 @@ async function upsertTaggedCustomer(
           WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
           ELSE s8_tagged_customers.tag_deactivated_at
         END,
-        email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
-        display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
+        email = CASE WHEN EXCLUDED.email IS NOT NULL THEN EXCLUDED.email ELSE s8_tagged_customers.email END,
+        display_name = CASE WHEN EXCLUDED.display_name IS NOT NULL THEN EXCLUDED.display_name ELSE s8_tagged_customers.display_name END
     `;
   } else {
     // 'fetched' or 'disabled': write values as-is (null overwrites)
@@ -330,6 +331,7 @@ async function updateTaggedCustomerIfExists(
 
   if (piiMode === "fallback") {
     // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
+    // Use CASE WHEN to only update if new value is non-null, preserving existing otherwise
     await sql`
       UPDATE s8_tagged_customers
       SET 
@@ -340,8 +342,8 @@ async function updateTaggedCustomerIfExists(
           WHEN tag_active = true AND ${tagActive} = false THEN NOW()
           ELSE tag_deactivated_at
         END,
-        email = COALESCE(${effectiveEmail}, email),
-        display_name = COALESCE(${effectiveDisplayName}, display_name)
+        email = CASE WHEN ${effectiveEmail} IS NOT NULL THEN ${effectiveEmail} ELSE email END,
+        display_name = CASE WHEN ${effectiveDisplayName} IS NOT NULL THEN ${effectiveDisplayName} ELSE display_name END
       WHERE shop_id = ${shopId} AND customer_id = ${customerId}
     `;
   } else {

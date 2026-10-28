@@ -778,10 +778,15 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
 
   if (!piiEnabled) {
     piiMode = "disabled";
+    customer.email = null;
+    customer.displayName = null;
   } else if (!matchesTagRule) {
     // Customer does not match tag rule - no PII fetch
     // Use 'fallback' for tracked customers to preserve stored PII
+    // Set null explicitly so COALESCE in updateTaggedCustomerIfExists preserves existing values
     piiMode = isTracked ? "fallback" : "disabled";
+    customer.email = null;
+    customer.displayName = null;
   } else {
     // Step 4: Fetch PII fields for matching/tracked customers
     const piiResult = await fetchCustomerPiiFields(message.shop, message.resourceGid);
