@@ -320,6 +320,8 @@ describe("Customer PII ACCESS_DENIED fallback", () => {
 describe("Real handleCustomer tests with fallback", () => {
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
   let mockProcessCustomerWebhook: ReturnType<typeof vi.fn>;
+  let mockGetTagRules: ReturnType<typeof vi.fn>;
+  let mockShouldFetchCustomerPii: ReturnType<typeof vi.fn>;
   let mockIsWebhookProcessed: ReturnType<typeof vi.fn>;
   let mockMarkWebhookProcessed: ReturnType<typeof vi.fn>;
   let mockIncrementCounter: ReturnType<typeof vi.fn>;
@@ -345,12 +347,16 @@ describe("Real handleCustomer tests with fallback", () => {
       action: "created",
       entityId: "contact-123",
     });
+    mockGetTagRules = vi.fn().mockResolvedValue([{ tag: "net-terms", defaultTermsDays: 30 }]);
+    mockShouldFetchCustomerPii = vi.fn().mockResolvedValue(true);
 
     mockIsWebhookProcessed = vi.fn().mockResolvedValue(false);
     mockMarkWebhookProcessed = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("~/services/sync/customer.server", () => ({
       processCustomerWebhook: mockProcessCustomerWebhook,
+      getTagRules: mockGetTagRules,
+      shouldFetchCustomerPii: mockShouldFetchCustomerPii,
       CustomerPiiMode: {} as never,
     }));
 
@@ -375,25 +381,27 @@ describe("Real handleCustomer tests with fallback", () => {
   });
 
   it("fallback succeeds: logs warning, increments counter, passes 'fallback' piiMode", async () => {
-    // First call: ACCESS_DENIED
-    mockAdminGraphQL.mockResolvedValueOnce({
-      success: false,
-      error: "Access denied: Required scope read_customers Level 1 + Email",
-      retryable: false,
-    });
-    // Fallback call: success
+    // Base fields call: success (always made first now)
     mockAdminGraphQL.mockResolvedValueOnce({
       success: true,
       data: { node: { id: "gid://shopify/Customer/123", tags: ["net-terms"] } },
       retryable: false,
     });
+    // PII call: ACCESS_DENIED
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Access denied: Required scope read_customers Level 1 + Email",
+      retryable: false,
+      errorCode: "access_denied",
+    });
 
     const { getSyncHandler } = await import("../processor.server");
     const handler = getSyncHandler("CUSTOMERS_UPDATE");
 
-    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
-      json: vi.fn((v: unknown) => v),
-    });
+    const mockSql = vi.fn()
+      .mockResolvedValueOnce([])  // isWebhookProcessed
+      .mockResolvedValueOnce([{ id: "shop-123" }]);  // Shop query
+    Object.assign(mockSql, { json: vi.fn((v: unknown) => v) });
 
     const message = {
       topic: "CUSTOMERS_UPDATE",
@@ -435,26 +443,19 @@ describe("Real handleCustomer tests with fallback", () => {
     );
   });
 
-  it("both calls denied: returns failure, no counter increment", async () => {
-    // First call: ACCESS_DENIED
+  it("base fetch denied: returns failure, no counter increment", async () => {
+    // Base fields call: ACCESS_DENIED
     mockAdminGraphQL.mockResolvedValueOnce({
       success: false,
       error: "Access denied",
-      retryable: false,
-    });
-    // Fallback call: also ACCESS_DENIED
-    mockAdminGraphQL.mockResolvedValueOnce({
-      success: false,
-      error: "Access denied - scope not granted",
       retryable: false,
     });
 
     const { getSyncHandler } = await import("../processor.server");
     const handler = getSyncHandler("CUSTOMERS_CREATE");
 
-    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
-      json: vi.fn((v: unknown) => v),
-    });
+    const mockSql = vi.fn().mockResolvedValue([]);
+    Object.assign(mockSql, { json: vi.fn((v: unknown) => v) });
 
     const message = {
       topic: "CUSTOMERS_CREATE",
@@ -475,8 +476,14 @@ describe("Real handleCustomer tests with fallback", () => {
     expect(mockProcessCustomerWebhook).not.toHaveBeenCalled();
   });
 
-  it("first call succeeds: no warning, no counter, 'fetched' piiMode", async () => {
-    // First call: success with PII
+  it("both calls succeed: no warning, no counter, 'fetched' piiMode", async () => {
+    // Base fields call: success
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: true,
+      data: { node: { id: "gid://shopify/Customer/789", tags: ["premium"] } },
+      retryable: false,
+    });
+    // PII call: success with PII
     mockAdminGraphQL.mockResolvedValueOnce({
       success: true,
       data: {
@@ -493,9 +500,10 @@ describe("Real handleCustomer tests with fallback", () => {
     const { getSyncHandler } = await import("../processor.server");
     const handler = getSyncHandler("CUSTOMERS_UPDATE");
 
-    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
-      json: vi.fn((v: unknown) => v),
-    });
+    const mockSql = vi.fn()
+      .mockResolvedValueOnce([])  // isWebhookProcessed
+      .mockResolvedValueOnce([{ id: "shop-123" }]);  // Shop query
+    Object.assign(mockSql, { json: vi.fn((v: unknown) => v) });
 
     const message = {
       topic: "CUSTOMERS_UPDATE",
@@ -509,10 +517,12 @@ describe("Real handleCustomer tests with fallback", () => {
 
     expect(result.success).toBe(true);
 
-    // No warning should be logged
-    expect(consoleWarnSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining("[customer_pii_access_denied_fallback]")
+    // No warning should be logged for access denied
+    const warnCalls = consoleWarnSpy.mock.calls.map((c: unknown[]) => c[0]);
+    const fallbackLog = warnCalls.find((c: unknown) =>
+      typeof c === "string" && c.includes('"event":"customer_pii_access_denied_fallback"')
     );
+    expect(fallbackLog).toBeUndefined();
 
     // Counter should NOT be called
     expect(mockIncrementCounter).not.toHaveBeenCalled();
@@ -532,17 +542,18 @@ describe("Real handleCustomer tests with fallback", () => {
   });
 
   it("counter insert throws: message still succeeds (best-effort)", async () => {
-    // First call: ACCESS_DENIED
-    mockAdminGraphQL.mockResolvedValueOnce({
-      success: false,
-      error: "Access denied",
-      retryable: false,
-    });
-    // Fallback call: success
+    // Base fields call: success
     mockAdminGraphQL.mockResolvedValueOnce({
       success: true,
       data: { node: { id: "gid://shopify/Customer/999", tags: [] } },
       retryable: false,
+    });
+    // PII call: ACCESS_DENIED
+    mockAdminGraphQL.mockResolvedValueOnce({
+      success: false,
+      error: "Access denied",
+      retryable: false,
+      errorCode: "access_denied",
     });
 
     // Counter throws (e.g., table doesn't exist, migration not applied)
@@ -551,9 +562,10 @@ describe("Real handleCustomer tests with fallback", () => {
     const { getSyncHandler } = await import("../processor.server");
     const handler = getSyncHandler("CUSTOMERS_UPDATE");
 
-    const mockSql = Object.assign(vi.fn().mockResolvedValue([]), {
-      json: vi.fn((v: unknown) => v),
-    });
+    const mockSql = vi.fn()
+      .mockResolvedValueOnce([])  // isWebhookProcessed
+      .mockResolvedValueOnce([{ id: "shop-123" }]);  // Shop query
+    Object.assign(mockSql, { json: vi.fn((v: unknown) => v) });
 
     const message = {
       topic: "CUSTOMERS_UPDATE",
