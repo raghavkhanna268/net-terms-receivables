@@ -439,4 +439,22 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Credit check paused");
     });
   });
+
+  describe("Payment Reminders side panel copy", () => {
+    it("renders updated unsubscribe copy without 'unsubscribe link'", () => {
+      const loaderData = buildLoaderData({
+        isGated: false,
+        gatingEnforced: false,
+      });
+      mockUseLoaderData.mockReturnValue(loaderData);
+
+      const html = renderToString(createElement(AccountPage));
+
+      expect(html).toContain("Payment Reminders");
+      expect(html).toContain(
+        "Buyers can opt out of payment reminder emails using the unsubscribe option their email app shows on each reminder."
+      );
+      expect(html).not.toContain("unsubscribe link");
+    });
+  });
 });
