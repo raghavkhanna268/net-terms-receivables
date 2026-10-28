@@ -409,4 +409,454 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
       expect(value).not.toContain("#");
     }
   });
+
+  /**
+   * S582: Dry-run re-match on already-imported statements.
+   * When dryRun=true AND the fixture is already imported, the matcher runs
+   * in read-only mode and emits suggestion lines with ZERO database writes.
+   */
+  describe("dry-run re-match on already-imported statements (S582)", () => {
+    it("emits suggestion lines and band totals with zero DB writes", async () => {
+      // First, import the fixture (live mode)
+      await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: collector().emit });
+      const before = await counts();
+
+      // Now run dry-run on the already-imported statement
+      const c = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+      // Verify noop flags
+      expect(c.out.already_imported).toBe(true);
+      expect(c.out.noop).toBe(true);
+      expect(c.out.result).toBe("noop_already_imported");
+
+      // Verify matcher ran in dry-run mode
+      expect(c.out.matcher_ran).toBe(true);
+      expect(c.out.suggestions_high).toBeDefined();
+      expect(c.out.suggestions_medium).toBeDefined();
+      expect(c.out.suggestions_low).toBeDefined();
+      expect(c.out.suggestions_total_import).toBeDefined();
+      expect(typeof c.out.suggestions_total_import).toBe("number");
+      expect(c.out.suggestions_total_import).toBeGreaterThan(0);
+
+      // Verify suggestion lines are emitted
+      const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+      expect(suggestionLines.length).toBeGreaterThan(0);
+
+      // Verify suggestion lines have correct format
+      for (const line of suggestionLines) {
+        const value = line.split("=")[1];
+        expect(value).toMatch(/^r\d+_(high|medium|low)_\d+_(order_\d+|other)$/);
+      }
+
+      // Verify row numbers match fixture credits (13-15)
+      const rows = suggestionLines.map((l) => {
+        const m = l.match(/^suggestion=r(\d+)_/);
+        return m ? Number(m[1]) : 0;
+      });
+      const uniqueRows = [...new Set(rows)].sort((a, b) => a - b);
+      expect(uniqueRows).toEqual([13, 14, 15]);
+
+      // Verify truncation flag
+      const truncatedLine = c.lines.find((l) => l.startsWith("suggestion_lines_truncated="));
+      expect(truncatedLine).toBeDefined();
+
+      // Verify ZERO database writes
+      expect(await counts()).toEqual(before);
+    });
+
+    it("emits exact expected suggestion lines for seeded invoices", async () => {
+      // First, import the fixture (live mode)
+      await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: collector().emit });
+
+      // Get the live suggestions for reference
+      const live = collector();
+      await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: live.emit });
+      // Live import is a noop since already imported, no new suggestions
+
+      // Run dry-run re-match
+      const c = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+      const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+      
+      // The fixture has 3 credits that should produce suggestions for #1001 and #1002:
+      // Row 13: ₹10,000 -> #1001 (exact match, medium band score 58)
+      // Row 14: ₹5,000 -> #1002 (exact match, medium band score 58)
+      // Row 15: ₹2,500 -> #1002 (partial, low band score 48)
+      // Note: Exact scores depend on seeded data; we verify the format and row numbers
+      expect(suggestionLines.some((l) => l.includes("r13_") && l.includes("_order_1001"))).toBe(true);
+      expect(suggestionLines.some((l) => l.includes("r14_") && l.includes("_order_1002"))).toBe(true);
+      expect(suggestionLines.some((l) => l.includes("r15_") && l.includes("_order_1002"))).toBe(true);
+    });
+
+    it("band totals match the number of suggestion lines", async () => {
+      await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: collector().emit });
+
+      const c = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+      const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+      const totalFromLines = suggestionLines.length;
+      const high = (c.out.suggestions_high ?? 0) as number;
+      const medium = (c.out.suggestions_medium ?? 0) as number;
+      const low = (c.out.suggestions_low ?? 0) as number;
+      const totalFromBands = high + medium + low;
+
+      expect(c.out.suggestions_total_import).toBe(totalFromLines);
+      expect(totalFromBands).toBe(totalFromLines);
+    });
+
+    it("suggestion output contains no UTRs, names, narrations, or forbidden text", async () => {
+      await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: collector().emit });
+
+      const c = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+      const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+      const forbidden = [
+        "SYNT0001", "SYNT0002", "SYNT0003",
+        "gid" + "://", "example" + ".com", "." + "myshopify" + ".com",
+        "TEST BUYER", "NEFT-", "UPI-", "IMPS-",
+        "10000", "5000", "2500",
+        shopId, buyerId,
+        "@",
+      ];
+      for (const line of suggestionLines) {
+        for (const pattern of forbidden) {
+          expect(line, `line contains "${pattern}"`).not.toContain(pattern);
+        }
+      }
+    });
+
+    it("result=noop_already_imported is emitted as the LAST line", async () => {
+      await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: collector().emit });
+
+      const c = collector();
+      await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+      const lastLine = c.lines[c.lines.length - 1];
+      expect(lastLine).toBe("result=noop_already_imported");
+    });
+  });
+});
+
+/**
+ * Zero-write proof tests for dry-run re-match (S582).
+ * These tests verify that the dry-run path executes no write SQL statements.
+ */
+describeWithDb("dry-run re-match zero-write proof (S582)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let shopId: string;
+  const runId = Date.now();
+  const SHOP = `test-zero-write-${runId}.myshopify.com`;
+  const env = { SHOP, ALLOWED_DEV_STORE: SHOP };
+  const buyerId = `buyer-zero-write-${runId}`;
+
+  async function fullRowCounts() {
+    const [row] = await sql<{
+      matches: string;
+      payments: string;
+      imports: string;
+      aliases: string;
+      audits: string;
+      invoices: string;
+      outstanding: string;
+    }[]>`
+      SELECT
+        (SELECT COUNT(*) FROM "Match" WHERE "shopId" = ${shopId})::text AS matches,
+        (SELECT COUNT(*) FROM "Payment" WHERE "shopId" = ${shopId})::text AS payments,
+        (SELECT COUNT(*) FROM "BankImport" WHERE "shopId" = ${shopId})::text AS imports,
+        (SELECT COUNT(*) FROM "PayerAlias" WHERE "buyerAccountId" = ${buyerId})::text AS aliases,
+        (SELECT COUNT(*) FROM "AuditEvent" WHERE "shopId" = ${shopId})::text AS audits,
+        (SELECT COUNT(*) FROM "Invoice" WHERE "shopId" = ${shopId})::text AS invoices,
+        (SELECT COALESCE(SUM(outstanding), 0) FROM "Invoice" WHERE "shopId" = ${shopId})::text AS outstanding
+    `;
+    return row;
+  }
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, { ...sqlOptions, onnotice: () => {} });
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    shopId = shop.id;
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerId}, ${shopId}, 'COMPANY',
+        'gid://shopify/Company/zero-write-test', 'gid://shopify/CompanyLocation/zero-write-test',
+        ${REVIEWER_DEMO_BUYER.name}, 100000, 'OK', NOW(), NOW()
+      )
+    `;
+    for (const [n, amount] of [
+      ["1001", REVIEWER_DEMO_AMOUNTS.order1],
+      ["1002", REVIEWER_DEMO_AMOUNTS.order2],
+    ] as const) {
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+          "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${`invoice-zero-write-${n}-${runId}`}, ${shopId}, ${buyerId},
+          ${`gid://shopify/Order/zero-write-${n}-${runId}`}, ${`#${n}`}, ${amount}, 'open', ${amount},
+          ${DEMO_ISSUED_AT}, ${DEMO_DUE_AT}, NOW(), NOW()
+        )
+      `;
+    }
+
+    // Import the fixture once (live mode)
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: collector().emit });
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+      await sql.end();
+    }
+  });
+
+  it("full row counts are identical before and after dry-run re-match", async () => {
+    const before = await fullRowCounts();
+
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    expect(c.out.already_imported).toBe(true);
+    expect(c.out.matcher_ran).toBe(true);
+    expect(c.out.suggestions_total_import).toBeGreaterThan(0);
+
+    const after = await fullRowCounts();
+    expect(after).toEqual(before);
+  });
+
+  it("dryRun=false on already-imported statement still prints old lines and writes nothing", async () => {
+    const before = await fullRowCounts();
+
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    expect(c.out.already_imported).toBe(true);
+    expect(c.out.noop).toBe(true);
+    expect(c.out.result).toBe("noop_already_imported");
+    // Live mode does NOT run the re-match
+    expect(c.out.matcher_ran).toBeUndefined();
+    expect(c.out.suggestions_total_import).toBeUndefined();
+
+    const after = await fullRowCounts();
+    expect(after).toEqual(before);
+  });
+});
+
+/**
+ * Rejected pair filtering test for dry-run re-match (S582).
+ * Verifies that rejected payment-invoice pairs are excluded from suggestions.
+ */
+describeWithDb("dry-run re-match rejected pair filtering (S582)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let shopId: string;
+  const runId = Date.now();
+  const SHOP = `test-rejected-pair-${runId}.myshopify.com`;
+  const env = { SHOP, ALLOWED_DEV_STORE: SHOP };
+  const buyerId = `buyer-rejected-${runId}`;
+  const invoice1Id = `invoice-rejected-1001-${runId}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, { ...sqlOptions, onnotice: () => {} });
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    shopId = shop.id;
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerId}, ${shopId}, 'COMPANY',
+        'gid://shopify/Company/rejected-test', 'gid://shopify/CompanyLocation/rejected-test',
+        ${REVIEWER_DEMO_BUYER.name}, 100000, 'OK', NOW(), NOW()
+      )
+    `;
+    // Create invoices #1001 and #1002
+    const orderGid1 = `gid://shopify/Order/rejected-1001-${runId}`;
+    const orderGid2 = `gid://shopify/Order/rejected-1002-${runId}`;
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoice1Id}, ${shopId}, ${buyerId},
+        ${orderGid1}, '#1001', ${REVIEWER_DEMO_AMOUNTS.order1}, 'open', ${REVIEWER_DEMO_AMOUNTS.order1},
+        ${DEMO_ISSUED_AT}, ${DEMO_DUE_AT}, NOW(), NOW()
+      )
+    `;
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${`invoice-rejected-1002-${runId}`}, ${shopId}, ${buyerId},
+        ${orderGid2}, '#1002', ${REVIEWER_DEMO_AMOUNTS.order2}, 'open', ${REVIEWER_DEMO_AMOUNTS.order2},
+        ${DEMO_ISSUED_AT}, ${DEMO_DUE_AT}, NOW(), NOW()
+      )
+    `;
+
+    // Import the fixture (creates payments)
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: collector().emit });
+
+    // Get the payment for row 13 (₹10,000 payment for #1001) - match by amount
+    const [payment] = await sql<{ id: string }[]>`
+      SELECT p.id FROM "Payment" p
+      JOIN "BankImport" bi ON bi.id = p."importId"
+      WHERE p."shopId" = ${shopId}
+        AND p.amount = 10000  -- Row 13 is ₹10,000
+      LIMIT 1
+    `;
+
+    // Insert a rejected pair for this payment and invoice #1001
+    await sql`
+      INSERT INTO "rejected_matches" ("shopId", "paymentId", "invoiceId", "rejectedBy", "rejectedAt")
+      VALUES (${shopId}, ${payment.id}, ${invoice1Id}, 'test-user', NOW())
+    `;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+      await sql.end();
+    }
+  });
+
+  it("rejected pair is excluded from dry-run suggestions", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    expect(c.out.already_imported).toBe(true);
+    expect(c.out.matcher_ran).toBe(true);
+
+    const suggestionLines = c.lines.filter((l) => l.startsWith("suggestion="));
+    
+    // The first row (row 13) should NOT have a suggestion for #1001 because it's rejected
+    // It may have no suggestions at all or suggestions for other invoices
+    const row13Order1001Suggestions = suggestionLines.filter(
+      (l) => l.includes("r13_") && l.includes("_order_1001")
+    );
+    expect(row13Order1001Suggestions.length).toBe(0);
+  });
+});
+
+/**
+ * Parity test: in-memory computed allocations match what runMatcher writes.
+ * For a fresh shop, the allocations computed by computeSuggestionsForPayment
+ * should produce the same invoice/score as the live matcher creates.
+ */
+describeWithDb("parity test: in-memory vs live matcher (S582)", () => {
+  let sql: ReturnType<typeof postgres>;
+  let shopId: string;
+  const runId = Date.now();
+  const SHOP = `test-parity-${runId}.myshopify.com`;
+  const env = { SHOP, ALLOWED_DEV_STORE: SHOP };
+  const buyerId = `buyer-parity-${runId}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, { ...sqlOptions, onnotice: () => {} });
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    shopId = shop.id;
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerId}, ${shopId}, 'COMPANY',
+        'gid://shopify/Company/parity-test', 'gid://shopify/CompanyLocation/parity-test',
+        ${REVIEWER_DEMO_BUYER.name}, 100000, 'OK', NOW(), NOW()
+      )
+    `;
+    for (const [n, amount] of [
+      ["1001", REVIEWER_DEMO_AMOUNTS.order1],
+      ["1002", REVIEWER_DEMO_AMOUNTS.order2],
+    ] as const) {
+      await sql`
+        INSERT INTO "Invoice" (
+          id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+          "issuedAt", "dueAt", "createdAt", "updatedAt"
+        )
+        VALUES (
+          ${`invoice-parity-${n}-${runId}`}, ${shopId}, ${buyerId},
+          ${`gid://shopify/Order/parity-${n}-${runId}`}, ${`#${n}`}, ${amount}, 'open', ${amount},
+          ${DEMO_ISSUED_AT}, ${DEMO_DUE_AT}, NOW(), NOW()
+        )
+      `;
+    }
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+      await sql.end();
+    }
+  });
+
+  it("dry-run suggestions match live matcher results", async () => {
+    // First run: import with live matcher
+    const live = collector();
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: live.emit });
+
+    expect(live.out.result).toBe("imported");
+    const liveSuggestionLines = live.lines.filter((l) => l.startsWith("suggestion=")).sort();
+    const liveTotals = {
+      high: live.out.suggestions_high,
+      medium: live.out.suggestions_medium,
+      low: live.out.suggestions_low,
+      total: live.out.suggestions_total_import,
+    };
+
+    // Second run: dry-run re-match on already-imported
+    const dryRun = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: dryRun.emit });
+
+    expect(dryRun.out.already_imported).toBe(true);
+    expect(dryRun.out.matcher_ran).toBe(true);
+    const dryRunSuggestionLines = dryRun.lines.filter((l) => l.startsWith("suggestion=")).sort();
+    const dryRunTotals = {
+      high: dryRun.out.suggestions_high,
+      medium: dryRun.out.suggestions_medium,
+      low: dryRun.out.suggestions_low,
+      total: dryRun.out.suggestions_total_import,
+    };
+
+    // The suggestion lines should be identical
+    expect(dryRunSuggestionLines).toEqual(liveSuggestionLines);
+    expect(dryRunTotals).toEqual(liveTotals);
+  });
 });

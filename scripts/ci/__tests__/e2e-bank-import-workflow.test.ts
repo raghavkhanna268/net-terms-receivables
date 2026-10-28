@@ -112,12 +112,13 @@ describe("no confirm/apply path (static)", () => {
     expect(src).not.toMatch(/state\s*=\s*'(confirmed|pushing|pushed)'|status\s*=\s*'(matched|partial)'/);
   });
 
-  it("the script imports only runMatcher/MAX_PAYMENTS_PER_REQUEST from the matcher", () => {
+  it("the script imports only runMatcher/MAX_PAYMENTS_PER_REQUEST/computeSuggestionsForPayment from the matcher", () => {
     const src = fs.readFileSync(SCRIPT, "utf8");
     const imp = src.match(/import \{([^}]*)\} from "~\/services\/matcher\.server";/);
     expect(imp).not.toBeNull();
     const names = imp![1].split(",").map((s) => s.trim()).filter(Boolean).sort();
-    expect(names).toEqual(["MAX_PAYMENTS_PER_REQUEST", "runMatcher"]);
+    // S582: computeSuggestionsForPayment is the read-only scoring function used for dry-run re-match
+    expect(names).toEqual(["MAX_PAYMENTS_PER_REQUEST", "computeSuggestionsForPayment", "runMatcher"]);
   });
 
   it("runMatcher's own path (runMatcher + matchSinglePayment) calls no confirm/apply function", () => {

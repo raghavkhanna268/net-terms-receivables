@@ -15,6 +15,11 @@
  * - Rejected pairs are persisted and never re-suggested
  * - Transactions with FOR UPDATE locks prevent over-allocation
  * - Lock order: Payment FIRST, then Match rows ORDER BY id, then Invoices ORDER BY id
+ *
+ * Architecture (S582):
+ * - computeSuggestionsForPayment: pure read-only scoring function
+ * - matchSinglePayment: delete existing + compute + write matches
+ * This split enables dry-run re-matching for already-imported statements.
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -73,6 +78,22 @@ export interface MatcherRunSummary {
   results: MatcherResult[];
   /** True when there are more payments to process (use offset for next batch) */
   hasMore: boolean;
+}
+
+/** Planned allocation returned by computeSuggestionsForPayment (read-only) */
+export interface PlannedAllocation {
+  invoiceId: string;
+  allocatedPaise: bigint;
+  score: number;
+  reasons: unknown;
+}
+
+/** Result of the read-only scoring computation */
+export interface ComputedSuggestions {
+  paymentId: string;
+  allocations: PlannedAllocation[];
+  topScore: number;
+  isHighConfidence: boolean;
 }
 
 /**
@@ -162,16 +183,25 @@ export async function runMatcher(
 }
 
 /**
- * Match a single payment against candidate invoices.
- * Does NOT learn PayerAlias from fuzzy matches (only on confirm).
- * Does NOT set 'partial' status on suggestions (only on confirmed allocations).
+ * Read-only scoring function that computes suggestions without any database writes.
+ * Returns planned allocations that matchSinglePayment would create.
  *
- * @param sql - postgres.js SQL client
+ * This function performs:
+ * - Alias lookup for buyer identification
+ * - Fuzzy buyer match
+ * - #579 fallback (widen to amount window when resolved buyer has no invoices)
+ * - Rejected pair filtering
+ * - Candidate limiting
+ * - scoreMultiInvoiceMatch scoring
+ * - Sorting and top-5/one-per-buyer selection
+ *
+ * @param sql - postgres.js SQL client (used for reads only)
  * @param shopId - Shop ID
- * @param payment - Payment to match
+ * @param payment - Payment to score
  * @param buyers - Pre-loaded buyers with aliases
+ * @param opts - Options including rejectedInvoiceIds to filter out
  */
-async function matchSinglePayment(
+export async function computeSuggestionsForPayment(
   sql: Sql,
   shopId: string,
   payment: {
@@ -182,14 +212,10 @@ async function matchSinglePayment(
     utr: string | null;
     rail: string | null;
   },
-  buyers: BuyerForScoring[]
-): Promise<MatcherResult> {
-  // Clear any existing suggested matches for idempotency
-  await deleteSuggestedMatchesForPayment(sql, shopId, payment.id);
-
-  // Get rejected pairs to exclude from suggestions
-  const rejectedPairs = await getRejectedPairs(sql, shopId, payment.id);
-  const rejectedInvoiceIds = new Set(rejectedPairs.map((r) => r.invoiceId));
+  buyers: BuyerForScoring[],
+  opts: { rejectedInvoiceIds?: Set<string> } = {}
+): Promise<ComputedSuggestions> {
+  const rejectedInvoiceIds = opts.rejectedInvoiceIds ?? new Set<string>();
 
   // Try to identify the buyer from payer text or narration (using confirmed aliases only)
   let targetBuyer: BuyerForScoring | null = null;
@@ -205,7 +231,6 @@ async function matchSinglePayment(
       const match = findBestBuyerMatch(payment.payerText, buyers);
       if (match) {
         targetBuyer = buyers.find((b) => b.id === match.buyerId) ?? null;
-        // P1.4: Do NOT call upsertPayerAlias here - only on confirmMatch
       }
     }
   }
@@ -265,7 +290,7 @@ async function matchSinglePayment(
   if (candidateInvoices.length === 0) {
     return {
       paymentId: payment.id,
-      matchesCreated: 0,
+      allocations: [],
       topScore: 0,
       isHighConfidence: false,
     };
@@ -316,40 +341,99 @@ async function matchSinglePayment(
   if (allResults.length === 0) {
     return {
       paymentId: payment.id,
-      matchesCreated: 0,
+      allocations: [],
       topScore: 0,
       isHighConfidence: false,
     };
   }
 
-  // Sort by score and create matches
+  // Sort by score and collect allocations
   allResults.sort((a, b) => b.result.totalScore - a.result.totalScore);
 
-  let matchesCreated = 0;
+  const allocations: PlannedAllocation[] = [];
   let topScore = 0;
 
-  // Create match records for top candidates
-  // We create matches for the best result per buyer, limited to top 3
+  // Collect allocations for the best result per buyer, limited to top 5
   const seenBuyers = new Set<string>();
   for (const { result, buyer } of allResults.slice(0, 5)) {
     if (seenBuyers.has(buyer.id)) continue;
     seenBuyers.add(buyer.id);
 
     for (const allocation of result.allocations) {
-      await createMatch(sql, {
-        shopId,
-        paymentId: payment.id,
+      allocations.push({
         invoiceId: allocation.invoiceId,
-        amountPaise: allocation.allocatedPaise,
+        allocatedPaise: allocation.allocatedPaise,
         score: allocation.score,
         reasons: allocation.reasons,
       });
-      matchesCreated++;
     }
 
     if (result.totalScore > topScore) {
       topScore = result.totalScore;
     }
+  }
+
+  return {
+    paymentId: payment.id,
+    allocations,
+    topScore,
+    isHighConfidence: topScore >= CONFIDENCE_THRESHOLD,
+  };
+}
+
+/**
+ * Match a single payment against candidate invoices.
+ * Does NOT learn PayerAlias from fuzzy matches (only on confirm).
+ * Does NOT set 'partial' status on suggestions (only on confirmed allocations).
+ *
+ * Implementation: deleteSuggestedMatchesForPayment + computeSuggestionsForPayment + createMatch loop.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param payment - Payment to match
+ * @param buyers - Pre-loaded buyers with aliases
+ */
+async function matchSinglePayment(
+  sql: Sql,
+  shopId: string,
+  payment: {
+    id: string;
+    amountPaise: bigint;
+    narration: string;
+    payerText: string | null;
+    utr: string | null;
+    rail: string | null;
+  },
+  buyers: BuyerForScoring[]
+): Promise<MatcherResult> {
+  // Clear any existing suggested matches for idempotency
+  await deleteSuggestedMatchesForPayment(sql, shopId, payment.id);
+
+  // Get rejected pairs to exclude from suggestions
+  const rejectedPairs = await getRejectedPairs(sql, shopId, payment.id);
+  const rejectedInvoiceIds = new Set(rejectedPairs.map((r) => r.invoiceId));
+
+  // Compute suggestions using the read-only scoring function
+  const computed = await computeSuggestionsForPayment(
+    sql,
+    shopId,
+    payment,
+    buyers,
+    { rejectedInvoiceIds }
+  );
+
+  // Write match records for computed allocations
+  let matchesCreated = 0;
+  for (const allocation of computed.allocations) {
+    await createMatch(sql, {
+      shopId,
+      paymentId: payment.id,
+      invoiceId: allocation.invoiceId,
+      amountPaise: allocation.allocatedPaise,
+      score: allocation.score,
+      reasons: allocation.reasons,
+    });
+    matchesCreated++;
   }
 
   // P2.3: Do NOT set 'partial' status on suggestions - only on confirmed allocations
@@ -358,8 +442,8 @@ async function matchSinglePayment(
   return {
     paymentId: payment.id,
     matchesCreated,
-    topScore,
-    isHighConfidence: topScore >= CONFIDENCE_THRESHOLD,
+    topScore: computed.topScore,
+    isHighConfidence: computed.isHighConfidence,
   };
 }
 

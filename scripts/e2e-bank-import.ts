@@ -57,7 +57,7 @@ import { pathToFileURL } from "node:url";
 import { sqlOptions, type Sql } from "~/lib/db-light.server";
 import { parseBankStatement } from "~/lib/banks/index";
 import { insertBankImportRows, normalizeDedupeKeyForDb, computeCreditDedupeKeys } from "~/services/bank-import.server";
-import { runMatcher, MAX_PAYMENTS_PER_REQUEST } from "~/services/matcher.server";
+import { runMatcher, MAX_PAYMENTS_PER_REQUEST, computeSuggestionsForPayment } from "~/services/matcher.server";
 import { CONFIDENCE_THRESHOLD } from "~/lib/matching/score";
 import { isCurrencyGateOpen } from "~/lib/currency-gate.server";
 import {
@@ -65,6 +65,7 @@ import {
   computeDateBounds,
   mapCreditsForImport,
 } from "~/routes/app.imports";
+import { getBuyersWithAliases, getRejectedPairs } from "~/lib/matching/queries.server";
 
 /** Fixed fixture: never an input. */
 export const FIXTURE_RELATIVE_PATH = "tests/fixtures/banks/synthetic/hdfc-review-synthetic.csv";
@@ -276,6 +277,202 @@ class RollbackSentinel extends Error {
   }
 }
 
+/**
+ * Build an in-memory payment object from a parsed credit row.
+ * Mirrors the field derivation in insertBankImportRows but without any DB writes.
+ */
+export function buildPaymentFromCredit(credit: {
+  date: string;
+  amountPaise: number;
+  narration: string;
+  rail: string;
+  utr?: string;
+  payerName?: string;
+  dedupeKey: string;
+}): {
+  amountPaise: bigint;
+  narration: string;
+  payerText: string | null;
+  utr: string | null;
+  rail: string | null;
+} {
+  const dbUtr = normalizeDedupeKeyForDb(credit.dedupeKey);
+  return {
+    amountPaise: BigInt(credit.amountPaise),
+    narration: credit.narration,
+    payerText: credit.payerName ?? null,
+    utr: dbUtr,
+    rail: credit.rail,
+  };
+}
+
+/**
+ * Run the matcher in read-only mode for already-imported statements.
+ * Wraps the entire operation in a read-only transaction to guarantee ZERO writes.
+ * The transaction is rolled back at the end.
+ */
+async function runDryRunRematch(
+  sql: Sql,
+  shopId: string,
+  fixture: Awaited<ReturnType<typeof loadFixturePayload>>,
+  emit: (key: OutputKey, value: OutputValue) => void
+): Promise<void> {
+  try {
+    await sql.begin(async (tx) => {
+      // SET TRANSACTION READ ONLY makes Postgres refuse any write statement
+      await tx`SET TRANSACTION READ ONLY`;
+
+      // Get the existing BankImport for this fixture
+      const [bankImport] = await tx<{ id: string }[]>`
+        SELECT id FROM "BankImport"
+        WHERE "shopId" = ${shopId} AND "fileName" = ${FIXTURE_FILE_NAME}
+        LIMIT 1
+      `;
+      if (!bankImport) {
+        throw new RollbackSentinel();
+      }
+      const importId = bankImport.id;
+
+      // Load buyers with aliases
+      const buyers = await getBuyersWithAliases(tx as unknown as Sql, shopId);
+
+      // Compute dedupe keys for fixture credits (same logic as insertBankImportRows)
+      const creditsWithKeys = await computeCreditDedupeKeys(
+        fixture.body.credits.map((c) => ({
+          date: c.date as string,
+          amountPaise: c.amountPaise as number,
+          narration: c.narration as string,
+          rail: c.rail as string,
+          utr: c.utr as string | undefined,
+          payerName: c.payerName as string | undefined,
+          refNo: c.refNo as string | undefined,
+          balancePaise: c.balancePaise as number | undefined,
+        }))
+      );
+
+      // Build normalized-db-key to sourceRow mapping
+      const dbKeyToSourceRow = new Map<string, number>();
+      for (let i = 0; i < creditsWithKeys.length; i++) {
+        const normalizedKey = normalizeDedupeKeyForDb(creditsWithKeys[i].dedupeKey);
+        const sourceRow = fixture.utrToSourceRow.get(normalizedKey) ?? 0;
+        dbKeyToSourceRow.set(normalizedKey, sourceRow);
+      }
+
+      // Query all already-imported Payment rows for this import
+      const paymentRows = await tx<{
+        id: string;
+        utr: string | null;
+        amount_paise: string;
+        narration: string;
+        payer_text: string | null;
+        rail: string | null;
+      }[]>`
+        SELECT
+          id,
+          utr,
+          (ROUND(amount * 100))::text AS amount_paise,
+          narration,
+          "payerText" AS payer_text,
+          rail
+        FROM "Payment"
+        WHERE "shopId" = ${shopId} AND "importId" = ${importId}
+      `;
+
+      // Map UTR to Payment row for lookup
+      const utrToPayment = new Map<string, typeof paymentRows[0]>();
+      for (const p of paymentRows) {
+        if (p.utr) {
+          utrToPayment.set(p.utr, p);
+        }
+      }
+
+      emit("matcher_ran", true);
+
+      const bands = { high: 0, medium: 0, low: 0 };
+      const suggestionLines: { row: number; score: number; invoiceName: string }[] = [];
+
+      // Process at most MAX_PAYMENTS_PER_REQUEST credits
+      const creditsToProcess = creditsWithKeys.slice(0, MAX_PAYMENTS_PER_REQUEST);
+      const truncatedByLimit = creditsWithKeys.length > MAX_PAYMENTS_PER_REQUEST;
+
+      for (const credit of creditsToProcess) {
+        const dbKey = normalizeDedupeKeyForDb(credit.dedupeKey);
+        const existingPayment = utrToPayment.get(dbKey);
+
+        if (!existingPayment) {
+          // No matching payment row found; skip (should not happen for a fully imported statement)
+          continue;
+        }
+
+        // Get rejected pairs for this payment
+        const rejectedPairs = await getRejectedPairs(tx as unknown as Sql, shopId, existingPayment.id);
+        const rejectedInvoiceIds = new Set(rejectedPairs.map((r) => r.invoiceId));
+
+        // Build in-memory payment object
+        const payment = {
+          id: existingPayment.id,
+          amountPaise: BigInt(existingPayment.amount_paise),
+          narration: existingPayment.narration,
+          payerText: existingPayment.payer_text,
+          utr: existingPayment.utr,
+          rail: existingPayment.rail,
+        };
+
+        // Run the read-only scoring function
+        const computed = await computeSuggestionsForPayment(
+          tx as unknown as Sql,
+          shopId,
+          payment,
+          buyers,
+          { rejectedInvoiceIds }
+        );
+
+        // Collect suggestions
+        for (const allocation of computed.allocations) {
+          // Look up invoice name for label formatting
+          const [invoice] = await tx<{ name: string }[]>`
+            SELECT name FROM "Invoice" WHERE id = ${allocation.invoiceId} AND "shopId" = ${shopId}
+          `;
+          const invoiceName = invoice?.name ?? "other";
+          const band = scoreBand(allocation.score);
+          bands[band]++;
+
+          const row = dbKeyToSourceRow.get(dbKey) ?? 0;
+          suggestionLines.push({ row, score: allocation.score, invoiceName });
+        }
+      }
+
+      // Emit band totals
+      emit("suggestions_high", bands.high);
+      emit("suggestions_medium", bands.medium);
+      emit("suggestions_low", bands.low);
+      emit("suggestions_total_import", bands.high + bands.medium + bands.low);
+
+      // Sort suggestions by row asc, then score desc
+      suggestionLines.sort((a, b) => a.row - b.row || b.score - a.score);
+
+      // Emit up to MAX_SUGGESTION_LINES, then the truncation flag
+      const truncatedBySuggestions = suggestionLines.length > MAX_SUGGESTION_LINES;
+      const toEmit = truncatedBySuggestions
+        ? suggestionLines.slice(0, MAX_SUGGESTION_LINES)
+        : suggestionLines;
+
+      for (const s of toEmit) {
+        emit("suggestion", formatSuggestionValue(s.row, s.score, s.invoiceName));
+      }
+      emit("suggestion_lines_truncated", truncatedBySuggestions || truncatedByLimit);
+
+      // Roll back the read-only transaction
+      throw new RollbackSentinel();
+    });
+  } catch (err) {
+    // RollbackSentinel is expected; any other error should propagate
+    if (!(err instanceof RollbackSentinel)) {
+      throw err;
+    }
+  }
+}
+
 export interface RunOptions {
   sql: Sql;
   env: Record<string, string | undefined>;
@@ -370,6 +567,12 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
   if (Number(existing.n) > 0) {
     emit("already_imported", true);
     emit("noop", true);
+
+    // Dry-run re-match: run matcher logic in memory, zero DB writes
+    if (dryRun) {
+      await runDryRunRematch(sql, shop.id, fixture, emit);
+    }
+
     emit("result", "noop_already_imported");
     return;
   }
