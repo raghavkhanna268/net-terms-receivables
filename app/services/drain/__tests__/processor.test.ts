@@ -94,7 +94,7 @@ vi.mock("../customer-fetch.server", () => ({
   }),
   fetchCustomerPiiFields: vi.fn().mockResolvedValue({
     success: true,
-    email: "test@example.com",
+    email: "buyer@test-proc.example.com",
     displayName: "Test Customer",
     retryable: false,
     usedFallback: false,
@@ -102,7 +102,7 @@ vi.mock("../customer-fetch.server", () => ({
   incrementCustomerPiiAccessDeniedFallback: vi.fn().mockResolvedValue(undefined),
   fetchCustomerWithFallback: vi.fn().mockResolvedValue({
     success: true,
-    data: { id: "gid://shopify/Customer/123", tags: ["net-terms"], email: "test@example.com" },
+    data: { id: "gid://shopify/Customer/123", tags: ["net-terms"], email: "buyer@test-proc.example.com" },
     piiMode: "fetched" as const,
   }),
   getCustomerByNodeQuery: vi.fn().mockReturnValue("query CustomerById"),
