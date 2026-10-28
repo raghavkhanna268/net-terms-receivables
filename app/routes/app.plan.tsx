@@ -263,7 +263,7 @@ export default function PlanPage() {
                 ) : gatingEnforced ? (
                   <s-paragraph>
                     <s-text>
-                      Upgrade to unlock more features and higher limits.
+                      Every plan includes every feature. Upgrade for more buyer accounts.
                     </s-text>
                   </s-paragraph>
                 ) : (
