@@ -7,7 +7,8 @@ import type postgres from "postgres";
  * Uses pgmq.archive() to move rows from the active queue to the archive,
  * preserving the message for debugging while removing it from processing.
  *
- * SAFETY: Refuses to run unless connected to the test database (TEST_DATABASE_URL).
+ * SAFETY: Refuses to run unless TEST_DATABASE_URL is set AND the sql connection's
+ * current_database() matches the database name parsed from TEST_DATABASE_URL.
  * This guard reuses the pattern from drain-guard-db, dlq-sanitize-db,
  * orders-no-session-ack-db, and drain-redact-inflight-db (#604 pattern).
  *
@@ -28,6 +29,17 @@ export async function archiveForeignQueueRows(
     throw new Error(
       "archiveForeignQueueRows: TEST_DATABASE_URL is not set. " +
         "This helper must only run against the test database."
+    );
+  }
+
+  const expectedDbName = decodeURIComponent(new URL(testDbUrl).pathname.slice(1));
+  const [{ db: actualDbName }] = await sql<[{ db: string }]>`SELECT current_database() AS db`;
+
+  if (actualDbName !== expectedDbName) {
+    throw new Error(
+      `archiveForeignQueueRows: database mismatch. ` +
+        `Connection is to "${actualDbName}" but TEST_DATABASE_URL specifies "${expectedDbName}". ` +
+        `This helper must only run against the test database.`
     );
   }
 

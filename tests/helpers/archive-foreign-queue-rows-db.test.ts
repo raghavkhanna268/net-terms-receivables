@@ -5,6 +5,7 @@
  * 1. Archives a foreign row and keeps an own row (real pgmq, synthetic test-* shops)
  * 2. Throws on a non-test DB URL (TEST_DATABASE_URL not set)
  * 3. Throws on an empty list
+ * 4. Throws on database mismatch and verifies no rows are archived
  *
  * Each test must fail on revert, with no conditional asserts and no sleeps.
  */
@@ -255,6 +256,37 @@ describeWithDb("archiveForeignQueueRows helper", () => {
         await expect(archiveForeignQueueRows(sql, [OWN_SHOP])).rejects.toThrow(
           "archiveForeignQueueRows: TEST_DATABASE_URL is not set"
         );
+      } finally {
+        process.env.TEST_DATABASE_URL = originalEnv;
+      }
+    });
+
+    it("throws on database mismatch and does not archive anything", async () => {
+      const originalEnv = process.env.TEST_DATABASE_URL!;
+      const url = new URL(originalEnv);
+      const originalDbName = decodeURIComponent(url.pathname.slice(1));
+      url.pathname = `/${originalDbName}_other`;
+      process.env.TEST_DATABASE_URL = url.toString();
+
+      const foreignMsg = {
+        shop: FOREIGN_SHOP,
+        topic: "ORDERS_CREATE",
+        webhookId: `wh-mismatch-${TEST_SUFFIX}`,
+        resourceGid: `gid://shopify/Order/mismatch-${TEST_SUFFIX}`,
+        enqueuedAt: new Date().toISOString(),
+      };
+      await sql`SELECT pgmq.send('s6_sync', ${sql.json(foreignMsg)})`;
+
+      try {
+        await expect(archiveForeignQueueRows(sql, [OWN_SHOP])).rejects.toThrow(
+          `archiveForeignQueueRows: database mismatch`
+        );
+
+        const [afterForeign] = await sql<[{ count: string }]>`
+          SELECT COUNT(*)::text as count FROM pgmq.q_s6_sync
+          WHERE message->>'webhookId' = ${'wh-mismatch-' + TEST_SUFFIX}
+        `;
+        expect(parseInt(afterForeign.count, 10)).toBe(1);
       } finally {
         process.env.TEST_DATABASE_URL = originalEnv;
       }
