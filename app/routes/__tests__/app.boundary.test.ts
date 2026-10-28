@@ -102,7 +102,7 @@ describe("app.tsx ErrorBoundary", () => {
     expect(html).toContain("bounce");
   });
 
-  it("rethrows real ErrorResponseImpl with status 401", async () => {
+  it("renders 401 route error in-layout with nav", async () => {
     const reauthError = new UNSAFE_ErrorResponseImpl(
       401,
       "Unauthorized",
@@ -116,16 +116,21 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => reauthError,
+        useNavigate: () => vi.fn(),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-app-nav");
+    expect(html).toContain("Something went wrong");
+    expect(html).not.toContain("<b>x</b>");
   });
 
-  it("rethrows 404 route error response (non-bounce status)", async () => {
+  it("renders 404 route error in-layout with nav", async () => {
     const notFoundError = {
       status: 404,
       statusText: "Not Found",
@@ -140,13 +145,17 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => notFoundError,
+        useNavigate: () => vi.fn(),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-app-nav");
+    expect(html).toContain("Page not found");
   });
 
   it("rethrows 200 route error with non-string data", async () => {
@@ -173,7 +182,7 @@ describe("app.tsx ErrorBoundary", () => {
     expect(() => renderToString(createElement(ErrorBoundary))).toThrow();
   });
 
-  it("rethrows plain Error for root boundary to handle", async () => {
+  it("renders plain Error in-layout with nav and generic message", async () => {
     const plainError = new Error("Unexpected failure");
 
     vi.doMock("react-router", async () => {
@@ -183,15 +192,18 @@ describe("app.tsx ErrorBoundary", () => {
       return {
         ...actual,
         useRouteError: () => plainError,
+        useNavigate: () => vi.fn(),
       };
     });
 
     vi.resetModules();
     const { ErrorBoundary } = await import("../app");
 
-    expect(() => renderToString(createElement(ErrorBoundary))).toThrow(
-      "Unexpected failure"
-    );
+    const html = renderToString(createElement(ErrorBoundary));
+
+    expect(html).toContain("s-app-nav");
+    expect(html).toContain("Something went wrong");
+    expect(html).not.toContain("Unexpected failure");
   });
 });
 
