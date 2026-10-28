@@ -227,6 +227,27 @@ async function matchSinglePayment(
       shopId,
       targetBuyer.id
     );
+    // Filter out rejected invoices
+    candidateInvoices = candidateInvoices.filter(
+      (inv) => !rejectedInvoiceIds.has(inv.id)
+    );
+
+    // Fallback: if the resolved buyer has no candidates after filtering,
+    // widen to the amount window. This handles cases where a company has
+    // multiple location accounts with similar names, and fuzzy matching
+    // resolves to an account with no open invoices while a sibling account
+    // has the correct invoice.
+    if (candidateInvoices.length === 0) {
+      candidateInvoices = await getOpenInvoicesInAmountWindow(
+        sql,
+        shopId,
+        minPaise,
+        maxPaise
+      );
+      candidateInvoices = candidateInvoices.filter(
+        (inv) => !rejectedInvoiceIds.has(inv.id)
+      );
+    }
   } else {
     // Otherwise, get invoices in the amount window
     candidateInvoices = await getOpenInvoicesInAmountWindow(
@@ -235,12 +256,11 @@ async function matchSinglePayment(
       minPaise,
       maxPaise
     );
+    // Filter out rejected invoices
+    candidateInvoices = candidateInvoices.filter(
+      (inv) => !rejectedInvoiceIds.has(inv.id)
+    );
   }
-
-  // Filter out rejected invoices
-  candidateInvoices = candidateInvoices.filter(
-    (inv) => !rejectedInvoiceIds.has(inv.id)
-  );
 
   if (candidateInvoices.length === 0) {
     return {
