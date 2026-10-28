@@ -17,7 +17,7 @@
  * Uses Polaris web components only.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type {
   HeadersFunction,
   LoaderFunctionArgs,
@@ -662,6 +662,23 @@ function InvoiceTable({
   );
 }
 
+interface InitialCreditSettings {
+  creditLimit: string;
+  noLimit: boolean;
+  manualHold: boolean;
+  holdReasonCode: string;
+  holdNote: string;
+}
+
+interface InitialHoldSettings {
+  manualHold: boolean;
+  holdReasonCode: string;
+  holdNote: string;
+}
+
+const CREDIT_SETTINGS_SAVE_BAR_ID = "credit-settings-save-bar";
+const HOLD_SETTINGS_SAVE_BAR_ID = "hold-settings-save-bar";
+
 export default function AccountPage() {
   const loaderData = useLoaderData<typeof loader>();
   const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, shopTimezone, newAccountsPausedBanner, error } = loaderData;
@@ -669,15 +686,122 @@ export default function AccountPage() {
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
   const isReminderSubmitting = isSubmitting && navigation.formData?.get("_action") === "updateReminderOptOut";
+  const isCreditSubmitting = isSubmitting && navigation.formData?.get("_action") === "updateCredit" && !navigation.formData?.get("holdOnly");
+  const isHoldSubmitting = isSubmitting && navigation.formData?.get("_action") === "updateCredit" && navigation.formData?.get("holdOnly") === "true";
 
   const formAction = account?.id ? accountHref(account.id) : undefined;
 
-  const serverNoLimit = creditStatus?.creditLimitAmount === null;
-  const [noLimitChecked, setNoLimitChecked] = useState(serverNoLimit);
+  const creditSettingsFormRef = useRef<HTMLFormElement>(null);
+  const holdSettingsFormRef = useRef<HTMLFormElement>(null);
+
+  const initialCreditSettings = useMemo<InitialCreditSettings>(() => ({
+    creditLimit: creditStatus?.creditLimitAmount?.toString() ?? "",
+    noLimit: creditStatus?.creditLimitAmount === null,
+    manualHold: creditStatus?.manualHold ?? false,
+    holdReasonCode: creditStatus?.holdReasonCode ?? "",
+    holdNote: creditStatus?.holdNote ?? "",
+  }), [creditStatus?.creditLimitAmount, creditStatus?.manualHold, creditStatus?.holdReasonCode, creditStatus?.holdNote]);
+
+  const initialHoldSettings = useMemo<InitialHoldSettings>(() => ({
+    manualHold: creditStatus?.manualHold ?? false,
+    holdReasonCode: creditStatus?.holdReasonCode ?? "",
+    holdNote: creditStatus?.holdNote ?? "",
+  }), [creditStatus?.manualHold, creditStatus?.holdReasonCode, creditStatus?.holdNote]);
+
+  const [creditLimit, setCreditLimit] = useState(initialCreditSettings.creditLimit);
+  const [noLimitChecked, setNoLimitChecked] = useState(initialCreditSettings.noLimit);
+  const [creditManualHold, setCreditManualHold] = useState(initialCreditSettings.manualHold);
+  const [creditHoldReasonCode, setCreditHoldReasonCode] = useState(initialCreditSettings.holdReasonCode);
+  const [creditHoldNote, setCreditHoldNote] = useState(initialCreditSettings.holdNote);
+
+  const [holdManualHold, setHoldManualHold] = useState(initialHoldSettings.manualHold);
+  const [holdHoldReasonCode, setHoldHoldReasonCode] = useState(initialHoldSettings.holdReasonCode);
+  const [holdHoldNote, setHoldHoldNote] = useState(initialHoldSettings.holdNote);
+
+  const isCreditSettingsDirty = useMemo(() => {
+    if (noLimitChecked !== initialCreditSettings.noLimit) return true;
+    if (!noLimitChecked && creditLimit !== initialCreditSettings.creditLimit) return true;
+    if (creditManualHold !== initialCreditSettings.manualHold) return true;
+    if (creditHoldReasonCode !== initialCreditSettings.holdReasonCode) return true;
+    if (creditHoldNote !== initialCreditSettings.holdNote) return true;
+    return false;
+  }, [noLimitChecked, creditLimit, creditManualHold, creditHoldReasonCode, creditHoldNote, initialCreditSettings]);
+
+  const isHoldSettingsDirty = useMemo(() => {
+    if (holdManualHold !== initialHoldSettings.manualHold) return true;
+    if (holdHoldReasonCode !== initialHoldSettings.holdReasonCode) return true;
+    if (holdHoldNote !== initialHoldSettings.holdNote) return true;
+    return false;
+  }, [holdManualHold, holdHoldReasonCode, holdHoldNote, initialHoldSettings]);
 
   useEffect(() => {
-    setNoLimitChecked(serverNoLimit);
-  }, [serverNoLimit]);
+    setCreditLimit(initialCreditSettings.creditLimit);
+    setNoLimitChecked(initialCreditSettings.noLimit);
+    setCreditManualHold(initialCreditSettings.manualHold);
+    setCreditHoldReasonCode(initialCreditSettings.holdReasonCode);
+    setCreditHoldNote(initialCreditSettings.holdNote);
+  }, [initialCreditSettings]);
+
+  useEffect(() => {
+    setHoldManualHold(initialHoldSettings.manualHold);
+    setHoldHoldReasonCode(initialHoldSettings.holdReasonCode);
+    setHoldHoldNote(initialHoldSettings.holdNote);
+  }, [initialHoldSettings]);
+
+  useEffect(() => {
+    if (typeof shopify === "undefined") return;
+    if (isCreditSettingsDirty) {
+      shopify.saveBar.show(CREDIT_SETTINGS_SAVE_BAR_ID);
+    } else {
+      shopify.saveBar.hide(CREDIT_SETTINGS_SAVE_BAR_ID);
+    }
+  }, [isCreditSettingsDirty]);
+
+  useEffect(() => {
+    if (typeof shopify === "undefined") return;
+    if (isHoldSettingsDirty) {
+      shopify.saveBar.show(HOLD_SETTINGS_SAVE_BAR_ID);
+    } else {
+      shopify.saveBar.hide(HOLD_SETTINGS_SAVE_BAR_ID);
+    }
+  }, [isHoldSettingsDirty]);
+
+  useEffect(() => {
+    if (actionData?.success && actionData.action === "updateCredit") {
+      if (typeof shopify !== "undefined") {
+        shopify.saveBar.hide(CREDIT_SETTINGS_SAVE_BAR_ID);
+        shopify.saveBar.hide(HOLD_SETTINGS_SAVE_BAR_ID);
+      }
+    }
+  }, [actionData]);
+
+  const handleCreditSettingsSave = useCallback(() => {
+    creditSettingsFormRef.current?.requestSubmit();
+  }, []);
+
+  const handleCreditSettingsDiscard = useCallback(() => {
+    setCreditLimit(initialCreditSettings.creditLimit);
+    setNoLimitChecked(initialCreditSettings.noLimit);
+    setCreditManualHold(initialCreditSettings.manualHold);
+    setCreditHoldReasonCode(initialCreditSettings.holdReasonCode);
+    setCreditHoldNote(initialCreditSettings.holdNote);
+    if (typeof shopify !== "undefined") {
+      shopify.saveBar.hide(CREDIT_SETTINGS_SAVE_BAR_ID);
+    }
+  }, [initialCreditSettings]);
+
+  const handleHoldSettingsSave = useCallback(() => {
+    holdSettingsFormRef.current?.requestSubmit();
+  }, []);
+
+  const handleHoldSettingsDiscard = useCallback(() => {
+    setHoldManualHold(initialHoldSettings.manualHold);
+    setHoldHoldReasonCode(initialHoldSettings.holdReasonCode);
+    setHoldHoldNote(initialHoldSettings.holdNote);
+    if (typeof shopify !== "undefined") {
+      shopify.saveBar.hide(HOLD_SETTINGS_SAVE_BAR_ID);
+    }
+  }, [initialHoldSettings]);
 
   // #292: When currency not supported, show only the banner
   if (loaderData.notSupported) {
@@ -921,7 +1045,15 @@ export default function AccountPage() {
 
       {!account.isGated && (
         <s-section heading="Edit Credit Settings">
-          <Form method="post" action={formAction}>
+          <ui-save-bar id={CREDIT_SETTINGS_SAVE_BAR_ID}>
+            <button variant="primary" onClick={handleCreditSettingsSave}>Save</button>
+            <button onClick={handleCreditSettingsDiscard}>Discard</button>
+          </ui-save-bar>
+          <Form
+            ref={creditSettingsFormRef}
+            method="post"
+            action={formAction}
+          >
             <input type="hidden" name="_action" value="updateCredit" />
             <s-stack gap="base">
               <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
@@ -929,8 +1061,12 @@ export default function AccountPage() {
                   label="Credit Limit"
                   name="creditLimit"
                   placeholder="e.g., 1,00,000 or ₹1,00,000.50"
-                  value={noLimitChecked ? "" : (creditStatus?.creditLimitAmount?.toString() ?? "")}
+                  value={noLimitChecked ? "" : creditLimit}
                   disabled={noLimitChecked}
+                  onInput={(e: Event) => {
+                    const target = e.currentTarget as HTMLInputElement | null;
+                    setCreditLimit(target?.value ?? "");
+                  }}
                 ></s-text-field>
                 <s-text>{currency}</s-text>
               </s-grid>
@@ -950,14 +1086,22 @@ export default function AccountPage() {
                 label="Place manual hold on this account"
                 name="manualHold"
                 value="true"
-                checked={creditStatus?.manualHold ?? false}
+                checked={creditManualHold}
+                onChange={(e: Event) => {
+                  const target = e.currentTarget as HTMLInputElement | null;
+                  setCreditManualHold(target?.checked ?? !creditManualHold);
+                }}
               ></s-checkbox>
 
               <s-select 
                 label="Hold Reason (if held)" 
                 name="holdReasonCode" 
                 placeholder="Select reason..."
-                value={creditStatus?.holdReasonCode ?? ""}
+                value={creditHoldReasonCode}
+                onChange={(e: Event) => {
+                  const target = e.currentTarget as HTMLSelectElement | null;
+                  setCreditHoldReasonCode(target?.value ?? "");
+                }}
               >
                 {HOLD_REASON_OPTIONS.map((opt) => (
                   <s-option key={opt.value ?? "null"} value={opt.value ?? ""}>
@@ -970,11 +1114,15 @@ export default function AccountPage() {
                 label="Hold Note (optional)"
                 name="holdNote"
                 placeholder="Internal note about the hold"
-                value={creditStatus?.holdNote ?? ""}
+                value={creditHoldNote}
+                onInput={(e: Event) => {
+                  const target = e.currentTarget as HTMLInputElement | null;
+                  setCreditHoldNote(target?.value ?? "");
+                }}
               ></s-text-field>
 
-              <s-button type="submit" variant="primary" disabled={isSubmitting}>
-                {isSubmitting ? "Saving..." : "Save Credit Settings"}
+              <s-button type="submit" variant="primary" disabled={isCreditSubmitting}>
+                {isCreditSubmitting ? "Saving..." : "Save Credit Settings"}
               </s-button>
             </s-stack>
           </Form>
@@ -1005,7 +1153,15 @@ export default function AccountPage() {
                 )}
               </s-stack>
             </s-banner>
-            <Form method="post" action={formAction}>
+            <ui-save-bar id={HOLD_SETTINGS_SAVE_BAR_ID}>
+              <button variant="primary" onClick={handleHoldSettingsSave}>Save</button>
+              <button onClick={handleHoldSettingsDiscard}>Discard</button>
+            </ui-save-bar>
+            <Form
+              ref={holdSettingsFormRef}
+              method="post"
+              action={formAction}
+            >
               <input type="hidden" name="_action" value="updateCredit" />
               <input type="hidden" name="holdOnly" value="true" />
               <s-stack gap="base">
@@ -1013,14 +1169,22 @@ export default function AccountPage() {
                   label="Place manual hold on this account"
                   name="manualHold"
                   value="true"
-                  checked={creditStatus?.manualHold ?? false}
+                  checked={holdManualHold}
+                  onChange={(e: Event) => {
+                    const target = e.currentTarget as HTMLInputElement | null;
+                    setHoldManualHold(target?.checked ?? !holdManualHold);
+                  }}
                 ></s-checkbox>
 
                 <s-select 
                   label="Hold Reason (if held)" 
                   name="holdReasonCode" 
                   placeholder="Select reason..."
-                  value={creditStatus?.holdReasonCode ?? ""}
+                  value={holdHoldReasonCode}
+                  onChange={(e: Event) => {
+                    const target = e.currentTarget as HTMLSelectElement | null;
+                    setHoldHoldReasonCode(target?.value ?? "");
+                  }}
                 >
                   {HOLD_REASON_OPTIONS.map((opt) => (
                     <s-option key={opt.value ?? "null"} value={opt.value ?? ""}>
@@ -1033,11 +1197,15 @@ export default function AccountPage() {
                   label="Hold Note (optional)"
                   name="holdNote"
                   placeholder="Internal note about the hold"
-                  value={creditStatus?.holdNote ?? ""}
+                  value={holdHoldNote}
+                  onInput={(e: Event) => {
+                    const target = e.currentTarget as HTMLInputElement | null;
+                    setHoldHoldNote(target?.value ?? "");
+                  }}
                 ></s-text-field>
 
-                <s-button type="submit" variant="primary" disabled={isSubmitting}>
-                  {isSubmitting ? "Saving..." : "Save Hold Settings"}
+                <s-button type="submit" variant="primary" disabled={isHoldSubmitting}>
+                  {isHoldSubmitting ? "Saving..." : "Save Hold Settings"}
                 </s-button>
               </s-stack>
             </Form>

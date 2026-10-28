@@ -303,6 +303,7 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
 
       expect(html).toContain("Edit Credit Settings");
       expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
     });
   });
 

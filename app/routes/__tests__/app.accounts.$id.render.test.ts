@@ -127,6 +127,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
 
       // Full credit edit form renders (not restricted)
       expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // Over-limit banner heading is ABSENT
       expect(html).not.toContain("This account was added after you reached your plan limit");
@@ -155,6 +156,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
 
       // Full credit edit form renders
       expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // Over-limit banner is ABSENT
       expect(html).not.toContain("This account was added after you reached your plan limit");
@@ -177,6 +179,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Hold Status");
       expect(html).toContain("Place manual hold on this account");
       expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // No limit-related UI
       expect(html).not.toContain("after you reached your plan limit");
@@ -218,6 +221,7 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
 
       // Full credit edit form renders (not gated)
       expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // No over-limit banner
       expect(html).not.toContain("This account was added after you reached your plan limit");
