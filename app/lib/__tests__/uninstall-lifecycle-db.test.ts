@@ -35,6 +35,38 @@ import { requestContext } from "~/lib/request-context.server";
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+/**
+ * Archive all s6_sync and s6_bulk messages that don't belong to this file's test shops.
+ * Prevents batch pollution from other Sequential DB test files' leftover messages.
+ */
+async function archiveStaleQueueMessages(
+  sql: ReturnType<typeof postgres>,
+  ourDomains: string[]
+): Promise<{ syncArchived: number; bulkArchived: number }> {
+  const [syncResult] = await sql<[{ archived: string }]>`
+    SELECT count(*)::text AS archived
+    FROM pgmq.archive('s6_sync', (
+      SELECT array_agg(msg_id)
+      FROM pgmq.q_s6_sync
+      WHERE message->>'shop' IS NULL
+         OR message->>'shop' NOT IN ${sql(ourDomains)}
+    ))
+  `;
+  const [bulkResult] = await sql<[{ archived: string }]>`
+    SELECT count(*)::text AS archived
+    FROM pgmq.archive('s6_bulk', (
+      SELECT array_agg(msg_id)
+      FROM pgmq.q_s6_bulk
+      WHERE message->>'shop' IS NULL
+         OR message->>'shop' NOT IN ${sql(ourDomains)}
+    ))
+  `;
+  return {
+    syncArchived: parseInt(syncResult.archived, 10),
+    bulkArchived: parseInt(bulkResult.archived, 10),
+  };
+}
+
 const mockVerifyWebhook = vi.fn();
 const mockVerifyPayloadShopMatch = vi.fn();
 vi.mock("~/lib/webhook-verify.server", () => ({
@@ -420,6 +452,8 @@ describeWithDb("Uninstall lifecycle (DB)", () => {
       await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
       await sql`DELETE FROM "Session" WHERE shop IN (${SHOP_A_DOMAIN}, ${SHOP_B_DOMAIN})`;
       await sql`DELETE FROM "Shop" WHERE id IN (${SHOP_A_ID}, ${SHOP_B_ID})`;
+
+      await archiveStaleQueueMessages(sql, [SHOP_A_DOMAIN, SHOP_B_DOMAIN]);
 
       await seedShop(
         SHOP_A_ID,
