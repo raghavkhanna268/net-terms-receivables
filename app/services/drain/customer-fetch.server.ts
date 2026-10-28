@@ -7,6 +7,11 @@
  *
  * This allows the app to function while PCD approval is pending,
  * without dead-lettering every customer message.
+ *
+ * Conditional PII fetch:
+ * - fetchCustomerBaseFields: Always fetches id + tags (no PII)
+ * - fetchCustomerPiiFields: Fetches email + displayName (requires PII approval)
+ * - fetchCustomerWithFallback: Legacy combined fetch with ACCESS_DENIED fallback
  */
 
 import type { Sql } from "~/lib/db-light.server";
@@ -126,6 +131,134 @@ export async function fetchCustomerWithFallback(
     error: baseResult.error,
     retryable: baseResult.retryable,
     usedFallback: true,
+  };
+}
+
+/**
+ * Result of fetching customer base fields.
+ */
+export interface CustomerBaseFieldsResult {
+  success: boolean;
+  data?: ShopifyCustomer | null;
+  error?: string;
+  retryable: boolean;
+}
+
+/**
+ * Fetch customer base fields only (id, tags).
+ *
+ * Used as the first step in conditional PII fetching. This query does not
+ * require Protected Customer Data approval and should always succeed if
+ * the customer exists.
+ *
+ * @param shop - Shop domain
+ * @param customerId - Customer GID
+ * @returns Fetch result with id and tags only
+ */
+export async function fetchCustomerBaseFields(
+  shop: string,
+  customerId: string
+): Promise<CustomerBaseFieldsResult> {
+  const baseQuery = getCustomerByNodeQuery({ CUSTOMER_PII_FIELDS: "0" });
+
+  const result = await adminGraphQL<{ node: ShopifyCustomer | null }>(
+    shop,
+    baseQuery,
+    { id: customerId }
+  );
+
+  if (result.success) {
+    return {
+      success: true,
+      data: result.data?.node ?? null,
+      retryable: false,
+    };
+  }
+
+  return {
+    success: false,
+    error: result.error,
+    retryable: result.retryable,
+  };
+}
+
+/**
+ * Result of fetching customer PII fields.
+ */
+export interface CustomerPiiFieldsResult {
+  success: boolean;
+  email?: string | null;
+  displayName?: string | null;
+  error?: string;
+  retryable: boolean;
+  /** True if we used the fallback due to ACCESS_DENIED */
+  usedFallback?: boolean;
+}
+
+/**
+ * Fetch customer PII fields (email, displayName) with ACCESS_DENIED fallback.
+ *
+ * Used as the second step in conditional PII fetching, only when the customer
+ * matches a tag rule or is already tracked.
+ *
+ * On ACCESS_DENIED, returns success with usedFallback=true and null PII fields.
+ * The caller should use 'fallback' piiMode to preserve existing stored values.
+ *
+ * @param shop - Shop domain
+ * @param customerId - Customer GID
+ * @returns Fetch result with email and displayName, or fallback indicator
+ */
+export async function fetchCustomerPiiFields(
+  shop: string,
+  customerId: string
+): Promise<CustomerPiiFieldsResult> {
+  const env = getRequestEnv() ?? {};
+  const piiEnabled = env.CUSTOMER_PII_FIELDS === "1";
+
+  if (!piiEnabled) {
+    return {
+      success: true,
+      email: null,
+      displayName: null,
+      retryable: false,
+      usedFallback: false,
+    };
+  }
+
+  const piiQuery = getCustomerByNodeQuery({ CUSTOMER_PII_FIELDS: "1" });
+
+  const result = await adminGraphQL<{ node: ShopifyCustomer | null }>(
+    shop,
+    piiQuery,
+    { id: customerId }
+  );
+
+  if (result.success) {
+    const customer = result.data?.node;
+    return {
+      success: true,
+      email: customer?.email ?? null,
+      displayName: customer?.displayName ?? null,
+      retryable: false,
+      usedFallback: false,
+    };
+  }
+
+  if (hasAccessDeniedError(result)) {
+    return {
+      success: true,
+      email: null,
+      displayName: null,
+      retryable: false,
+      usedFallback: true,
+    };
+  }
+
+  return {
+    success: false,
+    error: result.error,
+    retryable: result.retryable,
+    usedFallback: false,
   };
 }
 

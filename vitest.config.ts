@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (116 total, counting expanded globs):
+ * Files included (117 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -104,6 +104,9 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - tests/integration/confirm-reimport-pin-db.test.ts
  * - tests/integration/bank-upload-robustness-db.test.ts
  * - tests/integration/ingestion-paths-db.test.ts
+ *
+ * Customer conditional PII DB tests (added last; #599, #600 also bump count):
+ * - app/services/drain/__tests__/customer-conditional-pii-db.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
@@ -231,6 +234,9 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Customer conditional PII DB tests (added last; #599, #600 also bump count)
+  "app/services/drain/__tests__/customer-conditional-pii-db.test.ts",
 ];
 
 export default defineConfig({

@@ -22,7 +22,13 @@ import {
   isWebhookProcessed,
   markWebhookProcessed,
 } from "~/services/sync/company.server";
-import { processCustomerWebhook, type CustomerPiiMode } from "~/services/sync/customer.server";
+import {
+  processCustomerWebhook,
+  type CustomerPiiMode,
+  getTagRules,
+  shouldFetchCustomerPii,
+  isCustomerTracked,
+} from "~/services/sync/customer.server";
 import { validateCustomerQuery } from "~/services/sync/customer-fields.server";
 import { getRequestEnv } from "~/lib/request-context.server";
 import { processDraftOrderWebhook } from "~/services/sync/draft-order.server";
@@ -45,7 +51,8 @@ import {
   getCompanyLocationQueryWithoutContact,
 } from "./admin-client.server";
 import {
-  fetchCustomerWithFallback,
+  fetchCustomerBaseFields,
+  fetchCustomerPiiFields,
   incrementCustomerPiiAccessDeniedFallback,
 } from "./customer-fetch.server";
 import {
@@ -676,10 +683,14 @@ async function handleOrder(sql: Sql, message: SyncMessage): Promise<SyncResult> 
  * - Optional PII (CUSTOMER_PII_FIELDS=1): email, displayName
  * - NEVER fetches: phone, addresses
  *
+ * Conditional PII fetch:
+ * 1. First fetch base fields (id, tags) for all customers
+ * 2. Check if customer matches tag rules OR is already tracked
+ * 3. Only fetch PII fields (email, displayName) when needed
+ *
  * ACCESS_DENIED fallback:
  * If PCD approval is pending and Shopify returns ACCESS_DENIED for PII fields,
- * we retry with base fields only (id, tags) and process without PII.
- * This avoids dead-lettering every customer message while awaiting approval.
+ * we continue with null PII and use 'fallback' mode to preserve existing values.
  */
 async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResult> {
   // Idempotency check (S20: use shop for new table)
@@ -708,20 +719,20 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     );
   }
 
-  // Fetch customer data via GraphQL with ACCESS_DENIED fallback
-  const result = await fetchCustomerWithFallback(message.shop, message.resourceGid);
+  // Step 1: Fetch base fields (id, tags) for all customers
+  const baseResult = await fetchCustomerBaseFields(message.shop, message.resourceGid);
 
-  if (!result.success) {
+  if (!baseResult.success) {
     return {
       success: false,
       action: "skipped",
-      error: result.error,
-      retryable: result.retryable,
+      error: baseResult.error,
+      retryable: baseResult.retryable,
     };
   }
 
   // If node is null, the resource was deleted
-  if (!result.data) {
+  if (!baseResult.data) {
     const customer: ShopifyCustomer = {
       id: message.resourceGid,
       tags: [],
@@ -732,21 +743,74 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     );
   }
 
-  // Determine piiMode:
-  // - 'fallback': ACCESS_DENIED retry was used - preserve existing values
-  // - 'fetched': PII query succeeded - write values as returned
-  // - 'disabled': CUSTOMER_PII_FIELDS !== '1' - clear PII
+  const customer = baseResult.data;
+
+  // Step 2: Get shop and tag rules to decide if PII fetch is needed
+  const [shop] = await sql<{ id: string }[]>`
+    SELECT id FROM "Shop" WHERE domain = ${message.shop}
+  `;
+
+  if (!shop) {
+    return {
+      success: false,
+      action: "skipped",
+      error: "shop_not_found",
+      errorCode: "shop_not_found",
+    };
+  }
+
+  const tagRules = await getTagRules(sql, shop.id);
+
+  // Step 3: Check if customer matches a tag rule (only matching customers get PII)
+  const matchesTagRule = piiEnabled && shouldFetchCustomerPii(
+    customer.tags ?? [],
+    tagRules
+  );
+
+  // Check if customer is already tracked (for piiMode decision)
+  const isTracked = await isCustomerTracked(sql, shop.id, customer.id);
+
   let piiMode: CustomerPiiMode;
+  let usedFallback = false;
+
   if (!piiEnabled) {
     piiMode = "disabled";
-  } else if (result.usedFallback) {
-    piiMode = "fallback";
+    customer.email = null;
+    customer.displayName = null;
+  } else if (!matchesTagRule) {
+    // Customer does not match tag rule - no PII fetch
+    // Use 'fallback' for tracked customers to preserve stored PII
+    // Set null explicitly so COALESCE in updateTaggedCustomerIfExists preserves existing values
+    piiMode = isTracked ? "fallback" : "disabled";
+    customer.email = null;
+    customer.displayName = null;
   } else {
-    piiMode = "fetched";
+    // Step 4: Fetch PII fields for matching/tracked customers
+    const piiResult = await fetchCustomerPiiFields(message.shop, message.resourceGid);
+
+    if (!piiResult.success) {
+      return {
+        success: false,
+        action: "skipped",
+        error: piiResult.error,
+        retryable: piiResult.retryable,
+      };
+    }
+
+    // Merge PII fields into customer object
+    customer.email = piiResult.email ?? null;
+    customer.displayName = piiResult.displayName ?? null;
+
+    if (piiResult.usedFallback) {
+      piiMode = "fallback";
+      usedFallback = true;
+    } else {
+      piiMode = "fetched";
+    }
   }
 
   // Log warning if fallback was used
-  if (result.usedFallback) {
+  if (usedFallback) {
     safeLog("warn", "customer_pii_access_denied_fallback", {
       shopHash: await shopHash(message.shop),
       customerId: message.resourceGid,
@@ -760,12 +824,12 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     sql,
     message.shop,
     message.topic,
-    result.data,
+    customer,
     message.webhookId,
     piiMode
   );
 
-  if (result.usedFallback && syncResult.success) {
+  if (usedFallback && syncResult.success) {
     try {
       await incrementCustomerPiiAccessDeniedFallback(sql, message.shop);
     } catch (err) {
