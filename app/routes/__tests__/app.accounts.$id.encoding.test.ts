@@ -337,6 +337,52 @@ describe("Account id encoding round-trip", () => {
     });
   });
 
+  describe("Form action URL stays single-encoded (root cause fix)", () => {
+    it("explicit action from accountHref stays single-encoded (seeded GID)", () => {
+      const formAction = accountHref(SYNTHETIC_GID_ID);
+      
+      expect(formAction).toContain("%2F");
+      expect(formAction).not.toContain("%252F");
+      expect(formAction).not.toContain("%25");
+    });
+
+    it("explicit action from accountHref stays single-encoded (B2B UUID)", () => {
+      const formAction = accountHref(SYNTHETIC_B2B_UUID);
+      
+      expect(formAction).toBe(`/app/accounts/${SYNTHETIC_B2B_UUID}`);
+      expect(formAction).not.toContain("%");
+    });
+
+    it("explicit action from accountHref stays single-encoded (tag-rule UUID)", () => {
+      const formAction = accountHref(SYNTHETIC_TAGGED_UUID);
+      
+      expect(formAction).toBe(`/app/accounts/${SYNTHETIC_TAGGED_UUID}`);
+      expect(formAction).not.toContain("%");
+    });
+
+    it("POST to explicit action URL preserves params.id correctly", () => {
+      const routes: RouteObject[] = [
+        { path: "app", children: [{ path: "accounts/:id" }] },
+      ];
+
+      const formAction = accountHref(SYNTHETIC_GID_ID);
+      const postUrl = new URL(formAction, "https://example.com");
+      const matches = matchRoutes(routes, postUrl.pathname);
+
+      expect(matches).not.toBeNull();
+      expect(matches![matches!.length - 1].params.id).toBe(SYNTHETIC_GID_ID);
+    });
+
+    it("URL object does not double-encode explicit action path", () => {
+      const formAction = accountHref(SYNTHETIC_GID_ID);
+      const url = new URL(formAction, "https://example.com");
+      
+      expect(url.pathname).toBe(formAction);
+      expect(url.pathname).toContain("%2F");
+      expect(url.pathname).not.toContain("%252F");
+    });
+  });
+
   describe("Save-then-reload simulation for all account types", () => {
     const routes: RouteObject[] = [
       { path: "app", children: [{ path: "accounts/:id" }] },

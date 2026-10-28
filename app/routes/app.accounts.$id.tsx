@@ -24,7 +24,7 @@ import type {
   ActionFunctionArgs,
 } from "react-router";
 import { data } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation, useParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { isAccountActive, isGatingEnforced, getUsageStats } from "~/services/gating.server";
@@ -55,7 +55,7 @@ import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.se
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { pluralizeWithCount } from "~/lib/copy-helpers";
 import { validateTimezone } from "~/lib/aging-dates.server";
-import { normalizeAccountId } from "~/lib/account-href";
+import { normalizeAccountId, accountHref } from "~/lib/account-href";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -667,8 +667,11 @@ export default function AccountPage() {
   const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, shopTimezone, newAccountsPausedBanner, error } = loaderData;
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
+  const params = useParams();
   const isSubmitting = navigation.state === "submitting";
   const isReminderSubmitting = isSubmitting && navigation.formData?.get("_action") === "updateReminderOptOut";
+
+  const formAction = params.id ? accountHref(params.id) : undefined;
 
   const serverNoLimit = creditStatus?.creditLimitAmount === null;
   const [noLimitChecked, setNoLimitChecked] = useState(serverNoLimit);
@@ -919,7 +922,7 @@ export default function AccountPage() {
 
       {!account.isGated && (
         <s-section heading="Edit Credit Settings">
-          <Form method="post">
+          <Form method="post" action={formAction}>
             <input type="hidden" name="_action" value="updateCredit" />
             <s-stack gap="base">
               <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
@@ -1003,7 +1006,7 @@ export default function AccountPage() {
                 )}
               </s-stack>
             </s-banner>
-            <Form method="post">
+            <Form method="post" action={formAction}>
               <input type="hidden" name="_action" value="updateCredit" />
               <input type="hidden" name="holdOnly" value="true" />
               <s-stack gap="base">
@@ -1045,7 +1048,7 @@ export default function AccountPage() {
 
       {reminderOptOut && (
         <s-section heading="Payment Reminders">
-          <Form method="post">
+          <Form method="post" action={formAction}>
             <input type="hidden" name="_action" value="updateReminderOptOut" />
             <input type="hidden" name="enable" value={reminderOptOut.optedOut ? "true" : "false"} />
             <s-stack gap="base">
