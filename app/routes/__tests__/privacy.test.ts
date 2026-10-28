@@ -424,9 +424,12 @@ describe("privacy.md content requirements", () => {
     expect(privacyContent).not.toContain("Until shop uninstall");
   });
 
-  it("lists GitHub as a subprocessor", () => {
+  it("lists GitHub as a subprocessor with accurate backup wording", () => {
     expect(privacyContent).toContain("GitHub, Inc.");
     expect(privacyContent).toContain("Source code hosting and CI");
+    expect(privacyContent).toContain(
+      "database contents are processed transiently in runner memory, encrypted before leaving the runner, and not stored by GitHub"
+    );
   });
 
   it("lists Cloudflare R2 and observability logs", () => {
@@ -510,9 +513,12 @@ describe("merchant-terms.md content requirements", () => {
     );
   });
 
-  it("lists GitHub as a sub-processor", () => {
+  it("lists GitHub as a sub-processor with accurate backup wording", () => {
     expect(termsContent).toContain("GitHub, Inc.");
     expect(termsContent).toContain("Source code hosting and CI");
+    expect(termsContent).toContain(
+      "database contents are processed transiently in runner memory, encrypted before leaving the runner, and not stored by GitHub"
+    );
   });
 
   it("lists Cloudflare R2 and observability logs", () => {
@@ -526,8 +532,19 @@ describe("merchant-terms.md content requirements", () => {
   });
 
   it("says Cloudflare transfer includes R2 storage not transient only", () => {
-    expect(termsContent).toContain("Cloudflare edge nodes and R2 storage");
+    expect(termsContent).toContain("Cloudflare R2 (encrypted database backups, Asia-Pacific region)");
     expect(termsContent).not.toContain("transient processing only");
+  });
+
+  it("references Sentry scrubbing in Part 2 section 4 Sub-Processors", () => {
+    expect(termsContent).toContain("Sentry scrubbing is described in Part 2, section 4 (Sub-Processors)");
+    expect(termsContent).not.toContain("Sentry scrubbing is described in section 4\n");
+  });
+
+  it("lists GitHub cross-border transfer with transient processing wording", () => {
+    expect(termsContent).toContain(
+      "GitHub (source code and CI; database contents processed transiently in runner memory during encrypted backup job, not stored by GitHub)"
+    );
   });
 });
 

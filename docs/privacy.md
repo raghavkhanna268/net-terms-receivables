@@ -144,7 +144,7 @@ The merchant sets each buyer's credit limit and payment terms. When a buyer goes
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored app data | AWS ap-south-1 (Mumbai, India) |
 | Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, outstanding amount and due date, unsubscribe link, merchant contact email (as Reply-To), shop owner email (for data-request notices) | Japan (ap-northeast-1) |
 | Functional Software, Inc. (Sentry) | Error monitoring (used only when configured). Data is stored in Sentry's EU data region (Germany). It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts. | Sanitized error and performance events | EU (Germany) |
-| GitHub, Inc. | Source code hosting and CI (GitHub Actions for encrypted database backups) | Source code; no customer data | Global |
+| GitHub, Inc. | Source code hosting and CI. The nightly backup job runs on GitHub-hosted runners; database contents are processed transiently in runner memory, encrypted before leaving the runner, and not stored by GitHub. | Source code; database contents in transit during the encrypted backup job | Global |
 
 **Resend data handling:**
 
