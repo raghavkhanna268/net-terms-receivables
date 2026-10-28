@@ -4724,11 +4724,12 @@ export async function main(): Promise<void> {
     const sql = postgres(state.databaseUrl, { max: 1 });
     try {
       const result = await migrateSeedAccountIds(sql, !confirm);
-      console.log(`  accounts_to_change=${result.accountsToChange}`);
-      console.log(`  invoice_count=${result.invoiceCount}`);
-      console.log(`  payer_alias_count=${result.payerAliasCount}`);
-      console.log(`  draft_order_count=${result.draftOrderCount}`);
-      console.log(`  applied=${result.applied}`);
+      // Output counts and booleans only (no PII)
+      console.log("  accounts_to_change=" + String(result.accountsToChange));
+      console.log("  invoice_count=" + String(result.invoiceCount));
+      console.log("  payer_alias_count=" + String(result.payerAliasCount));
+      console.log("  draft_order_count=" + String(result.draftOrderCount));
+      console.log("  applied=" + String(result.applied));
       if (!confirm) {
         console.log("  [dry-run] Pass --confirm to apply changes");
       } else if (result.accountsToChange > 0) {
