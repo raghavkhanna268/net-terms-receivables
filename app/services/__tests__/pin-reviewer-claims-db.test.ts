@@ -35,13 +35,73 @@ const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 /**
  * Compute an Etc/GMT±N timezone where a given UTC hour becomes a target local hour.
  * PostgreSQL uses POSIX convention: Etc/GMT+5 means UTC-5.
+ *
+ * Valid IANA range: Etc/GMT+12 (UTC-12) to Etc/GMT-14 (UTC+14).
+ * The offset is wrapped into [-14, +12] to stay within valid range.
+ *
+ * @param utcHour - The UTC hour (0-23)
+ * @param targetLocalHour - The desired local hour (0-23)
+ * @returns A valid Etc/GMT zone name
  */
 function computeTimezoneForLocalHour(utcHour: number, targetLocalHour: number): string {
-  const offset = utcHour - targetLocalHour;
+  let offset = utcHour - targetLocalHour;
+  // Wrap into valid IANA range: Etc/GMT+12 (offset=12) to Etc/GMT-14 (offset=-14)
+  if (offset > 12) offset -= 24;
+  if (offset < -14) offset += 24;
   if (offset === 0) return "Etc/GMT";
   if (offset > 0) return `Etc/GMT+${offset}`;
   return `Etc/GMT${offset}`;
 }
+
+describe("computeTimezoneForLocalHour helper", () => {
+  const TARGET_HOURS = [8, 9, 18, 19];
+
+  /**
+   * Verify that a zone name is within valid IANA Etc/GMT range.
+   * Valid: Etc/GMT, Etc/GMT+1..+12, Etc/GMT-1..-14
+   */
+  function isValidEtcGmtZone(zone: string): boolean {
+    if (zone === "Etc/GMT") return true;
+    const match = zone.match(/^Etc\/GMT([+-])(\d+)$/);
+    if (!match) return false;
+    const sign = match[1];
+    const num = parseInt(match[2], 10);
+    if (sign === "+") return num >= 1 && num <= 12;
+    return num >= 1 && num <= 14;
+  }
+
+  /**
+   * Get the hour in a given timezone for a specific UTC hour.
+   * Uses Intl.DateTimeFormat with hourCycle h23 for 0-23 range.
+   */
+  function getLocalHourInZone(utcHour: number, zone: string): number {
+    // Create a date at the given UTC hour on a fixed date
+    const date = new Date(Date.UTC(2026, 0, 15, utcHour, 0, 0));
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      hour: "numeric",
+      hourCycle: "h23",
+    });
+    return parseInt(formatter.format(date), 10);
+  }
+
+  for (const targetHour of TARGET_HOURS) {
+    describe(`target hour ${targetHour}`, () => {
+      for (let utcHour = 0; utcHour < 24; utcHour++) {
+        it(`UTC hour ${utcHour} produces valid zone with correct local hour`, () => {
+          const zone = computeTimezoneForLocalHour(utcHour, targetHour);
+
+          // Check zone is within valid IANA range
+          expect(isValidEtcGmtZone(zone)).toBe(true);
+
+          // Check local hour in that zone equals target
+          const localHour = getLocalHourInZone(utcHour, zone);
+          expect(localHour).toBe(targetHour);
+        });
+      }
+    });
+  }
+});
 
 describe("(a) DEFAULT_RULE_OFFSETS constant", () => {
   it("is exactly [-3, 0, 7] in that order", async () => {
@@ -633,37 +693,55 @@ describeWithDb("(c) send window 9-18 inclusive (DB)", () => {
     }
   });
 
-  describe("half-hour timezone (Asia/Kolkata)", () => {
-    it("hour 9 IS queued in Asia/Kolkata", async () => {
-      const [row] = await sql<{ utc_hour: number; utc_minute: number }[]>`
-        SELECT 
-          EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour,
-          EXTRACT(MINUTE FROM NOW() AT TIME ZONE 'UTC')::int AS utc_minute
+  describe("deterministic in-window and out-of-window (DB time-based)", () => {
+    /**
+     * This test creates two stores with computed timezones based on the DB's
+     * current time, ensuring one is always in the 9-18 window and one is always
+     * outside. This makes the test deterministic regardless of when it runs.
+     *
+     * Approach: Query the DB's UTC hour, then use computeTimezoneForLocalHour
+     * to create zones where the local hour is guaranteed to be 12 (in-window)
+     * or 19 (out-of-window).
+     */
+    it("enqueues in-window store (local hour 12) and skips out-of-window store (local hour 19)", async () => {
+      const [row] = await sql<{ utc_hour: number }[]>`
+        SELECT EXTRACT(HOUR FROM NOW() AT TIME ZONE 'UTC')::int AS utc_hour
       `;
 
-      const localHourInIST = (row.utc_hour + 5 + (row.utc_minute >= 30 ? 1 : 0)) % 24;
+      // Create timezone where local hour is 12 (in-window)
+      const inWindowZone = computeTimezoneForLocalHour(row.utc_hour, 12);
+      // Create timezone where local hour is 19 (out-of-window)
+      const outWindowZone = computeTimezoneForLocalHour(row.utc_hour, 19);
 
-      if (localHourInIST < 9 || localHourInIST > 18) {
-        console.log(`Skipping: current IST hour ${localHourInIST} is outside 9-18 window`);
-        return;
-      }
-
-      const { shopId, shopDomain, invoiceId } = await setupShopAndInvoice("ist", "Asia/Kolkata");
+      const inWindowSetup = await setupShopAndInvoice("in-win", inWindowZone);
+      const outWindowSetup = await setupShopAndInvoice("out-win", outWindowZone);
 
       try {
-        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${shopDomain}`;
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${inWindowSetup.shopDomain}`;
+        await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' = ${outWindowSetup.shopDomain}`;
         await sql`SELECT public.s18_enqueue_reminders()`;
 
-        const rows = await sql<{ invoiceId: string }[]>`
+        const inWindowRows = await sql<{ invoiceId: string }[]>`
           SELECT message->>'invoiceId' AS "invoiceId"
           FROM pgmq.q_s6_sync
-          WHERE message->>'shop' = ${shopDomain}
+          WHERE message->>'shop' = ${inWindowSetup.shopDomain}
             AND message->>'topic' = 'REMINDER_SEND'
         `;
 
-        expect(rows.map(r => r.invoiceId)).toContain(invoiceId);
+        const outWindowRows = await sql<{ invoiceId: string }[]>`
+          SELECT message->>'invoiceId' AS "invoiceId"
+          FROM pgmq.q_s6_sync
+          WHERE message->>'shop' = ${outWindowSetup.shopDomain}
+            AND message->>'topic' = 'REMINDER_SEND'
+        `;
+
+        // In-window store (local hour 12) SHOULD be enqueued
+        expect(inWindowRows.map(r => r.invoiceId)).toContain(inWindowSetup.invoiceId);
+        // Out-of-window store (local hour 19) should NOT be enqueued
+        expect(outWindowRows.map(r => r.invoiceId)).not.toContain(outWindowSetup.invoiceId);
       } finally {
-        await cleanup(shopId, shopDomain);
+        await cleanup(inWindowSetup.shopId, inWindowSetup.shopDomain);
+        await cleanup(outWindowSetup.shopId, outWindowSetup.shopDomain);
       }
     });
   });
