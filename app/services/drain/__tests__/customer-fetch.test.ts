@@ -369,10 +369,18 @@ describe("Real handleCustomer tests with fallback", () => {
 
     // Mock the entire customer-fetch.server module
     // We can't use importActual because it would use real adminGraphQL
+    interface MockAdminResult {
+      success: boolean;
+      data?: { node: unknown };
+      error?: string;
+      errorCode?: string;
+      retryable?: boolean;
+    }
+
     vi.doMock("../customer-fetch.server", () => ({
       fetchCustomerBaseFields: vi.fn().mockImplementation(() => {
         // Get the next adminGraphQL mock result
-        return mockAdminGraphQL().then((result: { success: boolean; data?: { node: unknown } }) => {
+        return mockAdminGraphQL().then((result: MockAdminResult) => {
           if (!result.success) {
             return { success: false, error: result.error, retryable: result.retryable };
           }
@@ -385,12 +393,13 @@ describe("Real handleCustomer tests with fallback", () => {
       }),
       fetchCustomerPiiFields: vi.fn().mockImplementation(() => {
         // Get the next adminGraphQL mock result
-        return mockAdminGraphQL().then((result: { success: boolean; data?: { node: { email?: string; displayName?: string } }; errorCode?: string }) => {
+        return mockAdminGraphQL().then((result: MockAdminResult) => {
           if (result.success) {
+            const node = result.data?.node as { email?: string; displayName?: string } | undefined;
             return {
               success: true,
-              email: result.data?.node?.email ?? null,
-              displayName: result.data?.node?.displayName ?? null,
+              email: node?.email ?? null,
+              displayName: node?.displayName ?? null,
               retryable: false,
               usedFallback: false,
             };
