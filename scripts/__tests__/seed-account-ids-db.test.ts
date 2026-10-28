@@ -129,7 +129,7 @@ describeWithDb("seed account ID migration (DB)", () => {
     `;
   }
 
-  it("dry run changes nothing and reports counts", async () => {
+  it("dry run changes nothing and reports counts (scoped to shop)", async () => {
     const suffix = freshSuffix();
     const { shopId } = await insertShop(suffix);
     
@@ -159,8 +159,8 @@ describeWithDb("seed account ID migration (DB)", () => {
       buyerAccountId: oldAccountId,
     });
 
-    // Run dry run
-    const result = await migrateSeedAccountIds(sql, true);
+    // Run dry run with shopId filter for test isolation
+    const result = await migrateSeedAccountIds(sql, { dryRun: true, shopId });
     
     expect(result.accountsToChange).toBe(1);
     expect(result.invoiceCount).toBe(1);
@@ -212,8 +212,8 @@ describeWithDb("seed account ID migration (DB)", () => {
       buyerAccountId: oldAccountId,
     });
 
-    // Run with confirm (not dry run)
-    const result = await migrateSeedAccountIds(sql, false);
+    // Run with confirm (not dry run), scoped to shop
+    const result = await migrateSeedAccountIds(sql, { dryRun: false, shopId });
     
     expect(result.accountsToChange).toBe(1);
     expect(result.applied).toBe(true);
@@ -259,8 +259,8 @@ describeWithDb("seed account ID migration (DB)", () => {
       companyLocationId: locationId,
     });
 
-    // Run migration
-    const result = await migrateSeedAccountIds(sql, false);
+    // Run migration scoped to shop
+    const result = await migrateSeedAccountIds(sql, { dryRun: false, shopId });
     
     expect(result.accountsToChange).toBe(0);
     expect(result.applied).toBe(true);
@@ -293,8 +293,8 @@ describeWithDb("seed account ID migration (DB)", () => {
       orderId: "gid:" + "//shopify/Order/1004",
     });
 
-    // Run migration
-    const result = await migrateSeedAccountIds(sql, false);
+    // Run migration scoped to shop
+    const result = await migrateSeedAccountIds(sql, { dryRun: false, shopId });
     
     expect(result.accountsToChange).toBe(0);
 
@@ -375,11 +375,11 @@ describeWithDb("seed account ID migration (DB)", () => {
       SELECT "updatedAt" FROM "BuyerAccount" WHERE id = ${oldAccountId}
     `;
     
-    // Run dry run (dryRun = true)
-    const result = await migrateSeedAccountIds(sql, true);
+    // Run dry run with shopId filter for test isolation
+    const result = await migrateSeedAccountIds(sql, { dryRun: true, shopId });
     
-    // Should report at least 1 account to change (may find more from other tests)
-    expect(result.accountsToChange).toBeGreaterThanOrEqual(1);
+    // Should report exactly 1 account to change (scoped to this shop)
+    expect(result.accountsToChange).toBe(1);
     expect(result.applied).toBe(false);
     
     // Verify OUR account's id is unchanged (dry run did not write)

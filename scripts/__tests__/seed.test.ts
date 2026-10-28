@@ -16,6 +16,10 @@ import {
   SEED_MIGRATE_BAD_FLAG_COMBO,
   SEED_MIGRATE_CONFIRM_WITHOUT_FLAG,
   SEED_MIGRATE_NONLOCAL_HOST,
+  SeedModeError,
+  resolveSeedMode,
+  type SeedModeArgs,
+  type SeedModeEnv,
   isLocalhostDatabaseUrl,
   extractNumericTailFromGid,
   buildSeedAccountId,
@@ -7191,6 +7195,10 @@ describe("isLocalhostDatabaseUrl", () => {
     expect(isLocalhostDatabaseUrl("postgresql://user:pass@127.0.0.1:5432/db")).toBe(true);
   });
 
+  it("returns true for IPv6 localhost [::1]", () => {
+    expect(isLocalhostDatabaseUrl("postgresql://user:pass@[::1]:5432/db")).toBe(true);
+  });
+
   it("returns false for remote host", () => {
     delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
     expect(isLocalhostDatabaseUrl("postgresql://user:pass@db.example.com:5432/db")).toBe(false);
@@ -7207,20 +7215,141 @@ describe("isLocalhostDatabaseUrl", () => {
   });
 });
 
-describe("Migration flag error codes", () => {
-  it("exports SEED_MIGRATE_NO_DATABASE_URL error code", () => {
-    expect(SEED_MIGRATE_NO_DATABASE_URL).toBe("SEED_MIGRATE_NO_DATABASE_URL");
+describe("resolveSeedMode", () => {
+  const defaultArgs: SeedModeArgs = {
+    dryRun: false,
+    reset: false,
+    resetApply: false,
+    reportDuplicatesMode: false,
+    reseedHeldCurrencyMode: false,
+    reviewerDemo: false,
+    g4ReminderFixture: false,
+    g4ReminderFixtureCleanup: false,
+    migrateSeedAccountIds: false,
+    confirm: false,
+  };
+
+  const originalEnv = process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    } else {
+      process.env.SEED_MIGRATE_ALLOW_NONLOCAL = originalEnv;
+    }
   });
 
-  it("exports SEED_MIGRATE_BAD_FLAG_COMBO error code", () => {
-    expect(SEED_MIGRATE_BAD_FLAG_COMBO).toBe("SEED_MIGRATE_BAD_FLAG_COMBO");
+  it("returns seed mode when no migrate flag", () => {
+    const result = resolveSeedMode(defaultArgs, {});
+    expect(result).toEqual({ mode: "seed" });
   });
 
-  it("exports SEED_MIGRATE_CONFIRM_WITHOUT_FLAG error code", () => {
-    expect(SEED_MIGRATE_CONFIRM_WITHOUT_FLAG).toBe("SEED_MIGRATE_CONFIRM_WITHOUT_FLAG");
+  it("returns migrate mode with dryRun=true when --migrate-seed-account-ids without --confirm", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    const result = resolveSeedMode(args, env);
+    expect(result).toEqual({
+      mode: "migrate",
+      dryRun: true,
+      databaseUrl: "postgresql://user:pass@localhost:5432/db",
+    });
   });
 
-  it("exports SEED_MIGRATE_NONLOCAL_HOST error code", () => {
-    expect(SEED_MIGRATE_NONLOCAL_HOST).toBe("SEED_MIGRATE_NONLOCAL_HOST");
+  it("returns migrate mode with dryRun=false when --migrate-seed-account-ids --confirm", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, confirm: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    const result = resolveSeedMode(args, env);
+    expect(result).toEqual({
+      mode: "migrate",
+      dryRun: false,
+      databaseUrl: "postgresql://user:pass@localhost:5432/db",
+    });
+  });
+
+  it("throws SEED_MIGRATE_NO_DATABASE_URL when --migrate-seed-account-ids without DATABASE_URL", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true };
+    const env: SeedModeEnv = { databaseUrl: undefined };
+    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      expect(err).toBeInstanceOf(SeedModeError);
+      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_NO_DATABASE_URL);
+    }
+  });
+
+  it("throws SEED_MIGRATE_BAD_FLAG_COMBO when --migrate-seed-account-ids combined with --dry-run", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, dryRun: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      expect(err).toBeInstanceOf(SeedModeError);
+      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_BAD_FLAG_COMBO);
+    }
+  });
+
+  it("throws SEED_MIGRATE_BAD_FLAG_COMBO when --migrate-seed-account-ids combined with --reset", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, reset: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      expect(err).toBeInstanceOf(SeedModeError);
+      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_BAD_FLAG_COMBO);
+    }
+  });
+
+  it("throws SEED_MIGRATE_CONFIRM_WITHOUT_FLAG when --confirm without --migrate-seed-account-ids", () => {
+    const args: SeedModeArgs = { ...defaultArgs, confirm: true };
+    const env: SeedModeEnv = {};
+    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      expect(err).toBeInstanceOf(SeedModeError);
+      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_CONFIRM_WITHOUT_FLAG);
+    }
+  });
+
+  it("throws SEED_MIGRATE_NONLOCAL_HOST when --confirm on non-localhost DB without opt-in", () => {
+    delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, confirm: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@db.example.com:5432/db" };
+    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      expect(err).toBeInstanceOf(SeedModeError);
+      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_NONLOCAL_HOST);
+    }
+  });
+
+  it("allows --confirm on non-localhost DB when SEED_MIGRATE_ALLOW_NONLOCAL=1", () => {
+    process.env.SEED_MIGRATE_ALLOW_NONLOCAL = "1";
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, confirm: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@db.example.com:5432/db" };
+    const result = resolveSeedMode(args, env);
+    expect(result).toEqual({
+      mode: "migrate",
+      dryRun: false,
+      databaseUrl: "postgresql://user:pass@db.example.com:5432/db",
+    });
+  });
+
+  it("migrate mode returns before any Shopify client is created", () => {
+    const graphqlMock = vi.fn();
+    const checkDevStoreMock = vi.fn();
+
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    
+    const result = resolveSeedMode(args, env);
+    
+    expect(result.mode).toBe("migrate");
+    expect(graphqlMock).not.toHaveBeenCalled();
+    expect(checkDevStoreMock).not.toHaveBeenCalled();
   });
 });

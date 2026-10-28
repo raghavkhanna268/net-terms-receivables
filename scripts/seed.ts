@@ -214,9 +214,110 @@ export const SEED_MIGRATE_CONFIRM_WITHOUT_FLAG = "SEED_MIGRATE_CONFIRM_WITHOUT_F
 export const SEED_MIGRATE_NONLOCAL_HOST = "SEED_MIGRATE_NONLOCAL_HOST";
 
 /**
+ * Typed error for seed mode resolution failures.
+ */
+export class SeedModeError extends Error {
+  constructor(public readonly code: string) {
+    super(code);
+    this.name = "SeedModeError";
+  }
+}
+
+/**
+ * Arguments for resolveSeedMode (subset of parseArgs output).
+ */
+export interface SeedModeArgs {
+  dryRun: boolean;
+  reset: boolean;
+  resetApply: boolean;
+  reportDuplicatesMode: boolean;
+  reseedHeldCurrencyMode: boolean;
+  reviewerDemo: boolean;
+  g4ReminderFixture: boolean;
+  g4ReminderFixtureCleanup: boolean;
+  migrateSeedAccountIds: boolean;
+  confirm: boolean;
+}
+
+/**
+ * Environment values for resolveSeedMode.
+ */
+export interface SeedModeEnv {
+  databaseUrl?: string | null;
+}
+
+/**
+ * Result of resolveSeedMode when mode is 'migrate'.
+ */
+export interface SeedModeMigrate {
+  mode: "migrate";
+  dryRun: boolean;
+  databaseUrl: string;
+}
+
+/**
+ * Result of resolveSeedMode when mode is 'seed'.
+ */
+export interface SeedModeSeed {
+  mode: "seed";
+}
+
+export type SeedModeResult = SeedModeMigrate | SeedModeSeed;
+
+/**
+ * Pure function to resolve seed mode from args and env.
+ * Returns { mode: 'migrate', dryRun, databaseUrl } or { mode: 'seed' }.
+ * Throws SeedModeError with a code for validation failures.
+ *
+ * MUST be called BEFORE any Shopify client creation or API calls.
+ */
+export function resolveSeedMode(args: SeedModeArgs, env: SeedModeEnv): SeedModeResult {
+  const { migrateSeedAccountIds, confirm } = args;
+
+  // Reject --confirm without --migrate-seed-account-ids
+  if (confirm && !migrateSeedAccountIds) {
+    throw new SeedModeError(SEED_MIGRATE_CONFIRM_WITHOUT_FLAG);
+  }
+
+  // Reject --migrate-seed-account-ids combined with any other mode flag
+  const otherModeFlags =
+    args.dryRun ||
+    args.reset ||
+    args.resetApply ||
+    args.reportDuplicatesMode ||
+    args.reseedHeldCurrencyMode ||
+    args.reviewerDemo ||
+    args.g4ReminderFixture ||
+    args.g4ReminderFixtureCleanup;
+  if (migrateSeedAccountIds && otherModeFlags) {
+    throw new SeedModeError(SEED_MIGRATE_BAD_FLAG_COMBO);
+  }
+
+  if (!migrateSeedAccountIds) {
+    return { mode: "seed" };
+  }
+
+  // Migration mode: require DATABASE_URL
+  if (!env.databaseUrl) {
+    throw new SeedModeError(SEED_MIGRATE_NO_DATABASE_URL);
+  }
+
+  // For --confirm, require localhost (unless opt-in env var is set)
+  if (confirm && !isLocalhostDatabaseUrl(env.databaseUrl)) {
+    throw new SeedModeError(SEED_MIGRATE_NONLOCAL_HOST);
+  }
+
+  return {
+    mode: "migrate",
+    dryRun: !confirm,
+    databaseUrl: env.databaseUrl,
+  };
+}
+
+/**
  * Check if a DATABASE_URL host is localhost (127.0.0.1, ::1, or "localhost").
  * Returns true if the host is local OR if SEED_MIGRATE_ALLOW_NONLOCAL=1 is set.
- * Never prints the URL.
+ * Never throws; invalid URLs return false. Never prints the URL.
  */
 export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
   if (process.env.SEED_MIGRATE_ALLOW_NONLOCAL === "1") {
@@ -225,8 +326,9 @@ export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
   try {
     const url = new URL(databaseUrl);
     const host = url.hostname.toLowerCase();
-    // Note: IPv6 in URLs uses brackets, so [::1] becomes "::1" in hostname
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    // IPv6 in URLs uses brackets: postgres://u@[::1]:5432/db -> hostname is "[::1]"
+    // Accept both bracketed "[::1]" and unbracketed "::1" defensively
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
   } catch {
     return false;
   }
@@ -3987,6 +4089,14 @@ export interface MigrateSeedAccountIdsResult {
 }
 
 /**
+ * Options for migrateSeedAccountIds.
+ */
+export interface MigrateSeedAccountIdsOptions {
+  dryRun: boolean;
+  shopId?: string;
+}
+
+/**
  * Migrate old-format seed account IDs to the new URL-safe format.
  *
  * LOCAL DEV DBs ONLY. Never run against any non-local DB without the owner's
@@ -3997,24 +4107,43 @@ export interface MigrateSeedAccountIdsResult {
  * New format: seed-account-${shopId}-loc${numericTail} (URL-safe)
  *
  * @param sql - Postgres client
- * @param dryRun - If true, only count affected rows without making changes
+ * @param dryRunOrOptions - If boolean, interpreted as dryRun; otherwise MigrateSeedAccountIdsOptions
  */
 export async function migrateSeedAccountIds(
   sql: ReturnType<typeof postgres>,
-  dryRun: boolean
+  dryRunOrOptions: boolean | MigrateSeedAccountIdsOptions
 ): Promise<MigrateSeedAccountIdsResult> {
+  const options: MigrateSeedAccountIdsOptions =
+    typeof dryRunOrOptions === "boolean"
+      ? { dryRun: dryRunOrOptions }
+      : dryRunOrOptions;
+  const { dryRun, shopId } = options;
+
   return sql.begin(async (tx) => {
     // Find all seed accounts with old-format IDs that need migration
-    const accountsToMigrate = await tx<Array<{
-      id: string;
-      shopId: string;
-      companyLocationId: string;
-    }>>`
-      SELECT id, "shopId", "companyLocationId"
-      FROM "BuyerAccount"
-      WHERE id LIKE ${SEED_ACCOUNT_ID_PREFIX + "%"}
-        AND "companyLocationId" IS NOT NULL
-    `;
+    // Optionally filter by shopId for test isolation
+    const accountsToMigrate = shopId
+      ? await tx<Array<{
+          id: string;
+          shopId: string;
+          companyLocationId: string;
+        }>>`
+          SELECT id, "shopId", "companyLocationId"
+          FROM "BuyerAccount"
+          WHERE id LIKE ${SEED_ACCOUNT_ID_PREFIX + "%"}
+            AND "companyLocationId" IS NOT NULL
+            AND "shopId" = ${shopId}
+        `
+      : await tx<Array<{
+          id: string;
+          shopId: string;
+          companyLocationId: string;
+        }>>`
+          SELECT id, "shopId", "companyLocationId"
+          FROM "BuyerAccount"
+          WHERE id LIKE ${SEED_ACCOUNT_ID_PREFIX + "%"}
+            AND "companyLocationId" IS NOT NULL
+        `;
 
     // Calculate new IDs and filter to those that actually need changing
     const migrations: Array<{
@@ -4605,6 +4734,7 @@ export async function main(): Promise<void> {
   console.log("  (Using orderCreate with processedAt - no draft orders)");
   console.log("═══════════════════════════════════════════════════════════════");
 
+  const args = parseArgs();
   const {
     dryRun,
     reset,
@@ -4614,9 +4744,7 @@ export async function main(): Promise<void> {
     reviewerDemo,
     g4ReminderFixture,
     g4ReminderFixtureCleanup,
-    migrateSeedAccountIds: migrateSeedAccountIdsMode,
-    confirm,
-  } = parseArgs();
+  } = args;
 
   if (
     isG4FixtureBadArgs({
@@ -4637,46 +4765,30 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // -- Migration flag validation (must run BEFORE any Shopify calls) --
-  
-  // Reject --confirm without --migrate-seed-account-ids
-  if (confirm && !migrateSeedAccountIdsMode) {
-    console.error("error=" + SEED_MIGRATE_CONFIRM_WITHOUT_FLAG);
-    process.exit(1);
-  }
-
-  // Reject --migrate-seed-account-ids combined with any other mode flag
-  const otherModeFlags = dryRun || reset || resetApply || reportDuplicatesMode ||
-    reseedHeldCurrencyMode || reviewerDemo || g4ReminderFixture || g4ReminderFixtureCleanup;
-  if (migrateSeedAccountIdsMode && otherModeFlags) {
-    console.error("error=" + SEED_MIGRATE_BAD_FLAG_COMBO);
-    process.exit(1);
-  }
-
-  // Handle --migrate-seed-account-ids immediately (BEFORE any Shopify calls)
-  if (migrateSeedAccountIdsMode) {
-    // Require DATABASE_URL
-    if (!env.databaseUrl) {
-      console.error("error=" + SEED_MIGRATE_NO_DATABASE_URL);
+  // -- Resolve seed mode FIRST (must run BEFORE any Shopify calls) --
+  let seedMode: SeedModeResult;
+  try {
+    seedMode = resolveSeedMode(args, { databaseUrl: env.databaseUrl });
+  } catch (err) {
+    if (err instanceof SeedModeError) {
+      console.error("error=" + err.code);
       process.exit(1);
     }
+    throw err;
+  }
 
-    // For --confirm, require localhost (unless opt-in env var is set)
-    if (confirm && !isLocalhostDatabaseUrl(env.databaseUrl)) {
-      console.error("error=" + SEED_MIGRATE_NONLOCAL_HOST);
-      process.exit(1);
-    }
-
+  // Handle migrate mode immediately (BEFORE checkDevStore or any Shopify calls)
+  if (seedMode.mode === "migrate") {
     console.log("\n🔄 Migrating seed account IDs to URL-safe format...");
-    const sql = postgres(env.databaseUrl, { max: 1 });
+    const sql = postgres(seedMode.databaseUrl, { max: 1 });
     try {
-      const result = await migrateSeedAccountIds(sql, !confirm);
+      const result = await migrateSeedAccountIds(sql, seedMode.dryRun);
       console.log("  accounts_to_change=" + String(result.accountsToChange));
       console.log("  invoice_count=" + String(result.invoiceCount));
       console.log("  payer_alias_count=" + String(result.payerAliasCount));
       console.log("  draft_order_count=" + String(result.draftOrderCount));
       console.log("  applied=" + String(result.applied));
-      if (!confirm) {
+      if (seedMode.dryRun) {
         console.log("  [dry-run] Pass --confirm to apply changes");
       } else if (result.accountsToChange > 0) {
         console.log("  ✅ Migration complete");
@@ -4690,6 +4802,7 @@ export async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // -- Seed mode: continue with Shopify calls --
   const state: SeedState = {
     shop: env.shop,
     token: env.token,
