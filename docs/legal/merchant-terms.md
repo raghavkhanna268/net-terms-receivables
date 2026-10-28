@@ -93,7 +93,7 @@ The App processes the following categories of buyer personal data:
 | Financial Data | Invoice amounts, outstanding balances, payment terms | Credit management, invoice tracking | Shopify Order sync |
 | Payment Data | Bank transfer details (payer name, narration, UTR) | Payment reconciliation | Merchant-uploaded bank statements |
 
-**Note:** The App does NOT process or store:
+**Note:** The App does not request or store:
 - Phone numbers
 - Physical addresses
 - Payment card data
@@ -106,10 +106,11 @@ We use the following sub-processors to provide the App:
 
 | Sub-Processor | Service | Data Processed | Location |
 |---------------|---------|----------------|----------|
-| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All App data in transit | Global (Worker placed near ap-south-1) |
+| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive), encrypted database backups (R2), observability logs | All App data in transit; encrypted database backups | Global (Worker placed near ap-south-1); R2 bucket in Asia-Pacific region |
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored App data | AWS ap-south-1 (Mumbai, India) |
-| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
+| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, outstanding amount and due date, unsubscribe link, merchant contact email (as Reply-To), shop owner email (for data-request notices) | Japan (ap-northeast-1) |
 | Functional Software, Inc. (Sentry) | Error monitoring (used only when configured). Data is stored in Sentry's EU data region (Germany). It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts. | Sanitized error and performance events | EU (Germany) |
+| GitHub, Inc. | Source code hosting and CI (GitHub Actions for encrypted database backups) | Source code; no customer data | Global |
 
 **Note:** Shopify is the platform and data source, not our sub-processor. Shopify's DPA governs your relationship with Shopify: [Shopify DPA](https://www.shopify.com/legal/dpa)
 
@@ -138,8 +139,8 @@ We implement appropriate technical and organizational measures:
 Key retention periods:
 - Unmatched payment narrations: 180 days, then purged
 - Data request exports: 30 days, then deleted
-- All shop data: Deleted 48 hours after uninstall via `shop/redact`
-- Database backups: Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted
+- All shop data: Deleted 48 hours after uninstall via `shop/redact`. If the shop reinstalls before the shop/redact webhook arrives, deletion is skipped to preserve the reinstalled shop's data.
+- Database backups: The newest 7 backups are always kept, and older ones are deleted after 30 days on the next successful backup run. Backups are stored encrypted in Cloudflare R2.
 
 ### 8. Data Breach Notification
 
@@ -156,7 +157,8 @@ We do not provide audit rights. Upon written request, we will provide reasonable
 Personal data may be transferred to:
 - **Japan:** Resend (ap-northeast-1 data region) for email delivery
 - **EU (Germany):** Sentry for error monitoring (when configured)
-- **Global:** Cloudflare edge nodes (transient processing only)
+- **Global:** Cloudflare edge nodes and R2 storage (encrypted database backups and observability logs)
+- **Global:** GitHub (source code and CI; no customer data)
 
 ### 11. Term and Termination
 
@@ -164,7 +166,7 @@ This DPA remains in effect as long as the App processes personal data on your be
 
 Upon termination:
 - We delete your data per Section 7 above
-- No personal data is retained beyond the stated retention periods, except copies in encrypted backups for up to 30 days
+- No personal data is retained beyond the stated retention periods, except copies in encrypted backups (the newest 7 are always kept, older ones deleted after 30 days on the next successful backup run)
 - Deletion is automatic via Shopify compliance webhooks
 
 ---

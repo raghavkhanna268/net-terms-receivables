@@ -44,14 +44,14 @@ Termwise: Net Terms & Credit ("the App", "we", "us") is a Shopify app built for 
 
 ### 2.3 Customer Data from Shopify (Protected Customer Data)
 
-The app accesses buyer name and email, which Shopify classifies as protected customer data, and handles them as described in this policy. We use this data for store management and app functionality, and only for customers who match one of the merchant's net-terms tag rules. We do not request or store phone numbers or addresses.
+The app accesses buyer name and email, which Shopify classifies as protected customer data, and handles them as described in this policy. Name and email are received for customers in the sync and stored only for matching buyers. We do not request or store phone numbers or addresses.
 
 | Data | Purpose | Retention |
 |------|---------|-----------|
 | Customer ID, tags, tag status | Create and maintain tag-based net-terms buyer accounts | Until customer erasure, or 48 hours after uninstall (shop/redact) |
 | Email (Shopify customer email) | (1) Recipient of payment-reminder emails for that buyer's open invoices; (2) a matching hint: we compare the part of the address before the "@" with the payer name on the merchant's bank statement, and suggest a match that the merchant must confirm | As above, and see "Minimisation" |
 | Name (Shopify customer display name) | The greeting in payment-reminder emails ("Dear …"). Not used for matching | As above, and see "Minimisation" |
-| Draft Orders | Pending credit exposure (draft order ID, buyer account, total, status) | Until draft completed/deleted |
+| Draft Orders | Pending credit exposure (draft order ID, buyer account, total, status) | Until deleted in Shopify, customer erasure, or shop/redact |
 
 **Minimisation:** When a customer no longer matches a net-terms tag and has no open invoices, we clear their email and name. We do this when the tag is removed; if invoices are still open then, the email and name are kept until the customer's erasure request or until 48 hours after uninstall.
 
@@ -61,9 +61,9 @@ Buyer accounts for Shopify B2B companies use the company or location name and st
 
 | Data Category | Purpose | Retention |
 |---------------|---------|-----------|
-| Payment | Payment reconciliation (value date, amount, rail, UTR) | Until shop uninstall |
+| Payment | Payment reconciliation (value date, amount, rail, UTR) | Until shop/redact |
 | Payment (PII) | Payment matching (payer name, narration) | Until erasure or retention purge |
-| Payer Alias | Payment matching (normalized payer key, buyer account link) | Until customer erasure or shop uninstall |
+| Payer Alias | Payment matching (normalized payer key, buyer account link) | Until customer erasure or shop/redact |
 
 **Note:** Payment narration and payer text may contain personal data from bank statements. These fields are:
 - Redacted during customer erasure requests if the payment is matched to the customer's buyer account
@@ -140,10 +140,11 @@ The merchant sets each buyer's credit limit and payment terms. When a buyer goes
 
 | Subprocessor | Purpose | Data | Location |
 |--------------|---------|------|----------|
-| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive) | All app data in transit | Global (Worker placed near ap-south-1) |
+| Cloudflare, Inc. | Application hosting (Workers), connection pooling (Hyperdrive), encrypted database backups (R2), observability logs | All app data in transit; encrypted database backups | Global (Worker placed near ap-south-1); R2 bucket in Asia-Pacific region |
 | Supabase, Inc. | Database hosting (Postgres), encrypted at rest (AES-256) and in transit (TLS) | All stored app data | AWS ap-south-1 (Mumbai, India) |
-| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, amount and due date, unsubscribe link | Japan (ap-northeast-1) |
+| Resend, Inc., Tokyo, Japan (ap-northeast-1) data region | Sending payment-reminder emails and data-request notifications | Recipient email address, buyer name, shop name, invoice number, outstanding amount and due date, unsubscribe link, merchant contact email (as Reply-To), shop owner email (for data-request notices) | Japan (ap-northeast-1) |
 | Functional Software, Inc. (Sentry) | Error monitoring (used only when configured). Data is stored in Sentry's EU data region (Germany). It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts. | Sanitized error and performance events | EU (Germany) |
+| GitHub, Inc. | Source code hosting and CI (GitHub Actions for encrypted database backups) | Source code; no customer data | Global |
 
 **Resend data handling:**
 
@@ -156,10 +157,10 @@ Payment reminder emails (sent to buyer email address):
   - For B2B (COMPANY) accounts: main contact email from the buyer account
   - For tagged customer accounts: email from the tagged customer record
 - Invoice name (e.g. "#1001")
-- Invoice total (formatted with shop currency)
+- Outstanding amount (formatted with shop currency)
 - Invoice due date (formatted in shop timezone)
 - Buyer display name (mainContactName or displayName, or "Customer" if not available)
-- Shop name (derived from shop domain)
+- Shop name (from the store's Shopify name when available, otherwise from shop domain)
 - Reminder type label (e.g. "Payment due today")
 
 Resend is only used when email delivery is configured; emails are not sent otherwise.
@@ -172,7 +173,7 @@ Resend is only used when email delivery is configured; emails are not sent other
 
 | Data Category | Retention Period | Deletion Trigger |
 |---------------|------------------|------------------|
-| Access Logs | Until 48 hours after uninstall (shop/redact) | Automatic cascade. An automatic 1-year deletion is planned and will be stated here once it is active. |
+| Access Logs | 1 year | Access events are deleted after 1 year (daily automated job); also deleted on shop/redact via cascade |
 | OAuth Sessions | Until logout, expiry, or uninstall | App uninstall webhook or session expiry |
 | Shop and Account Data | Until 48 hours after uninstall (shop/redact) | Shop redact webhook (sent by Shopify 48h after uninstall) |
 | Payment and Financial Records | Until 48 hours after uninstall (shop/redact) | Deleted on Shopify's shop/redact request |
@@ -183,13 +184,13 @@ Resend is only used when email delivery is configured; emails are not sent other
 | Payments (unmatched narration) | **180 days** | Narration/payer text cleared daily; amounts/UTR/rail retained |
 | Payer Alias | Until customer erasure or shop redact | Deleted on customer erasure for the customer's buyer account |
 | Data Request Records | 30 days (data minimisation) | Purged automatically; also on customer or shop erasure |
-| Audit Events | Until shop redact | Automatic cascade |
+| Audit Events | 1 year for access events; until shop/redact for other events | Access events deleted after 1 year; financial events deleted on shop/redact via cascade |
 
 ### 6.1 Data Retention After Deletion — Known Limitations
 
 **Background job queue:** Background jobs for the shop are deleted when the shop's data is deleted. A job that is being processed at the exact moment of deletion may still be kept in a list of failed jobs afterwards; such leftover entries are purged automatically, up to about 37 days later.
 
-**Database backups:** Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted.
+**Database backups:** The newest 7 backups are always kept, and older ones are deleted after 30 days on the next successful backup run. Backups are stored encrypted in Cloudflare R2.
 
 **Shopify metafields:** The app's credit status field on Shopify Company records is not explicitly cleared by the app on uninstall or shop/redact. Per [Shopify metafield documentation](https://shopify.dev/docs/apps/build/metafields/definitions), when a user uninstalls an app, Shopify deletes its app-owned metafield definitions and temporarily retains the metafield values without a definition; cleanup of the retained data runs asynchronously (no guaranteed timeframe). Uninstalling the app removes the app's Shopify Functions, so the field value cannot affect checkout even if it persists temporarily.
 
