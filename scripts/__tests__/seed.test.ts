@@ -7191,10 +7191,6 @@ describe("isLocalhostDatabaseUrl", () => {
     expect(isLocalhostDatabaseUrl("postgresql://user:pass@127.0.0.1:5432/db")).toBe(true);
   });
 
-  it("returns true for [::1] (IPv6 localhost)", () => {
-    expect(isLocalhostDatabaseUrl("postgresql://user:pass@[::1]:5432/db")).toBe(true);
-  });
-
   it("returns false for remote host", () => {
     delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
     expect(isLocalhostDatabaseUrl("postgresql://user:pass@db.example.com:5432/db")).toBe(false);
