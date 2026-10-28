@@ -534,4 +534,89 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
     expect(r15Matches[0].invoiceName).toBe("#1002");
     expect(r15Matches[0].buyerAccountId).toBe(otherBuyerId);
   });
+
+  /**
+   * Case 7: Three or more tied buyers - oldest has no invoices, two later ones do.
+   * Assert that the FIRST later buyer in createdAt order wins (not any arbitrary one).
+   * This tests proper iteration order in the tied buyer fallback.
+   */
+  it("Case 7: 3+ tied buyers - first later buyer with invoices wins", async () => {
+    const buyer1Id = `${olderBuyerId}-case7-oldest`;
+    const buyer2Id = `${newerBuyerId}-case7-middle`;
+    const buyer3Id = `${newerBuyerId}-case7-newest`;
+    const invoice2Id = `${invoice1002Id}-case7-mid`;
+    const invoice3Id = `${invoice1002Id}-case7-new`;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyer1Id}, ${testShopId}, 'COMPANY',
+        'company-case7-oldest', 'location-case7-oldest',
+        'Test Buyer Co', 100000, 'OK', NOW() - INTERVAL '60 days', NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyer2Id}, ${testShopId}, 'COMPANY',
+        'company-case7-middle', 'location-case7-middle',
+        'Test Buyer Co', 100000, 'OK', NOW() - INTERVAL '30 days', NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoice2Id}, ${testShopId}, ${buyer2Id},
+        'order-1002-case7-mid', '#1002', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyer3Id}, ${testShopId}, 'COMPANY',
+        'company-case7-newest', 'location-case7-newest',
+        'Test Buyer Co', 100000, 'OK', NOW(), NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoice3Id}, ${testShopId}, ${buyer3Id},
+        'order-1002-case7-new', '#1002', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+
+    await seedPaymentsFromV2Csv();
+    await runMatcher(sql, testShopId);
+
+    const r14Matches = await getMatchesForPayment(paymentIds[0]);
+    expect(r14Matches.length).toBe(1);
+    expect(r14Matches[0].invoiceName).toBe("#1002");
+    expect(r14Matches[0].score).toBe(58);
+    expect(r14Matches[0].buyerAccountId).toBe(buyer2Id);
+
+    const r15Matches = await getMatchesForPayment(paymentIds[1]);
+    expect(r15Matches.length).toBe(1);
+    expect(r15Matches[0].invoiceName).toBe("#1002");
+    expect(r15Matches[0].score).toBe(48);
+    expect(r15Matches[0].buyerAccountId).toBe(buyer2Id);
+  });
 });

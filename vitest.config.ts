@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (115 total, counting expanded globs):
+ * Files included (117 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -26,7 +26,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/__tests__/integration/prisma-session-storage.test.ts
  *
  * Service DB tests (explicit + *-db.test.ts glob):
- * - app/services/__tests__/*-db.test.ts (matches ~34 files)
+ * - app/services/__tests__/*-db.test.ts (matches ~35 files)
  * - app/services/__tests__/audit-event-no-pii-db.test.ts
  * - app/services/__tests__/gating.test.ts
  * - app/services/__tests__/bank-import-critical-path.test.ts
@@ -104,6 +104,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - tests/integration/confirm-reimport-pin-db.test.ts
  * - tests/integration/bank-upload-robustness-db.test.ts
  * - tests/integration/ingestion-paths-db.test.ts
+ * - tests/integration/matcher-tied-buyer-db.test.ts
  */
 const DB_TEST_PATTERNS = [
   // Integration tests (all use real DB)
