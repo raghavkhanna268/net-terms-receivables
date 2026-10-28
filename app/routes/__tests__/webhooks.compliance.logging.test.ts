@@ -75,11 +75,18 @@ function setupWaitUntilMock(): void {
   mockGetRequestWaitUntil.mockReturnValue(mockWaitUntil);
 }
 
+const mockRecordWebhookReceipt = vi.fn().mockResolvedValue(true);
 const mockDeleteWebhookReceiptsForShop = vi.fn().mockResolvedValue(0);
 vi.mock("~/lib/webhook-receipts.server", () => ({
-  recordWebhookReceipt: vi.fn().mockResolvedValue(true),
+  recordWebhookReceipt: (...args: unknown[]) => mockRecordWebhookReceipt(...args),
   parseTriggeredAt: vi.fn().mockReturnValue(null),
   deleteWebhookReceiptsForShop: (...args: unknown[]) => mockDeleteWebhookReceiptsForShop(...args),
+}));
+
+const mockSendSyncMessage = vi.fn().mockResolvedValue({ msgId: "mock-msg-123" });
+vi.mock("~/lib/pgmq.server", () => ({
+  sendSyncMessage: (...args: unknown[]) => mockSendSyncMessage(...args),
+  S6_QUEUES: { SYNC: "s6_sync", BULK: "s6_bulk" },
 }));
 
 const { mockAdmin, mockGetOfflineAdminContext } = vi.hoisted(() => {
@@ -181,42 +188,39 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     }
   }
 
-  it("shop/redact deleted logs shop_redact_deleted with shopHash and counts, no raw domain", async () => {
-    // Setup mocks for successful deletion
-    // Transaction operations:
-    // 0. SELECT FOR UPDATE with uninstalledAt (reinstall guard #291)
-    const uninstalledDate = new Date();
-    mockTx.mockResolvedValueOnce([{ id: "shop-logging-test", uninstalledAt: uninstalledDate }]);
-    // 1. DELETE Session (moved inside transaction per #291)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 2. DELETE s10b_order_refetch_null
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-    // 3. DELETE s6_bulk_operations
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 4. DELETE s6_reconcile_stage_claims
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-    // 5. DELETE order_outstanding_missing
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-    // 6. DELETE s10b_customer_pii_fallback
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 7. DELETE pgmq.q_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 4 }));
-    // 8. DELETE pgmq.q_s6_bulk
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-    // 9. DELETE pgmq.a_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 10. DELETE pgmq.a_s6_bulk
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 }));
-    // 11. DELETE s6_dead_letter
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 1 }));
-    // 12. DELETE s6_processed_webhooks (reconcile prefix)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 2 }));
-    // 13. DELETE s6_processed_webhooks (receipts join)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 3 }));
-    // 14. DELETE webhook_receipts
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 5 }));
-    // 15. DELETE Shop (returns deleted shop)
-    mockTx.mockResolvedValueOnce([{ id: "shop-logging-test" }]);
+  it("shop/redact happy path enqueues and logs no raw domain or webhookId", async () => {
+    // Fast-ack route just enqueues and returns 200 - no Shop query needed for shop/redact
+    const payload = { shop_id: 123, shop_domain: TEST_SHOP };
+    const body = JSON.stringify(payload);
+    const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET);
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    // Verify message was enqueued
+    expect(mockSendSyncMessage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        topic: "SHOP_REDACT",
+        shop: TEST_SHOP,
+        shopId: "123",
+      })
+    );
+
+    const allOutput = getAllConsoleOutput();
+    const outputStr = allOutput.join("\n");
+
+    // Assert NO raw shop domain appears in any output
+    expect(outputStr).not.toContain(".myshopify.com");
+    expect(outputStr).not.toContain(TEST_SHOP);
+
+    // Assert webhookId is NOT logged
+    assertNoWebhookIdInLogs(TEST_WEBHOOK_ID);
+  });
+
+  it("shop/redact duplicate receipt logs compliance_duplicate, no raw domain", async () => {
+    // Setup mock for duplicate receipt
+    mockRecordWebhookReceipt.mockResolvedValueOnce(false);
 
     const payload = { shop_id: 123, shop_domain: TEST_SHOP };
     const body = JSON.stringify(payload);
@@ -228,111 +232,25 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
 
-    // Assert shop_redact_deleted event appears
-    expect(outputStr).toContain("shop_redact_deleted");
-
-    // Assert shopHash is present (12-char truncated hex SHA-256)
-    // shopHash() in log.server.ts returns hashHex.slice(0, 12)
-    expect(outputStr).toMatch(/shopHash[":]+[a-f0-9]{12}/i);
-
-    // Assert count fields are logged (safeLog may show <redacted> but fields must exist)
-    expect(outputStr).toContain("refetchNullPurged");
-    expect(outputStr).toContain("bulkOperationsPurged");
-    expect(outputStr).toContain("pgmqSyncQueuePurged");
-    expect(outputStr).toContain("deadLetterPurged");
-    expect(outputStr).toContain("processedWebhooksPurged");
-    expect(outputStr).toContain("webhookReceiptsPurged");
+    // Assert compliance_duplicate event appears
+    expect(outputStr).toContain("compliance_duplicate");
 
     // Assert NO raw shop domain appears in any output
     expect(outputStr).not.toContain(".myshopify.com");
     expect(outputStr).not.toContain(TEST_SHOP);
 
-    // Assert webhookId is NOT logged (removed per privacy requirements)
+    // Assert webhookId is NOT logged
     assertNoWebhookIdInLogs(TEST_WEBHOOK_ID);
-  });
 
-  it("shop/redact skipped reinstall logs shop_redact_skipped_reinstalled with shopHash only, no raw domain", async () => {
-    // Setup mocks for reinstalled shop (uninstalledAt is NULL)
-    // Transaction returns shop with uninstalledAt: null - this triggers the skip path
-    mockTx.mockResolvedValueOnce([{ id: "shop-reinstalled-test", uninstalledAt: null }]);
-
-    const payload = { shop_id: 123, shop_domain: TEST_SHOP };
-    const body = JSON.stringify(payload);
-    const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET);
-
-    const response = await action(createMockActionArgs(request));
-    expect(response.status).toBe(200);
-
-    const allOutput = getAllConsoleOutput();
-    const outputStr = allOutput.join("\n");
-
-    // Assert shop_redact_skipped_reinstalled event appears
-    expect(outputStr).toContain("shop_redact_skipped_reinstalled");
-
-    // Assert shopHash is present (12-char truncated hex SHA-256)
-    expect(outputStr).toMatch(/shopHash[":]+[a-f0-9]{12}/i);
-
-    // Assert NO raw shop domain appears in any output
-    expect(outputStr).not.toContain(".myshopify.com");
-    expect(outputStr).not.toContain(TEST_SHOP);
-
-    // Assert webhookId is NOT logged (removed per privacy requirements)
-    assertNoWebhookIdInLogs(TEST_WEBHOOK_ID);
-    expect(outputStr).not.toContain("refetchNullPurged");
-  });
-
-  it("shop/redact not found logs shop_redact_not_found with shopHash, no raw domain", async () => {
-    // Setup mocks for shop not found (all deletes return 0, shop delete returns empty)
-    // Transaction operations:
-    mockTx.mockResolvedValueOnce([]); // SELECT FOR UPDATE (shop not found)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // DELETE Session
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s10b_order_refetch_null
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_bulk_operations
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // order_outstanding_missing
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s10b_customer_pii_fallback
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.q_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.q_s6_bulk
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.a_s6_sync
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // pgmq.a_s6_bulk
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_dead_letter
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_processed_webhooks (reconcile)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // s6_processed_webhooks (receipts)
-    mockTx.mockResolvedValueOnce(Object.assign([], { count: 0 })); // webhook_receipts
-    mockTx.mockResolvedValueOnce([]); // Shop (empty - not found)
-
-    const payload = { shop_id: 999, shop_domain: TEST_SHOP };
-    const body = JSON.stringify(payload);
-    const request = createSignedRequest(body, "shop/redact", SYNTHETIC_TEST_SECRET);
-
-    const response = await action(createMockActionArgs(request));
-    expect(response.status).toBe(200);
-
-    const allOutput = getAllConsoleOutput();
-    const outputStr = allOutput.join("\n");
-
-    // Assert shop_redact_not_found event appears
-    expect(outputStr).toContain("shop_redact_not_found");
-
-    // Assert shopHash is present (12-char truncated hex SHA-256)
-    expect(outputStr).toMatch(/shopHash[":]+[a-f0-9]{12}/i);
-
-    // Assert NO raw shop domain appears in any output
-    expect(outputStr).not.toContain(".myshopify.com");
-    expect(outputStr).not.toContain(TEST_SHOP);
-
-    // Assert webhookId is NOT logged (removed per privacy requirements)
-    assertNoWebhookIdInLogs(TEST_WEBHOOK_ID);
+    // Duplicate should not call sendSyncMessage
+    expect(mockSendSyncMessage).not.toHaveBeenCalled();
   });
 
   // ============ CUSTOMERS/DATA_REQUEST TESTS ============
 
-  it("customers/data_request received logs no webhookId", async () => {
+  it("customers/data_request happy path enqueues and logs no webhookId", async () => {
     const testWebhookId = "test-data-request-received-wh";
     mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
-    mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
-    mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
-    mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
-    mockSendDataRequestNotification.mockResolvedValueOnce({ sent: true });
 
     const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
     const body = JSON.stringify(payload);
@@ -340,10 +258,20 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
 
     const response = await action(createMockActionArgs(request));
     expect(response.status).toBe(200);
+
+    expect(mockSendSyncMessage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        topic: "CUSTOMERS_DATA_REQUEST",
+        shop: TEST_SHOP,
+        requestId: "789",
+        customerId: "456",
+      })
+    );
     assertNoWebhookIdInLogs(testWebhookId);
   });
 
-  it("customers/data_request no customer id logs no webhookId", async () => {
+  it("customers/data_request no customer id logs compliance_missing_customer_id", async () => {
     const testWebhookId = "test-data-request-no-cust-wh";
     const payload = { data_request: { id: 789 }, shop_domain: TEST_SHOP };
     const body = JSON.stringify(payload);
@@ -354,11 +282,12 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
 
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("No customer ID in payload");
+    expect(outputStr).toContain("compliance_missing_customer_id");
     assertNoWebhookIdInLogs(testWebhookId);
+    expect(mockSendSyncMessage).not.toHaveBeenCalled();
   });
 
-  it("customers/data_request no data_request.id logs no webhookId", async () => {
+  it("customers/data_request no data_request.id logs compliance_missing_request_id", async () => {
     const testWebhookId = "test-data-request-no-reqid-wh";
     const payload = { customer: { id: 456 }, shop_domain: TEST_SHOP };
     const body = JSON.stringify(payload);
@@ -369,11 +298,12 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
 
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("No data_request.id in payload");
+    expect(outputStr).toContain("compliance_missing_request_id");
     assertNoWebhookIdInLogs(testWebhookId);
+    expect(mockSendSyncMessage).not.toHaveBeenCalled();
   });
 
-  it("customers/data_request shop not found logs no webhookId", async () => {
+  it("customers/data_request shop not found logs compliance_shop_not_found", async () => {
     const testWebhookId = "test-data-request-shop-not-found-wh";
     mockSql.mockResolvedValueOnce([]); // Shop not found
 
@@ -386,108 +316,36 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
 
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("Shop not found");
+    expect(outputStr).toContain("compliance_shop_not_found");
     assertNoWebhookIdInLogs(testWebhookId);
-  });
-
-  it("customers/data_request happy path (created) logs no webhookId", async () => {
-    const testWebhookId = "test-data-request-happy-wh";
-    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
-    mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
-    mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
-    mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
-    mockSendDataRequestNotification.mockResolvedValueOnce({ sent: true });
-
-    const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
-    const body = JSON.stringify(payload);
-    const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
-
-    const response = await action(createMockActionArgs(request));
-    expect(response.status).toBe(200);
-
-    const allOutput = getAllConsoleOutput();
-    const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("data request");
-    assertNoWebhookIdInLogs(testWebhookId);
-  });
-
-  it("customers/data_request email sent logs no webhookId", async () => {
-    const testWebhookId = "test-data-request-email-sent-wh";
-    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
-    mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
-    mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
-    mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
-    mockSendDataRequestNotification.mockResolvedValueOnce({ sent: true });
-
-    const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
-    const body = JSON.stringify(payload);
-    const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
-
-    const args = createMockActionArgs(request);
-    const response = await action(args);
-    // Email work runs in background via waitUntil
-    await Promise.allSettled(capturedWaitUntilPromises);
-    expect(response.status).toBe(200);
-
-    const allOutput = getAllConsoleOutput();
-    const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("Email notification sent");
-    assertNoWebhookIdInLogs(testWebhookId);
-  });
-
-  it("customers/data_request email failed logs no webhookId", async () => {
-    const testWebhookId = "test-data-request-email-fail-wh";
-    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
-    mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
-    mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
-    mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
-    mockSendDataRequestNotification.mockResolvedValueOnce({ sent: false, error: "email_send_failed" });
-
-    const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
-    const body = JSON.stringify(payload);
-    const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
-
-    const args = createMockActionArgs(request);
-    const response = await action(args);
-    // Email work runs in background via waitUntil
-    await Promise.allSettled(capturedWaitUntilPromises);
-    expect(response.status).toBe(200);
-
-    const allOutput = getAllConsoleOutput();
-    const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("Email notification failed");
-    assertNoWebhookIdInLogs(testWebhookId);
-  });
-
-  it("customers/data_request email skipped (no shop email) logs no webhookId", async () => {
-    const testWebhookId = "test-data-request-email-skip-wh";
-    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
-    mockPurgeExpiredDataRequests.mockResolvedValueOnce(undefined);
-    mockGenerateCustomerDataExport.mockResolvedValueOnce({ taggedCustomers: [], draftOrders: [] });
-    mockPersistDataRequest.mockResolvedValueOnce({ id: "dr-001", alreadyExists: false });
-    // Mock admin context with no shop email in GraphQL response
-    const noEmailAdmin = { graphql: vi.fn().mockResolvedValue({ json: async () => ({ data: { shop: {} } }) }) };
-    mockGetOfflineAdminContext.mockResolvedValueOnce({ success: true, admin: noEmailAdmin, retryable: false });
-
-    const payload = { customer: { id: 456 }, data_request: { id: 789 }, shop_domain: TEST_SHOP };
-    const body = JSON.stringify(payload);
-    const request = createSignedRequest(body, "customers/data_request", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
-
-    const args = createMockActionArgs(request);
-    const response = await action(args);
-    // Email work runs in background via waitUntil
-    await Promise.allSettled(capturedWaitUntilPromises);
-    expect(response.status).toBe(200);
-
-    const allOutput = getAllConsoleOutput();
-    const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("data_request_email_skipped");
-    assertNoWebhookIdInLogs(testWebhookId);
+    expect(mockSendSyncMessage).not.toHaveBeenCalled();
   });
 
   // ============ CUSTOMERS/REDACT TESTS ============
 
-  it("customers/redact no customer id logs no webhookId", async () => {
+  it("customers/redact happy path enqueues and logs no webhookId", async () => {
+    const testWebhookId = "test-redact-happy-wh";
+    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
+
+    const payload = { customer: { id: 456 }, shop_domain: TEST_SHOP };
+    const body = JSON.stringify(payload);
+    const request = createSignedRequest(body, "customers/redact", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
+
+    const response = await action(createMockActionArgs(request));
+    expect(response.status).toBe(200);
+
+    expect(mockSendSyncMessage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        topic: "CUSTOMERS_REDACT",
+        shop: TEST_SHOP,
+        customerId: "456",
+      })
+    );
+    assertNoWebhookIdInLogs(testWebhookId);
+  });
+
+  it("customers/redact no customer id logs compliance_missing_customer_id", async () => {
     const testWebhookId = "test-redact-no-cust-wh";
     const payload = { shop_domain: TEST_SHOP };
     const body = JSON.stringify(payload);
@@ -498,11 +356,12 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
 
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("No customer ID in payload");
+    expect(outputStr).toContain("compliance_missing_customer_id");
     assertNoWebhookIdInLogs(testWebhookId);
+    expect(mockSendSyncMessage).not.toHaveBeenCalled();
   });
 
-  it("customers/redact shop not found logs no webhookId", async () => {
+  it("customers/redact shop not found logs compliance_shop_not_found", async () => {
     const testWebhookId = "test-redact-shop-not-found-wh";
     mockSql.mockResolvedValueOnce([]); // Shop not found
 
@@ -515,33 +374,8 @@ describe("webhooks.compliance real logging (no log.server mock)", () => {
 
     const allOutput = getAllConsoleOutput();
     const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("Shop not found");
+    expect(outputStr).toContain("compliance_shop_not_found");
     assertNoWebhookIdInLogs(testWebhookId);
-  });
-
-  it("customers/redact happy path logs no webhookId", async () => {
-    const testWebhookId = "test-redact-happy-wh";
-    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]); // Shop lookup
-    mockRedactCustomer.mockResolvedValueOnce({
-      taggedCustomersDeleted: 1,
-      draftOrdersDeleted: 2,
-      dataRequestsDeleted: 1,
-      payerAliasesDeleted: 0,
-      buyerAccountAnonymized: true,
-      paymentsRedacted: 3,
-    });
-
-    const payload = { customer: { id: 456 }, shop_domain: TEST_SHOP };
-    const body = JSON.stringify(payload);
-    const request = createSignedRequest(body, "customers/redact", SYNTHETIC_TEST_SECRET, TEST_SHOP, testWebhookId);
-
-    const response = await action(createMockActionArgs(request));
-    expect(response.status).toBe(200);
-
-    const allOutput = getAllConsoleOutput();
-    const outputStr = allOutput.join("\n");
-    expect(outputStr).toContain("customers/redact");
-    expect(outputStr).toContain("tagged=");
-    assertNoWebhookIdInLogs(testWebhookId);
+    expect(mockSendSyncMessage).not.toHaveBeenCalled();
   });
 });

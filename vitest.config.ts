@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (117 total, counting expanded globs):
+ * Files included (120 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -235,6 +235,13 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Compliance edge and drain DB tests
+  "app/__tests__/integration/compliance-edge-db.test.ts",
+  "app/services/drain/__tests__/compliance-drain-db.test.ts",
+
+  // Large shop delete duration test
+  "tests/integration/large-shop-delete-db.test.ts",
 ];
 
 export default defineConfig({
