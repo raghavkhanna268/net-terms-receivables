@@ -1264,3 +1264,5 @@ export const headers: HeadersFunction = (headersArgs) => {
 
   return resultHeaders;
 };
+
+export { RouteErrorBoundary as ErrorBoundary } from "~/components/RouteErrorBoundary";

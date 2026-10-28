@@ -1040,3 +1040,5 @@ export default function ImportsPage() {
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
+
+export { RouteErrorBoundary as ErrorBoundary } from "~/components/RouteErrorBoundary";
