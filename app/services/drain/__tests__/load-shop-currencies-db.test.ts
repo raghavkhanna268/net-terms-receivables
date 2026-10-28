@@ -22,6 +22,26 @@ import { assertNoQueueLeftovers } from "../../../../tests/helpers/queue-leftover
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
 
+/**
+ * Archive all s6_sync messages that don't belong to this file's test shops.
+ * Prevents batch pollution from other Sequential DB test files' leftover messages.
+ */
+async function archiveStaleQueueMessages(
+  sql: ReturnType<typeof postgres>,
+  ourDomains: string[]
+): Promise<number> {
+  const [result] = await sql<[{ archived: string }]>`
+    SELECT count(*)::text AS archived
+    FROM pgmq.archive('s6_sync', (
+      SELECT array_agg(msg_id)
+      FROM pgmq.q_s6_sync
+      WHERE message->>'shop' IS NULL
+         OR message->>'shop' NOT IN ${sql(ourDomains)}
+    ))
+  `;
+  return parseInt(result.archived, 10);
+}
+
 vi.mock("~/services/drain/admin-client.server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/services/drain/admin-client.server")>();
   return {
@@ -122,6 +142,8 @@ describeWithDb("loadShopCurrencies IN-list query (DB-backed via runDrain)", () =
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // Archive foreign queue rows to ensure runDrain processes only this file's messages
+    await archiveStaleQueueMessages(sql, [...testShopDomains, UNKNOWN_DOMAIN]);
   });
 
   afterEach(async () => {
