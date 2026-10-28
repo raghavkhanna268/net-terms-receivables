@@ -235,6 +235,9 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Seed account ID migration DB tests
+  "scripts/__tests__/seed-account-ids-db.test.ts",
 ];
 
 export default defineConfig({
