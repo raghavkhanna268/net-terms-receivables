@@ -268,7 +268,6 @@ async function upsertTaggedCustomer(
 
   if (piiMode === "fallback") {
     // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
-    // Use CASE WHEN to only update PII if new value is non-null, preserving existing otherwise
     await sql`
       INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
       VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
@@ -281,8 +280,8 @@ async function upsertTaggedCustomer(
           WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
           ELSE s8_tagged_customers.tag_deactivated_at
         END,
-        email = CASE WHEN EXCLUDED.email IS NOT NULL THEN EXCLUDED.email ELSE s8_tagged_customers.email END,
-        display_name = CASE WHEN EXCLUDED.display_name IS NOT NULL THEN EXCLUDED.display_name ELSE s8_tagged_customers.display_name END
+        email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+        display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
     `;
   } else {
     // 'fetched' or 'disabled': write values as-is (null overwrites)
@@ -331,8 +330,6 @@ async function updateTaggedCustomerIfExists(
 
   if (piiMode === "fallback") {
     // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
-    // Use CASE WHEN to only update if new value is non-null, preserving existing otherwise
-    // Cast params to TEXT to help PostgreSQL infer types when value is null
     await sql`
       UPDATE s8_tagged_customers
       SET 
@@ -343,8 +340,8 @@ async function updateTaggedCustomerIfExists(
           WHEN tag_active = true AND ${tagActive} = false THEN NOW()
           ELSE tag_deactivated_at
         END,
-        email = CASE WHEN ${effectiveEmail}::TEXT IS NOT NULL THEN ${effectiveEmail}::TEXT ELSE email END,
-        display_name = CASE WHEN ${effectiveDisplayName}::TEXT IS NOT NULL THEN ${effectiveDisplayName}::TEXT ELSE display_name END
+        email = COALESCE(${effectiveEmail}, email),
+        display_name = COALESCE(${effectiveDisplayName}, display_name)
       WHERE shop_id = ${shopId} AND customer_id = ${customerId}
     `;
   } else {
@@ -758,24 +755,17 @@ export async function isCustomerTracked(
 /**
  * Determine if PII fields should be fetched for a customer.
  *
- * PII is needed when:
- * 1. Customer matches a tag rule (new or existing matching customer), OR
- * 2. Customer is already tracked (to update or clear their record)
+ * PII is needed when customer matches a tag rule.
+ * Tracked customers without matching tags use fallback mode (preserve stored PII).
  *
- * @param sql - postgres.js SQL client
- * @param shopId - Shop ID
- * @param customerId - Customer GID
  * @param customerTags - Customer's current tags
  * @param tagRules - Shop's tag rules from AccountSource
  * @returns True if PII fields should be fetched
  */
-export async function shouldFetchCustomerPii(
-  _sql: Sql,
-  _shopId: string,
-  _customerId: string,
+export function shouldFetchCustomerPii(
   customerTags: string[],
   tagRules: Array<{ tag: string; defaultTermsDays: number }>
-): Promise<boolean> {
+): boolean {
   return findMatchingTagRule(customerTags, tagRules) !== undefined;
 }
 

@@ -762,10 +762,7 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
   const tagRules = await getTagRules(sql, shop.id);
 
   // Step 3: Check if customer matches a tag rule (only matching customers get PII)
-  const matchesTagRule = piiEnabled && await shouldFetchCustomerPii(
-    sql,
-    shop.id,
-    customer.id,
+  const matchesTagRule = piiEnabled && shouldFetchCustomerPii(
     customer.tags ?? [],
     tagRules
   );

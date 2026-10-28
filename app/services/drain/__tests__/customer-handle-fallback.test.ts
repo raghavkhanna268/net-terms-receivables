@@ -142,7 +142,7 @@ describe("handleCustomer with fallback behavior", () => {
       entityId: "contact-123",
     });
     mocks.getTagRules.mockResolvedValue([{ tag: "net-terms", defaultTermsDays: 30 }]);
-    mocks.shouldFetchCustomerPii.mockResolvedValue(true);
+    mocks.shouldFetchCustomerPii.mockReturnValue(true);
     mocks.isCustomerTracked.mockResolvedValue(false);
     mocks.isWebhookProcessed.mockResolvedValue(false);
     mocks.markWebhookProcessed.mockResolvedValue(undefined);

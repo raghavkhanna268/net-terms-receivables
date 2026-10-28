@@ -72,7 +72,7 @@ vi.mock("~/services/sync/customer.server", () => ({
     entityId: "contact-123",
   }),
   getTagRules: vi.fn().mockResolvedValue([{ tag: "net-terms", defaultTermsDays: 30 }]),
-  shouldFetchCustomerPii: vi.fn().mockResolvedValue(true),
+  shouldFetchCustomerPii: vi.fn().mockReturnValue(true),
   isCustomerTracked: vi.fn().mockResolvedValue(false),
 }));
 
