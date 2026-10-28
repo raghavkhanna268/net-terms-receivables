@@ -19,6 +19,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -2693,6 +2694,7 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
 
     // Step 2: Run the daily sweep (Part 3)
     await sql`SELECT enqueue_credit_status_recomputes()`;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN, CONTROL_SHOP_DOMAIN]);
 
     // Verify messages were enqueued for the target accounts (filter by buyerAccountId,
     // not exact global count, because the sweep's 100 cap is shared across all shops)
@@ -2790,6 +2792,7 @@ describeWithDb("#294: reinstall reset → daily sweep → metafield re-push (DB)
 
     // Run sweep
     await sql`SELECT enqueue_credit_status_recomputes()`;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN, CONTROL_SHOP_DOMAIN]);
 
     // Process message for the test account
     const { getSyncHandler } = await import("../../services/drain/processor.server");

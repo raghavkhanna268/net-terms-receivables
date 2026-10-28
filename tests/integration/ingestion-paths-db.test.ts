@@ -35,6 +35,7 @@ import {
   companyLocationGid,
   customerGid,
 } from "../helpers/gid.js";
+import { archiveForeignQueueRows } from "../helpers/archive-foreign-queue-rows.js";
 import { calculateDaysPastDue } from "../../app/lib/aging-dates.server.js";
 import { getBucketForDaysPastDue, type AgingBucketKey } from "../../app/lib/aging.js";
 import { getBuyerLedger } from "../../app/lib/aging-queries.server.js";
@@ -108,6 +109,7 @@ describeWithDb("Ingestion Paths Integration", () => {
     await sql`DELETE FROM "Invoice" WHERE "shopId" = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${TEST_SHOP_ID}`;
     await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-ing-" + TEST_SUFFIX + "%"}`;
+    await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
   });
 
   describe("(1) Idempotency on redelivery", () => {

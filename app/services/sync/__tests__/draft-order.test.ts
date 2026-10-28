@@ -9,6 +9,7 @@ import {
   processBulkDraftOrder,
 } from "../draft-order.server";
 import type { ShopifyDraftOrder } from "../types";
+import { archiveForeignQueueRows } from "../../../../tests/helpers/archive-foreign-queue-rows";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -776,6 +777,7 @@ describeWithDb("Draft Order Sync", () => {
       await sql`DELETE FROM s8_draft_orders WHERE shop_id IN (${TEST_INR_SHOP_ID}, ${TEST_USD_SHOP_ID})`;
       await sql`DELETE FROM pgmq.q_s6_sync WHERE message->>'shop' IN (${TEST_INR_SHOP_DOMAIN}, ${TEST_USD_SHOP_DOMAIN})`;
       await sql`DELETE FROM s6_processed_webhooks WHERE webhook_id LIKE ${"wh-423-" + TEST_423_SUFFIX + "%"}`;
+      await archiveForeignQueueRows(sql, [TEST_INR_SHOP_DOMAIN, TEST_USD_SHOP_DOMAIN]);
     });
 
     async function getRecomputeMessages(shopDomain: string): Promise<{ id: string; source: string; buyerAccountId: string; read_ct: number }[]> {
