@@ -1579,6 +1579,50 @@ describe("S8 Customer handler path tests", () => {
     expect(result.error).toContain("Internal server error");
     expect(mockProcessCustomerWebhook).not.toHaveBeenCalled();
   });
+
+  it("shop lookup miss returns fixed error code", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    mockFetchBaseFields.mockResolvedValue({
+      success: true,
+      data: { id: "gid://shopify/Customer/test-shop-miss-1", tags: ["net-terms"] },
+      retryable: false,
+    });
+
+    const { getSyncHandler } = await import("../processor.server");
+    const handler = getSyncHandler("CUSTOMERS_UPDATE");
+
+    const { isWebhookProcessed } = await import("~/services/sync/company.server");
+    const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
+    mockIsWebhookProcessed.mockResolvedValueOnce(false);
+
+    const testDomain = "test-shop-miss.myshopify.com";
+    const mockSql = Object.assign(
+      vi.fn().mockResolvedValue([]),
+      { json: vi.fn((v: unknown) => v) }
+    );
+
+    const message = {
+      topic: "CUSTOMERS_UPDATE",
+      shop: testDomain,
+      webhookId: "wh-cust-shop-miss-1",
+      resourceGid: "gid://shopify/Customer/test-shop-miss-1",
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    const result = await handler!(mockSql as never, message);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("shop_not_found");
+    expect(result.errorCode).toBe("shop_not_found");
+    expect(result.error).not.toContain(testDomain);
+    expect(result.error).not.toContain("test-shop-miss");
+
+    const allMockCalls = JSON.stringify(mockSql.mock.calls);
+    expect(allMockCalls).not.toContain("sync_message_failed");
+
+    consoleWarnSpy.mockRestore();
+  });
 });
 
 describe("S8 Draft Order handler path tests", () => {
@@ -2042,31 +2086,14 @@ describe("DLQ shop_not_found sanitization (#239 part a)", () => {
     expect(result.error).toContain("test-draft-shop");
   });
 
-  it("customer shop_not_found still has shop domain in error (not relabelled)", async () => {
-    const { processCustomerWebhook } = await import(
-      "~/services/sync/customer.server"
-    );
-    const mockProcess = processCustomerWebhook as ReturnType<typeof vi.fn>;
-
-    // Mock the adminGraphQL to return customer data (so fetchCustomerWithFallback succeeds)
-    const mockAdminGraphQL = (await import("../admin-client.server"))
-      .adminGraphQL as ReturnType<typeof vi.fn>;
-    mockAdminGraphQL.mockResolvedValueOnce({
+  it("customer shop_not_found returns fixed error code (no domain in error)", async () => {
+    // Mock the fetchCustomerBaseFields to return customer data
+    const { fetchCustomerBaseFields } = await import("../customer-fetch.server");
+    const mockFetchBase = fetchCustomerBaseFields as ReturnType<typeof vi.fn>;
+    mockFetchBase.mockResolvedValueOnce({
       success: true,
-      data: {
-        node: {
-          id: "gid://shopify/Customer/444",
-          tags: [],
-        },
-      },
+      data: { id: "gid://shopify/Customer/444", tags: [] },
       retryable: false,
-    });
-
-    // Customers are NOT relabelled, so they keep the original error string
-    mockProcess.mockResolvedValueOnce({
-      success: false,
-      action: "skipped",
-      error: "Shop not found: test-customer-shop.myshopify.com",
     });
 
     const { getSyncHandler } = await import("../processor.server");
@@ -2078,6 +2105,7 @@ describe("DLQ shop_not_found sanitization (#239 part a)", () => {
     const mockIsWebhookProcessed = isWebhookProcessed as ReturnType<typeof vi.fn>;
     mockIsWebhookProcessed.mockResolvedValueOnce(false);
 
+    const testDomain = "test-customer-shop.myshopify.com";
     const mockSql = Object.assign(
       vi.fn().mockResolvedValue([]),
       { json: vi.fn((v: unknown) => v) }
@@ -2085,7 +2113,7 @@ describe("DLQ shop_not_found sanitization (#239 part a)", () => {
 
     const message = {
       topic: "CUSTOMERS_CREATE",
-      shop: "test-customer-shop.myshopify.com",
+      shop: testDomain,
       webhookId: "wh-cust-notfound",
       resourceGid: "gid://shopify/Customer/444",
       enqueuedAt: new Date().toISOString(),
@@ -2094,9 +2122,10 @@ describe("DLQ shop_not_found sanitization (#239 part a)", () => {
     const result = await handler!(mockSql as never, message);
 
     expect(result.success).toBe(false);
-    // Customer keeps full error string (not sanitized in this PR)
-    expect(result.error).toContain("Shop not found");
-    expect(result.error).toContain("test-customer-shop");
+    expect(result.error).toBe("shop_not_found");
+    expect(result.errorCode).toBe("shop_not_found");
+    expect(result.error).not.toContain(testDomain);
+    expect(result.error).not.toContain("test-customer-shop");
   });
 });
 

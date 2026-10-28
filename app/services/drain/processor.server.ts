@@ -754,7 +754,7 @@ async function handleCustomer(sql: Sql, message: SyncMessage): Promise<SyncResul
     return {
       success: false,
       action: "skipped",
-      error: `Shop not found: ${message.shop}`,
+      error: "shop_not_found",
       errorCode: "shop_not_found",
     };
   }
