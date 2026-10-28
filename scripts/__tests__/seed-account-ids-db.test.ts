@@ -173,6 +173,12 @@ describeWithDb("seed account ID migration (DB)", () => {
       SELECT id FROM "BuyerAccount" WHERE "shopId" = ${shopId}
     `;
     expect(account.id).toBe(oldAccountId);
+
+    // Clean up test data since dry run didn't migrate it - prevents interference with subsequent tests
+    await sql`DELETE FROM s8_draft_orders WHERE shop_id = ${shopId}`;
+    await sql`DELETE FROM "PayerAlias" WHERE "buyerAccountId" = ${oldAccountId}`;
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE id = ${oldAccountId}`;
   });
 
   it("with confirm, BuyerAccount id changes and cascade follows to Invoice and PayerAlias; s8_draft_orders is updated", async () => {
