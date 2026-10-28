@@ -167,7 +167,11 @@ pgmq visibility timeout (VT) is not a row lock. When a drain worker holds a mess
 When the worker finishes:
 - If the handler succeeds, its `pgmq.archive()` or `pgmq.delete()` on the now-missing `msg_id` returns `false` without throwing — this is safe.
 - If the handler fails with `retryable: false` (e.g., `no_session` because sessions were deleted), it dead-letters immediately. The `moveToDeadLetter` function (in `processor.server.ts`) calls `pgmq.delete` **before** inserting into `s6_dead_letter`. If the message was already deleted by `deleteShop`, `pgmq.delete` returns false and the dead-letter insert is skipped — no data is re-created.
-- If the handler fails without `retryable: false` (e.g., `shop_not_found`), the message is dead-lettered only if that read had already reached `maxRetries`; otherwise it's left for retry, and because `deleteShop` removed its queue row, it never comes back.
+- If the handler fails with a retryable error, the message is dead-lettered only if that read had already reached `maxRetries` (and the delete-first rule above still applies); otherwise it's left for retry, and because `deleteShop` removed its queue row, it never comes back.
+- If the drain reads a message whose Shop row is already gone, it deletes the message before calling any handler (`drain_shop_missing_deleted`), with no retry, archive or dead-letter.
+- Dead-letter rows written during the uninstall window are sanitized (no domain, internal `shopId` kept). `deleteShop` deletes `s6_dead_letter` rows by `message->>'shop'` or `message->>'shopId'`, so these are removed on redact too.
+
+A handler-by-handler trace with file:line is in [`docs/security/drain-redact-trace.md`](security/drain-redact-trace.md).
 
 This race is fixed by [#247](https://github.com/raghavkhanna268/net-terms-receivables/pull/247), which added delete-first dead-lettering in `moveToDeadLetter` plus FOR UPDATE (`deleteShop`) / FOR SHARE (drain senders) serialization. Refs [#239](https://github.com/raghavkhanna268/net-terms-receivables/issues/239); part (a) drain-side ack logging is tracked in [#254](https://github.com/raghavkhanna268/net-terms-receivables/pull/254).
 

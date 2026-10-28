@@ -241,13 +241,22 @@ export async function deleteShop(
       WHERE message->>'shop' = ${shopDomain}
     `;
 
-    // s6_dead_letter (dead-letter queue, shop in message JSON at message->>'shop')
-    // Producer: app/services/drain/processor.server.ts:968-991 (moveToDeadLetter function)
-    // The message JSON contains { shop: string, topic: string, webhookId: string, ... }
-    const deadLetterResult = await tx`
-      DELETE FROM s6_dead_letter
-      WHERE message->>'shop' = ${shopDomain}
-    `;
+    // s6_dead_letter (dead-letter queue). Producer: moveToDeadLetter in
+    // app/services/drain/processor.server.ts.
+    // Full rows carry the domain at message->>'shop'. Sanitized rows (#239, #262)
+    // drop the domain and carry the internal Shop id at message->>'shopId'
+    // instead, e.g. rows dead-lettered during the 48h uninstall window. Match
+    // both so redact leaves no dead-letter rows for this shop.
+    const deadLetterResult = lockedShop
+      ? await tx`
+          DELETE FROM s6_dead_letter
+          WHERE message->>'shop' = ${shopDomain}
+             OR message->>'shopId' = ${lockedShop.id}
+        `
+      : await tx`
+          DELETE FROM s6_dead_letter
+          WHERE message->>'shop' = ${shopDomain}
+        `;
 
     // s6_processed_webhooks (no shop column; ids may embed the domain)
     // Two deletion strategies for the two id formats:
