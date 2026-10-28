@@ -317,7 +317,7 @@ export function resolveSeedMode(args: SeedModeArgs, env: SeedModeEnv): SeedModeR
 /**
  * Check if a DATABASE_URL host is localhost (127.0.0.1, ::1, or "localhost").
  * Returns true if the host is local OR if SEED_MIGRATE_ALLOW_NONLOCAL=1 is set.
- * Never throws; invalid URLs return false. Never prints the URL.
+ * Never throws; invalid/unparseable URLs return false. Never prints the URL.
  */
 export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
   if (process.env.SEED_MIGRATE_ALLOW_NONLOCAL === "1") {
