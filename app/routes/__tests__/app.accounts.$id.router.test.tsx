@@ -21,7 +21,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createElement } from "react";
 import { createMemoryRouter, RouterProvider } from "react-router";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { render, cleanup, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { accountHref } from "~/lib/account-href";
 
@@ -115,7 +115,6 @@ describe("AccountPage router integration (createMemoryRouter)", () => {
       "$kind: rendered form actions have no %25 (single-encoded only)",
       async ({ id }) => {
         const encodedPath = accountHref(id);
-        let receivedParamsId: string | undefined;
 
         const router = createMemoryRouter(
           [
@@ -126,7 +125,6 @@ describe("AccountPage router integration (createMemoryRouter)", () => {
                 return { Component: mod.default };
               },
               loader: ({ params }) => {
-                receivedParamsId = params.id;
                 const normalizedId = params.id?.replace(/%2F/gi, "/");
                 return buildLoaderData(normalizedId!);
               },
