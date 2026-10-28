@@ -2,7 +2,7 @@
 
 **Owner/Operator:** Raghav Khanna, individual developer, India
 
-**Contact:** raghavkhanna468@gmail.com
+**Contact:** support@termwiseapp.com
 
 **Governing Law:** Laws of India  
 **Jurisdiction:** Courts at Delhi (New Delhi), India (exclusive)

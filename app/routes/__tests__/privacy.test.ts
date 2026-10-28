@@ -68,7 +68,8 @@ describe("/privacy route", () => {
 
     const html = await response.text();
 
-    expect(html).toContain("raghavkhanna468@gmail.com");
+    expect(html).toContain("support@termwiseapp.com");
+    expect(html).not.toContain("@gmail.com");
     expect(html).toContain("Raghav Khanna");
     expect(html).toContain("individual developer, India");
 
@@ -412,7 +413,8 @@ describe("merchant-terms.md content requirements", () => {
   });
 
   it("contains the privacy contact email", () => {
-    expect(termsContent).toContain("raghavkhanna468@gmail.com");
+    expect(termsContent).toContain("support@termwiseapp.com");
+    expect(termsContent).not.toContain("@gmail.com");
   });
 
   it("contains exact Resend subprocessor wording", () => {
@@ -463,6 +465,15 @@ describe("data-retention.md content requirements", () => {
 
   it("specifies 30-day backup retention period", () => {
     expect(retentionContent).toContain("30-day rolling retention");
+  });
+});
+
+describe("SUPPORT_EMAIL_MAILTO constant", () => {
+  it("contains app domain address and not gmail", async () => {
+    const { SUPPORT_EMAIL_MAILTO } = await import("../../lib/constants");
+
+    expect(SUPPORT_EMAIL_MAILTO).toBe("mailto:support@termwiseapp.com");
+    expect(SUPPORT_EMAIL_MAILTO).not.toContain("@gmail.com");
   });
 });
 

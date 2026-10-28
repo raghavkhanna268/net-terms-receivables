@@ -28,6 +28,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -44,6 +45,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -61,6 +63,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -100,6 +103,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -116,6 +120,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -133,6 +138,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
@@ -148,11 +154,29 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
       expect(html).toContain("INV-001");
       expect(html).toContain("INV-002");
+    });
+
+    it("renders order link with shopify://admin/orders href and target=_top", async () => {
+      const { BuyerInvoiceList } = await import("../app._index");
+
+      const html = renderToString(
+        createElement(BuyerInvoiceList, {
+          invoices: mockInvoices,
+          buyerName: TEST_BUYER_NAME,
+          buyerAccountId: TEST_BUYER_ID,
+          onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
+        })
+      );
+
+      expect(html).toContain('href="shopify://admin/orders/123"');
+      expect(html).toContain('target="_top"');
     });
 
     it("renders View account button with secondary variant", async () => {
@@ -164,6 +188,7 @@ describe("BuyerInvoiceList render tests", () => {
           buyerName: TEST_BUYER_NAME,
           buyerAccountId: TEST_BUYER_ID,
           onClose: CLOSE_URL,
+          shopTimezone: "Asia/Kolkata",
         })
       );
 
