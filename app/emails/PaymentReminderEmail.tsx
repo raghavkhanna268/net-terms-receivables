@@ -43,7 +43,7 @@ export function renderPaymentReminderEmail(
     hasReplyTo,
   } = props;
 
-  const displayName = storeDisplayName ?? merchantName;
+  const displayName = storeDisplayName?.trim() ? storeDisplayName : merchantName;
 
   const isOverdue = reminderType.toLowerCase().includes("overdue");
   const isDueToday = reminderType.toLowerCase().includes("today");
