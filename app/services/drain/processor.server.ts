@@ -1259,6 +1259,12 @@ export async function moveToDeadLetter(
     const shopId = shopRow?.id;
     let sanitizationReason: SanitizationReason | null = null;
 
+    // Pre-sanitized rows (shop_not_found) are built before the Shop lookup, so
+    // add the shop id here. deleteShop matches sanitized rows by shopId (#239).
+    if (preSanitized && shopId !== undefined) {
+      messageToStore = { ...(messageToStore as SanitizedDeadLetterMessage), shopId };
+    }
+
     if (shopGone && !preSanitized) {
       const reason: SanitizationReason = shopRowMissing ? "shop_row_missing" : "shop_uninstalled";
       if (queue === S6_QUEUES.SYNC) {

@@ -15,7 +15,7 @@ if the worker read it before the commit (pgmq visibility timeout is not a lock).
 1. **Drain guard, before any handler.** If the shop is not in the batch currency
    map, the drain re-checks `"Shop"` by exact domain. No row: the message is
    deleted with `pgmq.delete` and logged as `drain_shop_missing_deleted`
-   (`app/services/drain/processor.server.ts:1405-1446` sync, `:1693-1734` bulk).
+   (`app/services/drain/processor.server.ts:1411-1452` sync, `:1699-1740` bulk).
    No retry, no archive, no dead-letter.
 2. **Race window.** The guard saw the row, then `deleteShop` committed before or
    while the handler ran. The handler outcomes below apply. Whatever the
@@ -52,6 +52,9 @@ is dropped and the internal Shop id is kept at `message->>'shopId'`.
 `deleteShop` used to delete `s6_dead_letter` only by `message->>'shop'`, so
 these rows survived redact until the weekly 30-day cleanup. It now also deletes
 by `message->>'shopId'` (`compliance.server.ts`, the `s6_dead_letter` block).
+Rows sanitized up front for a `shop_not_found` reason (for example a bulk
+`permanent:shop_not_found`) used to carry no `shopId` at all; `moveToDeadLetter`
+now adds it when the Shop row is still present, so those rows match too.
 Covered by `app/services/drain/__tests__/dlq-uninstall-redact-db.test.ts`.
 
 ## Residuals (not fixed, low impact)
