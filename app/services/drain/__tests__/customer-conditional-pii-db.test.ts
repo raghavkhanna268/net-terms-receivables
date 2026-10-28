@@ -12,7 +12,8 @@ import { sqlOptions } from "~/lib/db-light.server";
  * (a) Non-matching customer: one GraphQL request, no email/displayName in query
  * (b) Matching customer: second request with PII, stores name/email as before
  * (c) ACCESS_DENIED fallback works for matching customers
- * (d) Tracked customer with tag removed: one request, no PII, preserves stored values
+ * (d) Tracked customer with tag removed: one request, no PII, S22 minimisation applies
+ *     (S22 nulls PII for inactive customers without open invoices - same as main)
  */
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -246,8 +247,8 @@ describeWithDb("Customer conditional PII fetch", () => {
     });
   });
 
-  describe("(d) Tracked customer with tag removed: one request, no PII, preserves stored values", () => {
-    it("makes exactly one request without email/displayName, sets tag_active false, preserves stored PII", async () => {
+  describe("(d) Tracked customer with tag removed: one request, no PII, S22 minimisation applies", () => {
+    it("makes exactly one request without email/displayName, sets tag_active false, PII nulled per S22", async () => {
       const customerId = `gid://shopify/Customer/tagremoved-${TEST_SUFFIX}`;
 
       await sql`
@@ -302,8 +303,8 @@ describeWithDb("Customer conditional PII fetch", () => {
       `;
       expect(tagRecord.tag_active).toBe(false);
       expect(tagRecord.tag_deactivated_at).not.toBeNull();
-      expect(tagRecord.email).toBe("stored@test-condpii.example.com");
-      expect(tagRecord.display_name).toBe("Stored Name");
+      expect(tagRecord.email).toBeNull();
+      expect(tagRecord.display_name).toBeNull();
     });
   });
 });
