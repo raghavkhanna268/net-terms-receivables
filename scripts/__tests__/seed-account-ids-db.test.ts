@@ -124,8 +124,8 @@ describeWithDb("seed account ID migration (DB)", () => {
     buyerAccountId: string;
   }): Promise<void> {
     await sql`
-      INSERT INTO s8_draft_orders (draft_order_id, shop_id, buyer_account_id, amount_paise, has_payment_terms, created_at, updated_at)
-      VALUES (${opts.draftOrderId}, ${opts.shopId}, ${opts.buyerAccountId}, 50000, true, NOW(), NOW())
+      INSERT INTO s8_draft_orders (draft_order_id, shop_id, buyer_account_id, name, total, has_payment_terms, created_at)
+      VALUES (${opts.draftOrderId}, ${opts.shopId}, ${opts.buyerAccountId}, '#D1', 500.00, true, NOW())
     `;
   }
 
