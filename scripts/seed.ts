@@ -207,6 +207,30 @@ export const SEED_ACCOUNT_ID_PREFIX = "seed-account-";
  */
 export const SEED_ACCOUNT_ID_CHARSET_RE = /^[A-Za-z0-9._-]+$/;
 
+// -- Migration Error Codes --
+export const SEED_MIGRATE_NO_DATABASE_URL = "SEED_MIGRATE_NO_DATABASE_URL";
+export const SEED_MIGRATE_BAD_FLAG_COMBO = "SEED_MIGRATE_BAD_FLAG_COMBO";
+export const SEED_MIGRATE_CONFIRM_WITHOUT_FLAG = "SEED_MIGRATE_CONFIRM_WITHOUT_FLAG";
+export const SEED_MIGRATE_NONLOCAL_HOST = "SEED_MIGRATE_NONLOCAL_HOST";
+
+/**
+ * Check if a DATABASE_URL host is localhost (127.0.0.1, ::1, or "localhost").
+ * Returns true if the host is local OR if SEED_MIGRATE_ALLOW_NONLOCAL=1 is set.
+ * Never prints the URL.
+ */
+export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
+  if (process.env.SEED_MIGRATE_ALLOW_NONLOCAL === "1") {
+    return true;
+  }
+  try {
+    const url = new URL(databaseUrl);
+    const host = url.hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Extract the numeric tail from a GID-style string.
  * e.g., "gid://shopify/CompanyLocation/123456" -> "123456"
@@ -4612,6 +4636,59 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // -- Migration flag validation (must run BEFORE any Shopify calls) --
+  
+  // Reject --confirm without --migrate-seed-account-ids
+  if (confirm && !migrateSeedAccountIdsMode) {
+    console.error("error=" + SEED_MIGRATE_CONFIRM_WITHOUT_FLAG);
+    process.exit(1);
+  }
+
+  // Reject --migrate-seed-account-ids combined with any other mode flag
+  const otherModeFlags = dryRun || reset || resetApply || reportDuplicatesMode ||
+    reseedHeldCurrencyMode || reviewerDemo || g4ReminderFixture || g4ReminderFixtureCleanup;
+  if (migrateSeedAccountIdsMode && otherModeFlags) {
+    console.error("error=" + SEED_MIGRATE_BAD_FLAG_COMBO);
+    process.exit(1);
+  }
+
+  // Handle --migrate-seed-account-ids immediately (BEFORE any Shopify calls)
+  if (migrateSeedAccountIdsMode) {
+    // Require DATABASE_URL
+    if (!env.databaseUrl) {
+      console.error("error=" + SEED_MIGRATE_NO_DATABASE_URL);
+      process.exit(1);
+    }
+
+    // For --confirm, require localhost (unless opt-in env var is set)
+    if (confirm && !isLocalhostDatabaseUrl(env.databaseUrl)) {
+      console.error("error=" + SEED_MIGRATE_NONLOCAL_HOST);
+      process.exit(1);
+    }
+
+    console.log("\n🔄 Migrating seed account IDs to URL-safe format...");
+    const sql = postgres(env.databaseUrl, { max: 1 });
+    try {
+      const result = await migrateSeedAccountIds(sql, !confirm);
+      console.log("  accounts_to_change=" + String(result.accountsToChange));
+      console.log("  invoice_count=" + String(result.invoiceCount));
+      console.log("  payer_alias_count=" + String(result.payerAliasCount));
+      console.log("  draft_order_count=" + String(result.draftOrderCount));
+      console.log("  applied=" + String(result.applied));
+      if (!confirm) {
+        console.log("  [dry-run] Pass --confirm to apply changes");
+      } else if (result.accountsToChange > 0) {
+        console.log("  ✅ Migration complete");
+      } else {
+        console.log("  ✅ No migration needed");
+      }
+    } finally {
+      await sql.end();
+    }
+    // Exit after migration (no normal seed runs)
+    process.exit(0);
+  }
+
   const state: SeedState = {
     shop: env.shop,
     token: env.token,
@@ -4717,32 +4794,6 @@ export async function main(): Promise<void> {
   // Seed reviewer demo company and orders (opt-in via --reviewer-demo or SEED_REVIEWER_DEMO=1)
   if (state.reviewerDemo) {
     await seedReviewerDemoCompany(state);
-  }
-
-  // Migrate old-format seed account IDs (opt-in, runs before seedDatabase)
-  if (migrateSeedAccountIdsMode && state.databaseUrl) {
-    console.log("\n🔄 Migrating seed account IDs to URL-safe format...");
-    const sql = postgres(state.databaseUrl, { max: 1 });
-    try {
-      const result = await migrateSeedAccountIds(sql, !confirm);
-      // Output counts and booleans only (no PII)
-      console.log("  accounts_to_change=" + String(result.accountsToChange));
-      console.log("  invoice_count=" + String(result.invoiceCount));
-      console.log("  payer_alias_count=" + String(result.payerAliasCount));
-      console.log("  draft_order_count=" + String(result.draftOrderCount));
-      console.log("  applied=" + String(result.applied));
-      if (!confirm) {
-        console.log("  [dry-run] Pass --confirm to apply changes");
-      } else if (result.accountsToChange > 0) {
-        console.log("  ✅ Migration complete");
-      } else {
-        console.log("  ✅ No migration needed");
-      }
-    } finally {
-      await sql.end();
-    }
-    // Exit after migration (don't continue to normal seeding)
-    process.exit(0);
   }
 
   // Seed database for S9 inference

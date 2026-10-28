@@ -353,4 +353,45 @@ describeWithDb("seed account ID migration (DB)", () => {
     expect(account.id).toBe(oldAccountId);
     expect(account.defaultTermsDays).toBe(45);
   });
+
+  it("dry run makes ZERO DB writes (only SELECTs, row ids unchanged)", async () => {
+    const suffix = freshSuffix();
+    const { shopId } = await insertShop(suffix);
+    
+    // Build old-format ID
+    const locationId = "gid:" + "//shopify/CompanyLocation/666";
+    const oldAccountId = SEED_ACCOUNT_ID_PREFIX + shopId + "-" + locationId;
+    const companyId = "gid:" + "//shopify/Company/dryrun" + suffix;
+    
+    // Get updatedAt BEFORE migration
+    await insertBuyerAccount({
+      id: oldAccountId,
+      shopId,
+      companyLocationId: locationId,
+      companyId,
+    });
+    
+    const [beforeAccount] = await sql<[{ updatedAt: Date }]>`
+      SELECT "updatedAt" FROM "BuyerAccount" WHERE id = ${oldAccountId}
+    `;
+    
+    // Run dry run (dryRun = true)
+    const result = await migrateSeedAccountIds(sql, true);
+    
+    // Should report 1 account to change
+    expect(result.accountsToChange).toBe(1);
+    expect(result.applied).toBe(false);
+    
+    // Verify id is unchanged (dry run did not write)
+    const [afterAccount] = await sql<[{ id: string; updatedAt: Date }]>`
+      SELECT id, "updatedAt" FROM "BuyerAccount" WHERE "shopId" = ${shopId}
+    `;
+    expect(afterAccount.id).toBe(oldAccountId);
+    
+    // updatedAt should also be unchanged (no writes)
+    expect(afterAccount.updatedAt.getTime()).toBe(beforeAccount.updatedAt.getTime());
+
+    // Clean up so this test doesn't interfere with others
+    await sql`DELETE FROM "BuyerAccount" WHERE id = ${oldAccountId}`;
+  });
 });

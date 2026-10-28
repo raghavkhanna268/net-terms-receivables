@@ -12,6 +12,11 @@ import {
   SEED_PREFIX,
   SEED_ACCOUNT_ID_PREFIX,
   SEED_ACCOUNT_ID_CHARSET_RE,
+  SEED_MIGRATE_NO_DATABASE_URL,
+  SEED_MIGRATE_BAD_FLAG_COMBO,
+  SEED_MIGRATE_CONFIRM_WITHOUT_FLAG,
+  SEED_MIGRATE_NONLOCAL_HOST,
+  isLocalhostDatabaseUrl,
   extractNumericTailFromGid,
   buildSeedAccountId,
   COMPANY_SEEDS,
@@ -7164,5 +7169,62 @@ describe("seed exit code behavior", () => {
     const state = createMockState();
     
     expect(computeExitCode(state)).toBe(0);
+  });
+});
+
+describe("isLocalhostDatabaseUrl", () => {
+  const originalEnv = process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    } else {
+      process.env.SEED_MIGRATE_ALLOW_NONLOCAL = originalEnv;
+    }
+  });
+
+  it("returns true for localhost", () => {
+    expect(isLocalhostDatabaseUrl("postgresql://user:pass@localhost:5432/db")).toBe(true);
+  });
+
+  it("returns true for 127.0.0.1", () => {
+    expect(isLocalhostDatabaseUrl("postgresql://user:pass@127.0.0.1:5432/db")).toBe(true);
+  });
+
+  it("returns true for ::1", () => {
+    expect(isLocalhostDatabaseUrl("postgresql://user:pass@::1:5432/db")).toBe(true);
+  });
+
+  it("returns false for remote host", () => {
+    delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    expect(isLocalhostDatabaseUrl("postgresql://user:pass@db.example.com:5432/db")).toBe(false);
+  });
+
+  it("returns true for remote host when SEED_MIGRATE_ALLOW_NONLOCAL=1", () => {
+    process.env.SEED_MIGRATE_ALLOW_NONLOCAL = "1";
+    expect(isLocalhostDatabaseUrl("postgresql://user:pass@db.example.com:5432/db")).toBe(true);
+  });
+
+  it("returns false for invalid URL", () => {
+    delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    expect(isLocalhostDatabaseUrl("not-a-url")).toBe(false);
+  });
+});
+
+describe("Migration flag error codes", () => {
+  it("exports SEED_MIGRATE_NO_DATABASE_URL error code", () => {
+    expect(SEED_MIGRATE_NO_DATABASE_URL).toBe("SEED_MIGRATE_NO_DATABASE_URL");
+  });
+
+  it("exports SEED_MIGRATE_BAD_FLAG_COMBO error code", () => {
+    expect(SEED_MIGRATE_BAD_FLAG_COMBO).toBe("SEED_MIGRATE_BAD_FLAG_COMBO");
+  });
+
+  it("exports SEED_MIGRATE_CONFIRM_WITHOUT_FLAG error code", () => {
+    expect(SEED_MIGRATE_CONFIRM_WITHOUT_FLAG).toBe("SEED_MIGRATE_CONFIRM_WITHOUT_FLAG");
+  });
+
+  it("exports SEED_MIGRATE_NONLOCAL_HOST error code", () => {
+    expect(SEED_MIGRATE_NONLOCAL_HOST).toBe("SEED_MIGRATE_NONLOCAL_HOST");
   });
 });
