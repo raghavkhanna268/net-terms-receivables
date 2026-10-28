@@ -433,8 +433,12 @@ describe("privacy.md content requirements", () => {
   });
 
   it("lists Cloudflare R2 and observability logs", () => {
-    expect(privacyContent).toContain("encrypted database backups (R2)");
+    expect(privacyContent).toContain("Cloudflare R2 (encrypted database backups)");
     expect(privacyContent).toContain("observability logs");
+  });
+
+  it("does not contain Asia-Pacific region claim", () => {
+    expect(privacyContent).not.toContain("Asia-Pacific");
   });
 
   it("lists Resend merchant contact email and owner email", () => {
@@ -522,8 +526,12 @@ describe("merchant-terms.md content requirements", () => {
   });
 
   it("lists Cloudflare R2 and observability logs", () => {
-    expect(termsContent).toContain("encrypted database backups (R2)");
+    expect(termsContent).toContain("Cloudflare R2 (encrypted database backups)");
     expect(termsContent).toContain("observability logs");
+  });
+
+  it("does not contain Asia-Pacific region claim", () => {
+    expect(termsContent).not.toContain("Asia-Pacific");
   });
 
   it("lists Resend merchant contact email and owner email", () => {
@@ -532,7 +540,7 @@ describe("merchant-terms.md content requirements", () => {
   });
 
   it("says Cloudflare transfer includes R2 storage not transient only", () => {
-    expect(termsContent).toContain("Cloudflare R2 (encrypted database backups, Asia-Pacific region)");
+    expect(termsContent).toContain("Cloudflare R2 (encrypted database backups)");
     expect(termsContent).not.toContain("transient processing only");
   });
 
