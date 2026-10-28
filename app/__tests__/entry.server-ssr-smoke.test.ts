@@ -23,7 +23,7 @@ let _allReadyResolved = false;
 let allReadyAwaited = false;
 const streamContent = "<html><head></head><body><div data-testid='app-shell'>App Shell</div></body></html>";
 
-vi.mock("react-dom/server.browser", () => ({
+vi.mock("react-dom/server", () => ({
   renderToReadableStream: vi.fn(async (_element: ReactNode) => {
     _allReadyResolved = false;
     allReadyAwaited = false;
