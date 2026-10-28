@@ -26,13 +26,17 @@ describe("Privacy Policy Support Address", () => {
   it("contains at least one email address", () => {
     expect(
       uniqueEmails.length,
-      "privacy.md must contain at least one email address"
+      `privacy.md must contain at least one email address (found ${uniqueEmails.length})`
     ).toBeGreaterThan(0);
   });
 
   it("all email addresses match the support constant", () => {
-    for (const email of uniqueEmails) {
-      expect(email, "email address mismatch").toBe(expectedEmail);
-    }
+    const mismatchCount = uniqueEmails.filter(
+      (email) => email !== expectedEmail
+    ).length;
+    expect(
+      mismatchCount,
+      "privacy doc support address differs from the support constant"
+    ).toBe(0);
   });
 });
