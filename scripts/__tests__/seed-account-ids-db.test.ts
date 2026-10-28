@@ -96,12 +96,12 @@ describeWithDb("seed account ID migration (DB)", () => {
   }): Promise<void> {
     await sql`
       INSERT INTO "Invoice" (
-        id, "shopId", "buyerAccountId", "orderId", "orderName", "amountPaise",
-        "issuedAt", "dueAt", "termsDays", "termsSource", "status", "createdAt", "updatedAt"
+        id, "shopId", "buyerAccountId", "orderId", "name", "total", "outstanding",
+        "issuedAt", "dueAt", "dueSource", "status", "createdAt", "updatedAt"
       )
       VALUES (
         ${opts.id}, ${opts.shopId}, ${opts.buyerAccountId}, ${opts.orderId},
-        '#TEST-001', 100000, NOW(), NOW() + INTERVAL '30 days', 30, 'explicit', 'OPEN',
+        '#TEST-001', 1000.00, 1000.00, NOW(), NOW() + INTERVAL '30 days', 'inferred', 'open',
         NOW(), NOW()
       )
     `;
@@ -312,11 +312,13 @@ describeWithDb("seed account ID migration (DB)", () => {
     // Insert old-format seed account
     const locationId = "gid:" + "//shopify/CompanyLocation/555";
     const oldAccountId = SEED_ACCOUNT_ID_PREFIX + shopId + "-" + locationId;
+    const companyId = "gid:" + "//shopify/Company/test" + suffix;
     
     await insertBuyerAccount({
       id: oldAccountId,
       shopId,
       companyLocationId: locationId,
+      companyId,
     });
 
     // Simulate what seedDatabase does: upsert with new format
@@ -325,11 +327,11 @@ describeWithDb("seed account ID migration (DB)", () => {
     
     await sql`
       INSERT INTO "BuyerAccount" (
-        id, "shopId", kind, "companyLocationId", name,
+        id, "shopId", kind, "companyId", "companyLocationId", name,
         "defaultTermsDays", "defaultTermsSource", "holdState", "createdAt", "updatedAt"
       )
       VALUES (
-        ${newAccountId}, ${shopId}, 'COMPANY', ${locationId},
+        ${newAccountId}, ${shopId}, 'COMPANY', ${companyId}, ${locationId},
         'Test Account Updated', 45, 'explicit', 'OK', NOW(), NOW()
       )
       ON CONFLICT ("shopId", "companyLocationId") DO UPDATE SET

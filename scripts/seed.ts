@@ -4012,6 +4012,7 @@ export async function migrateSeedAccountIds(
     }
 
     // Count dependent rows
+    // Use IN ${sql(array)} instead of ANY(${array}) for fetch_types:false compatibility
     const oldIds = migrations.map((m) => m.oldId);
     let invoiceCount = 0;
     let payerAliasCount = 0;
@@ -4019,17 +4020,17 @@ export async function migrateSeedAccountIds(
 
     if (oldIds.length > 0) {
       const [invoiceResult] = await tx<[{ count: string }]>`
-        SELECT COUNT(*)::text AS count FROM "Invoice" WHERE "buyerAccountId" = ANY(${oldIds})
+        SELECT COUNT(*)::text AS count FROM "Invoice" WHERE "buyerAccountId" IN ${tx(oldIds)}
       `;
       invoiceCount = parseInt(invoiceResult.count, 10);
 
       const [payerAliasResult] = await tx<[{ count: string }]>`
-        SELECT COUNT(*)::text AS count FROM "PayerAlias" WHERE "buyerAccountId" = ANY(${oldIds})
+        SELECT COUNT(*)::text AS count FROM "PayerAlias" WHERE "buyerAccountId" IN ${tx(oldIds)}
       `;
       payerAliasCount = parseInt(payerAliasResult.count, 10);
 
       const [draftOrderResult] = await tx<[{ count: string }]>`
-        SELECT COUNT(*)::text AS count FROM s8_draft_orders WHERE buyer_account_id = ANY(${oldIds})
+        SELECT COUNT(*)::text AS count FROM s8_draft_orders WHERE buyer_account_id IN ${tx(oldIds)}
       `;
       draftOrderCount = parseInt(draftOrderResult.count, 10);
     }
