@@ -44,8 +44,8 @@ import {
   bulkUpsertInvoices,
   type InvoiceData,
 } from "./order.server";
-import { processBulkCustomer, type CustomerPiiMode } from "./customer.server";
-import { processBulkDraftOrder, bulkUpsertDraftOrders, getAccountsWithDraftExposure } from "./draft-order.server";
+import { processBulkCustomer, deactivateMissingTaggedCustomers, type CustomerPiiMode } from "./customer.server";
+import { processBulkDraftOrder, bulkUpsertDraftOrders, getAccountsWithDraftExposure, closeMissingDraftOrders } from "./draft-order.server";
 import { flagAccountsForRecompute } from "~/services/credit-status-recompute.server";
 import { captureExceptionWithTags } from "~/lib/sentry";
 import { getRequestEnv } from "~/lib/request-context.server";
@@ -145,6 +145,136 @@ export function getNextStage(
       return undefined;
     default:
       return undefined;
+  }
+}
+
+/**
+ * Handle delete-missing logic after a reconcile bulk operation completes.
+ *
+ * v1.1: After COMPLETE reconcile runs:
+ * - draft_orders stage: close local drafts with status open/invoice_sent not seen
+ * - customers stage: deactivate local tagged customers not seen
+ *
+ * Guards (ALL must pass before any action):
+ * - status = 'COMPLETED' (from Shopify)
+ * - errorCode is null (from Shopify)
+ * - partialDataUrl is null (from Shopify)
+ * - lines_processed = objectCount (completeness check)
+ * - This op is the newest COMPLETED reconcile op of its stage for that shop
+ *
+ * Best-effort: errors are logged but do not fail the completion.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shop - Shop domain
+ * @param bulkOperationId - The completed bulk operation ID
+ * @param reconcileStage - The reconcile stage that completed
+ * @param getBulkOperationStatusFn - Optional: inject for testing
+ */
+export async function handleReconcileDeleteMissing(
+  sql: Sql,
+  shop: string,
+  bulkOperationId: string,
+  reconcileStage: string | null,
+  getBulkOperationStatusFn?: typeof getBulkOperationStatus
+): Promise<void> {
+  if (!reconcileStage) return;
+  if (reconcileStage !== "draft_orders" && reconcileStage !== "customers") return;
+
+  const getStatus = getBulkOperationStatusFn ?? getBulkOperationStatus;
+
+  try {
+    // Get shop ID
+    const [shopRow] = await sql<{ id: string }[]>`
+      SELECT id FROM "Shop" WHERE domain = ${shop}
+    `;
+    if (!shopRow) return;
+    const shopId = shopRow.id;
+
+    // Fetch bulk operation status from Shopify for completeness guards
+    const statusResult = await getStatus(shop, bulkOperationId);
+    if (!statusResult.success || !statusResult.data) return;
+
+    const { status, errorCode, partialDataUrl, objectCount } = statusResult.data;
+
+    // Guard: status must be COMPLETED
+    if (status !== "COMPLETED") return;
+
+    // Guard: no errorCode
+    if (errorCode != null) return;
+
+    // Guard: no partialDataUrl
+    if (partialDataUrl) return;
+
+    // Guard: objectCount 0 means empty export - skip delete-missing (Team Lead decision)
+    // An empty or failed export must never close drafts or deactivate customers/locations.
+    if (objectCount == null || objectCount === "0") return;
+
+    // Guard: lines_processed = objectCount
+    const [opRow] = await sql<{ lines_processed: string | null; completed_at: Date | null }[]>`
+      SELECT lines_processed, completed_at FROM s6_bulk_operations
+      WHERE bulk_operation_id = ${bulkOperationId}
+        AND shop = ${shop}
+    `;
+    if (!opRow || !opRow.completed_at) return;
+
+    const expectedCount = objectCount != null ? BigInt(objectCount) : null;
+    const actualCount = opRow.lines_processed != null ? BigInt(opRow.lines_processed) : null;
+    if (expectedCount === null || actualCount === null || actualCount !== expectedCount) return;
+
+    // Guard: must be the newest COMPLETED reconcile op of this stage for this shop
+    const [newestOp] = await sql<{ bulk_operation_id: string }[]>`
+      SELECT bulk_operation_id FROM s6_bulk_operations
+      WHERE shop = ${shop}
+        AND origin = 'reconcile'
+        AND reconcile_stage = ${reconcileStage}
+        AND completed_at IS NOT NULL
+        AND closed_at IS NULL
+      ORDER BY completed_at DESC
+      LIMIT 1
+    `;
+    if (!newestOp || newestOp.bulk_operation_id !== bulkOperationId) return;
+
+    // All guards passed - perform delete-missing action
+    if (reconcileStage === "draft_orders") {
+      // v1.1: Run close + enqueue in a single transaction so a failed enqueue
+      // rolls back the close, preventing closed drafts without queued recompute.
+      const result = await sql.begin(async (tx) => {
+        const { closedCount, affectedAccountIds } = await closeMissingDraftOrders(
+          tx,
+          shopId,
+          bulkOperationId
+        );
+        if (closedCount > 0 && affectedAccountIds.length > 0) {
+          await flagAccountsForRecompute(sql, shop, affectedAccountIds, tx);
+        }
+        return { closedCount, affectedAccountIds };
+      });
+      if (result.closedCount > 0) {
+        const hash = await shopHash(shop);
+        safeLog("info", "reconcile_draft_orders_closed_missing", {
+          shopHash: hash,
+          count: result.closedCount,
+        });
+      }
+    } else if (reconcileStage === "customers") {
+      const { deactivatedCount, skippedMismatchCount, skippedOutstandingCount } = await deactivateMissingTaggedCustomers(
+        sql,
+        shopId,
+        shop,
+        bulkOperationId
+      );
+      const skipped = skippedMismatchCount + skippedOutstandingCount;
+      if (deactivatedCount > 0 || skipped > 0) {
+        const hash = await shopHash(shop);
+        safeLog("info", "reconcile_customers_deactivated_missing", {
+          shopHash: hash,
+          count: deactivatedCount,
+          skipped,
+        });
+      }
+    }
+  } catch (err) {
+    captureExceptionWithTags(err, {});
   }
 }
 
@@ -833,11 +963,13 @@ function hasOrderScheduleDueAt(order: import("./types").ShopifyOrder): boolean {
 
 /**
  * Process a batch of JSONL lines for customers.
+ * @param bulkOperationId - Bulk operation ID (for reconcile delete-missing tracking)
  */
 async function processCustomerLines(
   sql: Sql,
   shop: string,
-  lines: string[]
+  lines: string[],
+  bulkOperationId?: string
 ): Promise<number> {
   const jsonl = lines.join("\n");
   const { customers, errors } = parseCustomerBulkJsonl(jsonl);
@@ -855,7 +987,7 @@ async function processCustomerLines(
   let processed = 0;
   for (const customer of customers) {
     const shopifyCustomer = bulkCustomerToShopifyCustomer(customer);
-    const result = await processBulkCustomer(sql, shop, shopifyCustomer, piiMode);
+    const result = await processBulkCustomer(sql, shop, shopifyCustomer, piiMode, bulkOperationId);
     if (result.success && result.action !== "skipped") {
       processed++;
     }
@@ -875,13 +1007,15 @@ async function processCustomerLines(
  * @param shop - Shop domain
  * @param lines - JSONL lines to process
  * @param origin - Bulk operation origin: 'reconcile' for nightly, 'initial' for initial sync
+ * @param bulkOperationId - Bulk operation ID (for reconcile delete-missing tracking)
  * @returns Number of draft orders upserted
  */
 export async function processDraftOrderLines(
   sql: Sql,
   shop: string,
   lines: string[],
-  origin?: string
+  origin?: string,
+  bulkOperationId?: string
 ): Promise<number> {
   const jsonl = lines.join("\n");
   const { draftOrders, errors } = parseDraftOrderBulkJsonl(jsonl);
@@ -917,7 +1051,9 @@ export async function processDraftOrderLines(
     safeLog("info", "drain_skip_non_inr_draft_order", { shopHash: hash, count: skippedNonInrCount });
   }
 
-  const { count, affectedAccountIds } = await bulkUpsertDraftOrders(sql, mappedOrders);
+  // v1.1: Pass bulkOperationId for reconcile delete-missing tracking (only for reconcile)
+  const opId = origin === "reconcile" ? bulkOperationId : undefined;
+  const { count, affectedAccountIds } = await bulkUpsertDraftOrders(sql, mappedOrders, opId);
 
   // D4: For reconcile, flag per batch (with dedupe within batch and queue-level debounce)
   // D6: For initial sync, don't flag per batch - flag at the END of import
@@ -992,6 +1128,10 @@ export async function loadBulkOperationProgress(
  * Only updates if byte_offset < new AND completed_at IS NULL.
  * This prevents reopening a closed/completed row.
  *
+ * v1.1: Also increments lines_read atomically with byte_offset.
+ * options.linesInChunk is the number of JSONL lines in this chunk (all lines,
+ * parents and children, including lines skipped or failed to parse).
+ *
  * R1: Owner-checked with processing_lease_token to prevent stale processor A
  * from overwriting progress after processor B has taken over the lease.
  * leaseToken is REQUIRED - all processor writes must be owner-checked.
@@ -1001,14 +1141,17 @@ export async function saveBulkOperationProgress(
   bulkOperationId: string,
   byteOffset: number,
   leaseToken: string,
-  chunkSize?: number
+  chunkSize?: number,
+  options?: { linesInChunk?: number }
 ): Promise<{ rowUpdated: boolean }> {
+  const linesInChunk = options?.linesInChunk ?? 0;
   let result;
   if (chunkSize !== undefined) {
     result = await sql`
       UPDATE s6_bulk_operations
       SET byte_offset = ${byteOffset},
-          chunk_size = ${chunkSize}
+          chunk_size = ${chunkSize},
+          lines_read = COALESCE(lines_read, 0) + ${linesInChunk}
       WHERE bulk_operation_id = ${bulkOperationId}
         AND closed_at IS NULL
         AND completed_at IS NULL
@@ -1018,7 +1161,8 @@ export async function saveBulkOperationProgress(
   } else {
     result = await sql`
       UPDATE s6_bulk_operations
-      SET byte_offset = ${byteOffset}
+      SET byte_offset = ${byteOffset},
+          lines_read = COALESCE(lines_read, 0) + ${linesInChunk}
       WHERE bulk_operation_id = ${bulkOperationId}
         AND closed_at IS NULL
         AND completed_at IS NULL
@@ -1034,22 +1178,29 @@ export async function saveBulkOperationProgress(
  * Only the winner gets to chain nextStage; losers mark their message processed and skip.
  *
  * S25: This is the ONLY path that writes completed_at.
+ * v1.1: Also sets lines_processed = COALESCE(lines_read, 0) + finalLinesInChunk.
+ * The lines_read value was accumulated during processing via saveBulkOperationProgress.
+ * The finalLinesInChunk adds the last batch's lines atomically with completion.
  *
  * R1: Owner-checked with processing_lease_token to prevent stale processor A
  * from claiming completion after processor B has taken over the lease.
  * leaseToken is REQUIRED - all processor writes must be owner-checked.
  *
+ * @param finalLinesInChunk - Lines in the final chunk to add to lines_read (default 0)
  * @returns true if this caller won the claim, false otherwise
  */
 export async function claimBulkCompletion(
   sql: Sql,
   bulkOperationId: string,
   shop: string,
-  leaseToken: string
+  leaseToken: string,
+  finalLinesInChunk: number = 0
 ): Promise<boolean> {
   const result = await sql`
     UPDATE s6_bulk_operations
-    SET completed_at = now()
+    SET completed_at = now(),
+        lines_read = COALESCE(lines_read, 0) + ${finalLinesInChunk},
+        lines_processed = COALESCE(lines_read, 0) + ${finalLinesInChunk}
     WHERE bulk_operation_id = ${bulkOperationId}
       AND shop = ${shop}
       AND completed_at IS NULL
@@ -1201,6 +1352,7 @@ export async function markNextStageEnqueued(
 /**
  * Process lines based on bulk type.
  * @param origin - Bulk operation origin: 'reconcile' for nightly, 'initial' for initial sync
+ * @param bulkOperationId - Bulk operation ID (for reconcile delete-missing tracking)
  */
 async function processLines(
   sql: Sql,
@@ -1208,7 +1360,8 @@ async function processLines(
   shopId: string,
   bulkType: string,
   lines: string[],
-  origin?: string
+  origin?: string,
+  bulkOperationId?: string
 ): Promise<number> {
   // Get Worker env for PII flag (used by companies and customers)
   const env = getRequestEnv() ?? {};
@@ -1219,9 +1372,9 @@ async function processLines(
     case "orders":
       return await processOrderLines(sql, shopId, shop, lines);
     case "customers":
-      return await processCustomerLines(sql, shop, lines);
+      return await processCustomerLines(sql, shop, lines, bulkOperationId);
     case "draft_orders":
-      return await processDraftOrderLines(sql, shop, lines, origin);
+      return await processDraftOrderLines(sql, shop, lines, origin, bulkOperationId);
     default:
       console.warn(`[bulk-jsonl] Unknown bulk type: ${bulkType}`);
       return 0;
@@ -1388,6 +1541,15 @@ export async function processBulkOperation(
     if (status === "COMPLETED" && url == null && !partialDataUrl && objectCount != null && parsedObjectCount === 0) {
       // Empty result - complete the operation with 0 lines processed
       // R1: Pass leaseToken for owner-checked completion
+      // v1.1: Set lines_read=0 for empty result (no JSONL to process)
+      await sql`
+        UPDATE s6_bulk_operations
+        SET lines_read = 0
+        WHERE bulk_operation_id = ${bulkOperationId}
+          AND processing_lease_token = ${leaseToken}
+          AND closed_at IS NULL
+          AND completed_at IS NULL
+      `;
       const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
       await markWebhookProcessed(
         sql,
@@ -1411,6 +1573,11 @@ export async function processBulkOperation(
           metadata?.origin === "reconcile"
             ? getNextStage(metadata.reconcileStage)
             : undefined;
+
+        // v1.1: Handle delete-missing for reconcile completions
+        if (metadata?.origin === "reconcile") {
+          await handleReconcileDeleteMissing(sql, shop, bulkOperationId, metadata.reconcileStage);
+        }
       }
 
       return {
@@ -1569,6 +1736,7 @@ export async function processBulkOperation(
   if (bytes.length === 0 && chunkResult.isEof) {
     // S25: Use claimBulkCompletion for exactly-once completion
     // R1: Pass leaseToken for owner-checked completion
+    // v1.1: lines_processed is set from lines_read by claimBulkCompletion
     const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
     await markWebhookProcessed(
       sql,
@@ -1591,6 +1759,11 @@ export async function processBulkOperation(
         metadata?.origin === "reconcile"
           ? getNextStage(metadata.reconcileStage)
           : undefined;
+
+      // v1.1: Handle delete-missing for reconcile completions
+      if (metadata?.origin === "reconcile") {
+        await handleReconcileDeleteMissing(sql, shop, bulkOperationId, metadata.reconcileStage);
+      }
     }
 
     return {
@@ -1705,7 +1878,8 @@ export async function processBulkOperation(
         shopId,
         bulkType,
         linesToProcess,
-        origin
+        origin,
+        bulkOperationId
       );
     } catch {
       // Increment failure count on processing error (owner-checked)
@@ -1744,7 +1918,8 @@ export async function processBulkOperation(
   if (isComplete) {
     // S25: Use claimBulkCompletion for exactly-once completion
     // R1: Pass leaseToken for owner-checked completion
-    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken);
+    // v1.1: Final batch's lines added to lines_read atomically with completion
+    const claimed = await claimBulkCompletion(sql, bulkOperationId, shop, leaseToken, linesToProcess.length);
     await markWebhookProcessed(
       sql,
       webhookId,
@@ -1780,6 +1955,11 @@ export async function processBulkOperation(
         metadata?.origin === "reconcile"
           ? getNextStage(metadata.reconcileStage)
           : undefined;
+
+      // v1.1: Handle delete-missing for reconcile completions
+      if (metadata?.origin === "reconcile") {
+        await handleReconcileDeleteMissing(sql, shop, bulkOperationId, metadata.reconcileStage);
+      }
     }
 
     return {
@@ -1811,8 +1991,9 @@ export async function processBulkOperation(
 
   // Save progress for next iteration
   // Reset chunk size to default if we found lines (owner-checked)
+  // v1.1: Also increment lines_read atomically with byte_offset
   const nextChunkSize = lines.length > 0 ? DEFAULT_CHUNK_SIZE : currentChunkSize;
-  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, leaseToken, nextChunkSize);
+  await saveBulkOperationProgress(sql, bulkOperationId, newByteOffset, leaseToken, nextChunkSize, { linesInChunk: linesToProcess.length });
 
   // Reset failure count on successful progress
   // R1: Pass leaseToken for owner-checked reset

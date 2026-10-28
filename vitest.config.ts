@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (114 total, counting expanded globs):
+ * Files included (115 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -49,7 +49,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
  *
- * Sync DB tests (8 files):
+ * Sync DB tests (9 files):
  * - app/services/sync/__tests__/company-location.test.ts
  * - app/services/sync/__tests__/customer.test.ts
  * - app/services/sync/__tests__/order.test.ts
@@ -58,6 +58,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/sync/__tests__/bulk-empty-result-db.test.ts
  * - app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts
  * - app/services/sync/__tests__/due-date-normalize-db.test.ts
+ * - app/services/sync/__tests__/reconcile-delete-missing-db.test.ts
  *
  * Route DB tests:
  * - app/routes/__tests__/app.imports.test.ts
@@ -227,6 +228,9 @@ const DB_TEST_PATTERNS = [
 
   // Cross-shop (tenant) isolation DB tests
   "tests/integration/tenant-isolation-db.test.ts",
+
+  // v1.1 reconcile delete-missing DB tests
+  "app/services/sync/__tests__/reconcile-delete-missing-db.test.ts",
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",

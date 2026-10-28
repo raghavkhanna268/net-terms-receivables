@@ -248,6 +248,8 @@ async function handleCustomerDelete(
  * - 'fetched': Write values as returned, including null (allows clearing removed email)
  * - 'fallback': ACCESS_DENIED retry - preserve existing values with COALESCE
  * - 'disabled': DPDP minimisation - always write NULL to clear PII
+ *
+ * @param bulkOperationId - Optional bulk op ID for reconcile (sets last_seen_bulk_op_id)
  */
 async function upsertTaggedCustomer(
   sql: Sql,
@@ -257,7 +259,8 @@ async function upsertTaggedCustomer(
   tagActive: boolean,
   email: string | null,
   displayName: string | null,
-  piiMode: CustomerPiiMode
+  piiMode: CustomerPiiMode,
+  bulkOperationId?: string
 ): Promise<void> {
   const tagsJson = sql.json(tags);
   const deactivatedAt = tagActive ? null : new Date();
@@ -268,38 +271,80 @@ async function upsertTaggedCustomer(
 
   if (piiMode === "fallback") {
     // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
-    await sql`
-      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
-      VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
-      ON CONFLICT (shop_id, customer_id)
-      DO UPDATE SET
-        tags = EXCLUDED.tags,
-        tag_active = EXCLUDED.tag_active,
-        tag_deactivated_at = CASE
-          WHEN EXCLUDED.tag_active = true THEN NULL
-          WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
-          ELSE s8_tagged_customers.tag_deactivated_at
-        END,
-        email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
-        display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
-    `;
+    if (bulkOperationId) {
+      // v1.1: Set last_seen_bulk_op_id for reconcile delete-missing tracking
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name, last_seen_bulk_op_id)
+        VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName}, ${bulkOperationId})
+        ON CONFLICT (shop_id, customer_id)
+        DO UPDATE SET
+          tags = EXCLUDED.tags,
+          tag_active = EXCLUDED.tag_active,
+          tag_deactivated_at = CASE
+            WHEN EXCLUDED.tag_active = true THEN NULL
+            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+            ELSE s8_tagged_customers.tag_deactivated_at
+          END,
+          email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+          display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name),
+          updated_at = NOW(),
+          last_seen_bulk_op_id = ${bulkOperationId}
+      `;
+    } else {
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+        VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+        ON CONFLICT (shop_id, customer_id)
+        DO UPDATE SET
+          tags = EXCLUDED.tags,
+          tag_active = EXCLUDED.tag_active,
+          tag_deactivated_at = CASE
+            WHEN EXCLUDED.tag_active = true THEN NULL
+            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+            ELSE s8_tagged_customers.tag_deactivated_at
+          END,
+          email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+          display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
+      `;
+    }
   } else {
     // 'fetched' or 'disabled': write values as-is (null overwrites)
-    await sql`
-      INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
-      VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
-      ON CONFLICT (shop_id, customer_id)
-      DO UPDATE SET
-        tags = EXCLUDED.tags,
-        tag_active = EXCLUDED.tag_active,
-        tag_deactivated_at = CASE
-          WHEN EXCLUDED.tag_active = true THEN NULL
-          WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
-          ELSE s8_tagged_customers.tag_deactivated_at
-        END,
-        email = EXCLUDED.email,
-        display_name = EXCLUDED.display_name
-    `;
+    if (bulkOperationId) {
+      // v1.1: Set last_seen_bulk_op_id for reconcile delete-missing tracking
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name, last_seen_bulk_op_id)
+        VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName}, ${bulkOperationId})
+        ON CONFLICT (shop_id, customer_id)
+        DO UPDATE SET
+          tags = EXCLUDED.tags,
+          tag_active = EXCLUDED.tag_active,
+          tag_deactivated_at = CASE
+            WHEN EXCLUDED.tag_active = true THEN NULL
+            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+            ELSE s8_tagged_customers.tag_deactivated_at
+          END,
+          email = EXCLUDED.email,
+          display_name = EXCLUDED.display_name,
+          updated_at = NOW(),
+          last_seen_bulk_op_id = ${bulkOperationId}
+      `;
+    } else {
+      await sql`
+        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+        VALUES (${shopId}, ${customerId}, ${tagsJson}, ${tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+        ON CONFLICT (shop_id, customer_id)
+        DO UPDATE SET
+          tags = EXCLUDED.tags,
+          tag_active = EXCLUDED.tag_active,
+          tag_deactivated_at = CASE
+            WHEN EXCLUDED.tag_active = true THEN NULL
+            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+            ELSE s8_tagged_customers.tag_deactivated_at
+          END,
+          email = EXCLUDED.email,
+          display_name = EXCLUDED.display_name
+      `;
+    }
   }
 }
 
@@ -642,12 +687,14 @@ export function mapCustomerToTaggedCustomer(
  * @param sql - postgres.js SQL client
  * @param customers - Array of mapped tagged customer data (only matching customers)
  * @param piiMode - How to handle PII fields (default: 'fetched')
+ * @param bulkOperationId - Optional bulk operation ID (only set for reconcile, not webhook)
  * @returns Number of customers upserted
  */
 export async function bulkUpsertTaggedCustomers(
   sql: Sql,
   customers: ReturnType<typeof mapCustomerToTaggedCustomer>[],
-  piiMode: CustomerPiiMode = "fetched"
+  piiMode: CustomerPiiMode = "fetched",
+  bulkOperationId?: string
 ): Promise<number> {
   if (customers.length === 0) return 0;
 
@@ -660,38 +707,80 @@ export async function bulkUpsertTaggedCustomers(
     const effectiveDisplayName = piiMode === "disabled" ? null : c.displayName;
 
     if (piiMode === "fallback") {
-      const result = await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
-        VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
-        ON CONFLICT (shop_id, customer_id)
-        DO UPDATE SET
-          tags = EXCLUDED.tags,
-          tag_active = EXCLUDED.tag_active,
-          tag_deactivated_at = CASE
-            WHEN EXCLUDED.tag_active = true THEN NULL
-            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
-            ELSE s8_tagged_customers.tag_deactivated_at
-          END,
-          email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
-          display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
-      `;
+      let result;
+      if (bulkOperationId) {
+        result = await sql`
+          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name, last_seen_bulk_op_id)
+          VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName}, ${bulkOperationId})
+          ON CONFLICT (shop_id, customer_id)
+          DO UPDATE SET
+            tags = EXCLUDED.tags,
+            tag_active = EXCLUDED.tag_active,
+            tag_deactivated_at = CASE
+              WHEN EXCLUDED.tag_active = true THEN NULL
+              WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+              ELSE s8_tagged_customers.tag_deactivated_at
+            END,
+            email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+            display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name),
+            updated_at = NOW(),
+            last_seen_bulk_op_id = ${bulkOperationId}
+        `;
+      } else {
+        result = await sql`
+          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+          VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+          ON CONFLICT (shop_id, customer_id)
+          DO UPDATE SET
+            tags = EXCLUDED.tags,
+            tag_active = EXCLUDED.tag_active,
+            tag_deactivated_at = CASE
+              WHEN EXCLUDED.tag_active = true THEN NULL
+              WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+              ELSE s8_tagged_customers.tag_deactivated_at
+            END,
+            email = COALESCE(EXCLUDED.email, s8_tagged_customers.email),
+            display_name = COALESCE(EXCLUDED.display_name, s8_tagged_customers.display_name)
+        `;
+      }
       count += result.count;
     } else {
-      const result = await sql`
-        INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
-        VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
-        ON CONFLICT (shop_id, customer_id)
-        DO UPDATE SET
-          tags = EXCLUDED.tags,
-          tag_active = EXCLUDED.tag_active,
-          tag_deactivated_at = CASE
-            WHEN EXCLUDED.tag_active = true THEN NULL
-            WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
-            ELSE s8_tagged_customers.tag_deactivated_at
-          END,
-          email = EXCLUDED.email,
-          display_name = EXCLUDED.display_name
-      `;
+      let result;
+      if (bulkOperationId) {
+        result = await sql`
+          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name, last_seen_bulk_op_id)
+          VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName}, ${bulkOperationId})
+          ON CONFLICT (shop_id, customer_id)
+          DO UPDATE SET
+            tags = EXCLUDED.tags,
+            tag_active = EXCLUDED.tag_active,
+            tag_deactivated_at = CASE
+              WHEN EXCLUDED.tag_active = true THEN NULL
+              WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+              ELSE s8_tagged_customers.tag_deactivated_at
+            END,
+            email = EXCLUDED.email,
+            display_name = EXCLUDED.display_name,
+            updated_at = NOW(),
+            last_seen_bulk_op_id = ${bulkOperationId}
+        `;
+      } else {
+        result = await sql`
+          INSERT INTO s8_tagged_customers (shop_id, customer_id, tags, tag_active, tag_deactivated_at, email, display_name)
+          VALUES (${c.shopId}, ${c.customerId}, ${tagsJson}, ${c.tagActive}, ${deactivatedAt}, ${effectiveEmail}, ${effectiveDisplayName})
+          ON CONFLICT (shop_id, customer_id)
+          DO UPDATE SET
+            tags = EXCLUDED.tags,
+            tag_active = EXCLUDED.tag_active,
+            tag_deactivated_at = CASE
+              WHEN EXCLUDED.tag_active = true THEN NULL
+              WHEN s8_tagged_customers.tag_active = true AND EXCLUDED.tag_active = false THEN NOW()
+              ELSE s8_tagged_customers.tag_deactivated_at
+            END,
+            email = EXCLUDED.email,
+            display_name = EXCLUDED.display_name
+        `;
+      }
       count += result.count;
     }
   }
@@ -736,13 +825,15 @@ export function findMatchingTagRule(
  * @param shop - Shop domain
  * @param customer - Customer data (id, tags, and optional email/displayName)
  * @param piiMode - How to handle PII fields (default: 'fetched' for bulk with PII enabled)
+ * @param bulkOperationId - Bulk operation ID (for reconcile delete-missing tracking)
  * @returns Sync result
  */
 export async function processBulkCustomer(
   sql: Sql,
   shop: string,
   customer: ShopifyCustomer,
-  piiMode: CustomerPiiMode = "fetched"
+  piiMode: CustomerPiiMode = "fetched",
+  bulkOperationId?: string
 ): Promise<SyncResult> {
   // Get shop with its tag rules
   const [shopRow] = await sql<{ id: string }[]>`
@@ -790,6 +881,7 @@ export async function processBulkCustomer(
   }
 
   // Upsert tagged customer tracking record
+  // v1.1: Pass bulkOperationId for reconcile delete-missing tracking
   await upsertTaggedCustomer(
     sql,
     shopId,
@@ -798,7 +890,8 @@ export async function processBulkCustomer(
     true,
     customer.email ?? null,
     customer.displayName ?? null,
-    piiMode
+    piiMode,
+    bulkOperationId
   );
 
   // Check if a company account already exists (precedence check)
@@ -886,4 +979,181 @@ export async function redactShopData(
     taggedCustomers: taggedResult.count,
     draftOrders: draftResult.count,
   };
+}
+
+/**
+ * Result of deactivateMissingTaggedCustomers.
+ */
+export interface DeactivateMissingResult {
+  /** Number of customers deactivated (gone from Shopify, no outstanding balance) */
+  deactivatedCount: number;
+  /** Number of customers skipped because they still exist in Shopify (tag-rule mismatch) */
+  skippedMismatchCount: number;
+  /** Number of customers skipped because they have outstanding balance or open invoices */
+  skippedOutstandingCount: number;
+}
+
+/**
+ * Query to batch-check customer existence in Shopify.
+ * Uses nodes(ids:) to fetch up to 250 customers at once.
+ * Returns only the id for customers that exist; missing customers return null.
+ */
+const CUSTOMERS_EXIST_QUERY = `
+  query CustomersExist($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Customer {
+        id
+      }
+    }
+  }
+`;
+
+/**
+ * Deactivate tagged customers that genuinely no longer exist in Shopify.
+ *
+ * v1.1 delete-missing (CONSERVATIVE): After a complete RECONCILE_CUSTOMERS bulk
+ * operation, check candidates (not seen in export) against Shopify to confirm
+ * they are actually deleted before deactivating.
+ *
+ * Conservative behavior:
+ * - Only deactivates customers that are GONE from Shopify (nodes query returns null)
+ * - Customers still in Shopify but no longer matching tag rules are NOT deactivated
+ * - Customers with outstanding balance or open invoices are NOT deactivated (skipped)
+ * - If Shopify read fails for any reason, deactivates NOTHING
+ *
+ * Detection: Uses last_seen_bulk_op_id column. Rows with a non-null value that
+ * differs from the current operation ID were seen in a previous reconcile but
+ * not this one. Rows with NULL (webhook-only) are never deactivated.
+ *
+ * Safety guards:
+ * - Scoped to the specific shop (shop_id in WHERE)
+ * - Soft deactivation only: sets tag_active=false, never deletes
+ * - Excludes redacted rows using strpos (customer_id containing '_redacted_' infix)
+ * - Rows with last_seen_bulk_op_id = NULL are never deactivated (webhook-only)
+ *
+ * Note: Completeness and latest-op guards are checked by the caller
+ * (handleReconcileDeleteMissing) before invoking this function.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Internal shop ID
+ * @param shopDomain - Shop domain for Shopify API calls
+ * @param bulkOperationId - The completed bulk operation ID
+ * @param adminGraphQLFn - Admin GraphQL function (injectable for testing)
+ * @returns Deactivated and skipped counts
+ */
+export async function deactivateMissingTaggedCustomers(
+  sql: Sql,
+  shopId: string,
+  shopDomain: string,
+  bulkOperationId: string,
+  adminGraphQLFn?: typeof import("~/services/drain/admin-client.server").adminGraphQL
+): Promise<DeactivateMissingResult> {
+  const redactedInfix = "_redacted_";
+
+  const candidates = await sql<{ id: string; customer_id: string }[]>`
+    SELECT id, customer_id
+    FROM s8_tagged_customers
+    WHERE shop_id = ${shopId}
+      AND tag_active = true
+      AND last_seen_bulk_op_id IS NOT NULL
+      AND last_seen_bulk_op_id != ${bulkOperationId}
+      AND strpos(customer_id, ${redactedInfix}) = 0
+  `;
+
+  if (candidates.length === 0) {
+    return { deactivatedCount: 0, skippedMismatchCount: 0, skippedOutstandingCount: 0 };
+  }
+
+  const { adminGraphQL } = adminGraphQLFn
+    ? { adminGraphQL: adminGraphQLFn }
+    : await import("~/services/drain/admin-client.server");
+
+  const goneCustomerIds = new Set<string>();
+  const customerIdToRowId = new Map<string, string>();
+  for (const c of candidates) {
+    customerIdToRowId.set(c.customer_id, c.id);
+  }
+
+  const BATCH_SIZE = 250;
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE);
+    const batchIds = batch.map((c) => c.customer_id);
+
+    const result = await adminGraphQL<{ nodes: ({ id: string } | null)[] }>(
+      shopDomain,
+      CUSTOMERS_EXIST_QUERY,
+      { ids: batchIds }
+    );
+
+    if (!result.success) {
+      return { deactivatedCount: 0, skippedMismatchCount: 0, skippedOutstandingCount: 0 };
+    }
+
+    const existingIds = new Set(
+      (result.data?.nodes ?? [])
+        .filter((n): n is { id: string } => n !== null && n.id !== undefined)
+        .map((n) => n.id)
+    );
+
+    for (const customerId of batchIds) {
+      if (!existingIds.has(customerId)) {
+        goneCustomerIds.add(customerId);
+      }
+    }
+  }
+
+  const skippedMismatchCount = candidates.length - goneCustomerIds.size;
+
+  if (goneCustomerIds.size === 0) {
+    return { deactivatedCount: 0, skippedMismatchCount, skippedOutstandingCount: 0 };
+  }
+
+  const goneRowIds = [...goneCustomerIds].map((cid) => customerIdToRowId.get(cid)!);
+  const goneCustomerIdsList = [...goneCustomerIds];
+
+  const accountsWithBalance = await sql<{ customerId: string }[]>`
+    SELECT DISTINCT ba."customerId"
+    FROM "BuyerAccount" ba
+    WHERE ba."shopId" = ${shopId}
+      AND ba."customerId" IN ${sql(goneCustomerIdsList)}
+      AND ba.kind = 'TAGGED_CUSTOMER'
+      AND (
+        EXISTS (
+          SELECT 1 FROM "Invoice" i
+          WHERE i."buyerAccountId" = ba.id
+            AND i.status = 'open'
+            AND i.outstanding > 0
+        )
+        OR EXISTS (
+          SELECT 1 FROM s8_draft_orders d
+          WHERE d.buyer_account_id = ba.id
+            AND d.has_payment_terms = true
+            AND d.status IN ('open', 'invoice_sent')
+        )
+      )
+  `;
+
+  const skipCustomerIds = new Set(accountsWithBalance.map((r) => r.customerId));
+  const toDeactivateRowIds = goneRowIds.filter((rowId) => {
+    const customerId = [...customerIdToRowId.entries()].find(([, rid]) => rid === rowId)?.[0];
+    return customerId && !skipCustomerIds.has(customerId);
+  });
+
+  const skippedOutstandingCount = goneRowIds.length - toDeactivateRowIds.length;
+
+  if (toDeactivateRowIds.length === 0) {
+    return { deactivatedCount: 0, skippedMismatchCount, skippedOutstandingCount };
+  }
+
+  const updateResult = await sql`
+    UPDATE s8_tagged_customers
+    SET tag_active = false, tag_deactivated_at = NOW(), updated_at = NOW()
+    WHERE id IN ${sql(toDeactivateRowIds)}
+      AND shop_id = ${shopId}
+      AND tag_active = true
+      AND last_seen_bulk_op_id IS NOT NULL
+      AND last_seen_bulk_op_id != ${bulkOperationId}
+  `;
+
+  return { deactivatedCount: updateResult.count, skippedMismatchCount, skippedOutstandingCount };
 }

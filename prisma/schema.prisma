@@ -698,6 +698,10 @@ model S6BulkOperation {
   processingLeaseToken String?   @map("processing_lease_token")
   /// When the next stage was enqueued. Prevents duplicate nextStage enqueues.
   nextStageEnqueuedAt DateTime? @map("next_stage_enqueued_at") @db.Timestamptz(6)
+  /// Total JSONL lines processed (set once at EOF). Used with objectCount for completeness check.
+  linesProcessed      BigInt?   @map("lines_processed")
+  /// Running count of JSONL lines read during processing. Updated atomically with byte_offset.
+  linesRead           BigInt?   @map("lines_read")
 
   @@map("s6_bulk_operations")
 }
@@ -773,10 +777,13 @@ model S8TaggedCustomer {
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
   /// When the record was last updated
   updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+  /// Bulk operation ID that last saw this row during reconcile. NULL for webhook-only rows.
+  lastSeenBulkOpId String?  @map("last_seen_bulk_op_id")
 
   // One record per customer per shop
   @@unique([shopId, customerId], map: "s8_tagged_customers_shop_customer_unique")
   @@index([shopId, tagActive], map: "idx_s8_tagged_customers_shop_tag_active")
+  @@index([shopId, lastSeenBulkOpId], map: "idx_s8_tagged_customers_last_seen")
   @@map("s8_tagged_customers")
 }
 
@@ -817,11 +824,14 @@ model S8DraftOrder {
   createdAt      DateTime @map("created_at") @db.Timestamptz
   /// When the record was last updated
   updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  /// Bulk operation ID that last saw this row during reconcile. NULL for webhook-only rows.
+  lastSeenBulkOpId String? @map("last_seen_bulk_op_id")
 
   // One record per draft order per shop
   @@unique([shopId, draftOrderId], map: "s8_draft_orders_shop_draft_unique")
   @@index([shopId, buyerAccountId], map: "idx_s8_draft_orders_shop_buyer")
   @@index([shopId, hasPaymentTerms], map: "idx_s8_draft_orders_shop_has_terms")
+  @@index([shopId, lastSeenBulkOpId], map: "idx_s8_draft_orders_last_seen")
   @@map("s8_draft_orders")
 }
 
