@@ -3,12 +3,44 @@ import { Outlet, useLoaderData, useRouteError, isRouteErrorResponse, data } from
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "~/components/AppProvider";
 import { runAfterAuth } from "~/lib/after-auth.server";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ServerTiming, readColdOnce } from "~/lib/server-timing.server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { isPlanSelectionRedirectEnabled } from "~/services/gating.server";
 import { resolvePlanWithStatus } from "~/services/plan.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
+
+const RELOAD_GUARD_KEY_PREFIX = "auth_bounce_reload_";
+const RELOAD_GUARD_WINDOW_MS = 30_000;
+
+export function isEmbeddedAuthBounce(
+  error: unknown
+): error is { status: 200; data: string } {
+  return (
+    isRouteErrorResponse(error) &&
+    error.status === 200 &&
+    typeof error.data === "string"
+  );
+}
+
+export function isBlankOrAppBridgeOnly(content: string): boolean {
+  if (!content || content.trim() === "") {
+    return true;
+  }
+  const stripped = content.replace(/<!--[\s\S]*?-->/g, "").trim();
+  if (stripped === "") {
+    return true;
+  }
+  const withoutAppBridge = stripped
+    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
+    .replace(/<script[^>]*src="[^"]*app-bridge[^"]*"[^>]*\/>/gi, "")
+    .replace(/<script[^>]*data-api-key="[^"]*"[^>]*src="[^"]*app-bridge[^"]*"[^>]*><\/script>/gi, "")
+    .trim();
+  if (withoutAppBridge === "") {
+    return true;
+  }
+  return withoutAppBridge.replace(/\s+/g, "") === "";
+}
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   // Read cold once for this request - index will get same value with same context object
@@ -140,14 +172,89 @@ export default function App() {
   );
 }
 
+function AuthBounceReloadFallback({ onReload }: { onReload: () => void }) {
+  return (
+    <div style={{ padding: "2rem", textAlign: "center" }}>
+      <p>Something went wrong. Please try again.</p>
+      <s-button onClick={onReload}>Reload</s-button>
+    </div>
+  );
+}
+
+function ReloadingSpinner() {
+  return (
+    <div style={{ padding: "2rem", textAlign: "center" }}>
+      <s-spinner />
+      <p>Reloading…</p>
+    </div>
+  );
+}
+
 export function ErrorBoundary() {
   const error = useRouteError();
+  const [recoveryState, setRecoveryState] = useState<
+    "idle" | "reloading" | "fallback"
+  >("idle");
 
-  if (
-    isRouteErrorResponse(error) &&
-    error.status === 200 &&
-    typeof error.data === "string"
-  ) {
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (!isEmbeddedAuthBounce(error)) {
+      return;
+    }
+    if (!isBlankOrAppBridgeOnly(error.data)) {
+      return;
+    }
+
+    const pathname = window.location.pathname;
+    const guardKey = `${RELOAD_GUARD_KEY_PREFIX}${pathname}`;
+    let lastReload: number | null = null;
+
+    try {
+      const stored = sessionStorage.getItem(guardKey);
+      if (stored) {
+        lastReload = parseInt(stored, 10);
+      }
+    } catch {
+      setRecoveryState("fallback");
+      return;
+    }
+
+    const now = Date.now();
+    if (lastReload !== null && now - lastReload < RELOAD_GUARD_WINDOW_MS) {
+      setRecoveryState("fallback");
+      return;
+    }
+
+    try {
+      sessionStorage.setItem(guardKey, String(now));
+    } catch {
+      setRecoveryState("fallback");
+      return;
+    }
+
+    setRecoveryState("reloading");
+    window.location.reload();
+  }, [error]);
+
+  if (isEmbeddedAuthBounce(error)) {
+    if (recoveryState === "reloading") {
+      return <ReloadingSpinner />;
+    }
+    if (recoveryState === "fallback") {
+      const handleReload = () => {
+        const pathname = window.location.pathname;
+        const guardKey = `${RELOAD_GUARD_KEY_PREFIX}${pathname}`;
+        try {
+          sessionStorage.removeItem(guardKey);
+        } catch {
+          // Ignore
+        }
+        window.location.reload();
+      };
+      return <AuthBounceReloadFallback onReload={handleReload} />;
+    }
     return (
       <div
         dangerouslySetInnerHTML={{ __html: error.data || "Handling response" }}
