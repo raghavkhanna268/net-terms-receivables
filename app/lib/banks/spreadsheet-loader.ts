@@ -122,11 +122,10 @@ async function loadWithSheetJS(
 
   // Convert sheet to array of arrays
   // For CSV/TXT: raw:true keeps strings as-is
-  // For XLSX/XLS: raw:true preserves numeric types (for Excel serial dates) and Date objects;
-  // text cells with leading zeros are preserved as strings
+  // For XLSX/XLS: raw:false uses formatted text (preserves leading zeros in refs)
   const toJsonOptions: Parameters<typeof XLSX.utils.sheet_to_json>[1] = {
     header: 1,
-    raw: true, // Always use raw values to preserve numbers and Date objects
+    raw: isTextFormat, // CSV/TXT: already strings; XLSX/XLS: use formatted text
     defval: null,
   };
 
