@@ -212,18 +212,59 @@ export function nameSimilarity(a: string, b: string): number {
   return union > 0 ? intersection / union : 0;
 }
 
+/** Buyer data shape for matching functions */
+type BuyerForMatching = {
+  id: string;
+  name: string;
+  aliases: string[];
+  email: string | null;
+};
+
+/** Minimum score threshold for a valid buyer match */
+const BUYER_MATCH_THRESHOLD = 0.5;
+
+/**
+ * Compute the match score for a single buyer against a normalized payer text.
+ * Returns the best score across aliases, name similarity, and email prefix.
+ * Internal helper used by both findBestBuyerMatch and findAllTiedBuyerMatches.
+ */
+function computeBuyerScore(
+  normalizedPayer: string,
+  buyer: BuyerForMatching
+): number {
+  let bestScore = 0;
+
+  for (const alias of buyer.aliases) {
+    if (alias === normalizedPayer || normalizedPayer.includes(alias)) {
+      const score = alias === normalizedPayer ? 1 : 0.9;
+      bestScore = Math.max(bestScore, score);
+    }
+  }
+
+  const normalizedBuyerName = normalizeName(buyer.name);
+  const nameSim = nameSimilarity(normalizedPayer, normalizedBuyerName);
+  if (nameSim > BUYER_MATCH_THRESHOLD) {
+    bestScore = Math.max(bestScore, nameSim);
+  }
+
+  if (buyer.email) {
+    const emailPrefix = buyer.email.split("@")[0].toLowerCase();
+    if (normalizedPayer.includes(emailPrefix) && emailPrefix.length >= 4) {
+      bestScore = Math.max(bestScore, 0.7);
+    }
+  }
+
+  return bestScore;
+}
+
 /**
  * Find the best matching buyer from a list based on payer text.
  * Returns the buyer ID and match score, or null if no good match.
+ * Uses strict '>' comparison so ties go to the first buyer in input order.
  */
 export function findBestBuyerMatch(
   payerText: string,
-  buyers: Array<{
-    id: string;
-    name: string;
-    aliases: string[];
-    email: string | null;
-  }>
+  buyers: Array<BuyerForMatching>
 ): { buyerId: string; score: number } | null {
   const normalizedPayer = normalizeNarrationForLookup(payerText);
   if (normalizedPayer.length < 3) return null;
@@ -231,36 +272,13 @@ export function findBestBuyerMatch(
   let bestMatch: { buyerId: string; score: number } | null = null;
 
   for (const buyer of buyers) {
-    // Check aliases first (exact or containment match)
-    for (const alias of buyer.aliases) {
-      if (alias === normalizedPayer || normalizedPayer.includes(alias)) {
-        const score = alias === normalizedPayer ? 1 : 0.9;
-        if (!bestMatch || score > bestMatch.score) {
-          bestMatch = { buyerId: buyer.id, score };
-        }
-      }
-    }
-
-    // Check buyer name
-    const normalizedBuyerName = normalizeName(buyer.name);
-    const nameSim = nameSimilarity(normalizedPayer, normalizedBuyerName);
-    if (nameSim > 0.5 && (!bestMatch || nameSim > bestMatch.score)) {
-      bestMatch = { buyerId: buyer.id, score: nameSim };
-    }
-
-    // Check email prefix
-    if (buyer.email) {
-      const emailPrefix = buyer.email.split("@")[0].toLowerCase();
-      if (normalizedPayer.includes(emailPrefix) && emailPrefix.length >= 4) {
-        const score = 0.7;
-        if (!bestMatch || score > bestMatch.score) {
-          bestMatch = { buyerId: buyer.id, score };
-        }
-      }
+    const score = computeBuyerScore(normalizedPayer, buyer);
+    if (score >= BUYER_MATCH_THRESHOLD && (!bestMatch || score > bestMatch.score)) {
+      bestMatch = { buyerId: buyer.id, score };
     }
   }
 
-  return bestMatch && bestMatch.score >= 0.5 ? bestMatch : null;
+  return bestMatch;
 }
 
 /**
@@ -270,12 +288,7 @@ export function findBestBuyerMatch(
  */
 export function findAllTiedBuyerMatches(
   payerText: string,
-  buyers: Array<{
-    id: string;
-    name: string;
-    aliases: string[];
-    email: string | null;
-  }>
+  buyers: Array<BuyerForMatching>
 ): Array<{ buyerId: string; score: number }> {
   const normalizedPayer = normalizeNarrationForLookup(payerText);
   if (normalizedPayer.length < 3) return [];
@@ -283,30 +296,9 @@ export function findAllTiedBuyerMatches(
   const buyerScores: Array<{ buyerId: string; score: number }> = [];
 
   for (const buyer of buyers) {
-    let buyerBestScore = 0;
-
-    for (const alias of buyer.aliases) {
-      if (alias === normalizedPayer || normalizedPayer.includes(alias)) {
-        const score = alias === normalizedPayer ? 1 : 0.9;
-        buyerBestScore = Math.max(buyerBestScore, score);
-      }
-    }
-
-    const normalizedBuyerName = normalizeName(buyer.name);
-    const nameSim = nameSimilarity(normalizedPayer, normalizedBuyerName);
-    if (nameSim > 0.5) {
-      buyerBestScore = Math.max(buyerBestScore, nameSim);
-    }
-
-    if (buyer.email) {
-      const emailPrefix = buyer.email.split("@")[0].toLowerCase();
-      if (normalizedPayer.includes(emailPrefix) && emailPrefix.length >= 4) {
-        buyerBestScore = Math.max(buyerBestScore, 0.7);
-      }
-    }
-
-    if (buyerBestScore >= 0.5) {
-      buyerScores.push({ buyerId: buyer.id, score: buyerBestScore });
+    const score = computeBuyerScore(normalizedPayer, buyer);
+    if (score >= BUYER_MATCH_THRESHOLD) {
+      buyerScores.push({ buyerId: buyer.id, score });
     }
   }
 

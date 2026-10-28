@@ -193,20 +193,16 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
     await runMatcher(sql, testShopId);
 
     const r14Matches = await getMatchesForPayment(paymentIds[0]);
-    expect(r14Matches.length).toBeGreaterThan(0);
-    const r14Top = r14Matches[0];
-    expect(r14Top.invoiceName).toBe("#1002");
-    expect(r14Top.score).toBe(58);
-    expect(r14Top.buyerAccountId).toBe(uniqueNewerId);
-    const r14MediumCount = r14Matches.filter((m) => m.invoiceName === "#1002" && m.score >= 50).length;
-    expect(r14MediumCount).toBe(1);
+    expect(r14Matches.length).toBe(1);
+    expect(r14Matches[0].invoiceName).toBe("#1002");
+    expect(r14Matches[0].score).toBe(58);
+    expect(r14Matches[0].buyerAccountId).toBe(uniqueNewerId);
 
     const r15Matches = await getMatchesForPayment(paymentIds[1]);
-    expect(r15Matches.length).toBeGreaterThan(0);
-    const r15Top = r15Matches[0];
-    expect(r15Top.invoiceName).toBe("#1002");
-    expect(r15Top.score).toBe(48);
-    expect(r15Top.buyerAccountId).toBe(uniqueNewerId);
+    expect(r15Matches.length).toBe(1);
+    expect(r15Matches[0].invoiceName).toBe("#1002");
+    expect(r15Matches[0].score).toBe(48);
+    expect(r15Matches[0].buyerAccountId).toBe(uniqueNewerId);
   });
 
   /**
@@ -256,13 +252,13 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
     await runMatcher(sql, testShopId);
 
     const r14Matches = await getMatchesForPayment(paymentIds[0]);
-    expect(r14Matches.length).toBeGreaterThan(0);
+    expect(r14Matches.length).toBe(1);
     expect(r14Matches[0].invoiceName).toBe("#1002");
     expect(r14Matches[0].score).toBe(58);
     expect(r14Matches[0].buyerAccountId).toBe(uniqueNewerId);
 
     const r15Matches = await getMatchesForPayment(paymentIds[1]);
-    expect(r15Matches.length).toBeGreaterThan(0);
+    expect(r15Matches.length).toBe(1);
     expect(r15Matches[0].invoiceName).toBe("#1002");
     expect(r15Matches[0].score).toBe(48);
     expect(r15Matches[0].buyerAccountId).toBe(uniqueNewerId);
@@ -328,13 +324,13 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
     await runMatcher(sql, testShopId);
 
     const r14Matches = await getMatchesForPayment(paymentIds[0]);
-    expect(r14Matches.length).toBeGreaterThan(0);
+    expect(r14Matches.length).toBe(1);
     expect(r14Matches[0].invoiceName).toBe("#1002");
     expect(r14Matches[0].score).toBe(58);
     expect(r14Matches[0].buyerAccountId).toBe(uniqueNewerId);
 
     const r15Matches = await getMatchesForPayment(paymentIds[1]);
-    expect(r15Matches.length).toBeGreaterThan(0);
+    expect(r15Matches.length).toBe(1);
     expect(r15Matches[0].invoiceName).toBe("#1002");
     expect(r15Matches[0].score).toBe(48);
     expect(r15Matches[0].buyerAccountId).toBe(uniqueNewerId);
@@ -387,13 +383,13 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
     await runMatcher(sql, testShopId);
 
     const r14Matches = await getMatchesForPayment(paymentIds[0]);
-    expect(r14Matches.length).toBeGreaterThan(0);
+    expect(r14Matches.length).toBe(1);
     expect(r14Matches[0].invoiceName).toBe("#1002");
     expect(r14Matches[0].score).toBe(58);
     expect(r14Matches[0].buyerAccountId).toBe(uniqueOlderId);
 
     const r15Matches = await getMatchesForPayment(paymentIds[1]);
-    expect(r15Matches.length).toBeGreaterThan(0);
+    expect(r15Matches.length).toBe(1);
     expect(r15Matches[0].invoiceName).toBe("#1002");
     expect(r15Matches[0].score).toBe(48);
     expect(r15Matches[0].buyerAccountId).toBe(uniqueOlderId);
@@ -452,13 +448,13 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
     await runMatcher(sql, testShopId);
 
     const r14Matches = await getMatchesForPayment(paymentIds[0]);
-    expect(r14Matches.length).toBeGreaterThan(0);
+    expect(r14Matches.length).toBe(1);
     expect(r14Matches[0].invoiceName).toBe("#1002");
     expect(r14Matches[0].score).toBe(58);
     expect(r14Matches[0].buyerAccountId).toBe(uniqueNewerId);
 
     const r15Matches = await getMatchesForPayment(paymentIds[1]);
-    expect(r15Matches.length).toBeGreaterThan(0);
+    expect(r15Matches.length).toBe(1);
     expect(r15Matches[0].invoiceName).toBe("#1002");
     expect(r15Matches[0].score).toBe(48);
     expect(r15Matches[0].buyerAccountId).toBe(uniqueNewerId);
@@ -529,12 +525,12 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
     await runMatcher(sql, testShopId);
 
     const r14Matches = await getMatchesForPayment(paymentIds[0]);
-    expect(r14Matches.length).toBeGreaterThan(0);
+    expect(r14Matches.length).toBe(1);
     expect(r14Matches[0].invoiceName).toBe("#1002");
     expect(r14Matches[0].buyerAccountId).toBe(otherBuyerId);
 
     const r15Matches = await getMatchesForPayment(paymentIds[1]);
-    expect(r15Matches.length).toBeGreaterThan(0);
+    expect(r15Matches.length).toBe(1);
     expect(r15Matches[0].invoiceName).toBe("#1002");
     expect(r15Matches[0].buyerAccountId).toBe(otherBuyerId);
   });
