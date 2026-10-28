@@ -84,26 +84,28 @@ vi.mock("~/services/sync/draft-order.server", () => ({
   }),
 }));
 
-// S8 customer fetch mock (partial)
-vi.mock("../customer-fetch.server", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../customer-fetch.server")>();
-  return {
-    ...actual,
-    fetchCustomerBaseFields: vi.fn().mockResolvedValue({
-      success: true,
-      data: { id: "gid://shopify/Customer/123", tags: ["net-terms"] },
-      retryable: false,
-    }),
-    fetchCustomerPiiFields: vi.fn().mockResolvedValue({
-      success: true,
-      email: "test@example.com",
-      displayName: "Test Customer",
-      retryable: false,
-      usedFallback: false,
-    }),
-    incrementCustomerPiiAccessDeniedFallback: vi.fn().mockResolvedValue(undefined),
-  };
-});
+// S8 customer fetch mock
+vi.mock("../customer-fetch.server", () => ({
+  fetchCustomerBaseFields: vi.fn().mockResolvedValue({
+    success: true,
+    data: { id: "gid://shopify/Customer/123", tags: ["net-terms"] },
+    retryable: false,
+  }),
+  fetchCustomerPiiFields: vi.fn().mockResolvedValue({
+    success: true,
+    email: "test@example.com",
+    displayName: "Test Customer",
+    retryable: false,
+    usedFallback: false,
+  }),
+  incrementCustomerPiiAccessDeniedFallback: vi.fn().mockResolvedValue(undefined),
+  fetchCustomerWithFallback: vi.fn().mockResolvedValue({
+    success: true,
+    data: { id: "gid://shopify/Customer/123", tags: ["net-terms"], email: "test@example.com" },
+    piiMode: "fetched" as const,
+  }),
+  getCustomerByNodeQuery: vi.fn().mockReturnValue("query CustomerById"),
+}));
 
 // Mock request context for PII flag
 vi.mock("~/lib/request-context.server", () => ({
@@ -1874,9 +1876,11 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
 
   describe("COMPANIES_* handlers", () => {
     it("COMPANIES_CREATE with no_session returns shop_not_found when Shop row is missing", async () => {
-      const mockAdminGraphQL = (await import("../admin-client.server"))
-        .adminGraphQL as ReturnType<typeof vi.fn>;
-      mockAdminGraphQL.mockResolvedValueOnce({
+      // Import admin client FIRST, reset, and set up mock
+      const { adminGraphQL } = await import("../admin-client.server");
+      const mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockReset();
+      mockAdminGraphQL.mockResolvedValue({
         success: false,
         error: "No session found",
         errorCode: "no_session",
@@ -2035,9 +2039,11 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
     });
 
     it("non-no_session error does NOT trigger Shop check (behaviour unchanged)", async () => {
-      const mockAdminGraphQL = (await import("../admin-client.server"))
-        .adminGraphQL as ReturnType<typeof vi.fn>;
-      mockAdminGraphQL.mockResolvedValueOnce({
+      // Import admin client FIRST, reset, and set up mock
+      const { adminGraphQL } = await import("../admin-client.server");
+      const mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockReset();
+      mockAdminGraphQL.mockResolvedValue({
         success: false,
         error: "GraphQL query error: schema validation failed",
         errorCode: "graphql_error",
@@ -2083,9 +2089,11 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
     });
 
     it("Shop query that throws returns original no_session error (fail-open)", async () => {
-      const mockAdminGraphQL = (await import("../admin-client.server"))
-        .adminGraphQL as ReturnType<typeof vi.fn>;
-      mockAdminGraphQL.mockResolvedValueOnce({
+      // Import admin client FIRST, reset, and set up mock
+      const { adminGraphQL } = await import("../admin-client.server");
+      const mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockReset();
+      mockAdminGraphQL.mockResolvedValue({
         success: false,
         error: "No session found",
         errorCode: "no_session",
@@ -2541,9 +2549,11 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
     });
 
     it("non-no_session error does NOT trigger Shop check (behaviour unchanged)", async () => {
-      const mockAdminGraphQL = (await import("../admin-client.server"))
-        .adminGraphQL as ReturnType<typeof vi.fn>;
-      mockAdminGraphQL.mockResolvedValueOnce({
+      // Import admin client FIRST, reset, and set up mock
+      const { adminGraphQL } = await import("../admin-client.server");
+      const mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockReset();
+      mockAdminGraphQL.mockResolvedValue({
         success: false,
         error: "GraphQL query error: schema validation failed",
         errorCode: "graphql_error",
@@ -2589,9 +2599,11 @@ describe("No-session Shop-row check (#239 follow-up)", () => {
     });
 
     it("safeLog output uses fixed codes plus shopHash only (no PII)", async () => {
-      const mockAdminGraphQL = (await import("../admin-client.server"))
-        .adminGraphQL as ReturnType<typeof vi.fn>;
-      mockAdminGraphQL.mockResolvedValueOnce({
+      // Import admin client FIRST, reset, and set up mock
+      const { adminGraphQL } = await import("../admin-client.server");
+      const mockAdminGraphQL = adminGraphQL as ReturnType<typeof vi.fn>;
+      mockAdminGraphQL.mockReset();
+      mockAdminGraphQL.mockResolvedValue({
         success: false,
         error: "No session found",
         errorCode: "no_session",
