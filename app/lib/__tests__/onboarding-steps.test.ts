@@ -10,6 +10,7 @@ import {
   type OnboardingStepInputs,
   type ValidationInfo,
   type PaymentCustomizationInfo,
+  type BuyerAccountCounts,
 } from "../onboarding-steps.server";
 
 describe("onboarding-steps", () => {
@@ -37,49 +38,214 @@ describe("onboarding-steps", () => {
   });
 
   describe("computeBuyerSetupStep", () => {
-    it("returns complete when buyer accounts exist", () => {
-      const step = computeBuyerSetupStep(5, 0);
-      expect(step.status).toBe("complete");
-      expect(step.helpText).toContain("5 buyer account(s)");
+    describe("company accounts only, C == L", () => {
+      it("singular: 1 B2B company synced", () => {
+        const counts: BuyerAccountCounts = { locationCount: 1, companyCount: 1, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(1, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("1 B2B company synced");
+      });
+
+      it("plural: 2 B2B companies synced", () => {
+        const counts: BuyerAccountCounts = { locationCount: 2, companyCount: 2, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(2, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("2 B2B companies synced");
+      });
     });
 
-    it("returns complete when tag rules exist", () => {
-      const step = computeBuyerSetupStep(0, 3);
-      expect(step.status).toBe("complete");
-      expect(step.helpText).toContain("3 customer tag rule(s)");
+    describe("company accounts only, C != L", () => {
+      it("singular company, plural locations: 1 B2B company synced (3 locations, one buyer account each)", () => {
+        const counts: BuyerAccountCounts = { locationCount: 3, companyCount: 1, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(3, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("1 B2B company synced (3 locations, one buyer account each)");
+      });
+
+      it("plural companies, plural locations: 2 B2B companies synced (5 locations, one buyer account each)", () => {
+        const counts: BuyerAccountCounts = { locationCount: 5, companyCount: 2, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(5, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("2 B2B companies synced (5 locations, one buyer account each)");
+      });
+
+      it("singular location (edge case): 2 B2B companies synced (1 location, one buyer account each)", () => {
+        const counts: BuyerAccountCounts = { locationCount: 1, companyCount: 2, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(1, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("2 B2B companies synced (1 location, one buyer account each)");
+      });
     });
 
-    it("returns complete when both exist", () => {
-      const step = computeBuyerSetupStep(2, 3);
-      expect(step.status).toBe("complete");
-      expect(step.helpText).toContain("2 buyer account(s)");
-      expect(step.helpText).toContain("3 tag rule(s)");
+    describe("tagged customers only", () => {
+      it("singular with rules: 1 tagged customer synced from 2 tag rules", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 1 };
+        const step = computeBuyerSetupStep(1, 2, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("1 tagged customer synced from 2 tag rules");
+      });
+
+      it("plural with singular rule: 3 tagged customers synced from 1 tag rule", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 3 };
+        const step = computeBuyerSetupStep(3, 1, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("3 tagged customers synced from 1 tag rule");
+      });
+
+      it("without rules (R == 0): 2 tagged customers synced", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 2 };
+        const step = computeBuyerSetupStep(2, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("2 tagged customers synced");
+      });
+
+      it("singular without rules: 1 tagged customer synced", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 1 };
+        const step = computeBuyerSetupStep(1, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("1 tagged customer synced");
+      });
     });
 
-    it("returns pending when neither exists", () => {
-      const step = computeBuyerSetupStep(0, 0);
-      expect(step.status).toBe("pending");
+    describe("both companies and tagged customers", () => {
+      it("singular company, singular location, singular customer: 1 B2B company (1 location) and 1 tagged customer synced", () => {
+        const counts: BuyerAccountCounts = { locationCount: 1, companyCount: 1, taggedCustomerCount: 1 };
+        const step = computeBuyerSetupStep(2, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("1 B2B company (1 location) and 1 tagged customer synced");
+      });
+
+      it("plural companies, plural locations, plural customers: 2 B2B companies (5 locations) and 3 tagged customers synced", () => {
+        const counts: BuyerAccountCounts = { locationCount: 5, companyCount: 2, taggedCustomerCount: 3 };
+        const step = computeBuyerSetupStep(8, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("2 B2B companies (5 locations) and 3 tagged customers synced");
+      });
     });
 
-    it("S23-03: returns actionUrl /app/tag-rules when pending", () => {
-      const step = computeBuyerSetupStep(0, 0);
-      expect(step.status).toBe("pending");
-      expect(step.actionUrl).toBe("/app/tag-rules");
-      expect(step.actionLabel).toBe("Create tag rule");
+    describe("rules but no accounts", () => {
+      it("singular rule: 1 customer tag rule configured", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 1, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("1 customer tag rule configured");
+      });
+
+      it("plural rules: 3 customer tag rules configured", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 3, counts);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("3 customer tag rules configured");
+      });
     });
 
-    it("S23-03: does not return actionUrl when complete", () => {
-      const step = computeBuyerSetupStep(5, 0);
-      expect(step.status).toBe("complete");
-      expect(step.actionUrl).toBeUndefined();
-      expect(step.actionLabel).toBeUndefined();
+    describe("empty state", () => {
+      it("sync done and empty: shows empty-state copy", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 0, counts, "done");
+        expect(step.status).toBe("pending");
+        expect(step.helpText).toBe(
+          "No company locations or tag rules found yet. Add a location to a B2B company in Shopify, or create a tag rule."
+        );
+      });
+
+      it("sync not done: shows default pending copy", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 0, counts, "not_started");
+        expect(step.status).toBe("pending");
+        expect(step.helpText).toBe(
+          "Sync B2B companies or create tag rules to identify net-terms buyers"
+        );
+      });
+
+      it("sync in_progress: shows default pending copy", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 0, counts, "in_progress");
+        expect(step.status).toBe("pending");
+        expect(step.helpText).toBe(
+          "Sync B2B companies or create tag rules to identify net-terms buyers"
+        );
+      });
+
+      it("sync failed: shows default pending copy", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 0, counts, "failed");
+        expect(step.status).toBe("pending");
+        expect(step.helpText).toBe(
+          "Sync B2B companies or create tag rules to identify net-terms buyers"
+        );
+      });
+
+      it("no sync status (undefined): shows default pending copy", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 0, counts, undefined);
+        expect(step.status).toBe("pending");
+        expect(step.helpText).toBe(
+          "Sync B2B companies or create tag rules to identify net-terms buyers"
+        );
+      });
     });
 
-    it("S23-03: does not return actionUrl when complete via tag rules", () => {
-      const step = computeBuyerSetupStep(0, 2);
-      expect(step.status).toBe("complete");
-      expect(step.actionUrl).toBeUndefined();
-      expect(step.actionLabel).toBeUndefined();
+    describe("completion rule", () => {
+      it("complete when L + T > 0", () => {
+        const counts: BuyerAccountCounts = { locationCount: 1, companyCount: 1, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(1, 0, counts);
+        expect(step.status).toBe("complete");
+      });
+
+      it("complete when R > 0", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 1, counts);
+        expect(step.status).toBe("complete");
+      });
+
+      it("pending when L == 0 AND T == 0 AND R == 0", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 0, counts);
+        expect(step.status).toBe("pending");
+      });
+    });
+
+    describe("S23-03: action URLs", () => {
+      it("returns actionUrl /app/tag-rules when pending", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 0, counts);
+        expect(step.status).toBe("pending");
+        expect(step.actionUrl).toBe("/app/tag-rules");
+        expect(step.actionLabel).toBe("Create tag rule");
+      });
+
+      it("does not return actionUrl when complete via companies", () => {
+        const counts: BuyerAccountCounts = { locationCount: 5, companyCount: 5, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(5, 0, counts);
+        expect(step.status).toBe("complete");
+        expect(step.actionUrl).toBeUndefined();
+        expect(step.actionLabel).toBeUndefined();
+      });
+
+      it("does not return actionUrl when complete via tag rules", () => {
+        const counts: BuyerAccountCounts = { locationCount: 0, companyCount: 0, taggedCustomerCount: 0 };
+        const step = computeBuyerSetupStep(0, 2, counts);
+        expect(step.status).toBe("complete");
+        expect(step.actionUrl).toBeUndefined();
+        expect(step.actionLabel).toBeUndefined();
+      });
+    });
+
+    describe("backward compatibility (no buyerCounts)", () => {
+      it("falls back to buyerAccountCount when buyerCounts is undefined", () => {
+        const step = computeBuyerSetupStep(5, 0);
+        expect(step.status).toBe("complete");
+        expect(step.helpText).toBe("5 B2B companies synced");
+      });
+
+      it("falls back to pending copy when neither exists", () => {
+        const step = computeBuyerSetupStep(0, 0);
+        expect(step.status).toBe("pending");
+        expect(step.helpText).toBe(
+          "Sync B2B companies or create tag rules to identify net-terms buyers"
+        );
+      });
     });
   });
 
