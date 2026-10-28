@@ -110,11 +110,11 @@ describeWithDb("seed account ID migration (DB)", () => {
   async function insertPayerAlias(opts: {
     id: string;
     buyerAccountId: string;
-    alias: string;
+    payerKey: string;
   }): Promise<void> {
     await sql`
-      INSERT INTO "PayerAlias" (id, "buyerAccountId", alias, source, "createdAt", "updatedAt")
-      VALUES (${opts.id}, ${opts.buyerAccountId}, ${opts.alias}, 'manual', NOW(), NOW())
+      INSERT INTO "PayerAlias" (id, "buyerAccountId", "payerKey", "createdAt")
+      VALUES (${opts.id}, ${opts.buyerAccountId}, ${opts.payerKey}, NOW())
     `;
   }
 
@@ -151,7 +151,7 @@ describeWithDb("seed account ID migration (DB)", () => {
     await insertPayerAlias({
       id: `alias-${suffix}-1`,
       buyerAccountId: oldAccountId,
-      alias: "test-alias@example.com",
+      payerKey: "test-alias@example.com",
     });
     await insertDraftOrder({
       draftOrderId: "gid:" + "//shopify/DraftOrder/2001",
@@ -198,7 +198,7 @@ describeWithDb("seed account ID migration (DB)", () => {
     await insertPayerAlias({
       id: `alias-${suffix}-2`,
       buyerAccountId: oldAccountId,
-      alias: "cascade-test@example.com",
+      payerKey: "cascade-test@example.com",
     });
     await insertDraftOrder({
       draftOrderId: "gid:" + "//shopify/DraftOrder/2002",
