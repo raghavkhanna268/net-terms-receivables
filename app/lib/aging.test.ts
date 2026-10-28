@@ -12,6 +12,8 @@ import {
   formatPaiseAmount,
   AGING_BUCKET_KEYS,
   BUCKET_BOUNDARIES,
+  extractOrderIdFromGid,
+  buildOrderAdminUrl,
   type OpenInvoice,
   type AgingBucketKey,
 } from "./aging";
@@ -530,6 +532,44 @@ describe("aging", () => {
         "61-90",
         "90+",
       ]);
+    });
+  });
+
+  describe("extractOrderIdFromGid", () => {
+    it("extracts numeric ID from valid order GID", () => {
+      expect(extractOrderIdFromGid("gid://shopify/Order/123456")).toBe("123456");
+    });
+
+    it("returns null for null input", () => {
+      expect(extractOrderIdFromGid(null)).toBeNull();
+    });
+
+    it("returns null for invalid GID format", () => {
+      expect(extractOrderIdFromGid("invalid")).toBeNull();
+    });
+
+    it("returns null for non-order GID", () => {
+      expect(extractOrderIdFromGid("gid://shopify/Product/123")).toBeNull();
+    });
+  });
+
+  describe("buildOrderAdminUrl", () => {
+    it("returns shopify://admin/orders URL with numeric ID", () => {
+      const url = buildOrderAdminUrl("gid://shopify/Order/123456");
+      expect(url).toBe("shopify://admin/orders/123456");
+    });
+
+    it("uses shopify:// protocol per App Bridge Navigation API docs", () => {
+      const url = buildOrderAdminUrl("gid://shopify/Order/789");
+      expect(url).toMatch(/^shopify:\/\/admin\/orders\/\d+$/);
+    });
+
+    it("returns null for null orderId", () => {
+      expect(buildOrderAdminUrl(null)).toBeNull();
+    });
+
+    it("returns null for invalid GID", () => {
+      expect(buildOrderAdminUrl("invalid")).toBeNull();
     });
   });
 });

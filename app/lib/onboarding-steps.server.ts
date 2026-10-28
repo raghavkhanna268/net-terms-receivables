@@ -201,6 +201,7 @@ export function computeValidationStep(
     actionUrl,
     actionLabel,
     helpText,
+    ...(actionUrl && { actionTarget: "_top" }),
   };
 }
 
@@ -249,6 +250,7 @@ export function computePaymentCustomizationStep(
     actionUrl,
     actionLabel,
     helpText,
+    ...(actionUrl && { actionTarget: "_top" }),
   };
 }
 

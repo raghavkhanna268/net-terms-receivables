@@ -394,3 +394,495 @@ describeWithDb("Reviewer CSV v3: Real matcher DB path", () => {
     });
   });
 });
+
+/**
+ * Amount window fallback tests.
+ *
+ * When a company has multiple location accounts with similar names (e.g.
+ * 'Test Buyer Co' and 'Test Buyer Co - Net-30'), fuzzy name matching may
+ * resolve to an account with no open invoices while a sibling account has
+ * the correct invoice. The matcher should fall back to the amount window
+ * to find candidates from other accounts.
+ */
+describeWithDb("Amount window fallback: resolved buyer with no invoices", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let _buyerAId: string;
+  let buyerBId: string;
+  let testImportId: string;
+  const paymentIds: string[] = [];
+
+  const runId = Date.now();
+  const TEST_SHOP_DOMAIN = `test-fallback-${runId}.myshopify.com`;
+
+  const buyerAIdValue = `buyer-a-fallback-${runId}`;
+  const buyerBIdValue = `buyer-b-fallback-${runId}`;
+  const invoice1001Id = `invoice-fallback-1001-${runId}`;
+  const invoice1002Id = `invoice-fallback-1002-${runId}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create test shop
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create buyer A: 'Test Buyer Co' - exact name match, will win buyer resolution
+    // Created FIRST so it appears first in query results (tests ORDER BY)
+    const [buyerA] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerAIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/fallback-a', 'gid://shopify/CompanyLocation/fallback-a',
+        'Test Buyer Co', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    _buyerAId = buyerA.id;
+
+    // Create buyer B: 'Test Buyer Co - Net-30' - will have invoices
+    // Created SECOND with slightly later timestamp
+    const [buyerB] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerBIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/fallback-b', 'gid://shopify/CompanyLocation/fallback-b',
+        'Test Buyer Co - Net-30', 100000, 'OK', NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second'
+      )
+      RETURNING id
+    `;
+    buyerBId = buyerB.id;
+
+    // Buyer A has NO invoices (the bug condition)
+
+    // Buyer B has invoices #1001 and #1002
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoice1001Id}, ${testShopId}, ${buyerBId},
+        'gid://shopify/Order/fallback-1001', '#1001', 10000, 'open', 10000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoice1002Id}, ${testShopId}, ${buyerBId},
+        'gid://shopify/Order/fallback-1002', '#1002', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+    paymentIds.length = 0;
+  });
+
+  async function seedFallbackPayments(): Promise<void> {
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'hdfc', 'fallback-test.csv', 2, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+
+    // L14 equivalent: UPI-TEST BUYER CO-SYNT0002-#1002, ₹5,000
+    const [payment1] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        '2026-10-23'::date, 5000, 'UPI', 'SYNT0002',
+        'TEST BUYER CO', 'UPI-TEST BUYER CO-SYNT0002-#1002', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    paymentIds.push(payment1.id);
+
+    // L15 equivalent: IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT, ₹2,500
+    const [payment2] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        '2026-10-24'::date, 2500, 'IMPS', 'SYNT0003',
+        'TEST BUYER CO', 'IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    paymentIds.push(payment2.id);
+  }
+
+  async function getMatchesForPayment(paymentId: string): Promise<Array<{
+    invoiceId: string;
+    invoiceName: string;
+    score: number;
+    amount: number;
+    buyerAccountId: string;
+  }>> {
+    const matches = await sql<Array<{
+      invoiceId: string;
+      invoiceName: string;
+      score: number;
+      amount: string;
+      buyerAccountId: string;
+    }>>`
+      SELECT 
+        m."invoiceId" AS "invoiceId",
+        i.name AS "invoiceName",
+        m.score,
+        m.amount,
+        i."buyerAccountId" AS "buyerAccountId"
+      FROM "Match" m
+      JOIN "Invoice" i ON i.id = m."invoiceId"
+      WHERE m."paymentId" = ${paymentId}
+        AND m.state = 'suggested'
+      ORDER BY m.score DESC
+    `;
+    return matches.map((m) => ({
+      ...m,
+      amount: parseFloat(m.amount),
+    }));
+  }
+
+  /**
+   * L14: UPI-TEST BUYER CO-SYNT0002-#1002, ₹5,000
+   *
+   * Buyer A ('Test Buyer Co') wins the name match (exact match).
+   * Buyer A has no invoices, so fallback to amount window.
+   * Amount window returns buyer B's invoices.
+   * Scoring:
+   * - invoice_ref: +30 (#1002 in narration matches invoice name)
+   * - amount_exact: +20 (₹5,000 = ₹5,000)
+   * - payer_name: +8 ('TEST BUYER CO' fuzzy matches 'Test Buyer Co - Net-30')
+   * - Total: 58 points, MEDIUM band
+   */
+  it("L14: fallback finds #1002 from sibling account, score 58, medium", async () => {
+    await seedFallbackPayments();
+    await runMatcher(sql, testShopId);
+
+    const matches = await getMatchesForPayment(paymentIds[0]);
+    expect(matches.length).toBeGreaterThan(0);
+
+    const topMatch = matches[0];
+    expect(topMatch.invoiceName).toBe("#1002");
+    expect(topMatch.score).toBe(58);
+    expect(getConfidenceBand(topMatch.score)).toBe("medium");
+    expect(topMatch.amount).toBe(5000);
+    // Verify invoice is from buyer B (sibling account)
+    expect(topMatch.buyerAccountId).toBe(buyerBId);
+  });
+
+  /**
+   * L15: IMPS-SYNT0003-TEST BUYER CO-#1002 PART PAYMENT, ₹2,500
+   *
+   * Same fallback path as L14.
+   * Scoring:
+   * - invoice_ref: +30 (#1002 in narration matches invoice name)
+   * - amount_partial: +10 (₹2,500 < ₹5,000)
+   * - payer_name: +8 ('TEST BUYER CO' fuzzy matches 'Test Buyer Co - Net-30')
+   * - Total: 48 points, LOW band
+   */
+  it("L15: fallback finds #1002 from sibling account, score 48, low", async () => {
+    await seedFallbackPayments();
+    await runMatcher(sql, testShopId);
+
+    const matches = await getMatchesForPayment(paymentIds[1]);
+    expect(matches.length).toBeGreaterThan(0);
+
+    const topMatch = matches[0];
+    expect(topMatch.invoiceName).toBe("#1002");
+    expect(topMatch.score).toBe(48);
+    expect(getConfidenceBand(topMatch.score)).toBe("low");
+    expect(topMatch.amount).toBe(2500);
+    expect(topMatch.buyerAccountId).toBe(buyerBId);
+  });
+
+  it("both payments produce matches via fallback", async () => {
+    await seedFallbackPayments();
+    const result = await runMatcher(sql, testShopId);
+    expect(result.paymentsProcessed).toBe(2);
+    expect(result.matchesCreated).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Guard case: resolved buyer with candidates must NOT take fallback.
+ *
+ * When the resolved buyer DOES have candidate invoices, the matcher
+ * should only suggest those, not invoices from other buyers via fallback.
+ */
+describeWithDb("Guard: resolved buyer with candidates skips fallback", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let buyerWithInvoicesId: string;
+  let otherBuyerId: string;
+  let testImportId: string;
+  const paymentIds: string[] = [];
+
+  const runId = Date.now();
+  const TEST_SHOP_DOMAIN = `test-guard-${runId}.myshopify.com`;
+
+  const buyerWithInvoicesIdValue = `buyer-with-invoices-${runId}`;
+  const otherBuyerIdValue = `buyer-other-${runId}`;
+  const invoiceMatchId = `invoice-guard-match-${runId}`;
+  const invoiceOtherId = `invoice-guard-other-${runId}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Buyer that will be resolved and HAS invoices
+    const [buyerWithInvoices] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerWithInvoicesIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/guard-main', 'gid://shopify/CompanyLocation/guard-main',
+        'Guard Test Co', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    buyerWithInvoicesId = buyerWithInvoices.id;
+
+    // Other buyer in the shop (should NOT appear in results)
+    const [otherBuyer] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${otherBuyerIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/guard-other', 'gid://shopify/CompanyLocation/guard-other',
+        'Other Company Ltd', 100000, 'OK', NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second'
+      )
+      RETURNING id
+    `;
+    otherBuyerId = otherBuyer.id;
+
+    // Invoice for the resolved buyer
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceMatchId}, ${testShopId}, ${buyerWithInvoicesId},
+        'gid://shopify/Order/guard-2001', '#2001', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+
+    // Invoice for other buyer - same amount, inside amount window
+    // Should NOT be suggested because resolved buyer has candidates
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceOtherId}, ${testShopId}, ${otherBuyerId},
+        'gid://shopify/Order/guard-2002', '#2002', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+    paymentIds.length = 0;
+  });
+
+  async function seedGuardPayment(): Promise<void> {
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'hdfc', 'guard-test.csv', 1, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+
+    // Payment that matches 'Guard Test Co'
+    const [payment] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        '2026-10-23'::date, 5000, 'NEFT', 'GUARD001',
+        'GUARD TEST CO', 'NEFT-GUARD001-GUARD TEST CO-#2001', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    paymentIds.push(payment.id);
+  }
+
+  it("suggests only resolved buyer's invoice, not other buyer's invoice via fallback", async () => {
+    await seedGuardPayment();
+    await runMatcher(sql, testShopId);
+
+    const matches = await sql<Array<{
+      invoiceId: string;
+      invoiceName: string;
+      buyerAccountId: string;
+    }>>`
+      SELECT 
+        m."invoiceId" AS "invoiceId",
+        i.name AS "invoiceName",
+        i."buyerAccountId" AS "buyerAccountId"
+      FROM "Match" m
+      JOIN "Invoice" i ON i.id = m."invoiceId"
+      WHERE m."paymentId" = ${paymentIds[0]}
+        AND m.state = 'suggested'
+    `;
+
+    // Should have match(es) from resolved buyer only
+    expect(matches.length).toBeGreaterThan(0);
+    
+    // All matches should be from the resolved buyer
+    for (const match of matches) {
+      expect(match.buyerAccountId).toBe(buyerWithInvoicesId);
+    }
+
+    // Verify other buyer's invoice is NOT suggested
+    const otherBuyerMatches = matches.filter(m => m.buyerAccountId === otherBuyerId);
+    expect(otherBuyerMatches.length).toBe(0);
+  });
+});
+
+/**
+ * Test that getBuyersWithAliases returns accounts ordered by createdAt then id.
+ */
+describeWithDb("getBuyersWithAliases ordering", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+
+  const runId = Date.now();
+  const TEST_SHOP_DOMAIN = `test-order-${runId}.myshopify.com`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Create buyers with explicit createdAt to test ordering
+    // Buyer C created at base time
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${'buyer-order-c-' + runId}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/order-c', 'gid://shopify/CompanyLocation/order-c',
+        'Order Test C', 100000, 'OK', NOW(), NOW()
+      )
+    `;
+
+    // Buyer A created 1 second later
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${'buyer-order-a-' + runId}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/order-a', 'gid://shopify/CompanyLocation/order-a',
+        'Order Test A', 100000, 'OK', NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second'
+      )
+    `;
+
+    // Buyer B created 2 seconds later
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${'buyer-order-b-' + runId}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/order-b', 'gid://shopify/CompanyLocation/order-b',
+        'Order Test B', 100000, 'OK', NOW() + INTERVAL '2 seconds', NOW() + INTERVAL '2 seconds'
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      await sql.end();
+    }
+  });
+
+  it("returns buyers ordered by createdAt then id", async () => {
+    const { getBuyersWithAliases } = await import("../../app/lib/matching/queries.server.js");
+    const buyers = await getBuyersWithAliases(sql, testShopId);
+
+    // Should return buyers in creation order: C, A, B
+    expect(buyers.length).toBe(3);
+    expect(buyers[0].name).toBe("Order Test C");
+    expect(buyers[1].name).toBe("Order Test A");
+    expect(buyers[2].name).toBe("Order Test B");
+  });
+});
