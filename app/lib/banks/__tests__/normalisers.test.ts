@@ -168,74 +168,102 @@ describe("normalisers", () => {
       });
     });
 
-    describe("numeric Excel serial dates", () => {
-      it("converts serial 46310 to 2026-10-15", () => {
-        expect(parseIndianDate(46310)).toBe("2026-10-15");
+    describe("numeric Excel serial dates (opt-in)", () => {
+      describe("without option (main's behavior)", () => {
+        it("returns null for numeric serial 46310", () => {
+          expect(parseIndianDate(46310)).toBeNull();
+        });
+
+        it("returns null for numeric serial 46313", () => {
+          expect(parseIndianDate(46313)).toBeNull();
+        });
+
+        it("returns null for string serial '46310'", () => {
+          expect(parseIndianDate("46310")).toBeNull();
+        });
+
+        it("returns null for string serial '46313'", () => {
+          expect(parseIndianDate("46313")).toBeNull();
+        });
       });
 
-      it("converts serial 46313 to 2026-10-18", () => {
-        expect(parseIndianDate(46313)).toBe("2026-10-18");
-      });
+      describe("with allowExcelSerial: true", () => {
+        it("converts numeric serial 46310 to 2026-10-15", () => {
+          expect(parseIndianDate(46310, { allowExcelSerial: true })).toBe("2026-10-15");
+        });
 
-      it("converts serial 46315 to 2026-10-20", () => {
-        expect(parseIndianDate(46315)).toBe("2026-10-20");
-      });
+        it("converts numeric serial 46313 to 2026-10-18", () => {
+          expect(parseIndianDate(46313, { allowExcelSerial: true })).toBe("2026-10-18");
+        });
 
-      it("converts boundary serial 32874 to 1990-01-01", () => {
-        expect(parseIndianDate(32874)).toBe("1990-01-01");
-      });
+        it("converts numeric serial 46315 to 2026-10-20", () => {
+          expect(parseIndianDate(46315, { allowExcelSerial: true })).toBe("2026-10-20");
+        });
 
-      it("converts boundary serial 73415 to 2100-12-31", () => {
-        expect(parseIndianDate(73415)).toBe("2100-12-31");
-      });
+        it("converts string serial '46310' to 2026-10-15", () => {
+          expect(parseIndianDate("46310", { allowExcelSerial: true })).toBe("2026-10-15");
+        });
 
-      it("rejects serial below range (32873)", () => {
-        expect(parseIndianDate(32873)).toBeNull();
-      });
+        it("converts string serial '46313' to 2026-10-18", () => {
+          expect(parseIndianDate("46313", { allowExcelSerial: true })).toBe("2026-10-18");
+        });
 
-      it("rejects serial above range (73416)", () => {
-        expect(parseIndianDate(73416)).toBeNull();
-      });
+        it("converts boundary serial 32874 to 1990-01-01", () => {
+          expect(parseIndianDate(32874, { allowExcelSerial: true })).toBe("1990-01-01");
+        });
 
-      it("rejects out-of-range serial 0", () => {
-        expect(parseIndianDate(0)).toBeNull();
-      });
+        it("converts boundary serial 73415 to 2100-12-31", () => {
+          expect(parseIndianDate(73415, { allowExcelSerial: true })).toBe("2100-12-31");
+        });
 
-      it("rejects out-of-range serial 100", () => {
-        expect(parseIndianDate(100)).toBeNull();
-      });
+        it("rejects serial below range (32873)", () => {
+          expect(parseIndianDate(32873, { allowExcelSerial: true })).toBeNull();
+        });
 
-      it("rejects out-of-range serial 2958466 (way above range)", () => {
-        expect(parseIndianDate(2958466)).toBeNull();
-      });
+        it("rejects serial above range (73416)", () => {
+          expect(parseIndianDate(73416, { allowExcelSerial: true })).toBeNull();
+        });
 
-      it("rejects negative serial", () => {
-        expect(parseIndianDate(-1)).toBeNull();
-      });
+        it("rejects out-of-range serial 0", () => {
+          expect(parseIndianDate(0, { allowExcelSerial: true })).toBeNull();
+        });
 
-      it("rejects NaN", () => {
-        expect(parseIndianDate(NaN)).toBeNull();
-      });
+        it("rejects out-of-range serial 100", () => {
+          expect(parseIndianDate(100, { allowExcelSerial: true })).toBeNull();
+        });
 
-      it("drops fractional time part (46310.75 = 2026-10-15)", () => {
-        expect(parseIndianDate(46310.75)).toBe("2026-10-15");
-      });
+        it("rejects out-of-range serial 2958466 (way above range)", () => {
+          expect(parseIndianDate(2958466, { allowExcelSerial: true })).toBeNull();
+        });
 
-      it("handles fractional serial at boundary (32874.5 = 1990-01-01)", () => {
-        expect(parseIndianDate(32874.5)).toBe("1990-01-01");
+        it("rejects negative serial", () => {
+          expect(parseIndianDate(-1, { allowExcelSerial: true })).toBeNull();
+        });
+
+        it("rejects NaN", () => {
+          expect(parseIndianDate(NaN, { allowExcelSerial: true })).toBeNull();
+        });
+
+        it("drops fractional time part (46310.75 = 2026-10-15)", () => {
+          expect(parseIndianDate(46310.75, { allowExcelSerial: true })).toBe("2026-10-15");
+        });
+
+        it("handles fractional serial at boundary (32874.5 = 1990-01-01)", () => {
+          expect(parseIndianDate(32874.5, { allowExcelSerial: true })).toBe("1990-01-01");
+        });
       });
     });
 
     describe("numeric Excel serial timezone independence", () => {
       it("returns same date under TZ=UTC", () => {
-        const result = parseIndianDate(46310);
+        const result = parseIndianDate(46310, { allowExcelSerial: true });
         expect(result).toBe("2026-10-15");
       });
 
       it("returns same date regardless of local timezone (no shift)", () => {
-        expect(parseIndianDate(46310)).toBe("2026-10-15");
-        expect(parseIndianDate(46313)).toBe("2026-10-18");
-        expect(parseIndianDate(46315)).toBe("2026-10-20");
+        expect(parseIndianDate(46310, { allowExcelSerial: true })).toBe("2026-10-15");
+        expect(parseIndianDate(46313, { allowExcelSerial: true })).toBe("2026-10-18");
+        expect(parseIndianDate(46315, { allowExcelSerial: true })).toBe("2026-10-20");
       });
     });
   });

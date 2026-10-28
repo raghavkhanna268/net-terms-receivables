@@ -162,7 +162,7 @@ export async function parseAxisStatement(
       if (pendingNarration.length > 0) {
         lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
       }
-      const normalized = await normalizeAxisRow(lastValidRow);
+      const normalized = await normalizeAxisRow(lastValidRow, isSpreadsheet);
       if (normalized) {
         transactions.push(normalized);
       } else {
@@ -211,7 +211,7 @@ export async function parseAxisStatement(
     if (pendingNarration.length > 0) {
       lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
     }
-    const normalized = await normalizeAxisRow(lastValidRow);
+    const normalized = await normalizeAxisRow(lastValidRow, isSpreadsheet);
     if (normalized) {
       transactions.push(normalized);
     } else {
@@ -353,16 +353,17 @@ function extractAxisRow(
 
 /**
  * Normalize a raw Axis row to standard format.
+ * @param isSpreadsheet True for xlsx/xls files where serial dates are accepted
  */
-async function normalizeAxisRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
-  // Parse date (handles strings, Date objects, and numeric Excel serials)
-  const date = parseIndianDate(raw.dateRaw);
+async function normalizeAxisRow(raw: RawTxnRow, isSpreadsheet: boolean): Promise<NormalisedTxn | null> {
+  // Parse date (handles strings, Date objects, and numeric Excel serials when allowed)
+  const date = parseIndianDate(raw.dateRaw, { allowExcelSerial: isSpreadsheet });
   if (!date) {
     return null;
   }
 
   const valueDate = raw.valueDateRaw
-    ? parseIndianDate(raw.valueDateRaw) ?? undefined
+    ? parseIndianDate(raw.valueDateRaw, { allowExcelSerial: isSpreadsheet }) ?? undefined
     : undefined;
 
   // Determine amount and direction

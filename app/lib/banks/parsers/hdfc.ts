@@ -154,7 +154,7 @@ export async function parseHdfcStatement(
       if (pendingNarration.length > 0) {
         lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
       }
-      const normalized = await normalizeHdfcRow(lastValidRow);
+      const normalized = await normalizeHdfcRow(lastValidRow, isSpreadsheet);
       if (normalized) {
         transactions.push(normalized);
       } else {
@@ -204,7 +204,7 @@ export async function parseHdfcStatement(
     if (pendingNarration.length > 0) {
       lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
     }
-    const normalized = await normalizeHdfcRow(lastValidRow);
+    const normalized = await normalizeHdfcRow(lastValidRow, isSpreadsheet);
     if (normalized) {
       transactions.push(normalized);
     } else {
@@ -359,16 +359,17 @@ function extractHdfcRow(
 
 /**
  * Normalize a raw HDFC row to standard format.
+ * @param isSpreadsheet True for xlsx/xls files where serial dates are accepted
  */
-async function normalizeHdfcRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
-  // Parse date (handles strings, Date objects, and numeric Excel serials)
-  const date = parseIndianDate(raw.dateRaw);
+async function normalizeHdfcRow(raw: RawTxnRow, isSpreadsheet: boolean): Promise<NormalisedTxn | null> {
+  // Parse date (handles strings, Date objects, and numeric Excel serials when allowed)
+  const date = parseIndianDate(raw.dateRaw, { allowExcelSerial: isSpreadsheet });
   if (!date) {
     return null;
   }
 
   const valueDate = raw.valueDateRaw
-    ? parseIndianDate(raw.valueDateRaw) ?? undefined
+    ? parseIndianDate(raw.valueDateRaw, { allowExcelSerial: isSpreadsheet }) ?? undefined
     : undefined;
 
   // Determine amount and direction

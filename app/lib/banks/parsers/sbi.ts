@@ -163,7 +163,7 @@ export async function parseSbiStatement(
       if (pendingNarration.length > 0) {
         lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
       }
-      const normalized = await normalizeSbiRow(lastValidRow);
+      const normalized = await normalizeSbiRow(lastValidRow, isSpreadsheet);
       if (normalized) {
         transactions.push(normalized);
       } else {
@@ -212,7 +212,7 @@ export async function parseSbiStatement(
     if (pendingNarration.length > 0) {
       lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
     }
-    const normalized = await normalizeSbiRow(lastValidRow);
+    const normalized = await normalizeSbiRow(lastValidRow, isSpreadsheet);
     if (normalized) {
       transactions.push(normalized);
     } else {
@@ -364,16 +364,17 @@ function extractSbiRow(
 
 /**
  * Normalize a raw SBI row to standard format.
+ * @param isSpreadsheet True for xlsx/xls files where serial dates are accepted
  */
-async function normalizeSbiRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
-  // Parse date (handles strings, Date objects, and numeric Excel serials)
-  const date = parseIndianDate(raw.dateRaw);
+async function normalizeSbiRow(raw: RawTxnRow, isSpreadsheet: boolean): Promise<NormalisedTxn | null> {
+  // Parse date (handles strings, Date objects, and numeric Excel serials when allowed)
+  const date = parseIndianDate(raw.dateRaw, { allowExcelSerial: isSpreadsheet });
   if (!date) {
     return null;
   }
 
   const valueDate = raw.valueDateRaw
-    ? parseIndianDate(raw.valueDateRaw) ?? undefined
+    ? parseIndianDate(raw.valueDateRaw, { allowExcelSerial: isSpreadsheet }) ?? undefined
     : undefined;
 
   // Determine amount and direction

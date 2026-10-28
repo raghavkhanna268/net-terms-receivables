@@ -955,7 +955,7 @@ describe("Dedupe hash stability (SYNTHETIC)", () => {
 describe("XLSX/XLS only serial acceptance (SYNTHETIC)", () => {
   it("CSV with '46310' in date column stays unparsed (main's outcome)", async () => {
     // On main, "46310" in a CSV date column would fail to parse (not a valid date format)
-    // The row should fail with ROW_PARSE_FAILED or be skipped
+    // The row should fail with ROW_PARSE_FAILED or NORMALIZE_FAILED
     const csvContent = [
       "HDFC BANK",
       "Statement of Account",
@@ -970,9 +970,11 @@ describe("XLSX/XLS only serial acceptance (SYNTHETIC)", () => {
     expect(result.detection.bank).toBe("HDFC");
     // The row should not parse (serial string rejected for CSV)
     expect(result.transactions).toHaveLength(0);
-    // Should have error or be skipped
-    const errors = result.errors.filter((e) => e.code === "ROW_PARSE_FAILED");
-    expect(errors.length).toBeGreaterThanOrEqual(0);
+    // Must have at least one ROW_PARSE_FAILED or NORMALIZE_FAILED error (main's behavior)
+    const errors = result.errors.filter(
+      (e) => e.code === "ROW_PARSE_FAILED" || e.code === "NORMALIZE_FAILED"
+    );
+    expect(errors.length).toBeGreaterThanOrEqual(1);
   });
 
   it("XLSX with '46310' (string serial) in date column parses to 2026-10-15", async () => {
@@ -1025,5 +1027,100 @@ describe("XLSX/XLS only serial acceptance (SYNTHETIC)", () => {
     expect(result.detection.bank).toBe("HDFC");
     expect(result.transactions).toHaveLength(1);
     expect(result.transactions[0].date).toBe("2026-10-15");
+  });
+
+  it("CSV with valid transaction date and serial value-date '46313': valueDate undefined, hash matches main", async () => {
+    // Scenario: CSV with valid transaction date "15/10/2026" and value-date "46313" (serial string)
+    // On main: valueDateRaw "46313" failed parseIndianDate, valueDate=undefined, hash has no vdate
+    // On new: CSV files don't pass allowExcelSerial, so serial strings return null, valueDate=undefined
+    // Hash should match main's (no vdate component)
+    const csvContent = [
+      "HDFC BANK",
+      "Statement of Account",
+      "",
+      "Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance",
+      "15/10/2026,NEFT CR-SYNTHETIC CSV SERIAL VDATE TEST,REFCSVVD01,46313,,10000,100000",
+    ].join("\n");
+
+    const file = new File([csvContent], "hdfc-csv-serial-valuedate.csv", { type: "text/csv" });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions).toHaveLength(1);
+
+    const txn = result.transactions[0];
+    expect(txn.date).toBe("2026-10-15");
+    // valueDate should be undefined because CSV doesn't enable serial parsing
+    expect(txn.valueDate).toBeUndefined();
+
+    // Construct what main would have hashed (no vdate since serial failed to parse)
+    // date:2026-10-15|amount:1000000|dir:CR|nar:neft cr-synthetic csv serial vdate test|bal:10000000|ref:REFCSVVD01
+    const expectedNar = "neft cr-synthetic csv serial vdate test";
+    const mainCanonical = `date:2026-10-15|amount:1000000|dir:CR|nar:${expectedNar}|bal:10000000|ref:REFCSVVD01`;
+
+    const encoder = new TextEncoder();
+    const data = encoder.encode(mainCanonical);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = new Uint8Array(hashBuffer);
+    const expectedHash = Array.from(hashArray)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    expect(txn.dedupeKey).toBe(`sha256:${expectedHash}`);
+  });
+
+  it("XLSX with same row as CSV: valueDate is 2026-10-18, hash matches main's (no vdate)", async () => {
+    // Same data as CSV test but as XLSX - serial value-date should parse but hash should still match main's
+    // On main: valueDateRaw "46313" failed parseIndianDate, hash has no vdate
+    // On new: XLSX enables serial parsing, valueDate=2026-10-18, but hash excludes serial-derived vdate
+    const header = [
+      "Date",
+      "Narration",
+      "Chq./Ref.No.",
+      "Value Dt",
+      "Withdrawal Amt.",
+      "Deposit Amt.",
+      "Closing Balance",
+    ];
+    const preamble = [["HDFC BANK"], ["Statement"], [], header];
+    // Transaction date as normal text "15/10/2026", value-date as serial string "46313"
+    const dataRows = [["15/10/2026", "NEFT CR-SYNTHETIC CSV SERIAL VDATE TEST", "REFCSVVD01", "46313", "", "10000", "100000"]];
+    const allRows = [...preamble, ...dataRows];
+    const ws = XLSX.utils.aoa_to_sheet(allRows);
+
+    // Ensure value-date cell is a string "46313" (serial string)
+    ws["D5"] = { t: "s", v: "46313" };
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Statement");
+    const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+
+    const file = new File([buf], "hdfc-xlsx-serial-valuedate.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const result = await parseBankStatement(file);
+
+    expect(result.detection.bank).toBe("HDFC");
+    expect(result.transactions).toHaveLength(1);
+
+    const txn = result.transactions[0];
+    expect(txn.date).toBe("2026-10-15");
+    // valueDate should be parsed from serial for XLSX
+    expect(txn.valueDate).toBe("2026-10-18");
+
+    // Hash should match main's (no vdate since serial was unparseable on main)
+    // date:2026-10-15|amount:1000000|dir:CR|nar:neft cr-synthetic csv serial vdate test|bal:10000000|ref:REFCSVVD01
+    const expectedNar = "neft cr-synthetic csv serial vdate test";
+    const mainCanonical = `date:2026-10-15|amount:1000000|dir:CR|nar:${expectedNar}|bal:10000000|ref:REFCSVVD01`;
+
+    const encoder = new TextEncoder();
+    const data = encoder.encode(mainCanonical);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = new Uint8Array(hashBuffer);
+    const expectedHash = Array.from(hashArray)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    expect(txn.dedupeKey).toBe(`sha256:${expectedHash}`);
   });
 });

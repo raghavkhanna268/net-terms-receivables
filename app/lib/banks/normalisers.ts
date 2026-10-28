@@ -60,6 +60,12 @@ function excelSerialToIsoDate(serial: number): string {
   return formatIsoDate(year, month, day);
 }
 
+/** Options for parseIndianDate */
+export interface ParseDateOptions {
+  /** Allow Excel serial dates (numbers and 5-digit strings). Default: false (main's behavior). */
+  allowExcelSerial?: boolean;
+}
+
 /**
  * Parse Indian date formats to ISO 8601 (YYYY-MM-DD).
  *
@@ -71,15 +77,21 @@ function excelSerialToIsoDate(serial: number): string {
  * - dd-MMM-yyyy (ICICI corporate: 15-Mar-2026)
  * - dd-MMM-yy (15-Mar-26)
  * - Date objects from Excel (converted using UTC to avoid timezone shifts)
- * - Numeric Excel serial dates (in detected date columns only, range 1990-2100)
+ * - Numeric Excel serial dates (ONLY when allowExcelSerial: true, range 1990-2100)
  *
  * @param input Date string, Date object, or numeric Excel serial
+ * @param options Optional parsing options
  * @returns ISO 8601 date string (YYYY-MM-DD) or null if unparseable/invalid
  */
-export function parseIndianDate(input: string | Date | number | null | undefined): string | null {
+export function parseIndianDate(
+  input: string | Date | number | null | undefined,
+  options?: ParseDateOptions
+): string | null {
   if (input === null || input === undefined) {
     return null;
   }
+
+  const allowExcelSerial = options?.allowExcelSerial ?? false;
 
   // Handle Date objects (from Excel parser) - use UTC getters to avoid timezone shifts
   if (input instanceof Date) {
@@ -98,7 +110,11 @@ export function parseIndianDate(input: string | Date | number | null | undefined
   }
 
   // Handle numeric Excel serial dates (raw numbers in date columns)
+  // Only when explicitly enabled - this is OPT-IN to preserve main's behavior
   if (typeof input === "number") {
+    if (!allowExcelSerial) {
+      return null; // main's behavior: numbers not parseable as dates
+    }
     if (!isValidExcelSerial(input)) {
       return null;
     }
@@ -152,7 +168,8 @@ export function parseIndianDate(input: string | Date | number | null | undefined
 
   // Handle string representation of Excel serial date (5-digit number, optionally fractional)
   // This handles XLSX cells with General format where raw:false returns the number as a string
-  if (looksLikeExcelSerialString(str)) {
+  // Only when explicitly enabled - this is OPT-IN to preserve main's behavior
+  if (allowExcelSerial && looksLikeExcelSerialString(str)) {
     const serial = parseFloat(str);
     return excelSerialToIsoDate(serial);
   }
