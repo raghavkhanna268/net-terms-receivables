@@ -332,6 +332,7 @@ async function updateTaggedCustomerIfExists(
   if (piiMode === "fallback") {
     // Preserve existing PII when fallback (ACCESS_DENIED retry) is used
     // Use CASE WHEN to only update if new value is non-null, preserving existing otherwise
+    // Cast params to TEXT to help PostgreSQL infer types when value is null
     await sql`
       UPDATE s8_tagged_customers
       SET 
@@ -342,8 +343,8 @@ async function updateTaggedCustomerIfExists(
           WHEN tag_active = true AND ${tagActive} = false THEN NOW()
           ELSE tag_deactivated_at
         END,
-        email = CASE WHEN ${effectiveEmail} IS NOT NULL THEN ${effectiveEmail} ELSE email END,
-        display_name = CASE WHEN ${effectiveDisplayName} IS NOT NULL THEN ${effectiveDisplayName} ELSE display_name END
+        email = CASE WHEN ${effectiveEmail}::TEXT IS NOT NULL THEN ${effectiveEmail}::TEXT ELSE email END,
+        display_name = CASE WHEN ${effectiveDisplayName}::TEXT IS NOT NULL THEN ${effectiveDisplayName}::TEXT ELSE display_name END
       WHERE shop_id = ${shopId} AND customer_id = ${customerId}
     `;
   } else {
