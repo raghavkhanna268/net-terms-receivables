@@ -318,6 +318,9 @@ export function resolveSeedMode(args: SeedModeArgs, env: SeedModeEnv): SeedModeR
  * Check if a DATABASE_URL host is localhost (127.0.0.1, ::1, or "localhost").
  * Returns true if the host is local OR if SEED_MIGRATE_ALLOW_NONLOCAL=1 is set.
  * Never throws; invalid/unparseable URLs return false. Never prints the URL.
+ *
+ * Also returns false if libpq-style `host` or `hostaddr` query params are present,
+ * since those override the URL hostname and could point to a non-local server.
  */
 export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
   if (process.env.SEED_MIGRATE_ALLOW_NONLOCAL === "1") {
@@ -325,6 +328,10 @@ export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
   }
   try {
     const url = new URL(databaseUrl);
+    // Reject if libpq-style host/hostaddr query params are present (they override hostname)
+    if (url.searchParams.has("host") || url.searchParams.has("hostaddr")) {
+      return false;
+    }
     // URL.hostname keeps brackets for IPv6: postgres://u@[::1]:5432/db -> "[::1]"
     // Strip surrounding brackets before comparing, so [::1] becomes ::1
     const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
