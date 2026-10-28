@@ -1,7 +1,7 @@
 # SYNTHETIC REVIEWER TEST DATA V2 - NOT REAL BANK DATA
 # Purpose: Second fixture for e2e bank import workflow with different statement hash
 # All names, accounts, UTRs are fabricated with SYNT marker - FICTIONAL DATA ONLY
-# NOTE: This fixture intentionally has NO credits matching #1001 - only #1002 matches
+# NOTE: This fixture has NO credits matching #1001 - zero suggestions reference #1001
 
 HDFC BANK
 Statement of Account
@@ -10,19 +10,19 @@ Account Type: Savings Account
 Branch: SYNTHETIC REVIEW BRANCH V2
 
 Date,Narration,Chq./Ref.No.,Value Dt,Withdrawal Amt.,Deposit Amt.,Closing Balance
-27/10/26,Opening Balance,,,,,"75,000.00"
-27/10/26,UPI-TEST BUYER CO-SYNT0011-#1002,SYNT0011,27/10/26,,"5,000.00","80,000.00"
-28/10/26,IMPS-SYNT0012-TEST BUYER CO-#1002 PARTIAL,SYNT0012,28/10/26,,"2,000.00","82,000.00"
-28/10/26,NEFT-SYNT0013-ACME CORP-PAYMENT,SYNT0013,28/10/26,,"3,500.00","85,500.00"
-29/10/26,RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE,SYNT0014,29/10/26,,"7,000.00","92,500.00"
-29/10/26,SYNT0015-SERVICE CHARGES,SYNT0015,29/10/26,"500.00",,"92,000.00"
+24/10/26,Opening Balance,,,,,"75,000.00"
+24/10/26,UPI-TEST BUYER CO-SYNT0011-#1002,SYNT0011,24/10/26,,"5,000.00","80,000.00"
+25/10/26,IMPS-SYNT0012-TEST BUYER CO-#1002 PARTIAL,SYNT0012,25/10/26,,"2,000.00","82,000.00"
+25/10/26,NEFT-SYNT0013-ACME CORP-PAYMENT,SYNT0013,25/10/26,,"3,500.00","85,500.00"
+26/10/26,RTGS-SYNT0014-UNKNOWN SENDER-ADVANCE,SYNT0014,26/10/26,,"1,500.00","87,000.00"
+26/10/26,SYNT0015-SERVICE CHARGES,SYNT0015,26/10/26,"500.00",,"86,500.00"
 
-Total,,,,"500.00","17,500.00",
+Total,,,,"500.00","12,000.00",
 
 Statement Summary
 Opening Balance: 75,000.00
-Total Deposits: 17,500.00
+Total Deposits: 12,000.00
 Total Withdrawals: 500.00
-Closing Balance: 92,000.00
+Closing Balance: 86,500.00
 
 This is a computer generated statement and does not require signature.
