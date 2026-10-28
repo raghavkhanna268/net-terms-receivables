@@ -321,10 +321,19 @@ function extractIciciRow(
     return null;
   }
 
-  // Check if date looks valid (contains digits)
-  const dateStr = dateRaw instanceof Date ? dateRaw.toISOString() : String(dateRaw);
-  if (!dateStr.match(/\d/) || dateStr.length < 6) {
-    return null;
+  // Check if date looks valid:
+  // - Date objects are valid
+  // - Numbers are valid (Excel serial dates handled by parseIndianDate)
+  // - Strings must contain digits and be at least 6 chars
+  if (dateRaw instanceof Date) {
+    // Date object - OK
+  } else if (typeof dateRaw === "number") {
+    // Numeric Excel serial - OK, parseIndianDate will validate range
+  } else {
+    const dateStr = String(dateRaw);
+    if (!dateStr.match(/\d/) || dateStr.length < 6) {
+      return null;
+    }
   }
 
   // Skip rows where narration is just "0.00" or similar (autosweep artifacts)
@@ -333,11 +342,13 @@ function extractIciciRow(
   }
 
   const valueDateCell = columns.valueDateCol !== undefined ? row[columns.valueDateCol] : undefined;
-  const valueDateRaw: string | Date | undefined =
+  const valueDateRaw: string | Date | number | undefined =
     valueDateCell != null
       ? valueDateCell instanceof Date
         ? valueDateCell
-        : String(valueDateCell)
+        : typeof valueDateCell === "number"
+          ? valueDateCell
+          : String(valueDateCell)
       : undefined;
 
   // Normalize ICICI ref
@@ -345,7 +356,7 @@ function extractIciciRow(
   const normalizedRef = normalizeIciciRef(rawRef);
 
   return {
-    dateRaw: dateRaw instanceof Date ? dateRaw : dateStr,
+    dateRaw: dateRaw instanceof Date ? dateRaw : typeof dateRaw === "number" ? dateRaw : String(dateRaw),
     valueDateRaw,
     narration,
     refNo: normalizedRef,
@@ -360,14 +371,14 @@ function extractIciciRow(
  * Normalize a raw ICICI row to standard format.
  */
 async function normalizeIciciRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
-  // Parse date
-  const date = parseIndianDate(raw.dateRaw as string | Date);
+  // Parse date (handles strings, Date objects, and numeric Excel serials)
+  const date = parseIndianDate(raw.dateRaw);
   if (!date) {
     return null;
   }
 
   const valueDate = raw.valueDateRaw
-    ? parseIndianDate(raw.valueDateRaw as string | Date) ?? undefined
+    ? parseIndianDate(raw.valueDateRaw) ?? undefined
     : undefined;
 
   // Determine amount and direction

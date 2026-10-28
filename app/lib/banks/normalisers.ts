@@ -5,6 +5,36 @@
  * Part of S14/S15: Net Terms Receivables bank statement parsing.
  */
 
+const EXCEL_EPOCH_MS = Date.UTC(1899, 11, 30);
+const MS_PER_DAY = 86400000;
+const EXCEL_SERIAL_MIN = 32874;
+const EXCEL_SERIAL_MAX = 73415;
+
+/**
+ * Check if a number is a valid Excel serial date in the plausible range.
+ * Range: 1990-01-01 (32874) to 2100-12-31 (73415).
+ */
+function isValidExcelSerial(n: number): boolean {
+  if (!Number.isFinite(n)) return false;
+  const intPart = Math.floor(n);
+  return intPart >= EXCEL_SERIAL_MIN && intPart <= EXCEL_SERIAL_MAX;
+}
+
+/**
+ * Convert Excel serial date to ISO 8601 date string (YYYY-MM-DD).
+ * Uses 1899-12-30 epoch with no +1 adjustment.
+ * Drops fractional time part.
+ */
+function excelSerialToIsoDate(serial: number): string {
+  const days = Math.floor(serial);
+  const ms = EXCEL_EPOCH_MS + days * MS_PER_DAY;
+  const d = new Date(ms);
+  const year = d.getUTCFullYear();
+  const month = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return formatIsoDate(year, month, day);
+}
+
 /**
  * Parse Indian date formats to ISO 8601 (YYYY-MM-DD).
  *
@@ -16,11 +46,12 @@
  * - dd-MMM-yyyy (ICICI corporate: 15-Mar-2026)
  * - dd-MMM-yy (15-Mar-26)
  * - Date objects from Excel (converted using UTC to avoid timezone shifts)
+ * - Numeric Excel serial dates (in detected date columns only, range 1990-2100)
  *
- * @param input Date string or Date object
+ * @param input Date string, Date object, or numeric Excel serial
  * @returns ISO 8601 date string (YYYY-MM-DD) or null if unparseable/invalid
  */
-export function parseIndianDate(input: string | Date | null | undefined): string | null {
+export function parseIndianDate(input: string | Date | number | null | undefined): string | null {
   if (input === null || input === undefined) {
     return null;
   }
@@ -39,6 +70,14 @@ export function parseIndianDate(input: string | Date | null | undefined): string
       return null;
     }
     return formatIsoDate(year, month, day);
+  }
+
+  // Handle numeric Excel serial dates (raw numbers in date columns)
+  if (typeof input === "number") {
+    if (!isValidExcelSerial(input)) {
+      return null;
+    }
+    return excelSerialToIsoDate(input);
   }
 
   const str = String(input).trim();

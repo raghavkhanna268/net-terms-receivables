@@ -167,6 +167,77 @@ describe("normalisers", () => {
         expect(parseIndianDate("29/02/00")).toBe("2000-02-29");
       });
     });
+
+    describe("numeric Excel serial dates", () => {
+      it("converts serial 46310 to 2026-10-15", () => {
+        expect(parseIndianDate(46310)).toBe("2026-10-15");
+      });
+
+      it("converts serial 46313 to 2026-10-18", () => {
+        expect(parseIndianDate(46313)).toBe("2026-10-18");
+      });
+
+      it("converts serial 46315 to 2026-10-20", () => {
+        expect(parseIndianDate(46315)).toBe("2026-10-20");
+      });
+
+      it("converts boundary serial 32874 to 1990-01-01", () => {
+        expect(parseIndianDate(32874)).toBe("1990-01-01");
+      });
+
+      it("converts boundary serial 73415 to 2100-12-31", () => {
+        expect(parseIndianDate(73415)).toBe("2100-12-31");
+      });
+
+      it("rejects serial below range (32873)", () => {
+        expect(parseIndianDate(32873)).toBeNull();
+      });
+
+      it("rejects serial above range (73416)", () => {
+        expect(parseIndianDate(73416)).toBeNull();
+      });
+
+      it("rejects out-of-range serial 0", () => {
+        expect(parseIndianDate(0)).toBeNull();
+      });
+
+      it("rejects out-of-range serial 100", () => {
+        expect(parseIndianDate(100)).toBeNull();
+      });
+
+      it("rejects out-of-range serial 2958466 (way above range)", () => {
+        expect(parseIndianDate(2958466)).toBeNull();
+      });
+
+      it("rejects negative serial", () => {
+        expect(parseIndianDate(-1)).toBeNull();
+      });
+
+      it("rejects NaN", () => {
+        expect(parseIndianDate(NaN)).toBeNull();
+      });
+
+      it("drops fractional time part (46310.75 = 2026-10-15)", () => {
+        expect(parseIndianDate(46310.75)).toBe("2026-10-15");
+      });
+
+      it("handles fractional serial at boundary (32874.5 = 1990-01-01)", () => {
+        expect(parseIndianDate(32874.5)).toBe("1990-01-01");
+      });
+    });
+
+    describe("numeric Excel serial timezone independence", () => {
+      it("returns same date under TZ=UTC", () => {
+        const result = parseIndianDate(46310);
+        expect(result).toBe("2026-10-15");
+      });
+
+      it("returns same date regardless of local timezone (no shift)", () => {
+        expect(parseIndianDate(46310)).toBe("2026-10-15");
+        expect(parseIndianDate(46313)).toBe("2026-10-18");
+        expect(parseIndianDate(46315)).toBe("2026-10-20");
+      });
+    });
   });
 
   describe("parseIndianAmount", () => {
