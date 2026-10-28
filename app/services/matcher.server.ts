@@ -94,6 +94,8 @@ export async function runMatcher(
     limit?: number;
     /** Offset for pagination */
     offset?: number;
+    /** Optional import ID to scope matching to a single import */
+    importId?: string;
   } = {}
 ): Promise<MatcherRunSummary> {
   // Cap the limit to respect CPU budget
@@ -114,6 +116,7 @@ export async function runMatcher(
   const { payments } = await getUnmatchedPayments(sql, shopId, {
     limit: limit + 1,
     offset,
+    importId: options.importId,
   });
 
   if (payments.length === 0) {

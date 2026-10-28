@@ -406,9 +406,13 @@ export async function runE2eBankImport(opts: RunOptions): Promise<void> {
 
       // Same trigger as the action: matcher only when something was inserted.
       // runMatcher only issues plain queries (no nested begin), so it runs on tx.
+      // Pass importId to scope matching to only this import's payments.
       emit("matcher_ran", imported.inserted > 0);
       if (imported.inserted > 0) {
-        const m = await runMatcher(tx as unknown as Sql, shop.id, { limit: MAX_PAYMENTS_PER_REQUEST });
+        const m = await runMatcher(tx as unknown as Sql, shop.id, {
+          limit: MAX_PAYMENTS_PER_REQUEST,
+          importId: imported.importId,
+        });
         emit("matcher_payments_processed", m.paymentsProcessed);
         emit("matcher_matches_created", m.matchesCreated);
         emit("matcher_high_confidence", m.highConfidenceMatches);
