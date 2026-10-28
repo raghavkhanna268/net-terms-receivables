@@ -345,6 +345,71 @@ describe("Payment Reminder Email Rendering - Store Display Name", () => {
     expect(html).toContain("open invoice with Test Store Display Name.");
     expect(html).not.toContain("open invoice with test-handle.");
   });
+
+  it("falls back to merchantName when storeDisplayName is empty string", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: "test-inv-001",
+      buyerName: "test-buyer",
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: "test-shop.example.com",
+      reminderType: "Payment due today",
+      storeDisplayName: "",
+    });
+
+    expect(html).toContain("invoice from <strong>test-shop.example.com</strong>");
+    expect(html).toContain("open invoice with test-shop.example.com.");
+    expect(html).not.toContain("<strong></strong>");
+  });
+
+  it("falls back to merchantName when storeDisplayName is whitespace-only", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: "test-inv-002",
+      buyerName: "test-buyer",
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: "test-shop.example.com",
+      reminderType: "Payment due today",
+      storeDisplayName: "   ",
+    });
+
+    expect(html).toContain("invoice from <strong>test-shop.example.com</strong>");
+    expect(html).toContain("open invoice with test-shop.example.com.");
+    expect(html).not.toContain("<strong></strong>");
+  });
+
+  it("falls back to merchantName when storeDisplayName is undefined", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: "test-inv-003",
+      buyerName: "test-buyer",
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: "test-shop.example.com",
+      reminderType: "Payment due today",
+      storeDisplayName: undefined,
+    });
+
+    expect(html).toContain("invoice from <strong>test-shop.example.com</strong>");
+    expect(html).toContain("open invoice with test-shop.example.com.");
+    expect(html).not.toContain("<strong></strong>");
+  });
+
+  it("uses storeDisplayName as-is when it is a valid non-empty name", () => {
+    const html = renderPaymentReminderEmail({
+      invoiceName: "test-inv-004",
+      buyerName: "buyer@example.com",
+      amount: "₹1,000.00",
+      dueDate: "October 26, 2026",
+      merchantName: "test-shop.example.com",
+      reminderType: "Payment due today",
+      storeDisplayName: "Test Store Name",
+    });
+
+    expect(html).toContain("invoice from <strong>Test Store Name</strong>");
+    expect(html).toContain("open invoice with Test Store Name.");
+    expect(html).not.toContain("test-shop.example.com");
+    expect(html).not.toContain("<strong></strong>");
+  });
 });
 
 describe("Payment Reminder Email Rendering - Footer Content", () => {
