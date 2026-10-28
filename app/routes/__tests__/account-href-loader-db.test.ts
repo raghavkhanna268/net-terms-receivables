@@ -202,3 +202,278 @@ function extractLoaderResult<T>(result: unknown): T {
   }
   return result as T;
 }
+
+describeWithDb("account-href encoded id DB test (loader and action)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-enc";
+
+  const SHOP_ID = `shop-enc-${TEST_SUFFIX}`;
+  const SHOP_DOMAIN = `test-enc-${TEST_SUFFIX}.example.com`;
+  const ACCOUNT_ID = `${TEST_ID_WITH_SLASHES}-${TEST_SUFFIX}`;
+  const COMPANY_ID = `company-enc-${TEST_SUFFIX}`;
+  const LOCATION_ID = `location-enc-${TEST_SUFFIX}`;
+  const NONEXISTENT_ACCOUNT_ID = `test-nonexistent/path:segment-${TEST_SUFFIX}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP_ID}, ${SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+    `;
+
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", "manualHold", "createdAt", "updatedAt"
+      ) VALUES (
+        ${ACCOUNT_ID}, ${SHOP_ID}, 'COMPANY', ${COMPANY_ID}, ${LOCATION_ID},
+        'Test Encoded Account', 50000.00, 'OK', false, NOW(), NOW()
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM "AuditEvent" WHERE "shopId" = ${SHOP_ID}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE id = ${ACCOUNT_ID}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${SHOP_ID}`;
+    await sql.end();
+  });
+
+  it("loader finds account with single-encoded params.id", async () => {
+    const { requestContext } = await import("~/lib/request-context.server");
+    const { loader } = await import("../app.accounts.$id");
+
+    const singleEncodedId = encodeURIComponent(ACCOUNT_ID);
+    const href = `/app/accounts/${singleEncodedId}`;
+    const url = new URL(`https://example.com${href}`);
+    const request = new Request(url.toString());
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: SHOP_DOMAIN, accessToken: "test-token" },
+            sessionToken: { sub: "12345" },
+          }),
+        },
+      },
+      cloudflare: { env: {} },
+    };
+
+    const args = {
+      request,
+      context: mockContext,
+      params: { id: singleEncodedId },
+      url,
+      pattern: "/app/accounts/:id",
+    };
+
+    const result = await requestContext.run({ getSql: () => sql }, async () => {
+      return loader(args as never);
+    });
+
+    const data = extractLoaderResult<{ account: { id: string } | null; error: string | null }>(result);
+    expect(data.error).toBeNull();
+    expect(data.account).not.toBeNull();
+    expect(data.account?.id).toBe(ACCOUNT_ID);
+  });
+
+  it("loader finds account with double-encoded params.id", async () => {
+    const { requestContext } = await import("~/lib/request-context.server");
+    const { loader } = await import("../app.accounts.$id");
+
+    const doubleEncodedId = encodeURIComponent(encodeURIComponent(ACCOUNT_ID));
+    const href = `/app/accounts/${doubleEncodedId}`;
+    const url = new URL(`https://example.com${href}`);
+    const request = new Request(url.toString());
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: SHOP_DOMAIN, accessToken: "test-token" },
+            sessionToken: { sub: "12345" },
+          }),
+        },
+      },
+      cloudflare: { env: {} },
+    };
+
+    const args = {
+      request,
+      context: mockContext,
+      params: { id: doubleEncodedId },
+      url,
+      pattern: "/app/accounts/:id",
+    };
+
+    const result = await requestContext.run({ getSql: () => sql }, async () => {
+      return loader(args as never);
+    });
+
+    const data = extractLoaderResult<{ account: { id: string } | null; error: string | null }>(result);
+    expect(data.error).toBeNull();
+    expect(data.account).not.toBeNull();
+    expect(data.account?.id).toBe(ACCOUNT_ID);
+  });
+
+  it("action (updateCredit) changes stored row with double-encoded params.id", async () => {
+    const { requestContext } = await import("~/lib/request-context.server");
+    const { action } = await import("../app.accounts.$id");
+
+    const [beforeRow] = await sql<{ manualHold: boolean }[]>`
+      SELECT "manualHold" FROM "BuyerAccount" WHERE id = ${ACCOUNT_ID}
+    `;
+    expect(beforeRow.manualHold).toBe(false);
+
+    const doubleEncodedId = encodeURIComponent(encodeURIComponent(ACCOUNT_ID));
+    const href = `/app/accounts/${doubleEncodedId}`;
+    const url = new URL(`https://example.com${href}`);
+
+    const formData = new FormData();
+    formData.append("_action", "updateCredit");
+    formData.append("manualHold", "true");
+    formData.append("holdReasonCode", "MANUAL_HOLD");
+    formData.append("noLimit", "true");
+
+    const request = new Request(url.toString(), {
+      method: "POST",
+      body: formData,
+    });
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: SHOP_DOMAIN, accessToken: "test-token" },
+            sessionToken: { sub: "12345" },
+          }),
+        },
+      },
+      cloudflare: { env: {} },
+    };
+
+    const args = {
+      request,
+      context: mockContext,
+      params: { id: doubleEncodedId },
+      url,
+      pattern: "/app/accounts/:id",
+    };
+
+    const result = await requestContext.run({ getSql: () => sql }, async () => {
+      return action(args as never);
+    });
+
+    const data = extractLoaderResult<{ success: boolean; error?: string }>(result);
+    expect(data.success).toBe(true);
+
+    const [afterRow] = await sql<{ manualHold: boolean; holdState: string }[]>`
+      SELECT "manualHold", "holdState" FROM "BuyerAccount" WHERE id = ${ACCOUNT_ID}
+    `;
+    expect(afterRow.manualHold).toBe(true);
+    expect(afterRow.holdState).toBe("HELD");
+
+    await sql`
+      UPDATE "BuyerAccount"
+      SET "manualHold" = false, "holdState" = 'OK', "holdReasonCode" = NULL
+      WHERE id = ${ACCOUNT_ID}
+    `;
+  });
+
+  it("loader returns 'Account not found' for nonexistent double-encoded id", async () => {
+    const { requestContext } = await import("~/lib/request-context.server");
+    const { loader } = await import("../app.accounts.$id");
+
+    const doubleEncodedId = encodeURIComponent(encodeURIComponent(NONEXISTENT_ACCOUNT_ID));
+    const href = `/app/accounts/${doubleEncodedId}`;
+    const url = new URL(`https://example.com${href}`);
+    const request = new Request(url.toString());
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: SHOP_DOMAIN, accessToken: "test-token" },
+            sessionToken: { sub: "12345" },
+          }),
+        },
+      },
+      cloudflare: { env: {} },
+    };
+
+    const args = {
+      request,
+      context: mockContext,
+      params: { id: doubleEncodedId },
+      url,
+      pattern: "/app/accounts/:id",
+    };
+
+    const result = await requestContext.run({ getSql: () => sql }, async () => {
+      return loader(args as never);
+    });
+
+    const data = extractLoaderResult<{ account: null; error: string | null }>(result);
+    expect(data.account).toBeNull();
+    expect(data.error).toBe("Account not found");
+  });
+
+  it("action returns 'Account not found' for nonexistent double-encoded id (no write)", async () => {
+    const { requestContext } = await import("~/lib/request-context.server");
+    const { action } = await import("../app.accounts.$id");
+
+    const [countBefore] = await sql<{ count: string }[]>`
+      SELECT COUNT(*) AS count FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}
+    `;
+
+    const doubleEncodedId = encodeURIComponent(encodeURIComponent(NONEXISTENT_ACCOUNT_ID));
+    const href = `/app/accounts/${doubleEncodedId}`;
+    const url = new URL(`https://example.com${href}`);
+
+    const formData = new FormData();
+    formData.append("_action", "updateCredit");
+    formData.append("manualHold", "true");
+    formData.append("holdReasonCode", "MANUAL_HOLD");
+    formData.append("noLimit", "true");
+
+    const request = new Request(url.toString(), {
+      method: "POST",
+      body: formData,
+    });
+
+    const mockContext = {
+      shopify: {
+        authenticate: {
+          admin: vi.fn().mockResolvedValue({
+            session: { shop: SHOP_DOMAIN, accessToken: "test-token" },
+            sessionToken: { sub: "12345" },
+          }),
+        },
+      },
+      cloudflare: { env: {} },
+    };
+
+    const args = {
+      request,
+      context: mockContext,
+      params: { id: doubleEncodedId },
+      url,
+      pattern: "/app/accounts/:id",
+    };
+
+    const result = await requestContext.run({ getSql: () => sql }, async () => {
+      return action(args as never);
+    });
+
+    const data = extractLoaderResult<{ success: boolean; error?: string }>(result);
+    expect(data.success).toBe(false);
+    expect(data.error).toBe("Account not found");
+
+    const [countAfter] = await sql<{ count: string }[]>`
+      SELECT COUNT(*) AS count FROM "BuyerAccount" WHERE "shopId" = ${SHOP_ID}
+    `;
+    expect(countAfter.count).toBe(countBefore.count);
+  });
+});

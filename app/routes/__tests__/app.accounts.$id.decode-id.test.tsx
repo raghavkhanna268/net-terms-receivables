@@ -201,14 +201,12 @@ describe("AccountPage router integration: re-encoded id handling", () => {
     cleanup();
   });
 
-  it("loader resolves double-encoded seed-style id to correct account", async () => {
-    // Router decodes the path once, so to simulate a double-encoded link pasted,
-    // we need to triple-encode so that after router decode we have double-encoded
-    const tripleEncodedId = encodeURIComponent(encodeURIComponent(encodeURIComponent(SEEDED_STYLE_ID)));
-    const tripleEncodedPath = `/app/accounts/${tripleEncodedId}`;
+  it("Form submit: action URL has exactly one %2F per slash, no %25, pathname stays encoded", async () => {
+    const singleEncodedHref = accountHref(SEEDED_STYLE_ID);
 
-    let loaderReceivedId: string | undefined;
-    let loaderDecodedId: string | undefined;
+    let actionRequestUrl: string | undefined;
+    let actionReceivedParamsId: string | undefined;
+    let loaderReceivedParamsId: string | undefined;
 
     const router = createMemoryRouter(
       [
@@ -219,34 +217,57 @@ describe("AccountPage router integration: re-encoded id handling", () => {
             return { Component: mod.default };
           },
           loader: ({ params }) => {
-            loaderReceivedId = params.id;
-            loaderDecodedId = params.id ? decodeAccountIdParam(params.id) : params.id;
-            return buildLoaderData(loaderDecodedId!);
+            loaderReceivedParamsId = params.id;
+            return buildLoaderData(params.id!);
+          },
+          action: async ({ params, request }) => {
+            actionReceivedParamsId = params.id;
+            actionRequestUrl = request.url;
+            return { success: true, action: "updateCredit" };
           },
         },
       ],
-      { initialEntries: [tripleEncodedPath] }
+      { initialEntries: [singleEncodedHref] }
     );
 
     render(createElement(RouterProvider, { router }));
 
     await waitFor(() => {
-      const heading = document.querySelector("s-page");
-      expect(heading).toBeInTheDocument();
+      const forms = document.querySelectorAll("form[method='post']");
+      expect(forms.length).toBeGreaterThan(0);
     }, { timeout: 5000 });
 
-    // Params.id should be double-encoded (after router decodes once)
-    expect(loaderReceivedId).toBe(encodeURIComponent(encodeURIComponent(SEEDED_STYLE_ID)));
-    // After our decode helper, it should be the original id
-    expect(loaderDecodedId).toBe(SEEDED_STYLE_ID);
-    const heading = document.querySelector("s-page");
-    expect(heading?.getAttribute("heading")).toBe("Test Buyer Corp");
+    expect(loaderReceivedParamsId).toBe(SEEDED_STYLE_ID);
+
+    const creditForm = document.querySelector("form[method='post']") as HTMLFormElement;
+    expect(creditForm).toBeInTheDocument();
+
+    const formActionAttr = creditForm.getAttribute("action");
+    expect(formActionAttr).toBe(singleEncodedHref);
+    expect(formActionAttr).toContain("%2F");
+    expect(formActionAttr).not.toContain("%25");
+
+    fireEvent.submit(creditForm);
+
+    await waitFor(() => {
+      expect(actionRequestUrl).toBeDefined();
+    }, { timeout: 5000 });
+
+    expect(actionRequestUrl).toContain("%2F");
+    expect(actionRequestUrl).not.toContain("%25");
+    const slashEncodedCount = (actionRequestUrl!.match(/%2F/gi) || []).length;
+    expect(slashEncodedCount).toBeGreaterThanOrEqual(1);
+
+    expect(actionReceivedParamsId).toBe(SEEDED_STYLE_ID);
+
+    expect(router.state.location.pathname).toBe(singleEncodedHref);
+    expect(router.state.location.pathname).toContain("%2F");
+    expect(router.state.location.pathname).not.toContain("%25");
   });
 
-  it("Form submit and reload: URL stays single-encoded, same account loads", async () => {
-    const navigations: string[] = [];
-    let actionCalled = false;
-    let actionDecodedId: string | undefined;
+  it("Form action attribute without decode produces double-encoded URL (control test)", async () => {
+    const tripleEncodedId = encodeURIComponent(encodeURIComponent(encodeURIComponent(SEEDED_STYLE_ID)));
+    const tripleEncodedPath = `/app/accounts/${tripleEncodedId}`;
 
     const router = createMemoryRouter(
       [
@@ -257,22 +278,11 @@ describe("AccountPage router integration: re-encoded id handling", () => {
             return { Component: mod.default };
           },
           loader: ({ params }) => {
-            navigations.push(params.id!);
-            const decodedId = params.id ? decodeAccountIdParam(params.id) : params.id;
-            return buildLoaderData(decodedId!);
-          },
-          action: async ({ params, request }) => {
-            actionCalled = true;
-            actionDecodedId = params.id ? decodeAccountIdParam(params.id) : params.id;
-            const formData = await request.formData();
-            return {
-              success: true,
-              action: formData.get("_action"),
-            };
+            return buildLoaderData(params.id!);
           },
         },
       ],
-      { initialEntries: [accountHref(SEEDED_STYLE_ID)] }
+      { initialEntries: [tripleEncodedPath] }
     );
 
     render(createElement(RouterProvider, { router }));
@@ -283,40 +293,14 @@ describe("AccountPage router integration: re-encoded id handling", () => {
     }, { timeout: 5000 });
 
     const creditForm = document.querySelector("form[method='post']") as HTMLFormElement;
-    expect(creditForm).toBeInTheDocument();
-
-    const actionInput = creditForm.querySelector("input[name='_action']") as HTMLInputElement;
-    expect(actionInput).toBeInTheDocument();
-
-    fireEvent.submit(creditForm);
-
-    await waitFor(() => {
-      expect(actionCalled).toBe(true);
-    }, { timeout: 5000 });
-
-    // Action decodes to the original id
-    expect(actionDecodedId).toBe(SEEDED_STYLE_ID);
-
-    router.navigate(accountHref(SEEDED_STYLE_ID));
-
-    await waitFor(() => {
-      expect(navigations.length).toBeGreaterThanOrEqual(2);
-    }, { timeout: 5000 });
-
-    // params.id after navigate should be the original (router decodes once)
-    const lastNavId = navigations[navigations.length - 1];
-    expect(lastNavId).toBe(SEEDED_STYLE_ID);
-    expect(lastNavId).not.toContain("%25");
-
-    const heading = document.querySelector("s-page");
-    expect(heading?.getAttribute("heading")).toBe("Test Buyer Corp");
+    const formActionAttr = creditForm.getAttribute("action");
+    expect(formActionAttr).toContain("%25");
   });
 
-  it("action resolves double-encoded seed-style id correctly", async () => {
-    const doubleEncodedId = encodeURIComponent(encodeURIComponent(SEEDED_STYLE_ID));
-    const doubleEncodedPath = `/app/accounts/${doubleEncodedId}`;
+  it("after revalidation: location.pathname remains single-encoded", async () => {
+    const singleEncodedHref = accountHref(SEEDED_STYLE_ID);
 
-    let actionDecodedId: string | undefined;
+    let loaderCallCount = 0;
 
     const router = createMemoryRouter(
       [
@@ -327,16 +311,15 @@ describe("AccountPage router integration: re-encoded id handling", () => {
             return { Component: mod.default };
           },
           loader: ({ params }) => {
-            const decodedId = params.id ? decodeAccountIdParam(params.id) : params.id;
-            return buildLoaderData(decodedId!);
+            loaderCallCount++;
+            return buildLoaderData(params.id!);
           },
-          action: async ({ params }) => {
-            actionDecodedId = params.id ? decodeAccountIdParam(params.id) : params.id;
+          action: async () => {
             return { success: true, action: "updateCredit" };
           },
         },
       ],
-      { initialEntries: [doubleEncodedPath] }
+      { initialEntries: [singleEncodedHref] }
     );
 
     render(createElement(RouterProvider, { router }));
@@ -346,13 +329,17 @@ describe("AccountPage router integration: re-encoded id handling", () => {
       expect(forms.length).toBeGreaterThan(0);
     }, { timeout: 5000 });
 
-    const form = document.querySelector("form[method='post']") as HTMLFormElement;
-    fireEvent.submit(form);
+    const initialLoaderCalls = loaderCallCount;
+
+    const creditForm = document.querySelector("form[method='post']") as HTMLFormElement;
+    fireEvent.submit(creditForm);
 
     await waitFor(() => {
-      expect(actionDecodedId).toBeDefined();
+      expect(loaderCallCount).toBeGreaterThan(initialLoaderCalls);
     }, { timeout: 5000 });
 
-    expect(actionDecodedId).toBe(SEEDED_STYLE_ID);
+    expect(router.state.location.pathname).toBe(singleEncodedHref);
+    expect(router.state.location.pathname).toContain("%2F");
+    expect(router.state.location.pathname).not.toContain("%25");
   });
 });
