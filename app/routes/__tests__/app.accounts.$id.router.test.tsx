@@ -7,7 +7,6 @@
  * AccountPage component at /app/accounts/<encoded id>, verifying:
  * 1. Rendered form action attributes have no %25/%252F (single-encoded only)
  * 2. Router correctly resolves the route with encoded id
- * 3. Loader receives params.id that normalizes to original id
  *
  * MUST FAIL ON MAIN: Without explicit action={accountHref(id)} on Forms,
  * React Router's useFormAction resolves action from match.pathname,
@@ -30,9 +29,9 @@ const SYNTHETIC_B2B_UUID = "b2b-loc-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 const SYNTHETIC_TAGGED_UUID = "tag-cust-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
 const ALL_ID_KINDS = [
-  { kind: "seeded-style GID", id: SEEDED_STYLE_ID, hasSpecialChars: true },
-  { kind: "native B2B UUID", id: SYNTHETIC_B2B_UUID, hasSpecialChars: false },
-  { kind: "tag-rule UUID", id: SYNTHETIC_TAGGED_UUID, hasSpecialChars: false },
+  { kind: "seeded-style GID", id: SEEDED_STYLE_ID },
+  { kind: "native B2B UUID", id: SYNTHETIC_B2B_UUID },
+  { kind: "tag-rule UUID", id: SYNTHETIC_TAGGED_UUID },
 ] as const;
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
@@ -124,10 +123,7 @@ describe("AccountPage router integration (createMemoryRouter)", () => {
                 const mod = await import("../app.accounts.$id");
                 return { Component: mod.default };
               },
-              loader: ({ params }) => {
-                const normalizedId = params.id?.replace(/%2F/gi, "/");
-                return buildLoaderData(normalizedId!);
-              },
+              loader: ({ params }) => buildLoaderData(params.id!),
             },
           ],
           { initialEntries: [encodedPath] }
@@ -166,10 +162,7 @@ describe("AccountPage router integration (createMemoryRouter)", () => {
                 const mod = await import("../app.accounts.$id");
                 return { Component: mod.default };
               },
-              loader: ({ params }) => {
-                const normalizedId = params.id?.replace(/%2F/gi, "/");
-                return buildLoaderData(normalizedId!);
-              },
+              loader: ({ params }) => buildLoaderData(params.id!),
             },
           ],
           { initialEntries: [encodedPath] }
@@ -205,10 +198,7 @@ describe("AccountPage router integration (createMemoryRouter)", () => {
                 const mod = await import("../app.accounts.$id");
                 return { Component: mod.default };
               },
-              loader: ({ params }) => {
-                const normalizedId = params.id?.replace(/%2F/gi, "/");
-                return buildLoaderData(normalizedId!);
-              },
+              loader: ({ params }) => buildLoaderData(params.id!),
             },
           ],
           { initialEntries: [encodedPath] }
@@ -228,74 +218,5 @@ describe("AccountPage router integration (createMemoryRouter)", () => {
         expect(formsWithAction.length).toBe(forms.length);
       }
     );
-
-    it.each(ALL_ID_KINDS)(
-      "$kind: loader params.id normalizes to original id",
-      async ({ id }) => {
-        const encodedPath = accountHref(id);
-        let receivedParamsId: string | undefined;
-
-        const router = createMemoryRouter(
-          [
-            {
-              path: "/app/accounts/:id",
-              lazy: async () => {
-                const mod = await import("../app.accounts.$id");
-                return { Component: mod.default };
-              },
-              loader: ({ params }) => {
-                receivedParamsId = params.id;
-                const normalizedId = params.id?.replace(/%2F/gi, "/");
-                return buildLoaderData(normalizedId!);
-              },
-            },
-          ],
-          { initialEntries: [encodedPath] }
-        );
-
-        render(createElement(RouterProvider, { router }));
-
-        await waitFor(() => {
-          const forms = document.querySelectorAll("form[method='post']");
-          expect(forms.length).toBeGreaterThan(0);
-        }, { timeout: 5000 });
-
-        const normalizedId = receivedParamsId?.replace(/%2F/gi, "/");
-        expect(normalizedId).toBe(id);
-      }
-    );
-  });
-
-  describe("inline normalization proves necessary", () => {
-    it("double-encoded URL params.id only resolves to original with inline normalize", () => {
-      const originalId = SEEDED_STYLE_ID;
-      const doubleEncodedParamsId = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
-
-      const withoutNormalize = doubleEncodedParamsId;
-      expect(withoutNormalize).not.toBe(originalId);
-
-      const withNormalize = doubleEncodedParamsId.replace(/%2F/gi, "/");
-      expect(withNormalize).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
-      expect(withNormalize).toContain("/");
-      expect(withNormalize).not.toContain("%2F");
-    });
-
-    it("narrow normalization: %2F becomes /, %41 stays %41", () => {
-      const withMixedPercent = "test%41value%2Fpath%3Acolon";
-      const normalized = withMixedPercent.replace(/%2F/gi, "/");
-
-      expect(normalized).toBe("test%41value/path%3Acolon");
-      expect(normalized).toContain("%41");
-      expect(normalized).toContain("%3A");
-      expect(normalized).not.toContain("%2F");
-    });
-
-    it("normalization is case-insensitive (%2f and %2F both become /)", () => {
-      const mixedCase = "path%2Fwith%2flower%2Fand%2FUPPER";
-      const normalized = mixedCase.replace(/%2F/gi, "/");
-
-      expect(normalized).toBe("path/with/lower/and/UPPER");
-      expect(normalized).not.toMatch(/%2f/i);
-    });
   });
 });

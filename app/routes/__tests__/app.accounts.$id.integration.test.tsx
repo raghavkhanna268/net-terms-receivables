@@ -10,8 +10,7 @@
  * These tests verify:
  * 1. Form has explicit action attribute (single-encoded, no %25)
  * 2. Action attribute equals accountHref(id)
- * 3. All 3 Forms have explicit action (comprehensive check)
- * 4. Narrow normalization: %2F only, %3A untouched, %41 unchanged
+ * 3. All Forms have explicit action (comprehensive check)
  *
  * Tests cover ALL THREE id kinds via table-driven it.each:
  * - Seeded-style synthetic id with GID segment containing ':' and '/'
@@ -36,9 +35,9 @@ const SYNTHETIC_B2B_UUID = "b2b-loc-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 const SYNTHETIC_TAGGED_UUID = "tag-cust-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
 const ALL_ID_KINDS = [
-  { kind: "seeded-style GID", id: SEEDED_STYLE_ID, hasSpecialChars: true },
-  { kind: "native B2B UUID", id: SYNTHETIC_B2B_UUID, hasSpecialChars: false },
-  { kind: "tag-rule UUID", id: SYNTHETIC_TAGGED_UUID, hasSpecialChars: false },
+  { kind: "seeded-style GID", id: SEEDED_STYLE_ID },
+  { kind: "native B2B UUID", id: SYNTHETIC_B2B_UUID },
+  { kind: "tag-rule UUID", id: SYNTHETIC_TAGGED_UUID },
 ] as const;
 
 vi.mock("react-router", async () => {
@@ -159,25 +158,6 @@ describe("Account Form action integration (explicit action fix)", () => {
     );
 
     it.each(ALL_ID_KINDS)(
-      "$kind: multiple saves use same action (still no %25)",
-      ({ id }) => {
-        mockUseLoaderData.mockReturnValue(buildLoaderData(id));
-
-        const html = renderToString(createElement(AccountPage));
-
-        const actionMatches = html.match(/action="[^"]+"/g);
-        expect(actionMatches).not.toBeNull();
-        expect(actionMatches!.length).toBeGreaterThan(0);
-
-        for (const match of actionMatches!) {
-          expect(match).not.toContain("%25");
-          expect(match).not.toContain("%252F");
-          expect(match).not.toContain("%25252F");
-        }
-      }
-    );
-
-    it.each(ALL_ID_KINDS)(
       "$kind: action decodes to original id",
       ({ id }) => {
         const expectedAction = accountHref(id);
@@ -210,88 +190,16 @@ describe("Account Form action integration (explicit action fix)", () => {
     );
   });
 
-  describe("narrow params.id normalization: %2F only", () => {
-    it("replaces %2F with / (case-insensitive)", () => {
-      const withEncodedSlash = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
-      const normalized = withEncodedSlash.replace(/%2F/gi, "/");
-
-      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
-      expect(normalized).toContain("/");
-      expect(normalized).not.toContain("%2F");
-    });
-
-    it("does NOT replace %3A (colon stays encoded)", () => {
-      const withEncodedColon = "gid%3A%2F%2Fshopify";
-      const normalized = withEncodedColon.replace(/%2F/gi, "/");
-
-      expect(normalized).toContain("%3A");
-      expect(normalized).toBe("gid%3A//shopify");
-    });
-
-    it("leaves other percent sequences unchanged (e.g. %41 stays %41)", () => {
-      const withOtherPercent = "test%41value%2Fpath";
-      const normalized = withOtherPercent.replace(/%2F/gi, "/");
-
-      expect(normalized).toBe("test%41value/path");
-      expect(normalized).toContain("%41");
-    });
-
-    it.each(ALL_ID_KINDS)(
-      "$kind: normalization handles correctly",
-      ({ id, hasSpecialChars }) => {
-        if (hasSpecialChars) {
-          const encoded = encodeURIComponent(id);
-          const normalized = encoded.replace(/%2F/gi, "/");
-
-          expect(normalized).toContain("/");
-          expect(normalized).not.toContain("%2F");
-          expect(normalized).toContain("%3A");
-        } else {
-          expect(id.replace(/%2F/gi, "/")).toBe(id);
-        }
-      }
-    );
-
-    it("double-encoded %252F after RR decode becomes %2F, then / via normalize", () => {
-      const afterRrDecode = "seed-account-test-shop-gid%3A%2F%2Fshopify%2FCompanyLocation%2F1001";
-      const normalized = afterRrDecode.replace(/%2F/gi, "/");
-
-      expect(normalized).toBe("seed-account-test-shop-gid%3A//shopify/CompanyLocation/1001");
-      expect(normalized).not.toContain("%2F");
-      expect(normalized).toContain("%3A");
-    });
-  });
-
-  describe("seeded-style id specifics (contains : and /)", () => {
-    it("seeded id contains GID-like segment with special chars", () => {
-      expect(SEEDED_STYLE_ID).toContain("://");
-      expect(SEEDED_STYLE_ID).toContain(":");
-      expect(SEEDED_STYLE_ID).toContain("/");
-    });
-
-    it("accountHref encodes the slashes and colons", () => {
+  describe("accountHref encoding", () => {
+    it("seeded id encodes slashes and colons", () => {
       const href = accountHref(SEEDED_STYLE_ID);
 
       expect(href).toContain("%2F");
       expect(href).toContain("%3A");
       expect(href).not.toContain("%25");
     });
-  });
 
-  describe("UUID ids specifics (no special chars)", () => {
-    it("B2B UUID has no special URL characters", () => {
-      expect(SYNTHETIC_B2B_UUID).not.toContain("/");
-      expect(SYNTHETIC_B2B_UUID).not.toContain(":");
-      expect(SYNTHETIC_B2B_UUID).not.toContain("%");
-    });
-
-    it("tag-rule UUID has no special URL characters", () => {
-      expect(SYNTHETIC_TAGGED_UUID).not.toContain("/");
-      expect(SYNTHETIC_TAGGED_UUID).not.toContain(":");
-      expect(SYNTHETIC_TAGGED_UUID).not.toContain("%");
-    });
-
-    it("accountHref does not encode UUIDs", () => {
+    it("UUID ids need no encoding", () => {
       expect(accountHref(SYNTHETIC_B2B_UUID)).toBe(`/app/accounts/${SYNTHETIC_B2B_UUID}`);
       expect(accountHref(SYNTHETIC_TAGGED_UUID)).toBe(`/app/accounts/${SYNTHETIC_TAGGED_UUID}`);
     });

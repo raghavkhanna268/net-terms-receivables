@@ -156,7 +156,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id?.replace(/%2F/gi, "/");
+  const accountId = params.id;
 
   const upgradeUrl = (() => {
     const handle = getAppHandle();
@@ -443,7 +443,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
   const { session } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id?.replace(/%2F/gi, "/");
+  const accountId = params.id;
 
   if (!accountId) {
     return { success: false, error: "Account ID is required" } satisfies ActionData;
