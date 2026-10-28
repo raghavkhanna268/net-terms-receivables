@@ -3497,10 +3497,9 @@ describeWithDb("S25 Exactly-Once Bulk Operations (DB-backed)", () => {
           VALUES (NOW(), ${DEFAULT_DRAIN_CONFIG.maxRetries - 1}, NOW(), ${sql.json(message)})
         `;
 
-        // Archive foreign queue rows so they can't take the batchSize=1 slot
-        await archiveForeignQueueRows();
-
         // Run drain - should dead-letter the message
+        // Note: batchSize=1 means a foreign row could take the slot, but Team Lead ruled
+        // own-row assertions only here (no archive of other shops' rows)
         await runDrain(sql, {
           ...DEFAULT_DRAIN_CONFIG,
           batchSize: 1,
