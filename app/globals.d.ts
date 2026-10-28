@@ -23,6 +23,29 @@ declare global {
         React.HTMLAttributes<HTMLElement>,
         HTMLElement
       >;
+      "ui-save-bar": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & { id: string },
+        HTMLElement
+      >;
     }
   }
+
+  namespace React {
+    interface ButtonHTMLAttributes<T> {
+      variant?: "primary" | "secondary";
+    }
+  }
+
+  interface ShopifySaveBar {
+    show: (id: string) => Promise<void>;
+    hide: (id: string) => Promise<void>;
+    toggle: (id: string) => Promise<void>;
+    leaveConfirmation: () => Promise<void>;
+  }
+
+  interface Shopify {
+    saveBar: ShopifySaveBar;
+  }
+
+  const shopify: Shopify | undefined;
 }

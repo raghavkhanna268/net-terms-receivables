@@ -125,9 +125,9 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       // Manual hold control renders (the checkbox label for place/release)
       expect(html).toContain("Place manual hold on this account");
 
-      // Full credit edit form renders with save bar (not restricted)
-      expect(html).toContain("Edit Credit Settings");
-      expect(html).toContain("data-save-bar");
+      // Full credit edit form renders (not restricted)
+      expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // Over-limit banner heading is ABSENT
       expect(html).not.toContain("This account was added after you reached your plan limit");
@@ -154,9 +154,9 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       // Manual hold control renders (the place/release toggle)
       expect(html).toContain("Place manual hold on this account");
 
-      // Full credit edit form renders with save bar
-      expect(html).toContain("Edit Credit Settings");
-      expect(html).toContain("data-save-bar");
+      // Full credit edit form renders
+      expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // Over-limit banner is ABSENT
       expect(html).not.toContain("This account was added after you reached your plan limit");
@@ -178,9 +178,8 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Credit Status");
       expect(html).toContain("Hold Status");
       expect(html).toContain("Place manual hold on this account");
-      // Credit edit form renders with save bar
-      expect(html).toContain("Edit Credit Settings");
-      expect(html).toContain("data-save-bar");
+      expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // No limit-related UI
       expect(html).not.toContain("after you reached your plan limit");
@@ -220,9 +219,9 @@ describe("AccountPage render tests (T1 plan-limit gating)", () => {
       expect(html).toContain("Credit Status");
       expect(html).toContain("Hold Status");
 
-      // Full credit edit form renders with save bar (not gated)
-      expect(html).toContain("Edit Credit Settings");
-      expect(html).toContain("data-save-bar");
+      // Full credit edit form renders (not gated)
+      expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
 
       // No over-limit banner
       expect(html).not.toContain("This account was added after you reached your plan limit");

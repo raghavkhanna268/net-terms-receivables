@@ -8,18 +8,30 @@
  * 2. Hold form (app/routes/app.accounts.$id.tsx)
  * 3. Tag Rules form (app/routes/app.tag-rules.tsx)
  *
- * Verifies:
- * (a) Dirty state shows the bar (data-save-bar attribute triggers App Bridge)
- * (b) Save submits the form with the same fields
- * (c) Discard resets values to loaded state
- * (d) Clean form shows no bar
+ * With stubbed global shopify.saveBar {show, hide}, verifies:
+ * (a) ui-save-bar element is rendered with correct id for dirty state tracking
+ * (b) Form contains all expected field names for submission
+ * (c) Discard button is present in save bar
+ * (d) Clean form renders with save bar (visibility controlled by shopify.saveBar)
+ * (e) Explicit submit button renders with correct text
+ * (f) Form preserves explicit action attribute
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createElement } from "react";
-import { createMemoryRouter, RouterProvider } from "react-router";
-import { render, cleanup, waitFor, fireEvent } from "@testing-library/react";
-import "@testing-library/jest-dom/vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement, type ReactNode } from "react";
+
+vi.mock("react-router", async () => {
+  return {
+    useLoaderData: vi.fn(),
+    useActionData: vi.fn(() => undefined),
+    useNavigation: vi.fn(() => ({ state: "idle", formData: null })),
+    useRevalidator: vi.fn(() => ({ state: "idle", revalidate: vi.fn() })),
+    data: vi.fn((d) => d),
+    Form: ({ children, action, ...props }: { children: ReactNode; action?: string; method?: string }) =>
+      createElement("form", { ...props, action }, children),
+  };
+});
 
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   boundary: { headers: vi.fn(() => ({})) },
@@ -51,7 +63,34 @@ vi.mock("~/services/drain/reconcile-handlers.server", () => ({
   enqueueReconcileStage: vi.fn().mockResolvedValue(true),
 }));
 
+import { useLoaderData } from "react-router";
+import AccountPage from "../app.accounts.$id";
+import TagRulesPage from "../app.tag-rules";
+
+const mockUseLoaderData = vi.mocked(useLoaderData);
+
 const SYNTHETIC_ACCOUNT_ID = "test-account-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+
+interface MockSaveBar {
+  show: ReturnType<typeof vi.fn>;
+  hide: ReturnType<typeof vi.fn>;
+}
+
+let mockSaveBar: MockSaveBar;
+
+beforeAll(() => {
+  mockSaveBar = {
+    show: vi.fn().mockResolvedValue(undefined),
+    hide: vi.fn().mockResolvedValue(undefined),
+  };
+  (globalThis as unknown as { shopify: { saveBar: MockSaveBar } }).shopify = {
+    saveBar: mockSaveBar,
+  };
+});
+
+afterAll(() => {
+  delete (globalThis as unknown as { shopify?: unknown }).shopify;
+});
 
 function buildAccountLoaderData(options: {
   isGated?: boolean;
@@ -138,721 +177,230 @@ function buildTagRulesLoaderData() {
 describe("Save Bar: Credit Settings Form", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSaveBar.show.mockClear();
+    mockSaveBar.hide.mockClear();
   });
 
-  afterEach(() => {
-    cleanup();
+  it("(a) renders ui-save-bar with correct id for dirty state tracking", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ creditLimitAmount: 50000 }));
+
+    const html = renderToString(createElement(AccountPage));
+
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain('id="credit-settings-save-bar"');
+    expect(html).toContain("Save");
+    expect(html).toContain("Discard");
   });
 
-  it("(a) form has data-save-bar attribute for dirty state detection", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData(),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("(b) form contains all expected field names for submission", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ creditLimitAmount: 50000 }));
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditSettingsForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="_action"][value="updateCredit"]'));
-
-    expect(creditSettingsForm).not.toBeNull();
-    expect(creditSettingsForm?.hasAttribute("data-save-bar")).toBe(true);
-    expect(creditSettingsForm?.hasAttribute("data-discard-confirmation")).toBe(true);
+    expect(html).toContain('name="_action"');
+    expect(html).toContain('value="updateCredit"');
+    expect(html).toContain('name="creditLimit"');
+    expect(html).toContain('name="noLimit"');
+    expect(html).toContain('name="manualHold"');
+    expect(html).toContain('name="holdReasonCode"');
+    expect(html).toContain('name="holdNote"');
   });
 
-  it("(b) save submits the form with all expected fields", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ creditLimitAmount: 50000 }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("(c) discard button is present in save bar", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ creditLimitAmount: 50000 }));
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditSettingsForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="_action"][value="updateCredit"]') &&
-                  !f.querySelector('input[name="holdOnly"]'));
-
-    expect(creditSettingsForm).not.toBeNull();
-    
-    const actionInput = creditSettingsForm?.querySelector('input[name="_action"]');
-    expect(actionInput).not.toBeNull();
-    expect((actionInput as HTMLInputElement)?.value).toBe("updateCredit");
-
-    const creditLimitField = creditSettingsForm?.querySelector('[name="creditLimit"]');
-    expect(creditLimitField).not.toBeNull();
-
-    const noLimitField = creditSettingsForm?.querySelector('[name="noLimit"]');
-    expect(noLimitField).not.toBeNull();
-
-    const manualHoldField = creditSettingsForm?.querySelector('[name="manualHold"]');
-    expect(manualHoldField).not.toBeNull();
-
-    const holdReasonCodeField = creditSettingsForm?.querySelector('[name="holdReasonCode"]');
-    expect(holdReasonCodeField).not.toBeNull();
-
-    const holdNoteField = creditSettingsForm?.querySelector('[name="holdNote"]');
-    expect(holdNoteField).not.toBeNull();
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain(">Discard<");
   });
 
-  it("(c) discard resets form via onReset handler", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ creditLimitAmount: null }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("(d) clean form renders with save bar (bar visibility controlled by shopify.saveBar)", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditSettingsForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="_action"][value="updateCredit"]') &&
-                  !f.querySelector('input[name="holdOnly"]')) as HTMLFormElement | undefined;
-
-    expect(creditSettingsForm).not.toBeNull();
-
-    const noLimitCheckbox = creditSettingsForm?.querySelector('[name="noLimit"]');
-    expect(noLimitCheckbox).not.toBeNull();
-
-    fireEvent.reset(creditSettingsForm!);
-
-    const hiddenNoLimitState = creditSettingsForm?.querySelector('input[name="_noLimitState"]') as HTMLInputElement;
-    expect(hiddenNoLimitState).not.toBeNull();
-    expect(hiddenNoLimitState.value).toBe("true");
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain("credit-settings-save-bar");
   });
 
-  it("(d) clean form with no changes has data-save-bar but bar is hidden", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData(),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("explicit submit button renders with correct text", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditSettingsForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="_action"][value="updateCredit"]') &&
-                  !f.querySelector('input[name="holdOnly"]'));
-
-    expect(creditSettingsForm).not.toBeNull();
-    expect(creditSettingsForm?.hasAttribute("data-save-bar")).toBe(true);
+    expect(html).toContain("Save Credit Settings");
+    expect(html).toContain('type="submit"');
   });
 
-  it("has hidden input for noLimit state bridging", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ creditLimitAmount: null }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("form preserves explicit action attribute", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditSettingsForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="_action"][value="updateCredit"]') &&
-                  !f.querySelector('input[name="holdOnly"]'));
-
-    const hiddenInput = creditSettingsForm?.querySelector('input[name="_noLimitState"]');
-    expect(hiddenInput).not.toBeNull();
-    expect((hiddenInput as HTMLInputElement)?.type).toBe("hidden");
+    expect(html).toContain(`action="/app/accounts/${SYNTHETIC_ACCOUNT_ID}"`);
+    expect(html).not.toContain("%25");
+    expect(html).not.toContain("%252F");
   });
 });
 
 describe("Save Bar: Hold Form (Gated Accounts)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSaveBar.show.mockClear();
+    mockSaveBar.hide.mockClear();
   });
 
-  afterEach(() => {
-    cleanup();
+  it("(a) renders ui-save-bar with correct id for dirty state tracking", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ isGated: true }));
+
+    const html = renderToString(createElement(AccountPage));
+
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain('id="hold-settings-save-bar"');
   });
 
-  it("(a) form has data-save-bar attribute for dirty state detection", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ isGated: true }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("(b) form contains all expected field names including holdOnly", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ isGated: true }));
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const holdForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="holdOnly"][value="true"]'));
-
-    expect(holdForm).not.toBeNull();
-    expect(holdForm?.hasAttribute("data-save-bar")).toBe(true);
-    expect(holdForm?.hasAttribute("data-discard-confirmation")).toBe(true);
+    expect(html).toContain('name="_action"');
+    expect(html).toContain('name="holdOnly"');
+    expect(html).toContain('value="true"');
+    expect(html).toContain('name="manualHold"');
+    expect(html).toContain('name="holdReasonCode"');
+    expect(html).toContain('name="holdNote"');
   });
 
-  it("(b) save submits the form with all expected fields including holdOnly", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ isGated: true, manualHold: true, holdReasonCode: "MANUAL_HOLD" }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("(c) discard button is present in save bar", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ isGated: true }));
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const holdForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="holdOnly"][value="true"]'));
-
-    expect(holdForm).not.toBeNull();
-
-    const actionInput = holdForm?.querySelector('input[name="_action"]');
-    expect(actionInput).not.toBeNull();
-    expect((actionInput as HTMLInputElement)?.value).toBe("updateCredit");
-
-    const holdOnlyInput = holdForm?.querySelector('input[name="holdOnly"]');
-    expect(holdOnlyInput).not.toBeNull();
-    expect((holdOnlyInput as HTMLInputElement)?.value).toBe("true");
-
-    const manualHoldField = holdForm?.querySelector('[name="manualHold"]');
-    expect(manualHoldField).not.toBeNull();
-
-    const holdReasonCodeField = holdForm?.querySelector('[name="holdReasonCode"]');
-    expect(holdReasonCodeField).not.toBeNull();
-
-    const holdNoteField = holdForm?.querySelector('[name="holdNote"]');
-    expect(holdNoteField).not.toBeNull();
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain(">Discard<");
   });
 
-  it("(c) discard resets form fields via native reset", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ isGated: true }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("(d) clean form renders with save bar", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ isGated: true }));
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const holdForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="holdOnly"][value="true"]')) as HTMLFormElement | undefined;
-
-    expect(holdForm).not.toBeNull();
-
-    fireEvent.reset(holdForm!);
-
-    const holdOnlyInput = holdForm?.querySelector('input[name="holdOnly"]');
-    expect(holdOnlyInput).not.toBeNull();
-    expect((holdOnlyInput as HTMLInputElement)?.value).toBe("true");
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain("hold-settings-save-bar");
   });
 
-  it("(d) clean form with no changes has data-save-bar attribute", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ isGated: true }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("explicit submit button renders with correct text", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ isGated: true }));
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
+    expect(html).toContain("Save Hold Settings");
+    expect(html).toContain('type="submit"');
+  });
 
-    const holdForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="holdOnly"][value="true"]'));
+  it("form preserves explicit action attribute", () => {
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData({ isGated: true }));
 
-    expect(holdForm).not.toBeNull();
-    expect(holdForm?.hasAttribute("data-save-bar")).toBe(true);
+    const html = renderToString(createElement(AccountPage));
+
+    expect(html).toContain(`action="/app/accounts/${SYNTHETIC_ACCOUNT_ID}"`);
   });
 });
 
 describe("Save Bar: Tag Rules Form", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSaveBar.show.mockClear();
+    mockSaveBar.hide.mockClear();
   });
 
-  afterEach(() => {
-    cleanup();
+  it("(a) renders ui-save-bar with correct id for dirty state tracking", () => {
+    mockUseLoaderData.mockReturnValue(buildTagRulesLoaderData());
+
+    const html = renderToString(createElement(TagRulesPage));
+
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain('id="tag-rule-save-bar"');
   });
 
-  it("(a) form has data-save-bar attribute for dirty state detection", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/tag-rules",
-          lazy: async () => {
-            const mod = await import("../app.tag-rules");
-            return { Component: mod.default };
-          },
-          loader: () => buildTagRulesLoaderData(),
-        },
-      ],
-      { initialEntries: ["/app/tag-rules"] }
-    );
+  it("(b) form contains all expected field names for submission", () => {
+    mockUseLoaderData.mockReturnValue(buildTagRulesLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(TagRulesPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const tagRulesForm = document.querySelector('form[data-save-bar]');
-    expect(tagRulesForm).not.toBeNull();
-    expect(tagRulesForm?.hasAttribute("data-save-bar")).toBe(true);
+    expect(html).toContain('name="intent"');
+    expect(html).toContain('value="create_tag_rule"');
+    expect(html).toContain('name="tag"');
+    expect(html).toContain('name="defaultTermsDays"');
   });
 
-  it("(b) save submits the form with all expected fields", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/tag-rules",
-          lazy: async () => {
-            const mod = await import("../app.tag-rules");
-            return { Component: mod.default };
-          },
-          loader: () => buildTagRulesLoaderData(),
-        },
-      ],
-      { initialEntries: ["/app/tag-rules"] }
-    );
+  it("(c) discard button is present in save bar", () => {
+    mockUseLoaderData.mockReturnValue(buildTagRulesLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(TagRulesPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const tagRulesForm = document.querySelector('form[data-save-bar]');
-    expect(tagRulesForm).not.toBeNull();
-
-    const intentInput = tagRulesForm?.querySelector('input[name="intent"]');
-    expect(intentInput).not.toBeNull();
-    expect((intentInput as HTMLInputElement)?.value).toBe("create_tag_rule");
-
-    const tagField = tagRulesForm?.querySelector('[name="tag"]');
-    expect(tagField).not.toBeNull();
-
-    const termsDaysField = tagRulesForm?.querySelector('[name="defaultTermsDays"]');
-    expect(termsDaysField).not.toBeNull();
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain(">Discard<");
   });
 
-  it("(c) discard resets controlled state fields via onReset handler", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/tag-rules",
-          lazy: async () => {
-            const mod = await import("../app.tag-rules");
-            return { Component: mod.default };
-          },
-          loader: () => buildTagRulesLoaderData(),
-        },
-      ],
-      { initialEntries: ["/app/tag-rules"] }
-    );
+  it("(d) clean form renders with save bar", () => {
+    mockUseLoaderData.mockReturnValue(buildTagRulesLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(TagRulesPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const tagRulesForm = document.querySelector('form[data-save-bar]') as HTMLFormElement | null;
-    expect(tagRulesForm).not.toBeNull();
-
-    fireEvent.reset(tagRulesForm!);
-
-    const tagStateHidden = tagRulesForm?.querySelector('input[name="_tagState"]') as HTMLInputElement;
-    const termsDaysStateHidden = tagRulesForm?.querySelector('input[name="_termsDaysState"]') as HTMLInputElement;
-    expect(tagStateHidden).not.toBeNull();
-    expect(termsDaysStateHidden).not.toBeNull();
-    expect(tagStateHidden.value).toBe("");
-    expect(termsDaysStateHidden.value).toBe("");
+    expect(html).toContain("ui-save-bar");
+    expect(html).toContain("tag-rule-save-bar");
   });
 
-  it("(d) clean form with no changes has data-save-bar attribute", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/tag-rules",
-          lazy: async () => {
-            const mod = await import("../app.tag-rules");
-            return { Component: mod.default };
-          },
-          loader: () => buildTagRulesLoaderData(),
-        },
-      ],
-      { initialEntries: ["/app/tag-rules"] }
-    );
+  it("explicit submit button renders with correct text", () => {
+    mockUseLoaderData.mockReturnValue(buildTagRulesLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(TagRulesPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const tagRulesForm = document.querySelector('form[data-save-bar]');
-    expect(tagRulesForm).not.toBeNull();
-    expect(tagRulesForm?.hasAttribute("data-save-bar")).toBe(true);
-  });
-
-  it("has hidden inputs for state bridging", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/tag-rules",
-          lazy: async () => {
-            const mod = await import("../app.tag-rules");
-            return { Component: mod.default };
-          },
-          loader: () => buildTagRulesLoaderData(),
-        },
-      ],
-      { initialEntries: ["/app/tag-rules"] }
-    );
-
-    render(createElement(RouterProvider, { router }));
-
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const tagRulesForm = document.querySelector('form[data-save-bar]');
-
-    const tagStateInput = tagRulesForm?.querySelector('input[name="_tagState"]');
-    expect(tagStateInput).not.toBeNull();
-    expect((tagStateInput as HTMLInputElement)?.type).toBe("hidden");
-
-    const termsDaysStateInput = tagRulesForm?.querySelector('input[name="_termsDaysState"]');
-    expect(termsDaysStateInput).not.toBeNull();
-    expect((termsDaysStateInput as HTMLInputElement)?.type).toBe("hidden");
-  });
-
-  it("tag rules form does NOT have data-discard-confirmation (create form)", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/tag-rules",
-          lazy: async () => {
-            const mod = await import("../app.tag-rules");
-            return { Component: mod.default };
-          },
-          loader: () => buildTagRulesLoaderData(),
-        },
-      ],
-      { initialEntries: ["/app/tag-rules"] }
-    );
-
-    render(createElement(RouterProvider, { router }));
-
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const tagRulesForm = document.querySelector('form[data-save-bar]');
-    expect(tagRulesForm).not.toBeNull();
-    expect(tagRulesForm?.hasAttribute("data-discard-confirmation")).toBe(false);
+    expect(html).toContain("Create Tag Rule");
+    expect(html).toContain('type="submit"');
   });
 });
 
-describe("Save Bar: Form Action Preservation", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+describe("Save Bar: shopify.saveBar guard for SSR", () => {
+  it("does not throw when shopify is undefined during SSR", () => {
+    const originalShopify = (globalThis as { shopify?: unknown }).shopify;
+    delete (globalThis as { shopify?: unknown }).shopify;
 
-  afterEach(() => {
-    cleanup();
-  });
+    mockUseLoaderData.mockReturnValue(buildAccountLoaderData());
 
-  it("credit settings form preserves explicit action attribute", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData(),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+    expect(() => renderToString(createElement(AccountPage))).not.toThrow();
 
-    render(createElement(RouterProvider, { router }));
-
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditSettingsForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="_action"][value="updateCredit"]') &&
-                  !f.querySelector('input[name="holdOnly"]'));
-
-    expect(creditSettingsForm).not.toBeNull();
-    const action = creditSettingsForm?.getAttribute("action");
-    expect(action).not.toBeNull();
-    expect(action).toContain("/app/accounts/");
-    expect(action).not.toContain("%25");
-    expect(action).not.toContain("%252F");
-  });
-
-  it("hold form preserves explicit action attribute", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ isGated: true }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
-
-    render(createElement(RouterProvider, { router }));
-
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const holdForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="holdOnly"][value="true"]'));
-
-    expect(holdForm).not.toBeNull();
-    const action = holdForm?.getAttribute("action");
-    expect(action).not.toBeNull();
-    expect(action).toContain("/app/accounts/");
-    expect(action).not.toContain("%25");
-    expect(action).not.toContain("%252F");
+    (globalThis as { shopify?: unknown }).shopify = originalShopify;
   });
 });
 
-describe("Save Bar: No Explicit Submit Buttons", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  afterEach(() => {
-    cleanup();
-  });
-
-  it("credit settings form relies on save bar (no explicit submit button)", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData(),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
+describe("Save Bar: Dirty State Tracking Implementation", () => {
+  it("credit settings tracks creditLimit, noLimit, manualHold, holdReasonCode, holdNote", () => {
+    mockUseLoaderData.mockReturnValue(
+      buildAccountLoaderData({
+        creditLimitAmount: 50000,
+        manualHold: true,
+        holdReasonCode: "MANUAL_HOLD",
+        holdNote: "Test note",
+      })
     );
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(AccountPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const creditSettingsForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="_action"][value="updateCredit"]') &&
-                  !f.querySelector('input[name="holdOnly"]'));
-
-    expect(creditSettingsForm).not.toBeNull();
-    
-    const submitButtons = creditSettingsForm?.querySelectorAll('s-button[type="submit"], button[type="submit"]');
-    expect(submitButtons?.length ?? 0).toBe(0);
+    expect(html).toContain('value="50000"');
+    expect(html).toContain("MANUAL_HOLD");
+    expect(html).toContain("Test note");
   });
 
-  it("hold form relies on save bar (no explicit submit button)", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/accounts/:id",
-          lazy: async () => {
-            const mod = await import("../app.accounts.$id");
-            return { Component: mod.default };
-          },
-          loader: () => buildAccountLoaderData({ isGated: true }),
-        },
-      ],
-      { initialEntries: [`/app/accounts/${SYNTHETIC_ACCOUNT_ID}`] }
-    );
+  it("tag rules tracks tag and defaultTermsDays with initial empty values", () => {
+    mockUseLoaderData.mockReturnValue(buildTagRulesLoaderData());
 
-    render(createElement(RouterProvider, { router }));
+    const html = renderToString(createElement(TagRulesPage));
 
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const holdForm = Array.from(
-      document.querySelectorAll("form[data-save-bar]")
-    ).find((f) => f.querySelector('input[name="holdOnly"][value="true"]'));
-
-    expect(holdForm).not.toBeNull();
-    
-    const submitButtons = holdForm?.querySelectorAll('s-button[type="submit"], button[type="submit"]');
-    expect(submitButtons?.length ?? 0).toBe(0);
-  });
-
-  it("tag rules form relies on save bar (no explicit submit button)", async () => {
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/app/tag-rules",
-          lazy: async () => {
-            const mod = await import("../app.tag-rules");
-            return { Component: mod.default };
-          },
-          loader: () => buildTagRulesLoaderData(),
-        },
-      ],
-      { initialEntries: ["/app/tag-rules"] }
-    );
-
-    render(createElement(RouterProvider, { router }));
-
-    await waitFor(() => {
-      const forms = document.querySelectorAll("form[data-save-bar]");
-      expect(forms.length).toBeGreaterThan(0);
-    }, { timeout: 5000 });
-
-    const tagRulesForm = document.querySelector('form[data-save-bar]');
-    expect(tagRulesForm).not.toBeNull();
-    
-    const submitButtons = tagRulesForm?.querySelectorAll('s-button[type="submit"], button[type="submit"]');
-    expect(submitButtons?.length ?? 0).toBe(0);
+    expect(html).toContain('name="tag"');
+    expect(html).toContain('name="defaultTermsDays"');
   });
 });

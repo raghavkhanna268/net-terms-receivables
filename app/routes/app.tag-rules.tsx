@@ -18,7 +18,7 @@
  * - Default terms days: positive integer, 1-365
  */
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import type {
   HeadersFunction,
   LoaderFunctionArgs,
@@ -531,41 +531,55 @@ function TagRuleTable({ rules, shopTimezone }: { rules: TagRule[]; shopTimezone:
   );
 }
 
+const TAG_RULE_SAVE_BAR_ID = "tag-rule-save-bar";
+
 export default function TagRulesPage() {
   const { storeMode, tagRules, error, finishingSetup, notSupported, shopTimezone, newAccountsPausedBanner } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
-  const [tag, setTag] = useState("");
-  const [termsDays, setTermsDays] = useState("");
+  const tagRuleFormRef = useRef<HTMLFormElement>(null);
 
-  const tagHiddenRef = useRef<HTMLInputElement>(null);
-  const termsDaysHiddenRef = useRef<HTMLInputElement>(null);
+  const initialTag = "";
+  const initialTermsDays = "";
 
-  useEffect(() => {
-    const input = tagHiddenRef.current;
-    if (!input) return;
+  const [tag, setTag] = useState(initialTag);
+  const [termsDays, setTermsDays] = useState(initialTermsDays);
 
-    if (input.value !== tag) {
-      input.value = tag;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-  }, [tag]);
+  const isTagRuleDirty = useMemo(() => {
+    return tag !== initialTag || termsDays !== initialTermsDays;
+  }, [tag, termsDays]);
 
   useEffect(() => {
-    const input = termsDaysHiddenRef.current;
-    if (!input) return;
-
-    if (input.value !== termsDays) {
-      input.value = termsDays;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (typeof shopify === "undefined") return;
+    if (isTagRuleDirty) {
+      shopify.saveBar.show(TAG_RULE_SAVE_BAR_ID);
+    } else {
+      shopify.saveBar.hide(TAG_RULE_SAVE_BAR_ID);
     }
-  }, [termsDays]);
+  }, [isTagRuleDirty]);
 
-  const handleTagRuleFormReset = useCallback(() => {
-    setTag("");
-    setTermsDays("");
+  useEffect(() => {
+    if (actionData?.success) {
+      setTag("");
+      setTermsDays("");
+      if (typeof shopify !== "undefined") {
+        shopify.saveBar.hide(TAG_RULE_SAVE_BAR_ID);
+      }
+    }
+  }, [actionData]);
+
+  const handleTagRuleSave = useCallback(() => {
+    tagRuleFormRef.current?.requestSubmit();
+  }, []);
+
+  const handleTagRuleDiscard = useCallback(() => {
+    setTag(initialTag);
+    setTermsDays(initialTermsDays);
+    if (typeof shopify !== "undefined") {
+      shopify.saveBar.hide(TAG_RULE_SAVE_BAR_ID);
+    }
   }, []);
 
   if (finishingSetup) {
@@ -678,20 +692,12 @@ export default function TagRulesPage() {
       )}
 
       <s-section heading="Create Tag Rule">
-        <Form method="post" data-save-bar onReset={handleTagRuleFormReset}>
+        <ui-save-bar id={TAG_RULE_SAVE_BAR_ID}>
+          <button variant="primary" onClick={handleTagRuleSave}>Save</button>
+          <button onClick={handleTagRuleDiscard}>Discard</button>
+        </ui-save-bar>
+        <Form ref={tagRuleFormRef} method="post">
           <input type="hidden" name="intent" value="create_tag_rule" />
-          <input
-            ref={tagHiddenRef}
-            type="hidden"
-            name="_tagState"
-            defaultValue=""
-          />
-          <input
-            ref={termsDaysHiddenRef}
-            type="hidden"
-            name="_termsDaysState"
-            defaultValue=""
-          />
           <s-stack gap="base">
             <s-text-field
               label="Customer Tag"
@@ -699,7 +705,7 @@ export default function TagRulesPage() {
               placeholder="e.g., net30, wholesale-gold"
               value={tag}
               error={actionData && "fieldErrors" in actionData ? (actionData.fieldErrors as Record<string, string> | undefined)?.tag : undefined}
-              onChange={(e: Event) => {
+              onInput={(e: Event) => {
                 const target = e.currentTarget as HTMLInputElement | null;
                 setTag(target?.value ?? "");
               }}
@@ -715,7 +721,7 @@ export default function TagRulesPage() {
               placeholder="e.g., 30"
               value={termsDays}
               error={actionData && "fieldErrors" in actionData ? (actionData.fieldErrors as Record<string, string> | undefined)?.defaultTermsDays : undefined}
-              onChange={(e: Event) => {
+              onInput={(e: Event) => {
                 const target = e.currentTarget as HTMLInputElement | null;
                 setTermsDays(target?.value ?? "");
               }}
@@ -724,6 +730,10 @@ export default function TagRulesPage() {
               The default payment terms for customers with this tag (1-365
               days).
             </s-paragraph>
+
+            <s-button type="submit" variant="primary" disabled={isSubmitting}>
+              {isSubmitting ? "Creating..." : "Create Tag Rule"}
+            </s-button>
           </s-stack>
         </Form>
       </s-section>

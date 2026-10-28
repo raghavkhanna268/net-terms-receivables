@@ -302,8 +302,8 @@ describeWithDb("Ledger-to-Account journey (DB)", () => {
       const html = renderToString(createElement(AccountPage));
 
       expect(html).toContain("Edit Credit Settings");
-      // Save bar replaces explicit submit button
-      expect(html).toContain("data-save-bar");
+      expect(html).toContain("Save Credit Settings");
+      expect(html).toContain("ui-save-bar");
     });
   });
 
