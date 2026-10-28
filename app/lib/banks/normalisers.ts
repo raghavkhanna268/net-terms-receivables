@@ -5,6 +5,67 @@
  * Part of S14/S15: Net Terms Receivables bank statement parsing.
  */
 
+const EXCEL_EPOCH_MS = Date.UTC(1899, 11, 30);
+const MS_PER_DAY = 86400000;
+const EXCEL_SERIAL_MIN = 32874;
+const EXCEL_SERIAL_MAX = 73415;
+const EXCEL_SERIAL_STRING_PATTERN = /^\d{5}(\.\d+)?$/;
+
+/**
+ * Check if a number is a valid Excel serial date in the plausible range.
+ * Range: 1990-01-01 (32874) to 2100-12-31 (73415).
+ */
+function isValidExcelSerial(n: number): boolean {
+  if (!Number.isFinite(n)) return false;
+  const intPart = Math.floor(n);
+  return intPart >= EXCEL_SERIAL_MIN && intPart <= EXCEL_SERIAL_MAX;
+}
+
+/**
+ * Check if a string looks like a 5-digit Excel serial date in the plausible range.
+ * Pattern: exactly 5 digits, optionally followed by decimal fraction.
+ * This does NOT collide with dd/mm/yy (6 digits) or dd/mm/yyyy (8 digits).
+ * Used by parsers to allow serial strings through the "date looks valid" check.
+ */
+export function looksLikeExcelSerialString(s: string): boolean {
+  if (!EXCEL_SERIAL_STRING_PATTERN.test(s)) return false;
+  const intPart = Math.floor(parseFloat(s));
+  return intPart >= EXCEL_SERIAL_MIN && intPart <= EXCEL_SERIAL_MAX;
+}
+
+/**
+ * Check if a raw date value was a serial (number or 5-digit string) that main couldn't parse.
+ * Used for dedupe hash stability: on main, serial values failed to parse and weren't
+ * included in the hash. We need to preserve that behavior even though we now parse them.
+ */
+export function wasUnparseableOnMain(raw: string | Date | number | null | undefined): boolean {
+  if (raw === null || raw === undefined) return false;
+  if (raw instanceof Date) return false;
+  if (typeof raw === "number") return true;
+  return looksLikeExcelSerialString(String(raw).trim());
+}
+
+/**
+ * Convert Excel serial date to ISO 8601 date string (YYYY-MM-DD).
+ * Uses 1899-12-30 epoch with no +1 adjustment.
+ * Drops fractional time part.
+ */
+function excelSerialToIsoDate(serial: number): string {
+  const days = Math.floor(serial);
+  const ms = EXCEL_EPOCH_MS + days * MS_PER_DAY;
+  const d = new Date(ms);
+  const year = d.getUTCFullYear();
+  const month = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return formatIsoDate(year, month, day);
+}
+
+/** Options for parseIndianDate */
+export interface ParseDateOptions {
+  /** Allow Excel serial dates (numbers and 5-digit strings). Default: false (main's behavior). */
+  allowExcelSerial?: boolean;
+}
+
 /**
  * Parse Indian date formats to ISO 8601 (YYYY-MM-DD).
  *
@@ -16,14 +77,21 @@
  * - dd-MMM-yyyy (ICICI corporate: 15-Mar-2026)
  * - dd-MMM-yy (15-Mar-26)
  * - Date objects from Excel (converted using UTC to avoid timezone shifts)
+ * - Numeric Excel serial dates (ONLY when allowExcelSerial: true, range 1990-2100)
  *
- * @param input Date string or Date object
+ * @param input Date string, Date object, or numeric Excel serial
+ * @param options Optional parsing options
  * @returns ISO 8601 date string (YYYY-MM-DD) or null if unparseable/invalid
  */
-export function parseIndianDate(input: string | Date | null | undefined): string | null {
+export function parseIndianDate(
+  input: string | Date | number | null | undefined,
+  options?: ParseDateOptions
+): string | null {
   if (input === null || input === undefined) {
     return null;
   }
+
+  const allowExcelSerial = options?.allowExcelSerial ?? false;
 
   // Handle Date objects (from Excel parser) - use UTC getters to avoid timezone shifts
   if (input instanceof Date) {
@@ -39,6 +107,18 @@ export function parseIndianDate(input: string | Date | null | undefined): string
       return null;
     }
     return formatIsoDate(year, month, day);
+  }
+
+  // Handle numeric Excel serial dates (raw numbers in date columns)
+  // Only when explicitly enabled - this is OPT-IN to preserve main's behavior
+  if (typeof input === "number") {
+    if (!allowExcelSerial) {
+      return null; // main's behavior: numbers not parseable as dates
+    }
+    if (!isValidExcelSerial(input)) {
+      return null;
+    }
+    return excelSerialToIsoDate(input);
   }
 
   const str = String(input).trim();
@@ -84,6 +164,14 @@ export function parseIndianDate(input: string | Date | null | undefined): string
   if (timestampMatch) {
     const [, dayStr, monthStr, yearStr] = timestampMatch;
     return parseComponents(dayStr, monthStr, yearStr);
+  }
+
+  // Handle string representation of Excel serial date (5-digit number, optionally fractional)
+  // This handles XLSX cells with General format where raw:false returns the number as a string
+  // Only when explicitly enabled - this is OPT-IN to preserve main's behavior
+  if (allowExcelSerial && looksLikeExcelSerialString(str)) {
+    const serial = parseFloat(str);
+    return excelSerialToIsoDate(serial);
   }
 
   return null;

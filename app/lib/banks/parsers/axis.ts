@@ -30,6 +30,7 @@ import type {
   ParseError,
   ParseResult,
   DetectionResult,
+  ParserContext,
 } from "../types.js";
 import { detectHeaderRow, detectFooterRows, isNarrationContinuation } from "../detection.js";
 
@@ -42,7 +43,7 @@ function isFullyBlankRow(row: (string | number | Date | boolean | null)[]): bool
   }
   return true;
 }
-import { parseIndianDate, parseIndianAmount, isBlankOrZero } from "../normalisers.js";
+import { parseIndianDate, parseIndianAmount, isBlankOrZero, looksLikeExcelSerialString, wasUnparseableOnMain } from "../normalisers.js";
 import { parseNarration, extractUtrForDedupe } from "../narration-parser.js";
 import { generateDedupeKey, dedupeTransactions } from "../dedupe.js";
 
@@ -63,10 +64,14 @@ interface AxisColumnMap {
 export async function parseAxisStatement(
   sheet: SheetData,
   detection: DetectionResult,
-  existingKeys?: Set<string>
+  existingKeys?: Set<string>,
+  context?: ParserContext
 ): Promise<ParseResult> {
   const transactions: NormalisedTxn[] = [];
   const errors: ParseError[] = [];
+
+  // Determine if this is a spreadsheet format (xlsx/xls) where serial dates are accepted
+  const isSpreadsheet = context?.fileType === "xlsx" || context?.fileType === "xls";
   let skippedRows = 0;
 
   // Find header row
@@ -157,7 +162,7 @@ export async function parseAxisStatement(
       if (pendingNarration.length > 0) {
         lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
       }
-      const normalized = await normalizeAxisRow(lastValidRow);
+      const normalized = await normalizeAxisRow(lastValidRow, isSpreadsheet);
       if (normalized) {
         transactions.push(normalized);
       } else {
@@ -172,7 +177,7 @@ export async function parseAxisStatement(
     }
 
     // Parse this row
-    const rawRow = extractAxisRow(row, columns, i + 1);
+    const rawRow = extractAxisRow(row, columns, i + 1, isSpreadsheet);
     if (!rawRow) {
       const dateCell = String(row[columns.dateCol] ?? "").trim();
       const particularsContent = String(row[columns.particularsCol] ?? "").trim();
@@ -206,7 +211,7 @@ export async function parseAxisStatement(
     if (pendingNarration.length > 0) {
       lastValidRow.narration = [lastValidRow.narration, ...pendingNarration].join(" ");
     }
-    const normalized = await normalizeAxisRow(lastValidRow);
+    const normalized = await normalizeAxisRow(lastValidRow, isSpreadsheet);
     if (normalized) {
       transactions.push(normalized);
     } else {
@@ -281,11 +286,13 @@ function mapAxisColumns(headers: string[]): AxisColumnMap | null {
 
 /**
  * Extract raw data from a row.
+ * @param isSpreadsheet True for xlsx/xls files where serial dates are accepted
  */
 function extractAxisRow(
   row: (string | number | Date | boolean | null)[],
   columns: AxisColumnMap,
-  sourceRow: number
+  sourceRow: number,
+  isSpreadsheet: boolean
 ): RawTxnRow | null {
   const dateRaw = row[columns.dateCol];
   const particulars = String(row[columns.particularsCol] ?? "").trim();
@@ -295,10 +302,26 @@ function extractAxisRow(
     return null;
   }
 
-  // Check if date looks valid
-  const dateStr = dateRaw instanceof Date ? dateRaw.toISOString() : String(dateRaw);
-  if (!dateStr.match(/\d/) || dateStr.length < 6) {
-    return null;
+  // Check if date looks valid:
+  // - Date objects are valid
+  // - Numbers are valid ONLY for xlsx/xls (Excel serial dates handled by parseIndianDate)
+  // - Strings must contain digits and be at least 6 chars (e.g., "01/10/26"),
+  //   OR be a 5-digit Excel serial string ONLY for xlsx/xls (e.g., "46310")
+  if (dateRaw instanceof Date) {
+    // Date object - OK
+  } else if (typeof dateRaw === "number") {
+    // Numeric Excel serial - only OK for spreadsheet formats
+    if (!isSpreadsheet) {
+      return null;
+    }
+  } else {
+    const dateStr = String(dateRaw).trim();
+    const isValidLength = dateStr.match(/\d/) && dateStr.length >= 6;
+    // Serial strings only accepted for spreadsheet formats
+    const isSerialString = isSpreadsheet && looksLikeExcelSerialString(dateStr);
+    if (!isValidLength && !isSerialString) {
+      return null;
+    }
   }
 
   // Skip rows where particulars is just numbers (summary artifacts)
@@ -307,15 +330,17 @@ function extractAxisRow(
   }
 
   const valueDateCell = columns.valueDateCol !== undefined ? row[columns.valueDateCol] : undefined;
-  const valueDateRaw: string | Date | undefined =
+  const valueDateRaw: string | Date | number | undefined =
     valueDateCell != null
       ? valueDateCell instanceof Date
         ? valueDateCell
-        : String(valueDateCell)
+        : typeof valueDateCell === "number"
+          ? valueDateCell
+          : String(valueDateCell)
       : undefined;
 
   return {
-    dateRaw: dateRaw instanceof Date ? dateRaw : dateStr,
+    dateRaw: dateRaw instanceof Date ? dateRaw : typeof dateRaw === "number" ? dateRaw : String(dateRaw),
     valueDateRaw,
     narration: particulars,
     refNo: row[columns.refCol] ? String(row[columns.refCol]).trim() : undefined,
@@ -328,16 +353,17 @@ function extractAxisRow(
 
 /**
  * Normalize a raw Axis row to standard format.
+ * @param isSpreadsheet True for xlsx/xls files where serial dates are accepted
  */
-async function normalizeAxisRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
-  // Parse date
-  const date = parseIndianDate(raw.dateRaw as string | Date);
+async function normalizeAxisRow(raw: RawTxnRow, isSpreadsheet: boolean): Promise<NormalisedTxn | null> {
+  // Parse date (handles strings, Date objects, and numeric Excel serials when allowed)
+  const date = parseIndianDate(raw.dateRaw, { allowExcelSerial: isSpreadsheet });
   if (!date) {
     return null;
   }
 
   const valueDate = raw.valueDateRaw
-    ? parseIndianDate(raw.valueDateRaw as string | Date) ?? undefined
+    ? parseIndianDate(raw.valueDateRaw, { allowExcelSerial: isSpreadsheet }) ?? undefined
     : undefined;
 
   // Determine amount and direction
@@ -375,6 +401,11 @@ async function normalizeAxisRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
     parsed.utr = utr;
   }
 
+  // For dedupe hash stability: on main, if valueDateRaw was a serial (number or 5-digit string),
+  // parseIndianDate returned null, so the hash didn't include vdate at all.
+  // We preserve that by passing undefined to generateDedupeKey when valueDateRaw was unparseable on main.
+  const valueDateForHash = wasUnparseableOnMain(raw.valueDateRaw) ? undefined : valueDate;
+
   // Generate dedupe key with all relevant fields
   const dedupeKey = await generateDedupeKey(
     date,
@@ -384,7 +415,7 @@ async function normalizeAxisRow(raw: RawTxnRow): Promise<NormalisedTxn | null> {
     parsed.rail,
     utr ?? undefined,
     balancePaise,
-    valueDate,
+    valueDateForHash,
     raw.refNo
   );
 

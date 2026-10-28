@@ -55,7 +55,7 @@ export {
 export { detectFileType, loadSpreadsheet, getSheetNames } from "./spreadsheet-loader.js";
 
 // Import for main parser
-import type { BankId, ParseResult, ParseOptions } from "./types.js";
+import type { BankId, ParseResult, ParseOptions, ParserContext } from "./types.js";
 import { detectFileType, loadSpreadsheet } from "./spreadsheet-loader.js";
 import { detectBank } from "./detection.js";
 import { parseHdfcStatement } from "./parsers/hdfc.js";
@@ -108,16 +108,19 @@ export async function parseBankStatement(
   // Detect bank
   const detection = detectBank(sheet, fileName);
 
+  // Build parser context
+  const context: ParserContext = { fileType };
+
   // Route to appropriate parser
   switch (detection.bank) {
     case "HDFC":
-      return parseHdfcStatement(sheet, detection, options.existingKeys);
+      return parseHdfcStatement(sheet, detection, options.existingKeys, context);
     case "ICICI":
-      return parseIciciStatement(sheet, detection, options.existingKeys);
+      return parseIciciStatement(sheet, detection, options.existingKeys, context);
     case "SBI":
-      return parseSbiStatement(sheet, detection, options.existingKeys);
+      return parseSbiStatement(sheet, detection, options.existingKeys, context);
     case "AXIS":
-      return parseAxisStatement(sheet, detection, options.existingKeys);
+      return parseAxisStatement(sheet, detection, options.existingKeys, context);
     default:
       // Unknown bank - return empty result with detection info
       return {

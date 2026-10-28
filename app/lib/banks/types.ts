@@ -25,10 +25,10 @@ export interface DetectionResult {
 
 /** Raw parsed row before normalization (bank-specific) */
 export interface RawTxnRow {
-  /** Original date as string or Date object from Excel */
-  dateRaw: string | Date;
-  /** Value date as string or Date object if present */
-  valueDateRaw?: string | Date;
+  /** Original date as string, Date object, or numeric Excel serial from Excel */
+  dateRaw: string | Date | number;
+  /** Value date as string, Date object, or numeric Excel serial if present */
+  valueDateRaw?: string | Date | number;
   /** Full narration text */
   narration: string;
   /** Cheque or reference number */
@@ -124,6 +124,12 @@ export interface ParseOptions {
   existingKeys?: Set<string>;
   /** File name (used for bank detection hints) */
   fileName?: string;
+}
+
+/** Context passed to parsers for file-type-aware parsing */
+export interface ParserContext {
+  /** File type - xlsx/xls allows serial dates, csv/txt does not */
+  fileType: FileType;
 }
 
 /** Supported file types */
