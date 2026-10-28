@@ -1172,11 +1172,11 @@ describe("edge-case handling (SYNTHETIC, UNVERIFIED LAYOUT)", () => {
     it.skip("HDFC XLSX: bare Total row followed by unformatted numeric serials parses correctly", async () => {
       const XLSX = await import("xlsx");
 
-      // Excel serial = days since 1899-12-30 + 1 (for 1900 leap year bug)
-      // Formula: Math.floor((Date.UTC(y,m-1,d) - Date.UTC(1899,11,30)) / 86400000) + 1
-      const SERIAL_2026_10_15 = 46311;
-      const SERIAL_2026_10_18 = 46314;
-      const SERIAL_2026_10_20 = 46316;
+      // Excel serial = days since 1899-12-30 (epoch absorbs the 1900 leap year bug)
+      // Formula: Math.floor((Date.UTC(y,m-1,d) - Date.UTC(1899,11,30)) / 86400000)
+      const SERIAL_2026_10_15 = 46310;
+      const SERIAL_2026_10_18 = 46313;
+      const SERIAL_2026_10_20 = 46315;
 
       const rows: (string | number | null)[][] = [
         ["HDFC BANK"],
