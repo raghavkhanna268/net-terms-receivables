@@ -409,4 +409,157 @@ describeWithDb("scripts/e2e-bank-import.ts (DB)", () => {
       expect(value).not.toContain("#");
     }
   });
+
+  it("apply with pre-existing import leaves other import's matches untouched", async () => {
+    // Create a pre-existing import with payments and matches
+    const preExistingImportId = `pre-existing-import-${runId}`;
+    const preExistingPaymentId = `pre-existing-payment-${runId}`;
+
+    await sql`
+      INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+      VALUES (${preExistingImportId}, ${shopId}, 'hdfc', 'pre-existing.csv', 1, NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingPaymentId}, ${shopId}, ${preExistingImportId},
+        '2026-10-20'::date, ${REVIEWER_DEMO_AMOUNTS.order1}, 'NEFT', 'SYNTPRE001',
+        'TEST BUYER CO', 'NEFT-SYNTPRE001-TEST BUYER CO-#1001', 'unmatched', NOW(), NOW()
+      )
+    `;
+
+    // Create a suggested match for the pre-existing payment
+    const preExistingMatchId = `pre-existing-match-${runId}`;
+    const [invoice] = await sql<{ id: string }[]>`
+      SELECT id FROM "Invoice" WHERE "shopId" = ${shopId} AND name = '#1001' LIMIT 1
+    `;
+
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingMatchId}, ${shopId}, ${preExistingPaymentId}, ${invoice.id},
+        ${REVIEWER_DEMO_AMOUNTS.order1}, 58, '[]'::jsonb, 'suggested', NOW(), NOW()
+      )
+    `;
+
+    // Snapshot the pre-existing match
+    const [matchBefore] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    // Run the e2e script in apply mode
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    expect(c.out.result).toBe("imported");
+    expect(c.out.rolled_back).toBe(false);
+    expect(c.out.statement_lines_inserted).toBe(3);
+    expect(c.out.matcher_payments_processed).toBe(3);
+    // 3 credits in fixture, < 10, so no more
+    expect(c.out.matcher_has_more).toBe(false);
+    expect(c.out.matches_not_suggested).toBe(0);
+    expect(c.out.payments_not_unmatched).toBe(0);
+    expect(c.out.payer_alias_delta).toBe(0);
+    expect(c.out.confirm_audit_events_delta).toBe(0);
+
+    // Verify pre-existing match is untouched
+    const [matchAfter] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    expect(matchAfter.id).toBe(matchBefore.id);
+    expect(matchAfter.score).toBe(matchBefore.score);
+    expect(matchAfter.amount).toBe(matchBefore.amount);
+    expect(matchAfter.state).toBe(matchBefore.state);
+
+    // Cleanup for other tests
+    await sql`DELETE FROM "Match" WHERE id = ${preExistingMatchId}`;
+    await sql`DELETE FROM "Payment" WHERE id = ${preExistingPaymentId}`;
+    await sql`DELETE FROM "BankImport" WHERE id = ${preExistingImportId}`;
+  });
+
+  it("dry_run with pre-existing import leaves other import's matches untouched", async () => {
+    // Create a pre-existing import with payments and matches
+    const preExistingImportId = `pre-existing-dry-${runId}`;
+    const preExistingPaymentId = `pre-existing-dry-payment-${runId}`;
+
+    await sql`
+      INSERT INTO "BankImport" (id, "shopId", bank, "fileName", "rowCount", "createdAt")
+      VALUES (${preExistingImportId}, ${shopId}, 'hdfc', 'pre-existing-dry.csv', 1, NOW())
+    `;
+
+    await sql`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingPaymentId}, ${shopId}, ${preExistingImportId},
+        '2026-10-20'::date, ${REVIEWER_DEMO_AMOUNTS.order1}, 'NEFT', 'SYNTPREDRY',
+        'TEST BUYER CO', 'NEFT-SYNTPREDRY-TEST BUYER CO-#1001', 'unmatched', NOW(), NOW()
+      )
+    `;
+
+    // Create a suggested match for the pre-existing payment
+    const preExistingMatchId = `pre-existing-dry-match-${runId}`;
+    const [invoice] = await sql<{ id: string }[]>`
+      SELECT id FROM "Invoice" WHERE "shopId" = ${shopId} AND name = '#1001' LIMIT 1
+    `;
+
+    await sql`
+      INSERT INTO "Match" (
+        id, "shopId", "paymentId", "invoiceId", amount, score, reasons, state, "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${preExistingMatchId}, ${shopId}, ${preExistingPaymentId}, ${invoice.id},
+        ${REVIEWER_DEMO_AMOUNTS.order1}, 58, '[]'::jsonb, 'suggested', NOW(), NOW()
+      )
+    `;
+
+    // Snapshot the pre-existing match
+    const [matchBefore] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    // Run the e2e script in dry_run mode
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: true, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    expect(c.out.result).toBe("dry_run_ok");
+    expect(c.out.rolled_back).toBe(true);
+    expect(c.out.statement_lines_inserted).toBe(3);
+    expect(c.out.matcher_payments_processed).toBe(3);
+    expect(c.out.matcher_has_more).toBe(false);
+
+    // Verify pre-existing match is untouched (was outside the rolled-back transaction)
+    const [matchAfter] = await sql<{ id: string; score: number; amount: string; state: string }[]>`
+      SELECT id, score, amount::text, state FROM "Match" WHERE id = ${preExistingMatchId}
+    `;
+
+    expect(matchAfter.id).toBe(matchBefore.id);
+    expect(matchAfter.score).toBe(matchBefore.score);
+    expect(matchAfter.amount).toBe(matchBefore.amount);
+    expect(matchAfter.state).toBe(matchBefore.state);
+
+    // Cleanup
+    await sql`DELETE FROM "Match" WHERE id = ${preExistingMatchId}`;
+    await sql`DELETE FROM "Payment" WHERE id = ${preExistingPaymentId}`;
+    await sql`DELETE FROM "BankImport" WHERE id = ${preExistingImportId}`;
+  });
+
+  it("matcher_payments_processed equals statement_lines_inserted (scope proof)", async () => {
+    const c = collector();
+    await runE2eBankImport({ sql, env, dryRun: false, rootDir: ROOT, now: NOW_IN_BOUNDS, emit: c.emit });
+
+    // The fixture has 3 credits (lines 13-15), all are inserted
+    expect(c.out.statement_lines_inserted).toBe(3);
+    // With importId scoping, matcher only processes payments from this import
+    expect(c.out.matcher_payments_processed).toBe(3);
+    // Since 3 < MAX_PAYMENTS_PER_REQUEST (10), no more to process
+    expect(c.out.matcher_has_more).toBe(false);
+  });
 });
