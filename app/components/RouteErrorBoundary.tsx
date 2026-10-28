@@ -28,8 +28,12 @@ export function RouteErrorBoundary() {
     if (error.status === 404) {
       heading = "Page not found";
       message = "The page you are looking for could not be found.";
-    } else {
-      heading = `Error ${error.status}`;
+    } else if (error.status === 401) {
+      heading = "Reconnecting to Shopify…";
+      message = "Please wait while we reconnect your session.";
+    } else if (error.status === 403) {
+      heading = "Access denied";
+      message = "You don't have access to this page.";
     }
   }
 
