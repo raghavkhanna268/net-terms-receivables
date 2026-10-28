@@ -325,10 +325,10 @@ export function isLocalhostDatabaseUrl(databaseUrl: string): boolean {
   }
   try {
     const url = new URL(databaseUrl);
-    const host = url.hostname.toLowerCase();
-    // IPv6 in URLs uses brackets: postgres://u@[::1]:5432/db -> hostname is "[::1]"
-    // Accept both bracketed "[::1]" and unbracketed "::1" defensively
-    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+    // URL.hostname keeps brackets for IPv6: postgres://u@[::1]:5432/db -> "[::1]"
+    // Strip surrounding brackets before comparing, so [::1] becomes ::1
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
   } catch {
     return false;
   }

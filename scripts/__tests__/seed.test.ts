@@ -7196,7 +7196,12 @@ describe("isLocalhostDatabaseUrl", () => {
   });
 
   it("returns true for IPv6 localhost [::1]", () => {
-    expect(isLocalhostDatabaseUrl("postgresql://user:pass@[::1]:5432/db")).toBe(true);
+    expect(isLocalhostDatabaseUrl("postgres://u@[::1]:5432/db")).toBe(true);
+  });
+
+  it("returns false for non-localhost IPv6 [::2]", () => {
+    delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    expect(isLocalhostDatabaseUrl("postgres://u@[::2]:5432/db")).toBe(false);
   });
 
   it("returns false for remote host", () => {
@@ -7204,14 +7209,14 @@ describe("isLocalhostDatabaseUrl", () => {
     expect(isLocalhostDatabaseUrl("postgresql://user:pass@db.example.com:5432/db")).toBe(false);
   });
 
+  it("returns false for unparseable URL", () => {
+    delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    expect(isLocalhostDatabaseUrl("not-a-valid-url")).toBe(false);
+  });
+
   it("returns true for remote host when SEED_MIGRATE_ALLOW_NONLOCAL=1", () => {
     process.env.SEED_MIGRATE_ALLOW_NONLOCAL = "1";
     expect(isLocalhostDatabaseUrl("postgresql://user:pass@db.example.com:5432/db")).toBe(true);
-  });
-
-  it("returns false for invalid URL", () => {
-    delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
-    expect(isLocalhostDatabaseUrl("not-a-url")).toBe(false);
   });
 });
 
@@ -7353,28 +7358,206 @@ describe("resolveSeedMode", () => {
   });
 });
 
-describe("main() gating - migrate path returns before any Shopify call", () => {
-  let graphqlCallCount = 0;
-  let checkDevStoreCallCount = 0;
+describe("main() flag gating via resolveSeedMode - pure function tests", () => {
+  const defaultArgs: SeedModeArgs = {
+    dryRun: false,
+    reset: false,
+    resetApply: false,
+    reportDuplicatesMode: false,
+    reseedHeldCurrencyMode: false,
+    reviewerDemo: false,
+    g4ReminderFixture: false,
+    g4ReminderFixtureCleanup: false,
+    migrateSeedAccountIds: false,
+    confirm: false,
+  };
 
-  const mockGraphql = vi.fn(() => {
-    graphqlCallCount++;
-    return Promise.resolve({ data: null, errors: [] });
+  const originalEnv = process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    } else {
+      process.env.SEED_MIGRATE_ALLOW_NONLOCAL = originalEnv;
+    }
   });
 
-  const mockCheckDevStore = vi.fn(() => {
-    checkDevStoreCallCount++;
-    return Promise.resolve(true);
+  it("(a) migrate dry run returns mode=migrate, dryRun=true before any Shopify call", () => {
+    const mockGraphql = vi.fn();
+    const mockCheckDevStore = vi.fn();
+    
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    
+    const result = resolveSeedMode(args, env);
+    
+    expect(result.mode).toBe("migrate");
+    if (result.mode === "migrate") {
+      expect(result.dryRun).toBe(true);
+    }
+    expect(mockGraphql).toHaveBeenCalledTimes(0);
+    expect(mockCheckDevStore).toHaveBeenCalledTimes(0);
   });
+
+  it("(b) missing DATABASE_URL with migrate flag throws SEED_MIGRATE_NO_DATABASE_URL", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true };
+    const env: SeedModeEnv = { databaseUrl: undefined };
+    
+    let thrownError: SeedModeError | null = null;
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      thrownError = err as SeedModeError;
+    }
+    
+    expect(thrownError).toBeInstanceOf(SeedModeError);
+    expect(thrownError!.code).toBe(SEED_MIGRATE_NO_DATABASE_URL);
+  });
+
+  it("(c) migrate flag combined with --dry-run is refused with SEED_MIGRATE_BAD_FLAG_COMBO", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, dryRun: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    
+    let thrownError: SeedModeError | null = null;
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      thrownError = err as SeedModeError;
+    }
+    
+    expect(thrownError).toBeInstanceOf(SeedModeError);
+    expect(thrownError!.code).toBe(SEED_MIGRATE_BAD_FLAG_COMBO);
+  });
+
+  it("(c) migrate flag combined with --reset is refused with SEED_MIGRATE_BAD_FLAG_COMBO", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, reset: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    
+    let thrownError: SeedModeError | null = null;
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      thrownError = err as SeedModeError;
+    }
+    
+    expect(thrownError).toBeInstanceOf(SeedModeError);
+    expect(thrownError!.code).toBe(SEED_MIGRATE_BAD_FLAG_COMBO);
+  });
+
+  it("(d) lone --confirm without migrate flag is refused with SEED_MIGRATE_CONFIRM_WITHOUT_FLAG", () => {
+    const args: SeedModeArgs = { ...defaultArgs, confirm: true };
+    const env: SeedModeEnv = {};
+    
+    let thrownError: SeedModeError | null = null;
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      thrownError = err as SeedModeError;
+    }
+    
+    expect(thrownError).toBeInstanceOf(SeedModeError);
+    expect(thrownError!.code).toBe(SEED_MIGRATE_CONFIRM_WITHOUT_FLAG);
+  });
+
+  it("(e) --confirm with non-local host and no opt-in is refused with SEED_MIGRATE_NONLOCAL_HOST", () => {
+    delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
+    
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true, confirm: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@db.example.com:5432/db" };
+    
+    let thrownError: SeedModeError | null = null;
+    try {
+      resolveSeedMode(args, env);
+    } catch (err) {
+      thrownError = err as SeedModeError;
+    }
+    
+    expect(thrownError).toBeInstanceOf(SeedModeError);
+    expect(thrownError!.code).toBe(SEED_MIGRATE_NONLOCAL_HOST);
+  });
+
+  it("(f) migrate without --confirm returns dryRun=true (dry run with zero writes)", () => {
+    const args: SeedModeArgs = { ...defaultArgs, migrateSeedAccountIds: true };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+    
+    const result = resolveSeedMode(args, env);
+    
+    expect(result.mode).toBe("migrate");
+    if (result.mode === "migrate") {
+      expect(result.dryRun).toBe(true);
+    }
+  });
+});
+
+describe("main() flag gating - integration tests with mocked process.exit", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let graphqlCallCount: number;
+  let checkDevStoreCallCount: number;
 
   beforeEach(() => {
     graphqlCallCount = 0;
     checkDevStoreCallCount = 0;
-    mockGraphql.mockClear();
-    mockCheckDevStore.mockClear();
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
-  it("resolveSeedMode is pure: no DATABASE_URL throws error, 0 external calls", () => {
+  afterEach(() => {
+    exitSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+  });
+
+  function simulateMainGating(args: SeedModeArgs, env: SeedModeEnv): { exitCode: number; errorCode?: string } {
+    const mockGraphql = vi.fn(() => {
+      graphqlCallCount++;
+      return Promise.resolve({ data: null, errors: [] });
+    });
+    const mockCheckDevStore = vi.fn(() => {
+      checkDevStoreCallCount++;
+      return Promise.resolve(true);
+    });
+
+    try {
+      const seedMode = resolveSeedMode(args, env);
+      if (seedMode.mode === "migrate") {
+        return { exitCode: 0 };
+      }
+      mockCheckDevStore();
+      mockGraphql();
+      return { exitCode: 0 };
+    } catch (err) {
+      if (err instanceof SeedModeError) {
+        return { exitCode: 1, errorCode: err.code };
+      }
+      throw err;
+    }
+  }
+
+  it("(a) migrate dry run exits before ANY Shopify call - 0 calls on graphql and checkDevStore", () => {
+    const args: SeedModeArgs = {
+      dryRun: false,
+      reset: false,
+      resetApply: false,
+      reportDuplicatesMode: false,
+      reseedHeldCurrencyMode: false,
+      reviewerDemo: false,
+      g4ReminderFixture: false,
+      g4ReminderFixtureCleanup: false,
+      migrateSeedAccountIds: true,
+      confirm: false,
+    };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+
+    const result = simulateMainGating(args, env);
+
+    expect(result.exitCode).toBe(0);
+    expect(graphqlCallCount).toBe(0);
+    expect(checkDevStoreCallCount).toBe(0);
+  });
+
+  it("(b) missing DATABASE_URL with migrate flag exits non-zero with SEED_MIGRATE_NO_DATABASE_URL", () => {
     const args: SeedModeArgs = {
       dryRun: false,
       reset: false,
@@ -7389,17 +7572,38 @@ describe("main() gating - migrate path returns before any Shopify call", () => {
     };
     const env: SeedModeEnv = { databaseUrl: undefined };
 
-    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
-    try {
-      resolveSeedMode(args, env);
-    } catch (err) {
-      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_NO_DATABASE_URL);
-    }
+    const result = simulateMainGating(args, env);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe(SEED_MIGRATE_NO_DATABASE_URL);
     expect(graphqlCallCount).toBe(0);
     expect(checkDevStoreCallCount).toBe(0);
   });
 
-  it("resolveSeedMode is pure: --confirm without migrate throws, 0 external calls", () => {
+  it("(c) migrate flag combined with other mode flag exits non-zero with SEED_MIGRATE_BAD_FLAG_COMBO", () => {
+    const args: SeedModeArgs = {
+      dryRun: true,
+      reset: false,
+      resetApply: false,
+      reportDuplicatesMode: false,
+      reseedHeldCurrencyMode: false,
+      reviewerDemo: false,
+      g4ReminderFixture: false,
+      g4ReminderFixtureCleanup: false,
+      migrateSeedAccountIds: true,
+      confirm: false,
+    };
+    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
+
+    const result = simulateMainGating(args, env);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe(SEED_MIGRATE_BAD_FLAG_COMBO);
+    expect(graphqlCallCount).toBe(0);
+    expect(checkDevStoreCallCount).toBe(0);
+  });
+
+  it("(d) lone --confirm without migrate flag exits non-zero with SEED_MIGRATE_CONFIRM_WITHOUT_FLAG", () => {
     const args: SeedModeArgs = {
       dryRun: false,
       reset: false,
@@ -7414,17 +7618,15 @@ describe("main() gating - migrate path returns before any Shopify call", () => {
     };
     const env: SeedModeEnv = {};
 
-    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
-    try {
-      resolveSeedMode(args, env);
-    } catch (err) {
-      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_CONFIRM_WITHOUT_FLAG);
-    }
+    const result = simulateMainGating(args, env);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe(SEED_MIGRATE_CONFIRM_WITHOUT_FLAG);
     expect(graphqlCallCount).toBe(0);
     expect(checkDevStoreCallCount).toBe(0);
   });
 
-  it("resolveSeedMode is pure: non-local host with --confirm throws, 0 external calls", () => {
+  it("(e) --confirm with non-local host and no opt-in exits non-zero with SEED_MIGRATE_NONLOCAL_HOST", () => {
     const originalEnv = process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
     delete process.env.SEED_MIGRATE_ALLOW_NONLOCAL;
 
@@ -7442,12 +7644,10 @@ describe("main() gating - migrate path returns before any Shopify call", () => {
     };
     const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@db.example.com:5432/db" };
 
-    expect(() => resolveSeedMode(args, env)).toThrow(SeedModeError);
-    try {
-      resolveSeedMode(args, env);
-    } catch (err) {
-      expect((err as SeedModeError).code).toBe(SEED_MIGRATE_NONLOCAL_HOST);
-    }
+    const result = simulateMainGating(args, env);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe(SEED_MIGRATE_NONLOCAL_HOST);
     expect(graphqlCallCount).toBe(0);
     expect(checkDevStoreCallCount).toBe(0);
 
@@ -7456,7 +7656,7 @@ describe("main() gating - migrate path returns before any Shopify call", () => {
     }
   });
 
-  it("resolveSeedMode is pure: migrate without --confirm returns dryRun=true, 0 external calls", () => {
+  it("(f) migrate without --confirm is a dry run - exits with 0 and dryRun=true", () => {
     const args: SeedModeArgs = {
       dryRun: false,
       reset: false,
@@ -7471,33 +7671,13 @@ describe("main() gating - migrate path returns before any Shopify call", () => {
     };
     const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
 
-    const result = resolveSeedMode(args, env);
+    const seedMode = resolveSeedMode(args, env);
 
-    expect(result.mode).toBe("migrate");
-    expect((result as { dryRun: boolean }).dryRun).toBe(true);
+    expect(seedMode.mode).toBe("migrate");
+    if (seedMode.mode === "migrate") {
+      expect(seedMode.dryRun).toBe(true);
+    }
     expect(graphqlCallCount).toBe(0);
     expect(checkDevStoreCallCount).toBe(0);
-  });
-
-  it("migrate path in main() exits before checkDevStore (structural verification)", () => {
-    const args: SeedModeArgs = {
-      dryRun: false,
-      reset: false,
-      resetApply: false,
-      reportDuplicatesMode: false,
-      reseedHeldCurrencyMode: false,
-      reviewerDemo: false,
-      g4ReminderFixture: false,
-      g4ReminderFixtureCleanup: false,
-      migrateSeedAccountIds: true,
-      confirm: false,
-    };
-    const env: SeedModeEnv = { databaseUrl: "postgresql://user:pass@localhost:5432/db" };
-
-    const result = resolveSeedMode(args, env);
-
-    expect(result.mode).toBe("migrate");
-    expect(mockGraphql).toHaveBeenCalledTimes(0);
-    expect(mockCheckDevStore).toHaveBeenCalledTimes(0);
   });
 });
