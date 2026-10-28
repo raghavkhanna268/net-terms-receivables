@@ -55,6 +55,7 @@ import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.se
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { pluralizeWithCount } from "~/lib/copy-helpers";
 import { validateTimezone } from "~/lib/aging-dates.server";
+import { normalizeAccountId } from "~/lib/account-href";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -155,7 +156,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id;
+  const accountId = params.id ? normalizeAccountId(params.id) : undefined;
 
   const upgradeUrl = (() => {
     const handle = getAppHandle();
@@ -442,7 +443,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
   const { session } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id;
+  const accountId = params.id ? normalizeAccountId(params.id) : undefined;
 
   if (!accountId) {
     return { success: false, error: "Account ID is required" } satisfies ActionData;
