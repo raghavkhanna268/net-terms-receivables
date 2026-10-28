@@ -24,7 +24,7 @@ import type {
   ActionFunctionArgs,
 } from "react-router";
 import { data } from "react-router";
-import { useLoaderData, useActionData, Form, useNavigation, useParams } from "react-router";
+import { useLoaderData, useActionData, Form, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { getRequestSql } from "~/lib/request-context.server";
 import { isAccountActive, isGatingEnforced, getUsageStats } from "~/services/gating.server";
@@ -667,11 +667,10 @@ export default function AccountPage() {
   const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, shopTimezone, newAccountsPausedBanner, error } = loaderData;
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
-  const params = useParams();
   const isSubmitting = navigation.state === "submitting";
   const isReminderSubmitting = isSubmitting && navigation.formData?.get("_action") === "updateReminderOptOut";
 
-  const formAction = params.id ? accountHref(params.id) : undefined;
+  const formAction = account?.id ? accountHref(account.id) : undefined;
 
   const serverNoLimit = creditStatus?.creditLimitAmount === null;
   const [noLimitChecked, setNoLimitChecked] = useState(serverNoLimit);
