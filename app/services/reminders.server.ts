@@ -903,10 +903,11 @@ function formatAmount(amount: string, currency: string): string {
 
 /**
  * Format date for display in the shop's timezone.
+ * Pinned to en-US locale so output is always 'Month Day, Year'.
  */
-function formatDate(date: Date, timezone: string): string {
+export function formatDate(date: Date, timezone: string): string {
   const validTz = validateTimezone(timezone);
-  const dt = DateTime.fromJSDate(date, { zone: validTz });
+  const dt = DateTime.fromJSDate(date, { zone: validTz }).setLocale("en-US");
   return dt.toLocaleString(DateTime.DATE_FULL);
 }
 
@@ -1054,8 +1055,8 @@ export async function sendPaymentReminder(
   }
 
   // Gate 8: Check buyer has email (via CUSTOMER_PII_FIELDS)
-  // If PII field is off or email missing, skip without consuming slot or cap
-  if (!invoice.buyerEmail) {
+  // If PII field is off or email missing/whitespace-only, skip without consuming slot or cap
+  if (!invoice.buyerEmail?.trim()) {
     return {
       success: true,
       action: "skipped",
@@ -1473,8 +1474,8 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 8: Check buyer has email
-  if (!invoice.buyerEmail) {
+  // Gate 8: Check buyer has email (whitespace-only also skipped)
+  if (!invoice.buyerEmail?.trim()) {
     await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,

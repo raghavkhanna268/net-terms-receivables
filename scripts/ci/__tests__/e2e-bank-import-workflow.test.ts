@@ -29,6 +29,10 @@ import {
   runE2eBankImport,
   OUTPUT_KEYS,
   FIXTURE_RELATIVE_PATH,
+  REVIEWER_DEMO_ORDER_NAMES,
+  formatSuggestionLabel,
+  formatSuggestionValue,
+  MAX_SUGGESTION_LINES,
   type OutputKey,
 } from "../../e2e-bank-import";
 import type { Sql } from "../../../app/lib/db-light.server";
@@ -65,14 +69,18 @@ function runFilter(input: string) {
 describe("e2e-bank-import.yml", () => {
   const wf = fs.readFileSync(WORKFLOW, "utf8");
 
-  it("is dispatch-only, main-only, with a single boolean dry_run defaulting to true", () => {
+  it("is dispatch-only, main-only, with dry_run and fixture inputs", () => {
     expect(wf).toMatch(/^on:\n {2}workflow_dispatch:\n {4}inputs:\n {6}dry_run:\n/m);
     expect(wf).not.toMatch(/^\s+(push|pull_request|schedule|workflow_run):/m);
     expect(wf).toContain("if: github.ref == 'refs/heads/main'");
     const inputs = wf.split("inputs:")[1].split("permissions:")[0];
-    expect(inputs.match(/^ {6}[a-z_]+:$/gm)).toEqual(["      dry_run:"]);
+    expect(inputs.match(/^ {6}[a-z_]+:$/gm)).toEqual(["      dry_run:", "      fixture:"]);
     expect(inputs).toContain("type: boolean");
     expect(inputs).toContain("default: true");
+    expect(inputs).toContain("type: choice");
+    expect(inputs).toContain("- hdfc");
+    expect(inputs).toContain("- hdfc_v2");
+    expect(inputs).toContain("default: hdfc");
     expect(wf).not.toMatch(/inputs\.(shop|domain|file|path)/i);
   });
 
@@ -263,5 +271,169 @@ describe("fixed fixture", () => {
     expect(f.body.credits).toHaveLength(3);
     expect(f.debits).toBe(1);
     expect(f.body.fileName).toBe("hdfc-review-synthetic.csv");
+  });
+
+  it("includes normalized-db-key-to-sourceRow mapping for row number lookup", async () => {
+    const f = await loadFixturePayload(ROOT);
+    expect(f.utrToSourceRow).toBeInstanceOf(Map);
+    expect(f.utrToSourceRow.size).toBe(3);
+    const keys = Array.from(f.utrToSourceRow.keys());
+    expect(keys.every((k) => k.startsWith("SYNTH-"))).toBe(true);
+    const values = Array.from(f.utrToSourceRow.values()).sort((a, b) => a - b);
+    expect(values).toEqual([13, 14, 15]);
+  });
+});
+
+describe("suggestion label formatter", () => {
+  it("formats seed order names as order_<digits>", () => {
+    expect(formatSuggestionLabel("#1001")).toBe("order_1001");
+    expect(formatSuggestionLabel("#1002")).toBe("order_1002");
+  });
+
+  it("returns 'other' for non-seed invoice names", () => {
+    expect(formatSuggestionLabel("#2001")).toBe("other");
+    expect(formatSuggestionLabel("TEST-9")).toBe("other");
+    expect(formatSuggestionLabel("INV-12345")).toBe("other");
+    expect(formatSuggestionLabel("#9999")).toBe("other");
+    expect(formatSuggestionLabel("")).toBe("other");
+  });
+
+  it("REVIEWER_DEMO_ORDER_NAMES is the single source of truth", () => {
+    expect(REVIEWER_DEMO_ORDER_NAMES).toContain("#1001");
+    expect(REVIEWER_DEMO_ORDER_NAMES).toContain("#1002");
+    expect(REVIEWER_DEMO_ORDER_NAMES).toHaveLength(2);
+    for (const name of REVIEWER_DEMO_ORDER_NAMES) {
+      expect(formatSuggestionLabel(name)).toMatch(/^order_\d+$/);
+    }
+  });
+});
+
+describe("suggestion value formatter", () => {
+  it("formats suggestion value as r<row>_<band>_<score>_<label>", () => {
+    expect(formatSuggestionValue(14, 58, "#1001")).toBe("r14_medium_58_order_1001");
+    expect(formatSuggestionValue(15, 85, "#1002")).toBe("r15_high_85_order_1002");
+    expect(formatSuggestionValue(16, 10, "#1002")).toBe("r16_low_10_order_1002");
+    expect(formatSuggestionValue(22, 10, "#9999")).toBe("r22_low_10_other");
+    expect(formatSuggestionValue(0, 48, "INV-123")).toBe("r0_low_48_other");
+  });
+
+  it("rounds score to integer", () => {
+    expect(formatSuggestionValue(14, 58.4, "#1001")).toBe("r14_medium_58_order_1001");
+    expect(formatSuggestionValue(14, 58.6, "#1001")).toBe("r14_medium_59_order_1001");
+  });
+
+  it("uses correct score bands", () => {
+    expect(formatSuggestionValue(1, 80, "#1001")).toBe("r1_high_80_order_1001");
+    expect(formatSuggestionValue(1, 79, "#1001")).toBe("r1_medium_79_order_1001");
+    expect(formatSuggestionValue(1, 50, "#1001")).toBe("r1_medium_50_order_1001");
+    expect(formatSuggestionValue(1, 49, "#1001")).toBe("r1_low_49_order_1001");
+  });
+
+  it("output matches ^[a-z0-9_]{1,64}$", () => {
+    const value = formatSuggestionValue(14, 58, "#1002");
+    expect(value).toMatch(/^[a-z0-9_]{1,64}$/);
+  });
+
+  it("MAX_SUGGESTION_LINES is 64", () => {
+    expect(MAX_SUGGESTION_LINES).toBe(64);
+  });
+});
+
+describe("suggestion output forbidden fields", () => {
+  const FORBIDDEN_PATTERNS = {
+    utr: "SYNT0001",
+    gid: "gid:" + "//shopify/Order/12345",
+    uuid: "0b5c3c1e-1111-4222-8333-444455556666",
+    amount: "10000.00",
+    buyerName: "TEST BUYER CO",
+    remitter: "NEFT-SYNT0001-TEST BUYER CO",
+    narration: "NEFT-SYNT0001-TEST BUYER CO-#1001",
+    email: "demo@example.com",
+    domain: "test-store-0000.myshopify.com",
+  };
+
+  it("formatSuggestionValue never includes forbidden patterns in output", () => {
+    for (const [field, pattern] of Object.entries(FORBIDDEN_PATTERNS)) {
+      const seedValue = formatSuggestionValue(14, 58, "#1001");
+      const otherValue = formatSuggestionValue(14, 58, "INV-TEST");
+      expect(seedValue, field).not.toContain(pattern);
+      expect(otherValue, field).not.toContain(pattern);
+    }
+  });
+
+  it("formatSuggestionLabel never includes UTR, gid, uuid, amount, or buyer name", () => {
+    for (const [field, pattern] of Object.entries(FORBIDDEN_PATTERNS)) {
+      const seedLabel = formatSuggestionLabel("#1001");
+      const otherLabel = formatSuggestionLabel("INV-TEST");
+      expect(seedLabel, field).not.toContain(pattern);
+      expect(otherLabel, field).not.toContain(pattern);
+    }
+  });
+
+  it("suggestion value never contains '#' character", () => {
+    const value = formatSuggestionValue(14, 58, "#1001");
+    expect(value).not.toContain("#");
+    const otherValue = formatSuggestionValue(14, 58, "#2001");
+    expect(otherValue).not.toContain("#");
+  });
+
+  it("suggestion value is always lowercase", () => {
+    const value = formatSuggestionValue(14, 58, "#1001");
+    expect(value).toBe(value.toLowerCase());
+    const otherValue = formatSuggestionValue(14, 58, "#9999");
+    expect(otherValue).toBe(otherValue.toLowerCase());
+  });
+
+  it("suggestion value never contains '@' character", () => {
+    const value = formatSuggestionValue(14, 58, "#1001");
+    expect(value).not.toContain("@");
+  });
+});
+
+describe("e2e-bank-import-filter.sh suggestion lines", () => {
+  it("passes valid suggestion lines unchanged", () => {
+    const res = runFilter(
+      [
+        "suggestion=r14_medium_58_order_1001",
+        "suggestion=r15_high_85_order_1002",
+        "suggestion=r16_low_10_other",
+        "suggestion_lines_truncated=false",
+      ].join("\n") + "\n"
+    );
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe(
+      [
+        "suggestion=r14_medium_58_order_1001",
+        "suggestion=r15_high_85_order_1002",
+        "suggestion=r16_low_10_other",
+        "suggestion_lines_truncated=false",
+        "filtered_lines_dropped=0",
+        "",
+      ].join("\n")
+    );
+  });
+
+  it("drops malformed suggestion values with '#'", () => {
+    const res = runFilter("suggestion=#1001_medium_58\n");
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("filtered_lines_dropped=1\n");
+  });
+
+  it("drops malformed suggestion values with uppercase", () => {
+    const res = runFilter("suggestion=r14_MEDIUM_58_order_1001\n");
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("filtered_lines_dropped=1\n");
+  });
+
+  it("drops malformed suggestion values with '@'", () => {
+    const res = runFilter("suggestion=r14_medium_58@order_1001\n");
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("filtered_lines_dropped=1\n");
+  });
+
+  it("passes suggestion_lines_truncated=true", () => {
+    const res = runFilter("suggestion_lines_truncated=true\n");
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("suggestion_lines_truncated=true\nfiltered_lines_dropped=0\n");
   });
 });

@@ -57,6 +57,7 @@
 | `s18_global_sends_cleanup` | `0 5 * * *` (daily 05:00 UTC) | Delete global send counts older than 35 days | `20261030000000_s18_payment_reminders/migration.sql:240-244` |
 | `s22_purge_unmatched_narration` | `0 4 * * *` (daily 04:00 UTC) | Purge narration on unmatched payments older than 180 days | `20261101000000_s22_followups/migration.sql:69-73` |
 | `audit_purge_access_events_365d` | `30 3 * * *` (daily 03:30 UTC) | Delete access.* AuditEvent rows older than 365 days | `20261115000000_access_event_purge/migration.sql` |
+| `pgmq_purge_archives_30d` | `30 5 * * *` (daily 05:30 UTC) | Delete pgmq archive rows (a_s6_sync, a_s6_bulk) older than 30 days | `20261126000000_pgmq_archive_purge_30d/migration.sql:26-30` |
 
 **Workers Cron Trigger (not pg_cron):** `*/5 * * * *` (every 5 minutes) — fallback drain keep-alive (`triggers.crons` in `wrangler.jsonc`)
 
