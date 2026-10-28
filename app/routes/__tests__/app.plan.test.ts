@@ -1244,17 +1244,20 @@ describe("Loader provides upgradeUrl for unlimited plan", () => {
 
   let mockSql: ReturnType<typeof vi.fn>;
 
+  let originalAppHandle: string | undefined;
+
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
     mockSql = vi.fn();
     mockContext.shopify.authenticate.admin.mockResolvedValue({ session: mockSession });
-    process.env.APP_HANDLE = "net-terms";
+    originalAppHandle = process.env.APP_HANDLE;
+    (process.env as Record<string, string | undefined>).APP_HANDLE = "net-terms";
   });
 
   afterEach(() => {
     vi.clearAllMocks();
-    delete process.env.APP_HANDLE;
+    (process.env as Record<string, string | undefined>).APP_HANDLE = originalAppHandle;
   });
 
   it("returns non-null upgradeUrl for unlimited plan", async () => {
