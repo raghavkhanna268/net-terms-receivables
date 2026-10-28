@@ -468,6 +468,11 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
    * Case 6: No tied buyer has open invoices - amount window fallback.
    * Both buyers have the same name but neither has open invoices.
    * Create a third buyer (different name) with an invoice in the amount window.
+   * 
+   * Note: Amount window is 0.5x to 2x of the PAYMENT amount:
+   * - r14 (₹5,000) window: ₹2,500 - ₹10,000
+   * - r15 (₹2,000) window: ₹1,000 - ₹4,000
+   * Invoice at ₹3,000 falls in both windows.
    */
   it("Case 6: no tied buyer has open invoices - falls back to amount window", async () => {
     const uniqueOlderId = `${olderBuyerId}-case6`;
@@ -515,7 +520,7 @@ describeWithDb("Tied buyer name resolution: DB matcher path", () => {
       )
       VALUES (
         ${uniqueInvoiceId}, ${testShopId}, ${otherBuyerId},
-        'order-1002-case6', '#1002', 5000, 'open', 5000,
+        'order-1002-case6', '#1002', 3000, 'open', 3000,
         NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
       )
     `;
