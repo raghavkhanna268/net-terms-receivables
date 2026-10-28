@@ -729,6 +729,57 @@ export function findMatchingTagRule(
 }
 
 /**
+ * Check if a customer is already tracked in s8_tagged_customers.
+ *
+ * Used by handleCustomer to determine if PII fields should be fetched.
+ * A tracked customer needs PII fetched to update or clear their record.
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param customerId - Customer GID
+ * @returns True if customer has a row in s8_tagged_customers
+ */
+export async function isCustomerTracked(
+  sql: Sql,
+  shopId: string,
+  customerId: string
+): Promise<boolean> {
+  const [row] = await sql<{ one: number }[]>`
+    SELECT 1 AS one FROM s8_tagged_customers
+    WHERE shop_id = ${shopId} AND customer_id = ${customerId}
+    LIMIT 1
+  `;
+  return row !== undefined;
+}
+
+/**
+ * Determine if PII fields should be fetched for a customer.
+ *
+ * PII is needed when:
+ * 1. Customer matches a tag rule (new or existing matching customer), OR
+ * 2. Customer is already tracked (to update or clear their record)
+ *
+ * @param sql - postgres.js SQL client
+ * @param shopId - Shop ID
+ * @param customerId - Customer GID
+ * @param customerTags - Customer's current tags
+ * @param tagRules - Shop's tag rules from AccountSource
+ * @returns True if PII fields should be fetched
+ */
+export async function shouldFetchCustomerPii(
+  sql: Sql,
+  shopId: string,
+  customerId: string,
+  customerTags: string[],
+  tagRules: Array<{ tag: string; defaultTermsDays: number }>
+): Promise<boolean> {
+  const matchesRule = findMatchingTagRule(customerTags, tagRules) !== undefined;
+  if (matchesRule) return true;
+
+  return isCustomerTracked(sql, shopId, customerId);
+}
+
+/**
  * Process a single customer from bulk operation.
  * Similar to processCustomerWebhook but without webhook context.
  *
