@@ -18,7 +18,7 @@
  * - Default terms days: positive integer, 1-365
  */
 
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import type {
   HeadersFunction,
   LoaderFunctionArgs,
@@ -540,6 +540,34 @@ export default function TagRulesPage() {
   const [tag, setTag] = useState("");
   const [termsDays, setTermsDays] = useState("");
 
+  const tagHiddenRef = useRef<HTMLInputElement>(null);
+  const termsDaysHiddenRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const input = tagHiddenRef.current;
+    if (!input) return;
+
+    if (input.value !== tag) {
+      input.value = tag;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }, [tag]);
+
+  useEffect(() => {
+    const input = termsDaysHiddenRef.current;
+    if (!input) return;
+
+    if (input.value !== termsDays) {
+      input.value = termsDays;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }, [termsDays]);
+
+  const handleTagRuleFormReset = useCallback(() => {
+    setTag("");
+    setTermsDays("");
+  }, []);
+
   if (finishingSetup) {
     return (
       <s-page heading="Tag Rules">
@@ -650,8 +678,20 @@ export default function TagRulesPage() {
       )}
 
       <s-section heading="Create Tag Rule">
-        <Form method="post">
+        <Form method="post" data-save-bar onReset={handleTagRuleFormReset}>
           <input type="hidden" name="intent" value="create_tag_rule" />
+          <input
+            ref={tagHiddenRef}
+            type="hidden"
+            name="_tagState"
+            defaultValue=""
+          />
+          <input
+            ref={termsDaysHiddenRef}
+            type="hidden"
+            name="_termsDaysState"
+            defaultValue=""
+          />
           <s-stack gap="base">
             <s-text-field
               label="Customer Tag"
@@ -684,10 +724,6 @@ export default function TagRulesPage() {
               The default payment terms for customers with this tag (1-365
               days).
             </s-paragraph>
-
-            <s-button type="submit" variant="primary" disabled={isSubmitting}>
-              {isSubmitting ? "Creating..." : "Create Tag Rule"}
-            </s-button>
           </s-stack>
         </Form>
       </s-section>

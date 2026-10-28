@@ -17,7 +17,7 @@
  * Uses Polaris web components only.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import type {
   HeadersFunction,
   LoaderFunctionArgs,
@@ -675,7 +675,24 @@ export default function AccountPage() {
   const serverNoLimit = creditStatus?.creditLimitAmount === null;
   const [noLimitChecked, setNoLimitChecked] = useState(serverNoLimit);
 
+  const noLimitHiddenRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
+    setNoLimitChecked(serverNoLimit);
+  }, [serverNoLimit]);
+
+  useEffect(() => {
+    const input = noLimitHiddenRef.current;
+    if (!input) return;
+
+    const newValue = noLimitChecked ? "true" : "";
+    if (input.value !== newValue) {
+      input.value = newValue;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }, [noLimitChecked]);
+
+  const handleCreditSettingsReset = useCallback(() => {
     setNoLimitChecked(serverNoLimit);
   }, [serverNoLimit]);
 
@@ -921,8 +938,20 @@ export default function AccountPage() {
 
       {!account.isGated && (
         <s-section heading="Edit Credit Settings">
-          <Form method="post" action={formAction}>
+          <Form
+            method="post"
+            action={formAction}
+            data-save-bar
+            data-discard-confirmation
+            onReset={handleCreditSettingsReset}
+          >
             <input type="hidden" name="_action" value="updateCredit" />
+            <input
+              ref={noLimitHiddenRef}
+              type="hidden"
+              name="_noLimitState"
+              defaultValue={serverNoLimit ? "true" : ""}
+            />
             <s-stack gap="base">
               <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
                 <s-text-field
@@ -972,10 +1001,6 @@ export default function AccountPage() {
                 placeholder="Internal note about the hold"
                 value={creditStatus?.holdNote ?? ""}
               ></s-text-field>
-
-              <s-button type="submit" variant="primary" disabled={isSubmitting}>
-                {isSubmitting ? "Saving..." : "Save Credit Settings"}
-              </s-button>
             </s-stack>
           </Form>
         </s-section>
@@ -1005,7 +1030,12 @@ export default function AccountPage() {
                 )}
               </s-stack>
             </s-banner>
-            <Form method="post" action={formAction}>
+            <Form
+              method="post"
+              action={formAction}
+              data-save-bar
+              data-discard-confirmation
+            >
               <input type="hidden" name="_action" value="updateCredit" />
               <input type="hidden" name="holdOnly" value="true" />
               <s-stack gap="base">
@@ -1035,10 +1065,6 @@ export default function AccountPage() {
                   placeholder="Internal note about the hold"
                   value={creditStatus?.holdNote ?? ""}
                 ></s-text-field>
-
-                <s-button type="submit" variant="primary" disabled={isSubmitting}>
-                  {isSubmitting ? "Saving..." : "Save Hold Settings"}
-                </s-button>
               </s-stack>
             </Form>
           </s-stack>
