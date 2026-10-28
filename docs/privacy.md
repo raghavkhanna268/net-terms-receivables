@@ -12,7 +12,7 @@ Termwise: Net Terms & Credit ("the App", "we", "us") is a Shopify app built for 
 
 **Owner/Operator:** Raghav Khanna, individual developer, India
 
-**Contact:** raghavkhanna468@gmail.com
+**Contact:** support@termwiseapp.com
 
 ---
 
@@ -306,7 +306,7 @@ We may update this Privacy Policy from time to time. Material changes will be co
 ## 11. Contact
 
 For privacy inquiries:
-- **Email:** raghavkhanna468@gmail.com
+- **Email:** support@termwiseapp.com
 - **Owner/Operator:** Raghav Khanna, individual developer, India
 
 ---
