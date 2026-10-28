@@ -886,3 +886,563 @@ describeWithDb("getBuyersWithAliases ordering", () => {
     expect(buyers[2].name).toBe("Order Test B");
   });
 });
+
+/**
+ * #579 Fallback rejected pair filtering tests.
+ *
+ * When a buyer is resolved (targetBuyer) but has no non-rejected open invoices,
+ * the matcher falls back to getOpenInvoicesInAmountWindow(sql, shopId, minPaise, maxPaise),
+ * then filters with rejectedInvoiceIds from getRejectedPairs(sql, shopId, payment.id).
+ *
+ * Test 1: Rejected pair on fallback
+ * Buyer A resolves and has no invoices. Sibling account B has invoice X in amount window.
+ * Insert a rejected_matches row for (payment, X). Expect no suggestion for X.
+ * Add a second in-window invoice Y on B, not rejected, and expect Y IS suggested.
+ */
+describeWithDb("#579 Fallback rejected pair filtering", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let _buyerAId: string;
+  let buyerBId: string;
+  let invoiceXId: string;
+  let invoiceYId: string;
+  let testImportId: string;
+  const paymentIds: string[] = [];
+
+  const runId = Date.now();
+  const TEST_SHOP_DOMAIN = `test-rejected-fallback-${runId}.myshopify.com`;
+
+  const buyerAIdValue = `buyer-rejected-a-${runId}`;
+  const buyerBIdValue = `buyer-rejected-b-${runId}`;
+  const invoiceXIdValue = `invoice-rejected-x-${runId}`;
+  const invoiceYIdValue = `invoice-rejected-y-${runId}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Buyer A: 'Test Buyer Co' - exact name match, will win buyer resolution
+    // Has NO invoices - triggers fallback
+    const [buyerA] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerAIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/rejected-a', 'gid://shopify/CompanyLocation/rejected-a',
+        'Test Buyer Co', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    _buyerAId = buyerA.id;
+
+    // Buyer B: sibling account with invoices
+    const [buyerB] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerBIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/rejected-b', 'gid://shopify/CompanyLocation/rejected-b',
+        'Test Buyer Co - Net-30', 100000, 'OK', NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second'
+      )
+      RETURNING id
+    `;
+    buyerBId = buyerB.id;
+
+    // Invoice X on buyer B: ₹5,000 - will be rejected
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceXIdValue}, ${testShopId}, ${buyerBId},
+        'gid://shopify/Order/rejected-x', '#X001', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+    invoiceXId = invoiceXIdValue;
+
+    // Invoice Y on buyer B: ₹5,500 - NOT rejected, should be suggested
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceYIdValue}, ${testShopId}, ${buyerBId},
+        'gid://shopify/Order/rejected-y', '#Y001', 5500, 'open', 5500,
+        NOW(), NOW() + INTERVAL '30 days', NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second'
+      )
+    `;
+    invoiceYId = invoiceYIdValue;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+    paymentIds.length = 0;
+  });
+
+  async function seedPaymentAndRejectX(): Promise<void> {
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'hdfc', 'rejected-test.csv', 1, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+
+    // Payment ₹5,000 - resolves to buyer A (no invoices), falls back to amount window
+    // Amount window (0.5x-2x): ₹2,500 - ₹10,000 includes both X (₹5,000) and Y (₹5,500)
+    const [payment] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        '2026-10-23'::date, 5000, 'NEFT', 'REJTEST001',
+        'TEST BUYER CO', 'NEFT-REJTEST001-TEST BUYER CO', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    paymentIds.push(payment.id);
+
+    // Insert rejected_matches row for (payment, X)
+    await sql`
+      INSERT INTO "rejected_matches" (
+        "shopId", "paymentId", "invoiceId", "rejectedBy", "rejectedAt"
+      )
+      VALUES (
+        ${testShopId}, ${payment.id}, ${invoiceXId}, 'test-user', NOW()
+      )
+    `;
+  }
+
+  it("rejected invoice X is not suggested, non-rejected Y is suggested", async () => {
+    await seedPaymentAndRejectX();
+    await runMatcher(sql, testShopId);
+
+    const matches = await sql<Array<{
+      invoiceId: string;
+      invoiceName: string;
+      state: string;
+    }>>`
+      SELECT 
+        m."invoiceId" AS "invoiceId",
+        i.name AS "invoiceName",
+        m.state
+      FROM "Match" m
+      JOIN "Invoice" i ON i.id = m."invoiceId"
+      WHERE m."paymentId" = ${paymentIds[0]}
+        AND m.state = 'suggested'
+    `;
+
+    // Invoice X should NOT be suggested (it's rejected)
+    const xMatches = matches.filter(m => m.invoiceId === invoiceXId);
+    expect(xMatches.length).toBe(0);
+
+    // Invoice Y SHOULD be suggested (proves fallback ran)
+    const yMatches = matches.filter(m => m.invoiceId === invoiceYId);
+    expect(yMatches.length).toBe(1);
+    expect(yMatches[0].invoiceName).toBe("#Y001");
+  });
+});
+
+/**
+ * #579 Test 2: Rejected-only buyer triggers fallback
+ *
+ * Resolved buyer A has exactly one open invoice, rejected for this payment.
+ * Sibling B has an in-window invoice.
+ * Expect B's invoice suggested and A's not.
+ */
+describeWithDb("#579 Rejected-only buyer triggers fallback", () => {
+  let sql: ReturnType<typeof postgres>;
+  let testShopId: string;
+  let buyerAId: string;
+  let buyerBId: string;
+  let invoiceAId: string;
+  let invoiceBId: string;
+  let testImportId: string;
+  const paymentIds: string[] = [];
+
+  const runId = Date.now();
+  const TEST_SHOP_DOMAIN = `test-rejected-only-${runId}.myshopify.com`;
+
+  const buyerAIdValue = `buyer-rejonly-a-${runId}`;
+  const buyerBIdValue = `buyer-rejonly-b-${runId}`;
+  const invoiceAIdValue = `invoice-rejonly-a-${runId}`;
+  const invoiceBIdValue = `invoice-rejonly-b-${runId}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    const [shop] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${TEST_SHOP_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    testShopId = shop.id;
+
+    // Buyer A: resolves by name match, has ONE invoice that will be rejected
+    const [buyerA] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerAIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/rejonly-a', 'gid://shopify/CompanyLocation/rejonly-a',
+        'Rejected Only Corp', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    buyerAId = buyerA.id;
+
+    // Buyer B: sibling with invoice in window
+    const [buyerB] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerBIdValue}, ${testShopId}, 'COMPANY',
+        'gid://shopify/Company/rejonly-b', 'gid://shopify/CompanyLocation/rejonly-b',
+        'Rejected Only Corp - Branch', 100000, 'OK', NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second'
+      )
+      RETURNING id
+    `;
+    buyerBId = buyerB.id;
+
+    // Invoice A on buyer A: ₹5,000 - will be rejected
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceAIdValue}, ${testShopId}, ${buyerAId},
+        'gid://shopify/Order/rejonly-a', '#RA001', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+    invoiceAId = invoiceAIdValue;
+
+    // Invoice B on buyer B: ₹5,500 - in window, should be suggested
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceBIdValue}, ${testShopId}, ${buyerBId},
+        'gid://shopify/Order/rejonly-b', '#RB001', 5500, 'open', 5500,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+    invoiceBId = invoiceBIdValue;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${testShopId}`;
+      await sql`DELETE FROM "Shop" WHERE id = ${testShopId}`;
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "rejected_matches" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Match" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" = ${testShopId}`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" = ${testShopId}`;
+    paymentIds.length = 0;
+  });
+
+  async function seedPaymentAndRejectA(): Promise<void> {
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, 'hdfc', 'rejonly-test.csv', 1, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+
+    // Payment ₹5,000 - resolves to buyer A by name match
+    const [payment] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${testShopId}, ${testImportId},
+        '2026-10-23'::date, 5000, 'NEFT', 'REJONLYTEST001',
+        'REJECTED ONLY CORP', 'NEFT-REJONLYTEST001-REJECTED ONLY CORP', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    paymentIds.push(payment.id);
+
+    // Reject buyer A's invoice
+    await sql`
+      INSERT INTO "rejected_matches" (
+        "shopId", "paymentId", "invoiceId", "rejectedBy", "rejectedAt"
+      )
+      VALUES (
+        ${testShopId}, ${payment.id}, ${invoiceAId}, 'test-user', NOW()
+      )
+    `;
+  }
+
+  it("rejected buyer A invoice not suggested, sibling B invoice IS suggested", async () => {
+    await seedPaymentAndRejectA();
+    await runMatcher(sql, testShopId);
+
+    const matches = await sql<Array<{
+      invoiceId: string;
+      invoiceName: string;
+      buyerAccountId: string;
+      state: string;
+    }>>`
+      SELECT 
+        m."invoiceId" AS "invoiceId",
+        i.name AS "invoiceName",
+        i."buyerAccountId" AS "buyerAccountId",
+        m.state
+      FROM "Match" m
+      JOIN "Invoice" i ON i.id = m."invoiceId"
+      WHERE m."paymentId" = ${paymentIds[0]}
+        AND m.state = 'suggested'
+    `;
+
+    // Invoice A (rejected) should NOT be suggested
+    const aMatches = matches.filter(m => m.invoiceId === invoiceAId);
+    expect(aMatches.length).toBe(0);
+
+    // Invoice B (sibling, not rejected) SHOULD be suggested
+    const bMatches = matches.filter(m => m.invoiceId === invoiceBId);
+    expect(bMatches.length).toBe(1);
+    expect(bMatches[0].invoiceName).toBe("#RB001");
+    expect(bMatches[0].buyerAccountId).toBe(buyerBId);
+  });
+});
+
+/**
+ * #579 Test 3: Cross-shop isolation
+ *
+ * Two shops: test-iso-a-<run>.myshopify.com and test-iso-b-<run>.myshopify.com
+ * In shop A the resolved buyer has no invoices.
+ * Shop B has an in-window open invoice.
+ * Expect 0 suggestions in shop A and no Match row referencing shop B's invoice.
+ */
+describeWithDb("#579 Cross-shop isolation", () => {
+  let sql: ReturnType<typeof postgres>;
+  let shopAId: string;
+  let shopBId: string;
+  let _buyerAId: string;
+  let buyerBId: string;
+  let invoiceBId: string;
+  let testImportId: string;
+  const paymentIds: string[] = [];
+
+  const runId = Date.now();
+  const SHOP_A_DOMAIN = `test-iso-a-${runId}.myshopify.com`;
+  const SHOP_B_DOMAIN = `test-iso-b-${runId}.myshopify.com`;
+
+  const buyerAIdValue = `buyer-iso-a-${runId}`;
+  const buyerBIdValue = `buyer-iso-b-${runId}`;
+  const invoiceBIdValue = `invoice-iso-b-${runId}`;
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+
+    // Create shop A
+    const [shopA] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP_A_DOMAIN}, 'INR', 'Asia/Kolkata', NOW(), NOW())
+      RETURNING id
+    `;
+    shopAId = shopA.id;
+
+    // Create shop B
+    const [shopB] = await sql<{ id: string }[]>`
+      INSERT INTO "Shop" (domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${SHOP_B_DOMAIN}, 'INR', 'Asia/Kolkata', NOW() + INTERVAL '1 second', NOW() + INTERVAL '1 second')
+      RETURNING id
+    `;
+    shopBId = shopB.id;
+
+    // Buyer in shop A: 'Iso Test Corp' - will be resolved, has NO invoices
+    const [buyerA] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerAIdValue}, ${shopAId}, 'COMPANY',
+        'gid://shopify/Company/iso-a', 'gid://shopify/CompanyLocation/iso-a',
+        'Iso Test Corp', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    _buyerAId = buyerA.id;
+
+    // Buyer in shop B with invoice in amount window
+    const [buyerB] = await sql<{ id: string }[]>`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name, "creditLimit", "holdState", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${buyerBIdValue}, ${shopBId}, 'COMPANY',
+        'gid://shopify/Company/iso-b', 'gid://shopify/CompanyLocation/iso-b',
+        'Other Shop Buyer', 100000, 'OK', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    buyerBId = buyerB.id;
+
+    // Invoice in shop B: ₹5,000 - in amount window for shop A's payment
+    await sql`
+      INSERT INTO "Invoice" (
+        id, "shopId", "buyerAccountId", "orderId", name, total, status, outstanding,
+        "issuedAt", "dueAt", "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${invoiceBIdValue}, ${shopBId}, ${buyerBId},
+        'gid://shopify/Order/iso-b', '#ISO-B001', 5000, 'open', 5000,
+        NOW(), NOW() + INTERVAL '30 days', NOW(), NOW()
+      )
+    `;
+    invoiceBId = invoiceBIdValue;
+  });
+
+  afterAll(async () => {
+    if (sql) {
+      await sql`DELETE FROM "Match" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+      await sql`DELETE FROM "Payment" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+      await sql`DELETE FROM "BankImport" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+      await sql`DELETE FROM "Invoice" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+      await sql`DELETE FROM "BuyerAccount" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+      await sql`DELETE FROM "Shop" WHERE id IN (${shopAId}, ${shopBId})`;
+      await sql.end();
+    }
+  });
+
+  beforeEach(async () => {
+    await sql`DELETE FROM "Match" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+    await sql`DELETE FROM "Payment" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+    await sql`DELETE FROM "BankImport" WHERE "shopId" IN (${shopAId}, ${shopBId})`;
+    paymentIds.length = 0;
+  });
+
+  async function seedPaymentInShopA(): Promise<void> {
+    const [bankImport] = await sql<{ id: string }[]>`
+      INSERT INTO "BankImport" (
+        id, "shopId", bank, "fileName", "rowCount", "createdAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${shopAId}, 'hdfc', 'iso-test.csv', 1, NOW()
+      )
+      RETURNING id
+    `;
+    testImportId = bankImport.id;
+
+    // Payment ₹5,000 in shop A - resolves to buyer A (no invoices)
+    // Amount window (0.5x-2x): ₹2,500 - ₹10,000
+    // Shop B's invoice is in this range but should NOT be matched
+    const [payment] = await sql<{ id: string }[]>`
+      INSERT INTO "Payment" (
+        id, "shopId", "importId", "valueDate", amount, rail, utr, "payerText", narration, status, "createdAt", "updatedAt"
+      )
+      VALUES (
+        gen_random_uuid()::text, ${shopAId}, ${testImportId},
+        '2026-10-23'::date, 5000, 'NEFT', 'ISOTEST001',
+        'ISO TEST CORP', 'NEFT-ISOTEST001-ISO TEST CORP', 'unmatched', NOW(), NOW()
+      )
+      RETURNING id
+    `;
+    paymentIds.push(payment.id);
+  }
+
+  it("shop A payment gets 0 suggestions, no match references shop B invoice", async () => {
+    await seedPaymentInShopA();
+    await runMatcher(sql, shopAId);
+
+    // Check matches in shop A
+    const shopAMatches = await sql<Array<{
+      id: string;
+      invoiceId: string;
+      state: string;
+    }>>`
+      SELECT id, "invoiceId" AS "invoiceId", state
+      FROM "Match"
+      WHERE "shopId" = ${shopAId}
+        AND state = 'suggested'
+    `;
+
+    // Should have 0 suggestions in shop A
+    expect(shopAMatches.length).toBe(0);
+
+    // Verify no match anywhere references shop B's invoice
+    const crossShopMatches = await sql<Array<{ id: string; shopId: string }>>`
+      SELECT id, "shopId" AS "shopId"
+      FROM "Match"
+      WHERE "invoiceId" = ${invoiceBId}
+    `;
+    expect(crossShopMatches.length).toBe(0);
+  });
+
+  it("ensures getOpenInvoicesInAmountWindow respects shopId filter", async () => {
+    const { getOpenInvoicesInAmountWindow } = await import("../../app/lib/matching/queries.server.js");
+    
+    // Query shop A's invoices in the amount window
+    const shopAInvoices = await getOpenInvoicesInAmountWindow(
+      sql,
+      shopAId,
+      BigInt(250000), // ₹2,500 in paise
+      BigInt(1000000) // ₹10,000 in paise
+    );
+
+    // Shop A has no invoices
+    expect(shopAInvoices.length).toBe(0);
+
+    // Shop B has an invoice in this range
+    const shopBInvoices = await getOpenInvoicesInAmountWindow(
+      sql,
+      shopBId,
+      BigInt(250000),
+      BigInt(1000000)
+    );
+    expect(shopBInvoices.length).toBe(1);
+    expect(shopBInvoices[0].id).toBe(invoiceBId);
+  });
+});
