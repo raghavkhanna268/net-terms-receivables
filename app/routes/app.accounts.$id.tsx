@@ -66,6 +66,31 @@ const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
 ];
 
 /**
+ * Decodes a URL-encoded account ID repeatedly until it stops changing,
+ * capped at 3 decode iterations. Handles re-encoded deep links where
+ * '%252F' represents an originally-encoded '/' that got double-encoded.
+ *
+ * On malformed escape sequences (decodeURIComponent throws), keeps the
+ * last successfully decoded value.
+ */
+export function decodeAccountIdParam(rawId: string): string {
+  let current = rawId;
+  for (let i = 0; i < 3; i++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      return current;
+    }
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+  return current;
+}
+
+/**
  * Sync state enum for banner display:
  * - pending_retry: syncPending=true, no permanent error, no dead-letter → auto-retries
  * - needs_attention: syncPending=true with permanent error OR dead-lettered → manual action needed
@@ -156,7 +181,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const { session, sessionToken } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id;
+  const accountId = params.id ? decodeAccountIdParam(params.id) : params.id;
 
   const upgradeUrl = (() => {
     const handle = getAppHandle();
@@ -443,7 +468,7 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
   const { session } = await shopify.authenticate.admin(request);
   const sql = getRequestSql();
   const shopDomain = session.shop;
-  const accountId = params.id;
+  const accountId = params.id ? decodeAccountIdParam(params.id) : params.id;
 
   if (!accountId) {
     return { success: false, error: "Account ID is required" } satisfies ActionData;
