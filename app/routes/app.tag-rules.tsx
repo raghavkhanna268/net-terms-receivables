@@ -557,7 +557,7 @@ export default function TagRulesPage() {
   if (notSupported) {
     return (
       <s-page heading="Tag Rules">
-        <s-link href="/" slot="breadcrumb-actions">
+        <s-link href="/app" slot="breadcrumb-actions">
           Back to Dashboard
         </s-link>
 

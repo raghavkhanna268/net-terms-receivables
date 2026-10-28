@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (114 total, counting expanded globs):
+ * Files included (116 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -206,6 +206,7 @@ const DB_TEST_PATTERNS = [
 
   // Reviewer demo DB tests
   "tests/integration/review-csv-matcher-db.test.ts",
+  "tests/integration/review-csv-v2-matcher-db.test.ts",
 
   // Confirm-reimport pin DB tests
   "tests/integration/confirm-reimport-pin-db.test.ts",

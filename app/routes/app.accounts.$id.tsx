@@ -648,7 +648,7 @@ function InvoiceTable({
               </s-table-cell>
               <s-table-cell>
                 {orderUrl ? (
-                  <s-link href={orderUrl}>View</s-link>
+                  <s-link href={orderUrl} target="_top">View</s-link>
                 ) : (
                   "—"
                 )}
@@ -1066,7 +1066,7 @@ export default function AccountPage() {
                   Opted out on {new Date(reminderOptOut.optOutAt).toLocaleDateString("en-IN", {
                     timeZone: shopTimezone,
                   })}
-                  {reminderOptOut.optOutSource === "link" && " via email unsubscribe link"}
+                  {reminderOptOut.optOutSource === "link" && " via email unsubscribe"}
                   {reminderOptOut.optOutSource === "merchant" && " by merchant"}
                 </s-paragraph>
               )}
@@ -1135,7 +1135,7 @@ export default function AccountPage() {
 
       <s-section slot="aside" heading="Payment Reminders">
         <s-paragraph>
-          Buyers can opt out of payment reminder emails via the unsubscribe link in each reminder.
+          Buyers can opt out of payment reminder emails via the one-click unsubscribe option in each reminder.
         </s-paragraph>
         <s-paragraph>
           Only merchants can re-enable reminders for an opted-out buyer.

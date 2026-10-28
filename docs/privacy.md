@@ -12,7 +12,7 @@ Termwise: Net Terms & Credit ("the App", "we", "us") is a Shopify app built for 
 
 **Owner/Operator:** Raghav Khanna, individual developer, India
 
-**Contact:** raghavkhanna468@gmail.com
+**Contact:** support@termwiseapp.com
 
 ---
 
@@ -34,13 +34,13 @@ Termwise: Net Terms & Credit ("the App", "we", "us") is a Shopify app built for 
 |---------------|---------|--------|
 | Buyer Account | Credit management (account kind, display name, credit limit, terms, hold state) | Synced from Shopify |
 | B2B Main Contact | Payment reminders for B2B accounts (email, display name, customer ID) | Synced from Shopify Company.mainContact |
-| Reminder Opt-Out | Payment reminder preference (opt-out timestamp, opt-out source) | Buyer unsubscribe link or merchant toggle |
+| Reminder Opt-Out | Payment reminder preference (opt-out timestamp, opt-out source) | Buyer one-click unsubscribe or merchant toggle |
 | Invoice | Receivables tracking (invoice name, amounts, due date, status) | Synced from Shopify orders |
 | Payer Alias | Payment matching (normalized payer key) | Derived from bank statements |
 
 **Note on B2B Main Contact:** For B2B (COMPANY) buyer accounts, the main contact's email and display name are stored for payment reminder emails. These fields require Shopify's Protected Customer Data (PCD) approval. The mainContactCustomerId links to the Shopify Customer GID for customers/redact matching.
 
-**Note on Reminder Opt-Out:** When a buyer opts out of payment reminders (via unsubscribe link in email or merchant toggle), the opt-out record stores only a timestamp and a source ('link' or 'merchant'), linked to the buyer account. Opted-out buyers receive no reminder emails until a merchant re-enables reminders.
+**Note on Reminder Opt-Out:** When a buyer opts out of payment reminders (via the one-click unsubscribe option their email app shows, or the merchant toggle), the opt-out record stores only a timestamp and a source ('link' or 'merchant'), linked to the buyer account. Opted-out buyers receive no reminder emails until a merchant re-enables reminders.
 
 ### 2.3 Customer Data from Shopify (Protected Customer Data)
 
@@ -103,7 +103,7 @@ Buyer accounts for Shopify B2B companies use the company or location name and st
 | Error monitoring and debugging | Sanitized error events (see Subprocessors) | Legitimate interest |
 | Respond to Shopify privacy webhooks and data requests | Data listed in §2 | Legal obligation |
 
-We do not use customer data for marketing or advertising, profiling, analytics resale, or training models, and we do not sell or share it. Buyers can stop reminders with the one-click unsubscribe link in every email; merchants can also turn reminders off for any buyer.
+We do not use customer data for marketing or advertising, profiling, analytics resale, or training models, and we do not sell or share it. Buyers can stop reminders with the one-click unsubscribe option their email app shows; merchants can also turn reminders off for any buyer.
 
 ### 3.1 Automated decisions
 
@@ -306,7 +306,7 @@ We may update this Privacy Policy from time to time. Material changes will be co
 ## 11. Contact
 
 For privacy inquiries:
-- **Email:** raghavkhanna468@gmail.com
+- **Email:** support@termwiseapp.com
 - **Owner/Operator:** Raghav Khanna, individual developer, India
 
 ---
