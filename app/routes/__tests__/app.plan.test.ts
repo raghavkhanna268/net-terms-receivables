@@ -1117,8 +1117,8 @@ describe("Plan page upgrade paragraph conditional copy", () => {
 
     const html = renderToString(createElement(PlanPage));
 
-    expect(html).toContain("Upgrade to unlock more features and higher limits");
-    expect(html).not.toContain("Every plan includes every feature");
+    expect(html).toContain("Every plan includes every feature. Upgrade for more buyer accounts");
+    expect(html).not.toContain("unlock more features");
   });
 
   it("gating OFF: shows compare-plans copy and not upgrade copy", async () => {
@@ -1146,7 +1146,7 @@ describe("Plan page upgrade paragraph conditional copy", () => {
 
     expect(html).toContain("Every plan includes every feature");
     expect(html).toContain("Compare plans to choose the one that fits your store");
-    expect(html).not.toContain("Upgrade to unlock more features and higher limits");
+    expect(html).not.toContain("Upgrade for more buyer accounts");
   });
 
   it("gating ON at limit: shows Limit Reached banner and not compare-plans copy", async () => {
