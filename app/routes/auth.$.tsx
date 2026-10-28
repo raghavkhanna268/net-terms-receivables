@@ -1,4 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useRouteError, isRouteErrorResponse } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
@@ -13,3 +14,21 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  if (
+    isRouteErrorResponse(error) &&
+    error.status === 200 &&
+    typeof error.data === "string"
+  ) {
+    return (
+      <div
+        dangerouslySetInnerHTML={{ __html: error.data || "Handling response" }}
+      />
+    );
+  }
+
+  throw error;
+}
