@@ -56,6 +56,8 @@
     "@shopify/api-codegen-preset": "^2.0.0",
     "@shopify/cli": "4.9.4",
     "@shopify/polaris-types": "^2.0.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@types/luxon": "^3.7.6",
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
