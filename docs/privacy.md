@@ -99,7 +99,7 @@ Buyer accounts for Shopify B2B companies use the company or location name and st
 |---------|-----------|-------------|
 | Provide core app functionality (invoices, credit limits, terms, holds) | Shop, buyer account, invoice and order data | Contract performance (on behalf of the merchant) |
 | Match bank payments to invoices (merchant confirms every match) | Bank payer name and narration uploaded by the merchant; buyer account name; learned payer aliases; customer email (before the "@") as a hint | Contract performance |
-| Send transactional payment reminders for open invoices, on the merchant's schedule | Customer email and name; invoice number, amount and due date; shop name | Contract performance; the merchant is responsible for having a lawful basis to contact its buyers (see Merchant Terms) |
+| Send transactional payment reminders for open invoices, on the merchant's schedule | Customer email and name; invoice number, outstanding amount and due date; shop name | Contract performance; the merchant is responsible for having a lawful basis to contact its buyers (see Merchant Terms) |
 | Error monitoring and debugging | Sanitized error events (see Subprocessors) | Legitimate interest |
 | Respond to Shopify privacy webhooks and data requests | Data listed in §2 | Legal obligation |
 
