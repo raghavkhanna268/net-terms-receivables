@@ -11,7 +11,7 @@
 ## App Introduction
 
 <!-- 88 characters -->
-Track B2B net-terms invoices, manage credit limits and holds, match Indian bank payments
+Track B2B net-terms invoices, enforce credit limits and holds, match Indian bank payments
 
 ---
 
@@ -20,7 +20,7 @@ Track B2B net-terms invoices, manage credit limits and holds, match Indian bank 
 <!-- 497 characters -->
 Built for Indian merchants. Requires INR as the store currency. Track outstanding invoices, enforce credit limits, and reconcile bank payments — without spreadsheets. Sync buyer accounts from Shopify B2B Companies or tagged Customers. Track open invoices by aging bucket. Set credit limits and manual holds per buyer. Block checkout or hide payment methods for held accounts. Import Indian bank statements and confirm matches to mark orders paid. Send payment reminders before and after due dates.
 
-**This app does not lend money, provide financing, or purchase/factor receivables.** It helps merchants track payment terms they extend themselves (App Store requirement 1.1.16).
+Termwise does not lend money, provide financing or cash advances, or buy receivables. Credit limits are the merchant's own limits for buyers on payment terms; Termwise tracks and enforces them.
 
 ---
 

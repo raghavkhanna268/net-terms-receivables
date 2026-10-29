@@ -107,7 +107,7 @@ We do not use customer data for marketing or advertising, profiling, analytics r
 
 ### 3.1 Automated decisions
 
-The merchant sets each buyer's credit limit and payment terms. When a buyer goes over the limit or has an overdue invoice, Termwise: Net Terms & Credit can automatically place the buyer on credit hold, which hides the net-terms payment option at checkout and can hold fulfilment. These decisions use only invoice amounts, due dates and the limits the merchant set; they do not use the buyer's name or email. The merchant can review, override, or release any hold at any time, and a buyer can ask the merchant to review a hold. Bank payment matches are suggestions only: a person at the merchant confirms each one.
+The merchant sets each buyer's credit limit and payment terms. When a buyer goes over the limit or has an overdue invoice, Termwise: Net Terms & Credit can automatically place the buyer on credit hold, which blocks the buyer from completing checkout until the merchant releases the hold and can hold fulfilment. These decisions use only invoice amounts, due dates and the limits the merchant set; they do not use the buyer's name or email. The merchant can review, override, or release any hold at any time, and a buyer can request a manual review of a hold from the merchant. Bank payment matches are suggestions only: a person at the merchant confirms each one.
 
 ---
 
