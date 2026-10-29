@@ -989,6 +989,22 @@ export async function sendPaymentReminder(
     };
   }
 
+  // Gate 2b: Re-check shop reminder settings at send time.
+  // Enqueue (s18_enqueue_reminders) only enqueues for shops whose settings row
+  // is enabled, but a shop may disable reminders after a message is already
+  // queued. Re-read the flag here with a single PK-indexed lookup. If the row
+  // exists and is disabled, skip like other send-time skip paths: ack the
+  // message, make no Resend call, and write no ReminderLog send row. A missing
+  // settings row preserves prior behaviour (no skip here).
+  const shopSettings = await getShopReminderSettings(sql, shopId);
+  if (shopSettings && !shopSettings.enabled) {
+    return {
+      success: true,
+      action: "skipped",
+      skipReason: "Shop reminders disabled",
+    };
+  }
+
   // Fetch invoice data
   const invoice = await getInvoiceForReminder(sql, shopId, invoiceId);
   if (!invoice) {
