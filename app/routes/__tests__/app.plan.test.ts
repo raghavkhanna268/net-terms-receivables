@@ -1088,6 +1088,220 @@ describe("Plan page copy polish", () => {
  * - Gating ON: shows "Upgrade to unlock more features and higher limits."
  * - Gating OFF: shows "Every plan includes every feature. Compare plans to choose the one that fits your store."
  */
+/**
+ * Change-plan link on every plan tests.
+ *
+ * Verifies:
+ * - Unlimited plan renders 'Change plan' link with correct href and target="_top"
+ * - Lower plans render 'View Plans & Upgrade' with the same href
+ * - Unlimited plan gets non-null upgradeUrl from loader
+ */
+describe("Change-plan link on every plan", () => {
+  afterEach(() => {
+    vi.doUnmock("react-router");
+    vi.resetModules();
+  });
+
+  it("unlimited plan renders Change plan link with correct href and target _top", async () => {
+    const testUpgradeUrl = "https://admin.shopify.com/store/test-shop/charges/net-terms/pricing_plans";
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "unlimited", name: "Unlimited", isTest: false },
+          usage: { companies: { current: 100, limit: -1 }, importsThisMonth: { current: 10, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-shop",
+          upgradeUrl: testUpgradeUrl,
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("Change plan");
+    expect(html).toContain(`href="${testUpgradeUrl}"`);
+    expect(html).toContain('target="_top"');
+    expect(html).toContain("Unlimited Plan");
+  });
+
+  it("lower plan (starter) renders View Plans & Upgrade button with correct href", async () => {
+    const testUpgradeUrl = "https://admin.shopify.com/store/test-shop/charges/net-terms/pricing_plans";
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "starter", name: "Starter", isTest: false },
+          usage: { companies: { current: 10, limit: 25 }, importsThisMonth: { current: 3, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-shop",
+          upgradeUrl: testUpgradeUrl,
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("View Plans &amp; Upgrade");
+    expect(html).toContain(`href="${testUpgradeUrl}"`);
+    expect(html).toContain('target="_top"');
+    expect(html).toContain("Upgrade");
+    expect(html).not.toContain("Plan Status");
+  });
+
+  it("lower plan (growth) renders View Plans & Upgrade button and Upgrade section", async () => {
+    const testUpgradeUrl = "https://admin.shopify.com/store/test-shop/charges/net-terms/pricing_plans";
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "growth", name: "Growth", isTest: false },
+          usage: { companies: { current: 50, limit: 100 }, importsThisMonth: { current: 5, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-shop",
+          upgradeUrl: testUpgradeUrl,
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).toContain("View Plans &amp; Upgrade");
+    expect(html).toContain(`href="${testUpgradeUrl}"`);
+    expect(html).toContain('variant="primary"');
+    expect(html).toContain("Upgrade");
+    expect(html).not.toContain("Plan Status");
+    expect(html).not.toContain("Change plan");
+  });
+
+  it("unlimited plan does not render View Plans & Upgrade or Upgrade section", async () => {
+    const testUpgradeUrl = "https://admin.shopify.com/store/test-shop/charges/net-terms/pricing_plans";
+
+    vi.doMock("react-router", async () => {
+      const actual = await vi.importActual<typeof import("react-router")>("react-router");
+      return {
+        ...actual,
+        useLoaderData: () => ({
+          plan: { key: "unlimited", name: "Unlimited", isTest: false },
+          usage: { companies: { current: 100, limit: -1 }, importsThisMonth: { current: 10, limit: -1 } },
+          gatedCount: 0,
+          gatingEnforced: true,
+          storeHandle: "test-shop",
+          upgradeUrl: testUpgradeUrl,
+          newAccountsPausedBanner: { show: false, heading: "", bodyText: "", upgradeUrl: null },
+          error: null,
+        }),
+      };
+    });
+
+    vi.resetModules();
+    const { default: PlanPage } = await import("../app.plan");
+
+    const html = renderToString(createElement(PlanPage));
+
+    expect(html).not.toContain("View Plans &amp; Upgrade");
+    expect(html).toContain("Plan Status");
+    expect(html).toContain("Change plan");
+  });
+});
+
+describe("Loader provides upgradeUrl for unlimited plan", () => {
+  const mockSession = { shop: "test-shop.myshopify.com" };
+  const mockContext = {
+    shopify: {
+      authenticate: {
+        admin: vi.fn().mockResolvedValue({ session: mockSession }),
+      },
+    },
+  };
+  const mockRequest = new Request("https://example.com/app/plan");
+  const mockUrl = new URL(mockRequest.url);
+  const mockPattern = "/app/plan";
+
+  let mockSql: ReturnType<typeof vi.fn>;
+
+  let originalAppHandle: string | undefined;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockSql = vi.fn();
+    mockContext.shopify.authenticate.admin.mockResolvedValue({ session: mockSession });
+    originalAppHandle = process.env.APP_HANDLE;
+    (process.env as Record<string, string | undefined>).APP_HANDLE = "net-terms";
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    (process.env as Record<string, string | undefined>).APP_HANDLE = originalAppHandle;
+  });
+
+  it("returns non-null upgradeUrl for unlimited plan", async () => {
+    const { resolvePlan } = await import("~/services/plan.server");
+    const { getUsageStats, getGatedAccountCount, isGatingEnforced } = await import(
+      "~/services/gating.server"
+    );
+    const { getRequestSql } = await import("~/lib/request-context.server");
+
+    mockSql.mockResolvedValueOnce([{ id: "shop-123" }]);
+    (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+    (resolvePlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+      plan: { key: "unlimited", limits: { companies: -1, importsPerMonth: -1 } },
+      subscriptionId: "gid://shopify/AppSubscription/123",
+      subscriptionName: "Unlimited",
+      isTest: false,
+      fromCache: true,
+    });
+
+    (getUsageStats as ReturnType<typeof vi.fn>).mockResolvedValue({
+      companies: { current: 100, limit: -1 },
+      importsThisMonth: { current: 10, limit: -1 },
+    });
+
+    (getGatedAccountCount as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (isGatingEnforced as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    const { loader } = await import("../app.plan");
+    const result = await loader({
+      request: mockRequest,
+      context: mockContext as never,
+      params: {},
+      url: mockUrl,
+      pattern: mockPattern,
+    });
+
+    expect(result.plan?.key).toBe("unlimited");
+    expect(result.upgradeUrl).not.toBeNull();
+    expect(result.upgradeUrl).toContain("test-shop");
+    expect(result.upgradeUrl).toContain("pricing_plans");
+  });
+});
+
 describe("Plan page upgrade paragraph conditional copy", () => {
   afterEach(() => {
     vi.doUnmock("react-router");
