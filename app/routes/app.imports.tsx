@@ -721,6 +721,9 @@ export default function ImportsPage() {
   if (notSupported) {
     return (
       <s-page heading="Import Bank Statement">
+        <s-link href="/app" slot="breadcrumb-actions">
+          Back to Dashboard
+        </s-link>
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
@@ -732,6 +735,9 @@ export default function ImportsPage() {
 
   return (
     <s-page heading="Import Bank Statement" key={resetKey}>
+      <s-link href="/app" slot="breadcrumb-actions">
+        Back to Dashboard
+      </s-link>
       {/* File upload section */}
       <s-section heading="Upload Statement">
         <s-stack>

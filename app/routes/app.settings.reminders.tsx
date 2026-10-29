@@ -437,6 +437,9 @@ export default function RemindersSettingsPage() {
 
   return (
     <s-page heading="Payment Reminders">
+      <s-link href="/app" slot="breadcrumb-actions">
+        Back to Dashboard
+      </s-link>
       {error && (
         <s-section>
           <s-banner tone="critical" heading="Error">
@@ -584,6 +587,19 @@ export default function RemindersSettingsPage() {
               <s-text slot="subheading">
                 Sent and delayed reminders will appear here.
               </s-text>
+              {!remindersEnabled && (
+                <Form method="post" slot="primary-action">
+                  <input type="hidden" name="intent" value="toggle_enabled" />
+                  <input type="hidden" name="enabled" value="true" />
+                  <s-button
+                    variant="primary"
+                    type="submit"
+                    disabled={isSubmitting || !providerConfigured}
+                  >
+                    Enable Reminders
+                  </s-button>
+                </Form>
+              )}
             </s-empty-state>
           ) : (
             <s-table>

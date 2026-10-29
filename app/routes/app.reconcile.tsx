@@ -805,6 +805,12 @@ function SuggestedMatchesView({
           There are no suggested matches awaiting review. Run the matcher to
           generate new suggestions.
         </s-text>
+        <Form method="post" slot="primary-action">
+          <input type="hidden" name="intent" value="run_matcher" />
+          <s-button variant="primary" type="submit" disabled={actionsDisabled}>
+            Run Matcher
+          </s-button>
+        </Form>
       </s-empty-state>
     );
   }
@@ -1116,6 +1122,9 @@ export default function ReconcilePage() {
   if ("notSupported" in loaderData && loaderData.notSupported) {
     return (
       <s-page heading="Payment Reconciliation">
+        <s-link href="/app" slot="breadcrumb-actions">
+          Back to Dashboard
+        </s-link>
         <s-section>
           <s-banner tone="critical" heading="Currency Not Supported">
             {CURRENCY_NOT_SUPPORTED_BANNER_COPY}
@@ -1127,6 +1136,9 @@ export default function ReconcilePage() {
 
   return (
     <s-page heading="Payment Reconciliation">
+      <s-link href="/app" slot="breadcrumb-actions">
+        Back to Dashboard
+      </s-link>
       {error && (
         <s-section>
           <s-banner tone="critical" heading="Error">
