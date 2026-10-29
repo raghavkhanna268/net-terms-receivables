@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (95 total, counting expanded globs):
+ * Files included (118 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -26,7 +26,8 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/__tests__/integration/prisma-session-storage.test.ts
  *
  * Service DB tests (explicit + *-db.test.ts glob):
- * - app/services/__tests__/*-db.test.ts (matches ~30 files)
+ * - app/services/__tests__/*-db.test.ts (matches ~34 files)
+ * - app/services/__tests__/audit-event-no-pii-db.test.ts
  * - app/services/__tests__/gating.test.ts
  * - app/services/__tests__/bank-import-critical-path.test.ts
  * - app/services/__tests__/reminders-critical-path.test.ts
@@ -36,6 +37,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/drain/__tests__/reconcile-manual-key-db.test.ts
  * - app/services/drain/__tests__/dlq-sanitize-db.test.ts
  * - app/services/drain/__tests__/dlq-redact-race-db.test.ts
+ * - app/services/drain/__tests__/dlq-uninstall-redact-db.test.ts
  * - app/services/drain/__tests__/bulk-op-recovery-db.test.ts
  * - app/services/drain/__tests__/s25-exactly-once-db.test.ts
  * - app/services/drain/__tests__/currency-guard-followups-db.test.ts
@@ -43,17 +45,20 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/drain/__tests__/drain-guard-db.test.ts
  * - app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts
  * - app/services/drain/__tests__/company-location-pii-db.test.ts
+ * - app/services/drain/__tests__/load-shop-currencies-db.test.ts
  *
  * Compliance DB tests:
  * - app/services/compliance/__tests__/redact-customer-db.test.ts
  *
- * Sync DB tests:
+ * Sync DB tests (8 files):
  * - app/services/sync/__tests__/company-location.test.ts
  * - app/services/sync/__tests__/customer.test.ts
  * - app/services/sync/__tests__/order.test.ts
  * - app/services/sync/__tests__/draft-order.test.ts
  * - app/services/sync/__tests__/draft-order-bulk-db.test.ts
  * - app/services/sync/__tests__/bulk-empty-result-db.test.ts
+ * - app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts
+ * - app/services/sync/__tests__/due-date-normalize-db.test.ts
  *
  * Route DB tests:
  * - app/routes/__tests__/app.imports.test.ts
@@ -64,10 +69,12 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/routes/__tests__/app._index-overlimit-db.test.ts
  * - app/routes/__tests__/app.accounts.$id-db.test.ts
  * - app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts
+ * - app/routes/__tests__/ledger-account-link-journey-db.test.ts
  * - app/routes/__tests__/merchant-form-validation-db.test.ts
  * - app/routes/__tests__/webhooks.compliance.customers.test.ts
  * - app/routes/__tests__/admin-render-smoke.test.tsx
  * - app/routes/__tests__/tenant-isolation.test.ts
+ * - app/routes/__tests__/account-href-loader-db.test.ts
  *
  * Lib DB tests:
  * - app/lib/__tests__/after-auth-db.test.ts
@@ -95,6 +102,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  *
  * Other integration DB tests:
  * - tests/integration/review-csv-matcher-db.test.ts
+ * - tests/integration/matcher-import-scope-db.test.ts
  * - tests/integration/confirm-reimport-pin-db.test.ts
  * - tests/integration/bank-upload-robustness-db.test.ts
  * - tests/integration/ingestion-paths-db.test.ts
@@ -130,16 +138,20 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/reconcile-manual-key-db.test.ts",
   "app/services/drain/__tests__/dlq-sanitize-db.test.ts",
   "app/services/drain/__tests__/dlq-redact-race-db.test.ts",
+  "app/services/drain/__tests__/dlq-uninstall-redact-db.test.ts",
   "app/services/drain/__tests__/bulk-op-recovery-db.test.ts",
   "app/services/drain/__tests__/s25-exactly-once-db.test.ts",
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
   "app/services/drain/__tests__/orders-no-session-ack-db.test.ts",
   "app/services/drain/__tests__/drain-guard-db.test.ts",
+  "app/services/drain/__tests__/multipass-drain-db.test.ts",
   "app/services/drain/__tests__/drain-redact-inflight-pr2-db.test.ts",
   "app/services/drain/__tests__/company-location-pii-db.test.ts",
+  "app/services/drain/__tests__/load-shop-currencies-db.test.ts",
 
   // Compliance DB tests
   "app/services/compliance/__tests__/redact-customer-db.test.ts",
+  "app/services/compliance/__tests__/redact-customer-queues-db.test.ts",
   "app/services/__tests__/customer-data-redaction-completeness-db.test.ts",
 
   // Sync DB tests (these use TEST_DATABASE_URL)
@@ -149,6 +161,8 @@ const DB_TEST_PATTERNS = [
   "app/services/sync/__tests__/draft-order.test.ts",
   "app/services/sync/__tests__/draft-order-bulk-db.test.ts",
   "app/services/sync/__tests__/bulk-empty-result-db.test.ts",
+  "app/services/sync/__tests__/bulk-jsonl-orphan-due-refresh-db.test.ts",
+  "app/services/sync/__tests__/due-date-normalize-db.test.ts",
 
   // Route DB tests
   "app/routes/__tests__/app.imports.test.ts",
@@ -159,6 +173,7 @@ const DB_TEST_PATTERNS = [
   "app/routes/__tests__/app._index-overlimit-db.test.ts",
   "app/routes/__tests__/app.accounts.$id-db.test.ts",
   "app/routes/__tests__/app.accounts.$id.reminder-optout-db.test.ts",
+  "app/routes/__tests__/ledger-account-link-journey-db.test.ts",
   "app/routes/__tests__/merchant-form-validation-db.test.ts",
   "app/routes/__tests__/webhooks.compliance.customers.test.ts",
   "app/routes/__tests__/admin-render-smoke.test.tsx",
@@ -181,6 +196,9 @@ const DB_TEST_PATTERNS = [
   "app/lib/banks/__tests__/import-edgecases-hdfc-icici.test.ts",
 
   // Script DB tests
+  // G4 fixture (and any future scripts/__tests__ DB test): runs sequentially
+  // against the real Postgres/pgmq like the other DB-backed suites.
+  "scripts/__tests__/*-db.test.ts",
   "scripts/__tests__/seed.test.ts",
   "scripts/__tests__/backstop-backfill.test.ts",
   "scripts/__tests__/credit-status-metafield-backfill.test.ts",
@@ -192,6 +210,10 @@ const DB_TEST_PATTERNS = [
 
   // Reviewer demo DB tests
   "tests/integration/review-csv-matcher-db.test.ts",
+  "tests/integration/review-csv-v2-matcher-db.test.ts",
+
+  // Matcher importId scope isolation DB tests
+  "tests/integration/matcher-import-scope-db.test.ts",
 
   // Confirm-reimport pin DB tests
   "tests/integration/confirm-reimport-pin-db.test.ts",
@@ -210,6 +232,12 @@ const DB_TEST_PATTERNS = [
 
   // Embedded admin scale and N+1 tests
   "tests/integration/embedded-admin-scale-db.test.ts",
+
+  // Cross-shop (tenant) isolation DB tests
+  "tests/integration/tenant-isolation-db.test.ts",
+
+  // Account href URL-encoding DB tests (loader finds decoded id)
+  "app/routes/__tests__/account-href-loader-db.test.ts",
 ];
 
 export default defineConfig({

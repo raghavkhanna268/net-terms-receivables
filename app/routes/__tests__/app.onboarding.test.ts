@@ -131,6 +131,10 @@ vi.mock("~/services/plan.server", () => ({
     subscriptionName: "Free",
     isTest: false,
   }),
+  resolvePlanWithStatus: vi.fn().mockResolvedValue({
+    plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+    status: "none",
+  }),
 }));
 
 const mockGetUsageStats = vi.fn().mockResolvedValue({
@@ -466,8 +470,8 @@ describe("app.onboarding", () => {
 
       expect(result.error).toBeNull();
       expect(result.state).not.toBeNull();
-      expect(result.state?.steps).toHaveLength(4);
-      expect(result.state?.isComplete).toBe(true);
+      expect(result.state?.steps).toHaveLength(5);
+      expect(result.state?.isComplete).toBe(false);
       expect(result.shopId).toBe(TEST_SHOP_ID);
       expect(result.registrationStatus).not.toBeNull();
     });

@@ -9,8 +9,9 @@
  *   when SHOP != ALLOWED_DEV_STORE
  * - scripts/ci/redact-seed-output.sh: GIDs, order names, amounts, emails and
  *   domains never reach public logs
- * - the workflow itself: dispatch-only, main-only, boolean inputs only (no
- *   shop/domain input), dry_run defaults to true, pinned actions, guard first
+ * - the workflow itself: dispatch-only, main-only, no shop/domain input (the
+ *   g4_fixture choice is none/write/cleanup), dry_run defaults to true, pinned
+ *   actions, guard first
  *
  * All domains here are fake placeholders.
  */
@@ -187,14 +188,18 @@ describe("seed-e2e-store.yml static checks", () => {
     expect(wf).toMatch(/^\s+if: github\.ref == 'refs\/heads\/main'$/m);
   });
 
-  it("has only boolean inputs dry_run (default true) and reviewer_demo (default false)", () => {
+  it("has boolean inputs dry_run/reviewer_demo and the g4_fixture choice (none/write/cleanup), no shop/domain input", () => {
     const inputsBlock = wf.split(/^ {4}inputs:\s*$/m)[1].split(/^permissions:/m)[0];
-    const names = [...inputsBlock.matchAll(/^ {6}([a-z_]+):/gm)].map((m) => m[1]);
-    expect(names).toEqual(["dry_run", "reviewer_demo"]);
+    const names = [...inputsBlock.matchAll(/^ {6}([a-z0-9_]+):/gm)].map((m) => m[1]);
+    expect(names).toEqual(["dry_run", "reviewer_demo", "g4_fixture"]);
     const types = [...inputsBlock.matchAll(/^ {8}type: (\S+)/gm)].map((m) => m[1]);
-    expect(types).toEqual(["boolean", "boolean"]);
+    expect(types).toEqual(["boolean", "boolean", "choice"]);
     const defaults = [...inputsBlock.matchAll(/^ {8}default: (\S+)/gm)].map((m) => m[1]);
-    expect(defaults).toEqual(["true", "false"]);
+    // dry_run defaults true (writes need an explicit non-dry-run choice); the
+    // fixture defaults to none, so a write/cleanup is never the default action.
+    expect(defaults).toEqual(["true", "false", "none"]);
+    const options = [...inputsBlock.matchAll(/^ {10}- (\S+)/gm)].map((m) => m[1]);
+    expect(options).toEqual(["none", "write", "cleanup"]);
     expect(names.some((n) => /shop|domain|store/i.test(n))).toBe(false);
   });
 
@@ -225,5 +230,29 @@ describe("seed-e2e-store.yml static checks", () => {
 
   it("pipes seed output through the redaction filter", () => {
     expect(wf).toContain('npx tsx scripts/seed.ts "${ARGS[@]}" 2>&1 | bash scripts/ci/redact-seed-output.sh');
+  });
+
+  it("fetches the deployed commit (depth 1) before the seed step, gated on g4_fixture == 'write'", () => {
+    // Shallow checkout means the deployed commit must be fetched so seed.ts's
+    // `git show $DEPLOY_SHA:wrangler.jsonc` drift check can run.
+    const fetchCmd = 'fetch --no-tags --depth=1 origin "$DEPLOY_SHA"';
+    const fetchIdx = wf.indexOf(fetchCmd);
+    expect(fetchIdx).toBeGreaterThan(0);
+    // Not a full-history checkout (no `fetch-depth: 0` YAML setting).
+    expect(wf).not.toMatch(/^\s*fetch-depth:\s*0\s*$/m);
+
+    const runSeedIdx = wf.indexOf("- name: Run seed script");
+    expect(runSeedIdx).toBeGreaterThan(0);
+    // The fetch happens in a step before the seed step.
+    expect(fetchIdx).toBeLessThan(runSeedIdx);
+
+    // The fetch lives in the write-gated "resolve deployed SHA" step, which
+    // fails closed with a fixed code when the commit can't be fetched.
+    const maskStepIdx = wf.indexOf("- name: Mask G4 recipient and resolve deployed SHA");
+    expect(maskStepIdx).toBeGreaterThan(0);
+    expect(maskStepIdx).toBeLessThan(fetchIdx);
+    const stepBlock = wf.slice(maskStepIdx, runSeedIdx);
+    expect(stepBlock).toMatch(/if:\s*inputs\.g4_fixture == 'write'/);
+    expect(stepBlock).toContain("g4_deploy_sha_fetch_failed");
   });
 });

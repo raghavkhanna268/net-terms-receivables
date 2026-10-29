@@ -649,6 +649,49 @@ describe("Reconcile Route (M5)", () => {
     });
   });
 
+  describe("loader page param handling (N1)", () => {
+    it("returns page 1 and offset 0 for ?page=abc", async () => {
+      const { getRequestSql } = await import("~/lib/request-context.server");
+      const { getSuggestedMatches } = await import(
+        "~/lib/matching/queries.server"
+      );
+
+      mockSql.mockResolvedValueOnce([{ id: "shop-page-test", currency: "INR" }]);
+      (getRequestSql as ReturnType<typeof vi.fn>).mockReturnValue(mockSql);
+
+      mockSql
+        .mockResolvedValueOnce([{ count: "5" }])
+        .mockResolvedValueOnce([{ count: "3" }])
+        .mockResolvedValueOnce([{ count: "2" }])
+        .mockResolvedValueOnce([{ count: "1" }])
+        .mockResolvedValue([]);
+
+      (getSuggestedMatches as ReturnType<typeof vi.fn>).mockResolvedValue({
+        matches: [],
+        totalCount: 0,
+      });
+
+      const invalidPageUrl = new URL("https://example.com/app/reconcile?page=abc");
+      const invalidPageRequest = new Request(invalidPageUrl);
+
+      const { loader } = await import("../app.reconcile");
+      const result = await loader({
+        request: invalidPageRequest,
+        context: mockContext as never,
+        params: {},
+        url: invalidPageUrl,
+        pattern: mockPattern,
+      });
+
+      expect(result.pagination.page).toBe(1);
+      expect(getSuggestedMatches).toHaveBeenCalledWith(
+        expect.anything(),
+        "shop-page-test",
+        expect.objectContaining({ offset: 0 })
+      );
+    });
+  });
+
   describe("loader success paths (no errors)", () => {
     it("does not call console.error when no errors occur", async () => {
       const { getRequestSql } = await import("~/lib/request-context.server");

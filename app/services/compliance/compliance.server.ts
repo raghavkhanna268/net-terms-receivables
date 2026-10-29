@@ -241,13 +241,22 @@ export async function deleteShop(
       WHERE message->>'shop' = ${shopDomain}
     `;
 
-    // s6_dead_letter (dead-letter queue, shop in message JSON at message->>'shop')
-    // Producer: app/services/drain/processor.server.ts:968-991 (moveToDeadLetter function)
-    // The message JSON contains { shop: string, topic: string, webhookId: string, ... }
-    const deadLetterResult = await tx`
-      DELETE FROM s6_dead_letter
-      WHERE message->>'shop' = ${shopDomain}
-    `;
+    // s6_dead_letter (dead-letter queue). Producer: moveToDeadLetter in
+    // app/services/drain/processor.server.ts.
+    // Full rows carry the domain at message->>'shop'. Sanitized rows (#239, #262)
+    // drop the domain and carry the internal Shop id at message->>'shopId'
+    // instead, e.g. rows dead-lettered during the 48h uninstall window. Match
+    // both so redact leaves no dead-letter rows for this shop.
+    const deadLetterResult = lockedShop
+      ? await tx`
+          DELETE FROM s6_dead_letter
+          WHERE message->>'shop' = ${shopDomain}
+             OR message->>'shopId' = ${lockedShop.id}
+        `
+      : await tx`
+          DELETE FROM s6_dead_letter
+          WHERE message->>'shop' = ${shopDomain}
+        `;
 
     // s6_processed_webhooks (no shop column; ids may embed the domain)
     // Two deletion strategies for the two id formats:
@@ -348,6 +357,7 @@ export async function purgePgmqMessages(
  * Redact all customer data for customers/redact webhook.
  *
  * Purge strategy:
+ * - pgmq sync queue/archive and dead-letter: DELETE customer-scoped messages
  * - s8_tagged_customers: DELETE (no legal retention requirement)
  * - s8_draft_orders: DELETE (no legal retention requirement)
  * - s22_data_requests: DELETE or null export_data (contains customer PII)
@@ -380,11 +390,51 @@ export async function redactCustomer(
   buyerAccountAnonymized: boolean;
   paymentsRedacted: number;
   b2bMainContactsRedacted: number;
+  pgmqSyncQueuePurged: number;
+  pgmqSyncArchivePurged: number;
+  deadLetterPurged: number;
 }> {
   // Wrap all operations in a single transaction for atomicity.
   // If any statement fails, the entire operation rolls back, so Shopify's
   // retry can safely re-execute from scratch.
   return sql.begin(async (tx) => {
+    // Customer-scoped queue cleanup (structured JSON match).
+    // Customer sync messages carry {shop, resourceGid}; resourceGid is the
+    // exact customer GID. Bulk messages carry no per-customer reference and
+    // are covered by the isCustomerRedacted check in the sync handlers.
+    const [shopRow] = await tx<{ domain: string }[]>`
+      SELECT domain FROM "Shop" WHERE id = ${shopId}
+    `;
+
+    let pgmqSyncQueuePurged = 0;
+    let pgmqSyncArchivePurged = 0;
+    let deadLetterPurged = 0;
+
+    if (shopRow) {
+      const shopDomain = shopRow.domain;
+
+      const syncQueueResult = await tx`
+        DELETE FROM pgmq.q_s6_sync
+        WHERE message->>'shop' = ${shopDomain}
+          AND message->>'resourceGid' = ${customerGid}
+      `;
+      const syncArchiveResult = await tx`
+        DELETE FROM pgmq.a_s6_sync
+        WHERE message->>'shop' = ${shopDomain}
+          AND message->>'resourceGid' = ${customerGid}
+      `;
+      const deadLetterResult = await tx`
+        DELETE FROM s6_dead_letter
+        WHERE original_queue = 's6_sync'
+          AND message->>'shop' = ${shopDomain}
+          AND message->>'resourceGid' = ${customerGid}
+      `;
+
+      pgmqSyncQueuePurged = syncQueueResult.count;
+      pgmqSyncArchivePurged = syncArchiveResult.count;
+      deadLetterPurged = deadLetterResult.count;
+    }
+
     // Delete tagged customer tracking record
     const taggedResult = await tx`
       DELETE FROM s8_tagged_customers
@@ -493,6 +543,9 @@ export async function redactCustomer(
       buyerAccountAnonymized,
       paymentsRedacted,
       b2bMainContactsRedacted: b2bMainContactResult.count,
+      pgmqSyncQueuePurged,
+      pgmqSyncArchivePurged,
+      deadLetterPurged,
     };
   });
 }

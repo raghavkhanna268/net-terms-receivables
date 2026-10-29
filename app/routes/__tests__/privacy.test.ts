@@ -68,7 +68,8 @@ describe("/privacy route", () => {
 
     const html = await response.text();
 
-    expect(html).toContain("raghavkhanna468@gmail.com");
+    expect(html).toContain("support@termwiseapp.com");
+    expect(html).not.toContain("@gmail.com");
     expect(html).toContain("Raghav Khanna");
     expect(html).toContain("individual developer, India");
 
@@ -376,7 +377,7 @@ describe("privacy.md content requirements", () => {
 
   it("contains exact backup retention sentence", () => {
     expect(privacyContent).toContain(
-      "Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted."
+      "The newest 7 backups are always kept, and older ones are deleted after 30 days on the next successful backup run."
     );
   });
 
@@ -401,6 +402,60 @@ describe("privacy.md content requirements", () => {
       "It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts."
     );
   });
+
+  it("states access logs are deleted after 1 year", () => {
+    expect(privacyContent).toContain("Access events are deleted after 1 year");
+  });
+
+  it("states customer PII sync wording accurately", () => {
+    expect(privacyContent).toContain(
+      "Name and email are received for customers in the sync and stored only for matching buyers."
+    );
+  });
+
+  it("states draft orders retention until deleted, erasure, or shop/redact", () => {
+    expect(privacyContent).toContain(
+      "Until deleted in Shopify, customer erasure, or shop/redact"
+    );
+  });
+
+  it("states payment retention is until shop/redact not shop uninstall", () => {
+    expect(privacyContent).toContain("| Payment | Payment reconciliation (value date, amount, rail, UTR) | Until shop/redact |");
+    expect(privacyContent).not.toContain("Until shop uninstall");
+  });
+
+  it("lists GitHub as a subprocessor with accurate backup wording", () => {
+    expect(privacyContent).toContain("GitHub, Inc.");
+    expect(privacyContent).toContain("Source code hosting and CI");
+    expect(privacyContent).toContain(
+      "database contents are processed transiently in runner memory, encrypted before leaving the runner, and not stored by GitHub"
+    );
+  });
+
+  it("lists Cloudflare R2 and observability logs", () => {
+    expect(privacyContent).toContain("Cloudflare R2 (encrypted database backups)");
+    expect(privacyContent).toContain("observability logs");
+  });
+
+  it("does not contain Asia-Pacific region claim", () => {
+    expect(privacyContent).not.toContain("Asia-Pacific");
+  });
+
+  it("lists Resend merchant contact email and owner email", () => {
+    expect(privacyContent).toContain("merchant contact email (as Reply-To)");
+    expect(privacyContent).toContain("shop owner email (for data-request notices)");
+  });
+
+  it("says outstanding amount not invoice total for reminder emails", () => {
+    expect(privacyContent).toContain("Outstanding amount (formatted with shop currency)");
+    expect(privacyContent).not.toContain("Invoice total (formatted with shop currency)");
+  });
+
+  it("says shop name from Shopify name when available", () => {
+    expect(privacyContent).toContain(
+      "Shop name (from the store's Shopify name when available, otherwise from shop domain)"
+    );
+  });
 });
 
 describe("merchant-terms.md content requirements", () => {
@@ -412,7 +467,8 @@ describe("merchant-terms.md content requirements", () => {
   });
 
   it("contains the privacy contact email", () => {
-    expect(termsContent).toContain("raghavkhanna468@gmail.com");
+    expect(termsContent).toContain("support@termwiseapp.com");
+    expect(termsContent).not.toContain("@gmail.com");
   });
 
   it("contains exact Resend subprocessor wording", () => {
@@ -440,13 +496,62 @@ describe("merchant-terms.md content requirements", () => {
 
   it("contains exact backup retention sentence", () => {
     expect(termsContent).toContain(
-      "Deleted data may remain in encrypted backups for up to 30 days, after which it is permanently deleted"
+      "The newest 7 backups are always kept, and older ones are deleted after 30 days on the next successful backup run."
     );
   });
 
   it("contains Team Lead Sentry sentence", () => {
     expect(termsContent).toContain(
       "It receives only sanitized error and performance events, with no buyer contact details, bank remitter names or narrations, and no payment amounts."
+    );
+  });
+
+  it("says does not request or store for phone/address", () => {
+    expect(termsContent).toContain("The App does not request or store:");
+    expect(termsContent).not.toContain("does NOT process or store");
+  });
+
+  it("notes reinstall skips deletion", () => {
+    expect(termsContent).toContain(
+      "If the shop reinstalls before the shop/redact webhook arrives, deletion is skipped"
+    );
+  });
+
+  it("lists GitHub as a sub-processor with accurate backup wording", () => {
+    expect(termsContent).toContain("GitHub, Inc.");
+    expect(termsContent).toContain("Source code hosting and CI");
+    expect(termsContent).toContain(
+      "database contents are processed transiently in runner memory, encrypted before leaving the runner, and not stored by GitHub"
+    );
+  });
+
+  it("lists Cloudflare R2 and observability logs", () => {
+    expect(termsContent).toContain("Cloudflare R2 (encrypted database backups)");
+    expect(termsContent).toContain("observability logs");
+  });
+
+  it("does not contain Asia-Pacific region claim", () => {
+    expect(termsContent).not.toContain("Asia-Pacific");
+  });
+
+  it("lists Resend merchant contact email and owner email", () => {
+    expect(termsContent).toContain("merchant contact email (as Reply-To)");
+    expect(termsContent).toContain("shop owner email (for data-request notices)");
+  });
+
+  it("says Cloudflare transfer includes R2 storage not transient only", () => {
+    expect(termsContent).toContain("Cloudflare R2 (encrypted database backups)");
+    expect(termsContent).not.toContain("transient processing only");
+  });
+
+  it("references Sentry scrubbing in Part 2 section 4 Sub-Processors", () => {
+    expect(termsContent).toContain("Sentry scrubbing is described in Part 2, section 4 (Sub-Processors)");
+    expect(termsContent).not.toContain("Sentry scrubbing is described in section 4\n");
+  });
+
+  it("lists GitHub cross-border transfer with transient processing wording", () => {
+    expect(termsContent).toContain(
+      "GitHub (source code and CI; database contents processed transiently in runner memory during encrypted backup job, not stored by GitHub)"
     );
   });
 });
@@ -463,6 +568,15 @@ describe("data-retention.md content requirements", () => {
 
   it("specifies 30-day backup retention period", () => {
     expect(retentionContent).toContain("30-day rolling retention");
+  });
+});
+
+describe("SUPPORT_EMAIL_MAILTO constant", () => {
+  it("contains app domain address and not gmail", async () => {
+    const { SUPPORT_EMAIL_MAILTO } = await import("../../lib/constants");
+
+    expect(SUPPORT_EMAIL_MAILTO).toBe("mailto:support@termwiseapp.com");
+    expect(SUPPORT_EMAIL_MAILTO).not.toContain("@gmail.com");
   });
 });
 

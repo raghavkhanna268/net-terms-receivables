@@ -554,7 +554,9 @@ describeWithDb("PII never logged to console or Sentry on import path (with REAL 
     };
 
     const response = await callAction(sql, "test-nonexistent-shop.myshopify.com", payload);
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(400);
+    const data = await response.json() as { error?: string };
+    expect(data.error).toContain("still being set up");
     
     const allOutput = getAllCapturedOutput();
     

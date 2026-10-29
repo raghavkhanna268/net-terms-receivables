@@ -11,4 +11,4 @@ export const APP_NAME = "Termwise";
  * Mailto link to the public support/privacy contact from docs/privacy.md.
  * Used in user-facing banners and error messages.
  */
-export const SUPPORT_EMAIL_MAILTO = "mailto:raghavkhanna468@gmail.com";
+export const SUPPORT_EMAIL_MAILTO = "mailto:support@termwiseapp.com";
