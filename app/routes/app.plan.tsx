@@ -285,11 +285,18 @@ export default function PlanPage() {
 
           {planKey === "unlimited" && (
             <s-section heading="Plan Status">
-              <s-banner tone="success" heading="Unlimited Plan">
-                <s-text>
-                  You&apos;re on the Unlimited plan with unlimited buyer accounts.
-                </s-text>
-              </s-banner>
+              <s-stack>
+                <s-banner tone="success" heading="Unlimited Plan">
+                  <s-text>
+                    You&apos;re on the Unlimited plan with unlimited buyer accounts.
+                  </s-text>
+                </s-banner>
+                {upgradeUrl && (
+                  <s-link href={upgradeUrl} target="_top">
+                    Change plan
+                  </s-link>
+                )}
+              </s-stack>
             </s-section>
           )}
         </>
