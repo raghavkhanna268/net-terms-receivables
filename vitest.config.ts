@@ -128,6 +128,7 @@ const DB_TEST_PATTERNS = [
   "app/services/__tests__/reminders-critical-path.test.ts",
   "app/services/__tests__/billing-plan-state-db.test.ts",
   "app/services/__tests__/reminders-catchup-db.test.ts",
+  "app/services/__tests__/reminders-send-journey-db.test.ts",
   "app/services/__tests__/reminders-uninstalled-db.test.ts",
   "app/services/__tests__/reminder-optout-db.test.ts",
   "app/services/__tests__/retention-db.test.ts",
