@@ -10,7 +10,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - describeWithDb = TEST_DATABASE_URL
  * - process.env.DATABASE_URL in test files
  *
- * Files included (117 total, counting expanded globs):
+ * Files included (118 total, counting expanded globs):
  *
  * Integration tests:
  * - app/__tests__/integration/s6-pgmq.test.ts
@@ -37,6 +37,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * - app/services/drain/__tests__/reconcile-manual-key-db.test.ts
  * - app/services/drain/__tests__/dlq-sanitize-db.test.ts
  * - app/services/drain/__tests__/dlq-redact-race-db.test.ts
+ * - app/services/drain/__tests__/dlq-uninstall-redact-db.test.ts
  * - app/services/drain/__tests__/bulk-op-recovery-db.test.ts
  * - app/services/drain/__tests__/s25-exactly-once-db.test.ts
  * - app/services/drain/__tests__/currency-guard-followups-db.test.ts
@@ -136,6 +137,7 @@ const DB_TEST_PATTERNS = [
   "app/services/drain/__tests__/reconcile-manual-key-db.test.ts",
   "app/services/drain/__tests__/dlq-sanitize-db.test.ts",
   "app/services/drain/__tests__/dlq-redact-race-db.test.ts",
+  "app/services/drain/__tests__/dlq-uninstall-redact-db.test.ts",
   "app/services/drain/__tests__/bulk-op-recovery-db.test.ts",
   "app/services/drain/__tests__/s25-exactly-once-db.test.ts",
   "app/services/drain/__tests__/currency-guard-followups-db.test.ts",
