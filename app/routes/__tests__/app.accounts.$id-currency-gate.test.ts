@@ -156,6 +156,11 @@ describe("#292 currency gate on /app/accounts/:id", () => {
     mockSql.mockImplementation((strings: TemplateStringsArray) => {
       const query = strings.join("?");
 
+      if (query.includes("SELECT id, currency, timezone FROM") && query.includes("Shop")) {
+        return Promise.resolve([
+          { id: TEST_SHOP_ID, currency: storedCurrency, timezone: "Asia/Kolkata" },
+        ]);
+      }
       if (query.includes("SELECT id, currency FROM") && query.includes("Shop")) {
         return Promise.resolve([
           { id: TEST_SHOP_ID, currency: storedCurrency },

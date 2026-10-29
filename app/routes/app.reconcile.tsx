@@ -40,6 +40,7 @@ import { safeLog, toErrorCode } from "~/lib/log.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
+import { accountHref } from "~/lib/account-href";
 
 const PAGE_SIZE = 20;
 
@@ -579,7 +580,7 @@ function PaymentDetailView({
           <s-text type="strong">Value Date: </s-text>
           <s-text>
             {new Date(payment.valueDate).toLocaleDateString("en-IN", {
-              timeZone: "Asia/Kolkata",
+              timeZone: "UTC",
             })}
           </s-text>
         </s-paragraph>
@@ -1043,7 +1044,7 @@ function PushingMatchesView({
             <s-table-row key={match.id}>
               <s-table-cell>
                 {match.buyerAccountId ? (
-                  <s-link href={`/app/accounts/${match.buyerAccountId}`}>
+                  <s-link href={accountHref(match.buyerAccountId)}>
                     {match.invoiceName}
                   </s-link>
                 ) : (

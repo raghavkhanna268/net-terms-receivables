@@ -32,6 +32,7 @@ on:
           - initial-sync-timing
           - offline-session-preflight
           - pgmq-archive-age
+          - pgmq-cron-job-status
           - post-drain-aggregates
           - redriven-webhook-receipts
           - s12-hold-coverage

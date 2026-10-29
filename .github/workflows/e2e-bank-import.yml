@@ -3,9 +3,10 @@
 #
 # SECURITY / SAFETY CONSTRAINTS (do not weaken):
 # - Manual dispatch only, and the job runs only on refs/heads/main
-# - The only input is the boolean dry_run (default true). There is NO shop,
-#   domain or file input: the store comes only from the E2E_SHOP repo secret and
-#   the file is fixed to tests/fixtures/banks/synthetic/hdfc-review-synthetic.csv
+# - The inputs are dry_run (boolean, default true) and fixture (choice of
+#   hdfc or hdfc_v2, default hdfc). There is NO shop, domain or raw file
+#   input: the store comes only from the E2E_SHOP repo secret and the file
+#   is one of the synthetic fixtures mapped from the fixture enum
 # - scripts/ci/e2e-shop-guard.sh masks E2E_SHOP and fails closed if it is empty,
 #   not a *.myshopify.com domain, or equal to the main dev store
 #   (ALLOWED_DEV_STORE secret); SHOP and ALLOWED_DEV_STORE both = E2E_SHOP
@@ -54,6 +55,13 @@ on:
         description: 'Dry run (import + matcher in a rolled-back transaction; nothing persists)'
         type: boolean
         default: true
+      fixture:
+        description: 'Fixture to import (hdfc or hdfc_v2)'
+        type: choice
+        options:
+          - hdfc
+          - hdfc_v2
+        default: hdfc
 
 permissions:
   contents: read
@@ -73,6 +81,7 @@ jobs:
       # SHOP is NOT set here: step env headers are printed in public logs.
       # It is resolved from the E2E_SHOP secret and masked.
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
+      INPUT_FIXTURE: ${{ inputs.fixture }}
 
     steps:
       - name: Checkout
@@ -108,6 +117,8 @@ jobs:
           else
             export DRY_RUN=true
           fi
+          # Fixture is the enum key (hdfc or hdfc_v2), not a path
+          export FIXTURE="${INPUT_FIXTURE:-hdfc}"
           # Counts/booleans/enums only; the filter drops every other line
           # (pipefail keeps the script's exit code).
           npx tsx scripts/e2e-bank-import.ts 2>&1 | bash scripts/ci/e2e-bank-import-filter.sh

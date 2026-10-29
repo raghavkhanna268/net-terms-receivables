@@ -262,12 +262,13 @@ export function extractOrderIdFromGid(gid: string | null): string | null {
 }
 
 /**
- * Build the Shopify admin URL for an order using the shopify: protocol.
- * This protocol navigates within the Admin context when used in embedded apps.
+ * Build the Shopify admin URL for an order using the shopify:// protocol.
+ * Per App Bridge Navigation API docs, shopify://admin/... navigates
+ * to admin pages from embedded apps.
  */
 export function buildOrderAdminUrl(orderId: string | null): string | null {
   if (!orderId) return null;
   const id = extractOrderIdFromGid(orderId);
   if (!id) return null;
-  return `shopify:admin/orders/${id}`;
+  return `shopify://admin/orders/${id}`;
 }
