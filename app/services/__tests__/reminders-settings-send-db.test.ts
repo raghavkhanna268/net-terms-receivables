@@ -234,6 +234,23 @@ describeWithDb("S18 reminder settings re-check at send time (DB)", () => {
         enqueuedAt: `${FIXED_TODAY}T06:30:00Z`,
       };
 
+      // Archive (not delete) s6_sync rows left by other DB tests so they
+      // can't fill the drain batch ahead of this test's message.
+      await sql`
+        SELECT pgmq.archive('s6_sync', ARRAY(
+          SELECT msg_id FROM pgmq.q_s6_sync
+          WHERE message->>'shop' IS NULL
+             OR message->>'shop' <> ${TEST_SHOP_DOMAIN}
+        ))
+      `;
+      await sql`
+        SELECT pgmq.archive('s6_bulk', ARRAY(
+          SELECT msg_id FROM pgmq.q_s6_bulk
+          WHERE message->>'shop' IS NULL
+             OR message->>'shop' <> ${TEST_SHOP_DOMAIN}
+        ))
+      `;
+
       await sql`SELECT pgmq.send('s6_sync', ${sql.json(message)})`;
 
       const { runDrain } = await import("~/services/drain/processor.server");
