@@ -275,7 +275,7 @@ describeWithDb("Reminder Send Journey (DB, end-to-end)", () => {
     mockFetch.mockReset();
     _resetMerchantInfoCacheForTests();
     // Ensure process.env does not leak enforcement/secret fallbacks into the env param.
-    delete process.env.RESEND_RECIPIENT_ALLOWLIST_ENFORCED;
+    Reflect.deleteProperty(process.env, "RESEND_RECIPIENT_ALLOWLIST_ENFORCED");
     delete process.env.RESEND_TEST_RECIPIENTS;
     delete process.env.REMINDER_UNSUBSCRIBE_SECRET;
     // Reset shop/account state to the enabled, non-opted-out baseline.
