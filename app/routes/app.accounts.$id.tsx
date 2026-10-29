@@ -38,6 +38,7 @@ import {
   getCreditStatusDisplay,
   getCompanyTotals,
   updateCreditStatus,
+  parseCreditLimitString,
   type CreditStatusUpdate,
 } from "~/services/credit-status.server";
 import { getBuyerInvoices, type BuyerInvoiceRow } from "~/lib/aging-queries.server";
@@ -53,6 +54,8 @@ import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
 import { isCurrencyGateOpen, getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { CURRENCY_NOT_SUPPORTED_BANNER_COPY } from "~/lib/shop-currency-copy";
 import { pluralizeWithCount } from "~/lib/copy-helpers";
+import { validateTimezone } from "~/lib/aging-dates.server";
+import { accountHref } from "~/lib/account-href";
 
 const HOLD_REASON_OPTIONS: Array<{ value: HoldReasonCode; label: string }> = [
   { value: "MANUAL_HOLD", label: "Manual hold" },
@@ -73,6 +76,7 @@ type SyncState = "pending_retry" | "needs_attention" | "synced";
 interface LoaderData {
   notSupported?: boolean;
   shopCurrency?: string;
+  shopTimezone: string;
   account: {
     id: string;
     name: string;
@@ -172,6 +176,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone: validateTimezone(null),
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -182,9 +187,11 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     } satisfies LoaderData;
   }
 
-  const [shop] = await sql<{ id: string; currency: string | null }[]>`
-    SELECT id, currency FROM "Shop" WHERE domain = ${shopDomain}
+  const [shop] = await sql<{ id: string; currency: string | null; timezone: string | null }[]>`
+    SELECT id, currency, timezone FROM "Shop" WHERE domain = ${shopDomain}
   `;
+
+  const shopTimezone = validateTimezone(shop?.timezone);
 
   if (!shop) {
     return {
@@ -195,6 +202,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -217,6 +225,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: false,
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -257,6 +266,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       gatingEnforced: isGatingEnforced(),
       reminderOptOut: null,
       upgradeUrl,
+      shopTimezone,
       newAccountsPausedBanner: {
         show: false,
         heading: "",
@@ -422,6 +432,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     gatingEnforced,
     reminderOptOut,
     upgradeUrl,
+    shopTimezone,
     newAccountsPausedBanner,
     error: null,
   } satisfies LoaderData;
@@ -512,27 +523,15 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
       }
     } else if (noLimit) {
       creditLimitAmount = null;
-    } else if (creditLimitStr && creditLimitStr.trim() !== "") {
-      const trimmed = creditLimitStr.trim();
-      if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) {
-        return {
-          success: false,
-          error: "Invalid credit limit format. Use a number with up to 2 decimal places (e.g., 100000 or 100000.50).",
-        } satisfies ActionData;
-      }
-      const parsed = Number(trimmed);
-      if (parsed < 0) {
-        return {
-          success: false,
-          error: "Credit limit must be non-negative.",
-        } satisfies ActionData;
-      }
-      creditLimitAmount = parsed;
     } else {
-      return {
-        success: false,
-        error: "Credit limit cannot be empty. Check 'No credit limit' to allow unlimited credit.",
-      } satisfies ActionData;
+      const parseResult = parseCreditLimitString(creditLimitStr);
+      if (!parseResult.valid) {
+        return {
+          success: false,
+          error: parseResult.error,
+        } satisfies ActionData;
+      }
+      creditLimitAmount = parseResult.value;
     }
 
     const update: CreditStatusUpdate = {
@@ -596,9 +595,11 @@ export const action = async ({ request, context, params }: ActionFunctionArgs) =
 function InvoiceTable({
   invoices,
   currency,
+  shopTimezone,
 }: {
   invoices: LoaderData["invoices"]["rows"];
   currency: string;
+  shopTimezone: string;
 }) {
   if (invoices.length === 0) {
     return (
@@ -630,7 +631,7 @@ function InvoiceTable({
               <s-table-cell>
                 {inv.dueAt
                   ? new Date(inv.dueAt).toLocaleDateString("en-IN", {
-                      timeZone: "Asia/Kolkata",
+                      timeZone: shopTimezone,
                     })
                   : "—"}
               </s-table-cell>
@@ -648,7 +649,7 @@ function InvoiceTable({
               </s-table-cell>
               <s-table-cell>
                 {orderUrl ? (
-                  <s-link href={orderUrl}>View</s-link>
+                  <s-link href={orderUrl} target="_top">View</s-link>
                 ) : (
                   "—"
                 )}
@@ -663,11 +664,13 @@ function InvoiceTable({
 
 export default function AccountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, newAccountsPausedBanner, error } = loaderData;
+  const { account, creditStatus, companyTotals, invoices, gatingEnforced, reminderOptOut, upgradeUrl, shopTimezone, newAccountsPausedBanner, error } = loaderData;
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
   const isReminderSubmitting = isSubmitting && navigation.formData?.get("_action") === "updateReminderOptOut";
+
+  const formAction = account?.id ? accountHref(account.id) : undefined;
 
   const serverNoLimit = creditStatus?.creditLimitAmount === null;
   const [noLimitChecked, setNoLimitChecked] = useState(serverNoLimit);
@@ -918,18 +921,17 @@ export default function AccountPage() {
 
       {!account.isGated && (
         <s-section heading="Edit Credit Settings">
-          <Form method="post">
+          <Form method="post" action={formAction}>
             <input type="hidden" name="_action" value="updateCredit" />
             <s-stack gap="base">
               <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
-                <s-money-field
+                <s-text-field
                   label="Credit Limit"
                   name="creditLimit"
-                  min={0}
-                  placeholder="e.g., 100000"
+                  placeholder="e.g., 1,00,000 or ₹1,00,000.50"
                   value={noLimitChecked ? "" : (creditStatus?.creditLimitAmount?.toString() ?? "")}
                   disabled={noLimitChecked}
-                ></s-money-field>
+                ></s-text-field>
                 <s-text>{currency}</s-text>
               </s-grid>
 
@@ -1003,7 +1005,7 @@ export default function AccountPage() {
                 )}
               </s-stack>
             </s-banner>
-            <Form method="post">
+            <Form method="post" action={formAction}>
               <input type="hidden" name="_action" value="updateCredit" />
               <input type="hidden" name="holdOnly" value="true" />
               <s-stack gap="base">
@@ -1045,7 +1047,7 @@ export default function AccountPage() {
 
       {reminderOptOut && (
         <s-section heading="Payment Reminders">
-          <Form method="post">
+          <Form method="post" action={formAction}>
             <input type="hidden" name="_action" value="updateReminderOptOut" />
             <input type="hidden" name="enable" value={reminderOptOut.optedOut ? "true" : "false"} />
             <s-stack gap="base">
@@ -1065,9 +1067,9 @@ export default function AccountPage() {
               {reminderOptOut.optedOut && reminderOptOut.optOutAt && (
                 <s-paragraph>
                   Opted out on {new Date(reminderOptOut.optOutAt).toLocaleDateString("en-IN", {
-                    timeZone: "Asia/Kolkata",
+                    timeZone: shopTimezone,
                   })}
-                  {reminderOptOut.optOutSource === "link" && " via email unsubscribe link"}
+                  {reminderOptOut.optOutSource === "link" && " via email unsubscribe"}
                   {reminderOptOut.optOutSource === "merchant" && " by merchant"}
                 </s-paragraph>
               )}
@@ -1094,7 +1096,7 @@ export default function AccountPage() {
       )}
 
       <s-section heading="Recent Invoices">
-        <InvoiceTable invoices={invoices.rows} currency={currency} />
+        <InvoiceTable invoices={invoices.rows} currency={currency} shopTimezone={shopTimezone} />
         {invoices.totalCount > 10 && (
           <s-paragraph>
             <s-text>
@@ -1136,7 +1138,7 @@ export default function AccountPage() {
 
       <s-section slot="aside" heading="Payment Reminders">
         <s-paragraph>
-          Buyers can opt out of payment reminder emails via the unsubscribe link in each reminder.
+          Buyers can opt out of payment reminder emails via the one-click unsubscribe option in each reminder.
         </s-paragraph>
         <s-paragraph>
           Only merchants can re-enable reminders for an opted-out buyer.

@@ -11,6 +11,7 @@ import {
   validateAllowlist,
   isSafeGuardRegex,
   sensitiveWord,
+  SESSION_CREDENTIAL_COLUMNS,
   type AllowlistEntry,
 } from "../check-readonly-columns";
 
@@ -203,6 +204,43 @@ SELECT CASE WHEN a."defaultTermsDays" BETWEEN 0 AND 365 THEN a."defaultTermsDays
     expect(sensitiveWord("shop_idx")).toBeNull();
     expect(sensitiveWord("shopDomain")).toBe("shop");
     expect(sensitiveWord("holdNote")).toBe("note");
+  });
+});
+
+describe("check-readonly-columns: Session credential columns (rule 4b)", () => {
+  const sel = (cols: string, ann = "") =>
+    issues(`${ann}BEGIN TRANSACTION READ ONLY;\nSELECT ${cols} FROM "Session" se;\nROLLBACK;`);
+
+  it("lists the Session token, expiry and OAuth state columns", () => {
+    expect([...SESSION_CREDENTIAL_COLUMNS].sort()).toEqual(
+      ["accessToken", "expires", "refreshToken", "refreshTokenExpires", "state"].sort(),
+    );
+  });
+
+  it("rejects passing a token or expiry time through, even when annotated", () => {
+    expect(sel(`se."refreshToken" AS rt_present`)).toEqual(["rt_present:sensitive"]);
+    expect(sel(`se.expires AS expires_at`)).toEqual(["expires_at:sensitive"]);
+    expect(sel(`se.expires AS x_at`, "-- @col x_at: timestamp\n")).toEqual(["x_at:sensitive"]);
+    expect(
+      sel(`to_char(max(se."refreshTokenExpires"), 'YYYY') AS y`, "-- @col y: timestamp\n"),
+    ).toEqual(["y:sensitive"]);
+    expect(sel(`max(se.state) AS oauth_kind`, "-- @col oauth_kind: enum\n")).toEqual([
+      "oauth_kind:sensitive",
+    ]);
+    expect(
+      sel(`CASE WHEN se."accessToken" ~ '^[a-z]{1,8}$' THEN se."accessToken" END AS k`),
+    ).toEqual(["k:sensitive"]);
+  });
+
+  it("allows them only inside a derived boolean or count", () => {
+    expect(
+      sel(
+        `COALESCE(bool_and(se."refreshToken" IS NOT NULL AND se."refreshToken" <> ''), false) AS refresh_token_present, ` +
+          `COALESCE(bool_and(se."refreshTokenExpires" > (NOW() AT TIME ZONE 'UTC')), false) AS refresh_expires_in_future, ` +
+          `COUNT(*) FILTER (WHERE se.expires < NOW()) AS expired_ct, ` +
+          `bool_or(se."needsReauth") AS needs_reauth`,
+      ),
+    ).toEqual([]);
   });
 });
 

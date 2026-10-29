@@ -29,6 +29,7 @@ vi.mock("~/services/credit-status.server", () => ({
   getCreditStatusDisplay: vi.fn(),
   getCompanyTotals: vi.fn().mockResolvedValue(null),
   updateCreditStatus: vi.fn(),
+  parseCreditLimitString: vi.fn().mockReturnValue({ valid: true, value: 0 }),
 }));
 
 import { getCreditStatusDisplay } from "~/services/credit-status.server";
@@ -329,6 +330,181 @@ describeWithDb("app.accounts.$id dead-letter time filter (DB)", () => {
         DELETE FROM s6_dead_letter 
         WHERE original_msg_id = ${"wrong-shop-msg-" + TEST_SUFFIX}
       `;
+    }
+  });
+});
+
+describeWithDb("app.accounts.$id shopTimezone from Shop row (DB)", () => {
+  let sql: ReturnType<typeof postgres>;
+  const TEST_SUFFIX = Date.now().toString(36) + "-tz-db";
+
+  beforeAll(async () => {
+    sql = postgres(TEST_DATABASE_URL!, sqlOptions);
+  });
+
+  afterAll(async () => {
+    await sql.end();
+  });
+
+  async function setupShopAndAccount(shopId: string, domain: string, currency: string, timezone: string | null, accountId: string) {
+    await sql`
+      INSERT INTO "Shop" (id, domain, currency, timezone, "createdAt", "updatedAt")
+      VALUES (${shopId}, ${domain}, ${currency}, ${timezone}, NOW(), NOW())
+    `;
+    await sql`
+      INSERT INTO "BuyerAccount" (
+        id, "shopId", kind, "companyId", "companyLocationId", name,
+        "creditLimit", "holdState", bypass, "syncPending",
+        "createdAt", "updatedAt"
+      )
+      VALUES (
+        ${accountId}, ${shopId}, 'COMPANY',
+        ${"co-" + accountId}, ${"loc-" + accountId},
+        'Test TZ Account', 100000.00, 'OK', false, false,
+        NOW(), NOW()
+      )
+    `;
+  }
+
+  async function cleanupShopAndAccount(shopId: string) {
+    await sql`DELETE FROM "Invoice" WHERE "shopId" = ${shopId}`;
+    await sql`DELETE FROM "BuyerAccount" WHERE "shopId" = ${shopId}`;
+    await sql`DELETE FROM "Shop" WHERE id = ${shopId}`;
+  }
+
+  function createLoaderArgs(domain: string, accountId: string) {
+    const url = new URL("https://example.com/app/accounts/" + accountId);
+    return {
+      request: new Request(url),
+      context: {
+        shopify: {
+          authenticate: {
+            admin: vi.fn().mockResolvedValue({
+              session: { shop: domain },
+              sessionToken: "test-token",
+            }),
+          },
+        },
+        cloudflare: {
+          env: {},
+          ctx: { waitUntil: vi.fn() },
+        },
+      },
+      params: { id: accountId },
+      url,
+      pattern: "/app/accounts/:id",
+    } as unknown;
+  }
+
+  it("shopTimezone: valid timezone (America/New_York) passes through", async () => {
+    const shopId = `shop-tz-valid-${TEST_SUFFIX}`;
+    const domain = `test-tz-valid-${TEST_SUFFIX}.example.com`;
+    const accountId = `acc-tz-valid-${TEST_SUFFIX}`;
+
+    await setupShopAndAccount(shopId, domain, "INR", "America/New_York", accountId);
+
+    mockGetCreditStatusDisplay.mockResolvedValue({
+      creditLimitAmount: 100000,
+      creditLimitPaise: 10000000n,
+      exposurePaise: 0n,
+      draftExposurePaise: 0n,
+      availableCreditPaise: 10000000n,
+      currency: "INR",
+      holdState: "OK",
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      isOnHold: false,
+      holdReasonDisplay: null,
+      isOverLimit: false,
+      isOverdue: false,
+      utilizationPercent: 0,
+      syncPending: false,
+      syncErrorCode: null,
+      metafieldSyncedAt: null,
+    });
+
+    try {
+      vi.resetModules();
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs(domain, accountId) as never);
+
+      expect(result.shopTimezone).toBe("America/New_York");
+    } finally {
+      await cleanupShopAndAccount(shopId);
+    }
+  });
+
+  it("shopTimezone: invalid timezone (Not/AZone) falls back to Asia/Kolkata", async () => {
+    const shopId = `shop-tz-invalid-${TEST_SUFFIX}`;
+    const domain = `test-tz-invalid-${TEST_SUFFIX}.example.com`;
+    const accountId = `acc-tz-invalid-${TEST_SUFFIX}`;
+
+    await setupShopAndAccount(shopId, domain, "INR", "Not/AZone", accountId);
+
+    mockGetCreditStatusDisplay.mockResolvedValue({
+      creditLimitAmount: 100000,
+      creditLimitPaise: 10000000n,
+      exposurePaise: 0n,
+      draftExposurePaise: 0n,
+      availableCreditPaise: 10000000n,
+      currency: "INR",
+      holdState: "OK",
+      manualHold: false,
+      holdReasonCode: null,
+      holdNote: null,
+      isOnHold: false,
+      holdReasonDisplay: null,
+      isOverLimit: false,
+      isOverdue: false,
+      utilizationPercent: 0,
+      syncPending: false,
+      syncErrorCode: null,
+      metafieldSyncedAt: null,
+    });
+
+    try {
+      vi.resetModules();
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs(domain, accountId) as never);
+
+      expect(result.shopTimezone).toBe("Asia/Kolkata");
+    } finally {
+      await cleanupShopAndAccount(shopId);
+    }
+  });
+
+  it("shopTimezone: notSupported (non-INR currency) branch also carries shopTimezone", async () => {
+    const shopId = `shop-tz-notsup-${TEST_SUFFIX}`;
+    const domain = `test-tz-notsup-${TEST_SUFFIX}.example.com`;
+    const accountId = `acc-tz-notsup-${TEST_SUFFIX}`;
+
+    await setupShopAndAccount(shopId, domain, "USD", "Europe/London", accountId);
+
+    try {
+      vi.resetModules();
+      vi.doMock("~/lib/request-context.server", () => ({
+        getRequestSql: () => sql,
+        getRequestWaitUntil: () => undefined,
+      }));
+
+      const { loader } = await import("../app.accounts.$id");
+      const result = await loader(createLoaderArgs(domain, accountId) as never);
+
+      expect(result.notSupported).toBe(true);
+      expect(result.shopTimezone).toBe("Europe/London");
+    } finally {
+      await cleanupShopAndAccount(shopId);
     }
   });
 });

@@ -73,42 +73,77 @@ interface MatchRow {
  *
  * @param sql - postgres.js SQL client
  * @param shopId - Shop ID
- * @param options - Pagination options
+ * @param options - Pagination options and optional importId filter
  */
 export async function getUnmatchedPayments(
   sql: Sql,
   shopId: string,
-  options: { limit: number; offset: number }
+  options: { limit: number; offset: number; importId?: string }
 ): Promise<{ payments: PaymentForScoring[]; totalCount: number }> {
-  const { limit, offset } = options;
+  const { limit, offset, importId } = options;
 
-  const rows = await sql<PaymentRow[]>`
-    SELECT
-      p.id,
-      (ROUND(p.amount * 100))::text AS amount_paise,
-      p.narration,
-      p."payerText" AS payer_text,
-      p.utr,
-      p.rail,
-      p."valueDate" AS value_date,
-      p."importId" AS import_id,
-      bi."fileName" AS import_file_name,
-      bi.bank
-    FROM "Payment" p
-    JOIN "BankImport" bi ON bi.id = p."importId"
-    WHERE p."shopId" = ${shopId}
-      AND p.status IN ('unmatched', 'partial')
-    ORDER BY p."valueDate" DESC, p.id
-    LIMIT ${limit}
-    OFFSET ${offset}
-  `;
+  let rows: PaymentRow[];
+  let countRow: { count: string } | undefined;
 
-  const [countRow] = await sql<{ count: string }[]>`
-    SELECT COUNT(*)::text AS count
-    FROM "Payment"
-    WHERE "shopId" = ${shopId}
-      AND status IN ('unmatched', 'partial')
-  `;
+  if (importId !== undefined) {
+    rows = await sql<PaymentRow[]>`
+      SELECT
+        p.id,
+        (ROUND(p.amount * 100))::text AS amount_paise,
+        p.narration,
+        p."payerText" AS payer_text,
+        p.utr,
+        p.rail,
+        p."valueDate" AS value_date,
+        p."importId" AS import_id,
+        bi."fileName" AS import_file_name,
+        bi.bank
+      FROM "Payment" p
+      JOIN "BankImport" bi ON bi.id = p."importId"
+      WHERE p."shopId" = ${shopId}
+        AND p.status IN ('unmatched', 'partial')
+        AND p."importId" = ${importId}
+      ORDER BY p."valueDate" DESC, p.id
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `;
+
+    [countRow] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count
+      FROM "Payment"
+      WHERE "shopId" = ${shopId}
+        AND status IN ('unmatched', 'partial')
+        AND "importId" = ${importId}
+    `;
+  } else {
+    rows = await sql<PaymentRow[]>`
+      SELECT
+        p.id,
+        (ROUND(p.amount * 100))::text AS amount_paise,
+        p.narration,
+        p."payerText" AS payer_text,
+        p.utr,
+        p.rail,
+        p."valueDate" AS value_date,
+        p."importId" AS import_id,
+        bi."fileName" AS import_file_name,
+        bi.bank
+      FROM "Payment" p
+      JOIN "BankImport" bi ON bi.id = p."importId"
+      WHERE p."shopId" = ${shopId}
+        AND p.status IN ('unmatched', 'partial')
+      ORDER BY p."valueDate" DESC, p.id
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `;
+
+    [countRow] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count
+      FROM "Payment"
+      WHERE "shopId" = ${shopId}
+        AND status IN ('unmatched', 'partial')
+    `;
+  }
 
   const payments: PaymentForScoring[] = rows.map((row) => ({
     id: row.id,
@@ -224,6 +259,7 @@ export async function getBuyersWithAliases(
   shopId: string
 ): Promise<BuyerForScoring[]> {
   // Get all buyers (gating applies only to value-add actions, not matching)
+  // ORDER BY createdAt, id ensures deterministic iteration order for name-tie-breaking
   const buyers = await sql<BuyerRow[]>`
     SELECT
       ba.id,
@@ -232,6 +268,7 @@ export async function getBuyersWithAliases(
     FROM "BuyerAccount" ba
     LEFT JOIN "s8_tagged_customers" tc ON tc."shop_id" = ba."shopId" AND tc."customer_id" = ba."customerId"
     WHERE ba."shopId" = ${shopId}
+    ORDER BY ba."createdAt", ba.id
   `;
 
   if (buyers.length === 0) {
