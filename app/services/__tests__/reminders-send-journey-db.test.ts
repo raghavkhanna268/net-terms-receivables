@@ -660,10 +660,10 @@ describeWithDb("Reminder Send Journey (DB, end-to-end)", () => {
   // Case 7: Message enqueued, then shop reminders disabled before the handler
   //         processes the REMINDER_SEND message.
   //
-  // Expected behaviour: no Resend call. Skipped pending follow-up.
+  // Expected behaviour: no Resend call (send-time settings re-check, #555).
   // ===========================================================================
   describe("Case 7: enqueued then shop disabled before processing", () => {
-    it.skip("enqueued REMINDER_SEND with shop later disabled: no Resend call (pending follow-up)", async () => {
+    it("enqueued REMINDER_SEND with shop later disabled: no Resend call", async () => {
       setShopLocalTime(2026, 10, 30, 12, 0);
 
       const dueAt = DateTime.fromObject(
