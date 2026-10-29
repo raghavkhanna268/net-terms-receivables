@@ -648,6 +648,10 @@ describeWithDb("Reminder Email DB Suite", () => {
       `;
       expect(after).toBeDefined();
       expect(after.updatedAt.getTime()).toBeGreaterThan(seededTime.getTime());
+
+      // Restore enabled=true: the send path re-reads this flag, so later cases
+      // must start from an enabled shop.
+      await sql`UPDATE s18_shop_reminder_settings SET enabled = true WHERE shop_id = ${SHOP_ID}`;
     });
   });
 

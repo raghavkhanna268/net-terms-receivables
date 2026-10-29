@@ -109,6 +109,9 @@ export default function DataRequestsPage() {
 
   return (
     <s-page heading="Customer Data Requests">
+      <s-link href="/app" slot="breadcrumb-actions">
+        Back to Dashboard
+      </s-link>
       <s-section heading="GDPR/CCPA Data Requests">
         <s-paragraph>
           When a customer requests their data under GDPR or CCPA, Shopify
