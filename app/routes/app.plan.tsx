@@ -260,10 +260,16 @@ export default function PlanPage() {
                       {importsAtLimit ? " importing bank statements" : ""}.
                     </s-text>
                   </s-banner>
+                ) : gatingEnforced ? (
+                  <s-paragraph>
+                    <s-text>
+                      Every plan includes every feature. Upgrade for more buyer accounts.
+                    </s-text>
+                  </s-paragraph>
                 ) : (
                   <s-paragraph>
                     <s-text>
-                      Upgrade to unlock more features and higher limits.
+                      Every plan includes every feature. Compare plans to choose the one that fits your store.
                     </s-text>
                   </s-paragraph>
                 )}
@@ -279,11 +285,18 @@ export default function PlanPage() {
 
           {planKey === "unlimited" && (
             <s-section heading="Plan Status">
-              <s-banner tone="success" heading="Unlimited Plan">
-                <s-text>
-                  You&apos;re on the Unlimited plan with unlimited buyer accounts.
-                </s-text>
-              </s-banner>
+              <s-stack>
+                <s-banner tone="success" heading="Unlimited Plan">
+                  <s-text>
+                    You&apos;re on the Unlimited plan with unlimited buyer accounts.
+                  </s-text>
+                </s-banner>
+                {upgradeUrl && (
+                  <s-link href={upgradeUrl} target="_top">
+                    Change plan
+                  </s-link>
+                )}
+              </s-stack>
             </s-section>
           )}
         </>

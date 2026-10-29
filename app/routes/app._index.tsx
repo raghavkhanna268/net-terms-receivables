@@ -32,9 +32,11 @@ import { getEffectiveCurrency } from "~/lib/currency-gate.server";
 import { getStoreSetupStatus } from "~/lib/store-setup-state";
 import { ServerTiming, mergeServerTimingHeaders, readColdOnce } from "~/lib/server-timing.server";
 import { getAppHandle, buildPlanSelectionUrl } from "~/lib/plan-url";
+import { validateTimezone } from "~/lib/aging-dates.server";
 import { recordAccess, getActorFromSessionToken } from "~/services/access-log.server";
 import { checkAndRecoverCurrency } from "~/services/shop-currency-recovery.server";
 import { processPlanWelcome } from "~/services/plan-welcome.server";
+import { accountHref } from "~/lib/account-href";
 
 const PAGE_SIZE = 20;
 
@@ -431,6 +433,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   `;
   timing.endPhase("shop_lookup");
 
+  const shopTimezone = validateTimezone(shop?.timezone);
+
   const [currencyResult, onboardingCheckResult] = await Promise.all([
     shop
       ? checkAndRecoverCurrency(sql, shopDomain, shop.currency, admin, shop.id)
@@ -461,6 +465,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       shopDomain,
       storeHandle: notSupportedStoreHandle,
       shopCurrency: getEffectiveCurrency(shopCurrency),
+      shopTimezone,
       currencySupported: false as const,
       currencyFlipBlocked,
       gatingEnforced: false,
@@ -532,6 +537,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shopDomain,
     storeHandle,
     shopCurrency,
+    shopTimezone,
     currencySupported: true as const,
     currencyFlipBlocked,
     gatingEnforced,
@@ -697,7 +703,7 @@ export function BuyerLedgerTable({
             return (
               <s-table-row key={`${row.buyer_account_id}-${row.currency}`}>
                 <s-table-cell>
-                  <s-link href={`?buyer=${row.buyer_account_id}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
+                  <s-link href={accountHref(row.buyer_account_id)}>
                     {row.buyer_name}
                   </s-link>
                   {gatingEnforced && row.is_gated && <s-badge tone="warning">Over plan limit</s-badge>}
@@ -708,7 +714,9 @@ export function BuyerLedgerTable({
                     : "No limit"}
                 </s-table-cell>
                 <s-table-cell>
-                  {formatPaiseAmount(outstanding, row.currency)}
+                  <s-link href={`?buyer=${encodeURIComponent(row.buyer_account_id)}&sortBy=${sortBy}&sortOrder=${sortOrder}&page=${page}${fp}`}>
+                    {formatPaiseAmount(outstanding, row.currency)}
+                  </s-link>
                 </s-table-cell>
                 <s-table-cell>
                   {overdue > 0n ? (
@@ -752,14 +760,18 @@ export function BuyerLedgerTable({
   );
 }
 
-function BuyerInvoiceList({
+export function BuyerInvoiceList({
   invoices,
   buyerName,
+  buyerAccountId,
   onClose,
+  shopTimezone,
 }: {
   invoices: BuyerInvoiceRow[];
   buyerName: string;
+  buyerAccountId: string;
   onClose: string;
+  shopTimezone: string;
 }) {
   if (invoices.length === 0) {
     return (
@@ -769,7 +781,10 @@ function BuyerInvoiceList({
             This buyer has no outstanding invoices.
           </s-text>
         </s-empty-state>
-        <s-button href={onClose}>Back to Ledger</s-button>
+        <s-stack direction="inline">
+          <s-button href={onClose}>Back to Ledger</s-button>
+          <s-button href={accountHref(buyerAccountId)} variant="secondary">View account</s-button>
+        </s-stack>
       </s-section>
     );
   }
@@ -796,7 +811,7 @@ function BuyerInvoiceList({
                   <s-table-cell>
                     {inv.due_at
                       ? new Date(inv.due_at).toLocaleDateString("en-IN", {
-                          timeZone: "Asia/Kolkata",
+                          timeZone: shopTimezone,
                         })
                       : "—"}
                   </s-table-cell>
@@ -814,7 +829,7 @@ function BuyerInvoiceList({
                   </s-table-cell>
                   <s-table-cell>
                     {orderUrl ? (
-                      <s-link href={orderUrl}>View Order</s-link>
+                      <s-link href={orderUrl} target="_top">View Order</s-link>
                     ) : (
                       "—"
                     )}
@@ -824,7 +839,10 @@ function BuyerInvoiceList({
             })}
           </s-table-body>
         </s-table>
-        <s-button href={onClose}>Back to Ledger</s-button>
+        <s-stack direction="inline">
+          <s-button href={onClose}>Back to Ledger</s-button>
+          <s-button href={accountHref(buyerAccountId)} variant="secondary">View account</s-button>
+        </s-stack>
       </s-stack>
     </s-section>
   );
@@ -936,6 +954,8 @@ function DashboardContent({
   sortBy,
   sortOrder,
   onlyOverLimit,
+  shopTimezone,
+  selectedBuyerId,
 }: {
   dashboardData: DeferredDashboardData;
   gatingEnforced: boolean;
@@ -943,6 +963,8 @@ function DashboardContent({
   sortBy: SortBy;
   sortOrder: SortOrder;
   onlyOverLimit: boolean;
+  shopTimezone: string;
+  selectedBuyerId: string | null;
 }) {
   const {
     plan,
@@ -1047,11 +1069,13 @@ function DashboardContent({
           </s-section>
 
           {/* Buyer Invoice Drill-down */}
-          {selectedBuyerInvoices && (
+          {selectedBuyerInvoices && selectedBuyerId && (
             <BuyerInvoiceList
               invoices={selectedBuyerInvoices.rows}
               buyerName={selectedBuyerInvoices.buyerName}
+              buyerAccountId={selectedBuyerId}
               onClose={closeInvoiceListUrl}
+              shopTimezone={shopTimezone}
             />
           )}
 
@@ -1129,7 +1153,9 @@ export default function Index() {
     onlyOverLimit,
     currencySupported,
     currencyFlipBlocked,
+    shopTimezone,
     dashboardData,
+    selectedBuyerId,
   } = loaderData;
 
   if (!currencySupported) {
@@ -1173,6 +1199,8 @@ export default function Index() {
               sortBy={sortBy}
               sortOrder={sortOrder}
               onlyOverLimit={onlyOverLimit}
+              shopTimezone={shopTimezone}
+              selectedBuyerId={selectedBuyerId}
             />
           )}
         </Await>

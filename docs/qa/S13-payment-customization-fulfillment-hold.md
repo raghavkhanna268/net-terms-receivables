@@ -12,7 +12,7 @@
 This plan verifies that:
 - held or over-limit buyers do not see net terms at checkout, and everyone else is unaffected (fail-open)
 - orders from held accounts are put on fulfillment hold and released correctly
-- all of this works with the existing 8 scopes and no PII
+- all of this works with the existing 9 scopes and no PII
 
 ## 2. Preconditions and fixtures (synthetic data only)
 - Shared fixture `tests/fixtures/credit-status.json`. Function input JSON fixtures:
@@ -64,7 +64,7 @@ This plan verifies that:
 
 ## 4. Protected customer data, scopes and data minimization (DPDP)
 - **PCD-1:** The Function input and Admin queries use Level 1 data only (ids, amounts, metafield). Customer **Email and Name** are only allowed where already gated by `CUSTOMER_PII_FIELDS=1`. **Phone and address are a fail.**
-- **SCOPE-1:** The 11 production scopes are unchanged in `shopify.app.toml` and `wrangler.jsonc`. **No `write_payment_terms`** (we hide options, we do not edit terms). **No `write_draft_orders`.** The scope-sync check passes.
+- **SCOPE-1:** The 9 production scopes are unchanged in `shopify.app.toml` and `wrangler.jsonc`. **No `write_payment_terms`** (we hide options, we do not edit terms). **No `write_draft_orders`.** The scope-sync check passes.
 - **SCOPE-2:** `paymentCustomizationCreate` uses `write_payment_customizations`. Fulfillment hold and release use `write_merchant_managed_fulfillment_orders`. Any extra scope request is a fail.
 - **DPDP-1:** Hold reason notes and AuditEvents carry codes and GIDs only. No buyer name or email.
 - **DPDP-2:** Function logs (`log!`) and Worker logs contain no PII.

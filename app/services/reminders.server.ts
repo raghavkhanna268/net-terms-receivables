@@ -373,6 +373,7 @@ export async function getInvoiceForReminder(
       customerId: string | null;
       mainContactEmail: string | null;
       mainContactDisplayName: string | null;
+      buyerAccountName: string | null;
       buyerAccountGatedAt: Date | null;
       shopUninstalledAt: Date | null;
     }[]
@@ -393,6 +394,7 @@ export async function getInvoiceForReminder(
       ba."customerId",
       ba."mainContactEmail",
       ba."mainContactName" AS "mainContactDisplayName",
+      ba.name AS "buyerAccountName",
       ba.gated_at AS "buyerAccountGatedAt",
       s."uninstalledAt" AS "shopUninstalledAt"
     FROM "Invoice" i
@@ -410,10 +412,13 @@ export async function getInvoiceForReminder(
   let buyerEmail: string | null = null;
   let buyerDisplayName: string | null = null;
 
+  const nonEmpty = (s: string | null | undefined): string | null =>
+    s && s.trim() ? s.trim() : null;
+
   if (row.accountKind === "COMPANY") {
-    // B2B: use mainContactEmail and mainContactName from BuyerAccount
+    // B2B: use mainContactEmail; name fallback: mainContactName → accountName
     buyerEmail = row.mainContactEmail;
-    buyerDisplayName = row.mainContactDisplayName;
+    buyerDisplayName = nonEmpty(row.mainContactDisplayName) ?? nonEmpty(row.buyerAccountName);
   } else if (row.customerId) {
     // Tagged customer: get email/displayName from s8_tagged_customers
     // This data is only present when CUSTOMER_PII_FIELDS=1 (S8)
@@ -425,7 +430,9 @@ export async function getInvoiceForReminder(
     `;
     if (customer) {
       buyerEmail = customer.email;
-      buyerDisplayName = customer.displayName;
+      buyerDisplayName = nonEmpty(customer.displayName) ?? nonEmpty(row.buyerAccountName);
+    } else {
+      buyerDisplayName = nonEmpty(row.buyerAccountName);
     }
   }
 
@@ -903,10 +910,11 @@ function formatAmount(amount: string, currency: string): string {
 
 /**
  * Format date for display in the shop's timezone.
+ * Pinned to en-US locale so output is always 'Month Day, Year'.
  */
-function formatDate(date: Date, timezone: string): string {
+export function formatDate(date: Date, timezone: string): string {
   const validTz = validateTimezone(timezone);
-  const dt = DateTime.fromJSDate(date, { zone: validTz });
+  const dt = DateTime.fromJSDate(date, { zone: validTz }).setLocale("en-US");
   return dt.toLocaleString(DateTime.DATE_FULL);
 }
 
@@ -1070,8 +1078,8 @@ export async function sendPaymentReminder(
   }
 
   // Gate 8: Check buyer has email (via CUSTOMER_PII_FIELDS)
-  // If PII field is off or email missing, skip without consuming slot or cap
-  if (!invoice.buyerEmail) {
+  // If PII field is off or email missing/whitespace-only, skip without consuming slot or cap
+  if (!invoice.buyerEmail?.trim()) {
     return {
       success: true,
       action: "skipped",
@@ -1489,8 +1497,8 @@ export async function sendCatchupReminder(
     };
   }
 
-  // Gate 8: Check buyer has email
-  if (!invoice.buyerEmail) {
+  // Gate 8: Check buyer has email (whitespace-only also skipped)
+  if (!invoice.buyerEmail?.trim()) {
     await deleteDelayedReminder(sql, shopId, ruleId, invoiceId);
     return {
       success: true,

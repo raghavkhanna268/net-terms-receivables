@@ -8,7 +8,7 @@
  * setCachedPlan - the only writer of plan_key.
  *
  * Security:
- * - plan_handle validated against strict allowlist: starter, growth, unlimited
+ * - plan_handle triggers refresh when non-empty (trimmed, max 32 chars)
  * - Shop comes ONLY from authenticated session, never URL params
  * - Foreign-shop params silently ignored (no write)
  *
@@ -23,9 +23,8 @@ import { resolvePlan } from "~/services/plan.server";
 const MAX_HANDLE_LENGTH = 32;
 
 /**
- * Strict allowlist of valid plan handles.
- * Exactly: starter, growth, unlimited (lowercase).
- * Ignores Shopify's private $0 test plan and any other handle.
+ * Allowlist of known plan handles for normalization.
+ * Used by normalizePlanHandle to validate against known values.
  */
 const VALID_PLAN_HANDLES: ReadonlySet<string> = new Set([
   "starter",
@@ -33,14 +32,26 @@ const VALID_PLAN_HANDLES: ReadonlySet<string> = new Set([
   "unlimited",
 ]);
 
+/**
+ * Reason codes for plan welcome processing results.
+ */
+export const PLAN_WELCOME_REASONS = [
+  "foreign_shop",
+  "no_trigger",
+  "refresh_failed",
+  "refreshed",
+] as const;
+
+export type PlanWelcomeReason = (typeof PLAN_WELCOME_REASONS)[number];
+
 export interface PlanWelcomeResult {
   refreshed: boolean;
   skipped: boolean;
-  reason?: string;
+  reason: PlanWelcomeReason;
 }
 
 /**
- * Normalize and validate a plan_handle.
+ * Normalize and validate a plan_handle against known values.
  * Returns null for invalid/unknown handles.
  */
 export function normalizePlanHandle(handle: string | null): string | null {
@@ -52,8 +63,19 @@ export function normalizePlanHandle(handle: string | null): string | null {
 }
 
 /**
+ * Check if plan_handle is a valid trigger for refresh.
+ * Non-empty (after trim), at most MAX_HANDLE_LENGTH chars.
+ */
+function isValidRefreshTrigger(handle: string | null): boolean {
+  if (!handle || typeof handle !== "string") return false;
+  const trimmed = handle.trim();
+  return trimmed.length > 0 && trimmed.length <= MAX_HANDLE_LENGTH;
+}
+
+/**
  * Check if plan_handle or charge_id is present and valid for refresh.
  * charge_id presence triggers refresh even without plan_handle.
+ * plan_handle triggers refresh when non-empty and at most 32 chars.
  */
 export function shouldRefreshPlan(
   planHandle: string | null,
@@ -62,7 +84,7 @@ export function shouldRefreshPlan(
   if (chargeId && chargeId.trim().length > 0) {
     return true;
   }
-  return normalizePlanHandle(planHandle) !== null;
+  return isValidRefreshTrigger(planHandle);
 }
 
 /**
@@ -95,7 +117,7 @@ export async function processPlanWelcome(
 
   try {
     await resolvePlan(sql, sessionShop, true);
-    return { refreshed: true, skipped: false };
+    return { refreshed: true, skipped: false, reason: "refreshed" };
   } catch {
     return { refreshed: false, skipped: false, reason: "refresh_failed" };
   }

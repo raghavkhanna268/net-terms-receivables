@@ -56,6 +56,10 @@ vi.mock("~/services/plan.server", () => ({
     subscriptionName: "Free",
     isTest: false,
   }),
+  resolvePlanWithStatus: vi.fn().mockResolvedValue({
+    plan: { plan: { key: "none" }, subscriptionId: null, fromCache: false },
+    status: "none",
+  }),
 }));
 
 vi.mock("~/services/gating.server", () => ({

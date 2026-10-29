@@ -34,6 +34,8 @@ export interface OnboardingStep {
   actionUrl?: string;
   actionLabel?: string;
   helpText?: string;
+  /** Target for the action link (e.g., "_top" for external links). */
+  actionTarget?: string;
 }
 
 /**
@@ -68,6 +70,12 @@ export interface PaymentCustomizationInfo {
 }
 
 /**
+ * Plan status for the "Choose a plan" step.
+ * Matches PlanResolutionStatus from plan.server.ts.
+ */
+export type OnboardingPlanStatus = "active" | "none" | "error";
+
+/**
  * Data needed to compute onboarding step states.
  * All fields are fetched from real sources (DB or Admin API).
  */
@@ -83,6 +91,10 @@ export interface OnboardingStepInputs {
   /** True when shop has enabled reminders via s18_shop_reminder_settings. */
   remindersEnabled: boolean;
   dismissedAt: Date | null;
+  /** Plan status for the "Choose a plan" step. */
+  planStatus?: OnboardingPlanStatus;
+  /** URL to the plan selection page (null if APP_HANDLE is not set). */
+  planSelectionUrl?: string | null;
 }
 
 const VALIDATION_FUNCTION_HANDLE = "credit-check-validation";
@@ -189,6 +201,7 @@ export function computeValidationStep(
     actionUrl,
     actionLabel,
     helpText,
+    ...(actionUrl && { actionTarget: "_top" }),
   };
 }
 
@@ -237,6 +250,7 @@ export function computePaymentCustomizationStep(
     actionUrl,
     actionLabel,
     helpText,
+    ...(actionUrl && { actionTarget: "_top" }),
   };
 }
 
@@ -282,6 +296,43 @@ export function computeReminderStep(
 }
 
 /**
+ * Compute the "Choose a plan" step.
+ * Shows as pending when no active plan, complete when a plan is active.
+ * Links to the pricing URL if available, otherwise /app/plan.
+ * This step never blocks other steps or pages.
+ */
+export function computePlanStep(
+  planStatus: OnboardingPlanStatus | undefined,
+  planSelectionUrl: string | null | undefined
+): OnboardingStep {
+  const hasActivePlan = planStatus === "active";
+
+  if (hasActivePlan) {
+    return {
+      id: "choose-plan",
+      title: "Choose a plan",
+      description: "Select a plan to access all features",
+      status: "complete",
+      helpText: "Plan selected",
+    };
+  }
+
+  const actionUrl = planSelectionUrl ?? "/app/plan";
+  const useExternalLink = !!planSelectionUrl;
+
+  return {
+    id: "choose-plan",
+    title: "Choose a plan",
+    description: "Select a plan to access all features",
+    status: "pending",
+    helpText: "Pick a plan to keep using all features.",
+    actionUrl,
+    actionLabel: "Select plan",
+    ...(useExternalLink && { actionTarget: "_top" }),
+  };
+}
+
+/**
  * Compute the full onboarding state from inputs.
  * This is a pure function - all data fetching happens elsewhere.
  */
@@ -291,6 +342,7 @@ export function computeOnboardingState(
   const steps: OnboardingStep[] = [
     // Re-enable in v1.1 once a default-terms settings route exists
     // computeDefaultTermsStep(inputs.defaultTermsDays),
+    computePlanStep(inputs.planStatus, inputs.planSelectionUrl),
     computeBuyerSetupStep(inputs.buyerAccountCount, inputs.tagRuleCount),
     computeValidationStep(inputs.validation),
     computePaymentCustomizationStep(inputs.paymentCustomization),
