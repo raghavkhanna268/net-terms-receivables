@@ -238,6 +238,9 @@ const DB_TEST_PATTERNS = [
 
   // Account href URL-encoding DB tests (loader finds decoded id)
   "app/routes/__tests__/account-href-loader-db.test.ts",
+
+  // Archive foreign queue rows helper DB tests
+  "tests/helpers/archive-foreign-queue-rows-db.test.ts",
 ];
 
 export default defineConfig({

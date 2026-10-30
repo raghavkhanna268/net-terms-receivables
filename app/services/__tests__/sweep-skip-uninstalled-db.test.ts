@@ -14,6 +14,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgres from "postgres";
 import { sqlOptions } from "~/lib/db-light.server";
 import { assertNoQueueLeftovers } from "../../../tests/helpers/queue-leftovers";
+import { archiveForeignQueueRows } from "../../../tests/helpers/archive-foreign-queue-rows";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithDb = TEST_DATABASE_URL ? describe : describe.skip;
@@ -123,6 +124,7 @@ describeWithDb("sweep skip uninstalled shops", () => {
       expect(account.holdState).toBe("OK");
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const messages = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"
@@ -148,6 +150,7 @@ describeWithDb("sweep skip uninstalled shops", () => {
       `;
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const messages = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"
@@ -181,6 +184,7 @@ describeWithDb("sweep skip uninstalled shops", () => {
       expect(shop.uninstalledAt).toBeNull();
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const messages = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"
@@ -212,6 +216,7 @@ describeWithDb("sweep skip uninstalled shops", () => {
       `;
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const messages = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"
@@ -231,6 +236,7 @@ describeWithDb("sweep skip uninstalled shops", () => {
       `;
 
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const beforeReinstall = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"
@@ -250,6 +256,7 @@ describeWithDb("sweep skip uninstalled shops", () => {
 
       // Run sweep again
       await sql`SELECT * FROM enqueue_credit_status_recomputes()`;
+      await archiveForeignQueueRows(sql, [TEST_SHOP_DOMAIN]);
 
       const afterReinstall = await sql<{ buyerAccountId: string }[]>`
         SELECT message->>'buyerAccountId' AS "buyerAccountId"
